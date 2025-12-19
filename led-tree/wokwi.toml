@@ -1,7 +1,7 @@
 [wokwi]
 version = 1
-firmware = "build/led-complex.ino.hex"
-elf = "build/led-complex.ino.elf"
+firmware = "build/led-tree.ino.hex"
+elf = "build/led-tree.ino.elf"
 
 [[part]]
 type = "wokwi-arduino-nano"

@@ -67,8 +67,8 @@
       "type": "wokwi-neopixel-canvas",
       "id": "twig_right",
       "top": -20,
-      "left": 460,
-      "rotate": -20,
+      "left": 465,
+      "rotate": 160,
       "attrs": {
         "pin": "10",
         "rows": "1",

@@ -26,6 +26,8 @@ uint32_t barkBrown;
 uint32_t leafGreen;
 uint32_t springGreen;
 
+int32_t direction = 1; // Direction of color crawl
+
 void setup() {
   Serial.begin(115200);
   Serial.println("Asymmetric LED Tree");
@@ -62,89 +64,6 @@ void loop() {
   colorCrawl(100);
 }
 
-// Growth animation - starts from trunk, spreads to branches
-void growthAnimation(int wait) {
-  clearAll();
-
-  // Grow trunk from bottom to top
-  for(int i = 0; i < TRUNK_LEDS; i++) {
-    trunk.setPixelColor(i, barkBrown);
-    trunk.show();
-    delay(wait);
-  }
-
-  // Branches grow simultaneously from their bases
-  int maxLen = max(max(LOWER_LEFT_LEDS, RIGHT_LEDS), max(UPPER_LEFT_LEDS, RIGHT_TWIG_LEDS));
-  for(int i = 0; i < maxLen; i++) {
-    if(i < LOWER_LEFT_LEDS) {
-      lowerLeft.setPixelColor(i, leafGreen);
-      lowerLeft.show();
-    }
-    if(i < RIGHT_LEDS) {
-      rightBranch.setPixelColor(i, leafGreen);
-      rightBranch.show();
-    }
-    if(i < UPPER_LEFT_LEDS) {
-      upperLeft.setPixelColor(i, springGreen);
-      upperLeft.show();
-    }
-    if(i < RIGHT_TWIG_LEDS) {
-      rightTwig.setPixelColor(i, springGreen);
-      rightTwig.show();
-    }
-    delay(wait);
-  }
-}
-
-// Wind effect - random shimmering in branches
-void windEffect(int wait, int duration) {
-  unsigned long startTime = millis();
-
-  while(millis() - startTime < duration) {
-    // Keep trunk steady (brown)
-    for(int i = 0; i < TRUNK_LEDS; i++) {
-      trunk.setPixelColor(i, barkBrown);
-    }
-    trunk.show();
-
-    // Random shimmer in branches
-    shimmerBranch(lowerLeft, LOWER_LEFT_LEDS, leafGreen);
-    shimmerBranch(rightBranch, RIGHT_LEDS, leafGreen);
-    shimmerBranch(upperLeft, UPPER_LEFT_LEDS, springGreen);
-    shimmerBranch(rightTwig, RIGHT_TWIG_LEDS, springGreen);
-
-    delay(wait);
-  }
-}
-
-// Helper function to create shimmer effect on a branch
-void shimmerBranch(Adafruit_NeoPixel &branch, int numLEDs, uint32_t baseColor) {
-  for(int i = 0; i < numLEDs; i++) {
-    // Random brightness variation
-    int brightness = random(50, 100);
-    uint8_t r = ((baseColor >> 16) & 0xFF) * brightness / 100;
-    uint8_t g = ((baseColor >> 8) & 0xFF) * brightness / 100;
-    uint8_t b = (baseColor & 0xFF) * brightness / 100;
-    branch.setPixelColor(i, branch.Color(r, g, b));
-  }
-  branch.show();
-}
-
-// Breathing effect - entire tree pulses
-void breatheEffect(int wait, int cycles) {
-  for(int cycle = 0; cycle < cycles; cycle++) {
-    // Breathe in (brighten)
-    for(int brightness = 50; brightness <= 100; brightness += 5) {
-      setAllBrightness(brightness);
-      delay(wait);
-    }
-    // Breathe out (dim)
-    for(int brightness = 100; brightness >= 50; brightness -= 5) {
-      setAllBrightness(brightness);
-      delay(wait);
-    }
-  }
-}
 
 // Set brightness for all branches
 void setAllBrightness(int brightness) {
@@ -215,16 +134,17 @@ void colorCrawl(int wait) {
   applyWaveToBranch(rightTwig, RIGHT_TWIG_LEDS, offset, waveWidth, brownR, brownG, brownB, greenR, greenG, greenB);
 
   // Move wave forward
-  offset++;
+  offset+= 1 * direction;
 
   // Get max length for proper cycling
   int maxLen = max(max(TRUNK_LEDS, LOWER_LEFT_LEDS), max(RIGHT_LEDS, max(UPPER_LEFT_LEDS, RIGHT_TWIG_LEDS)));
 
   // Reset when wave completes
-  if (offset > maxLen + (int)waveWidth) {
-    delay(200);
-    offset = -(int)waveWidth;
+  if (offset > maxLen + (int)waveWidth || offset < waveWidth* -1) {
+    delay(1000);
+    direction = direction * -1;
   }
+  
 
   delay(wait);
 }

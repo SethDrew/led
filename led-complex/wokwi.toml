@@ -1,0 +1,93 @@
+[wokwi]
+version = 1
+firmware = "build/led-complex.ino.hex"
+elf = "build/led-complex.ino.elf"
+
+[[part]]
+type = "wokwi-arduino-nano"
+id = "nano"
+
+[[part]]
+type = "wokwi-neopixel-canvas"
+id = "trunk"
+attrs = { pin = "6", rows = "1", cols = "10", pixelate = "circle" }
+
+[[part]]
+type = "wokwi-neopixel-canvas"
+id = "branch_lower_left"
+attrs = { pin = "7", rows = "1", cols = "7", pixelate = "circle" }
+
+[[part]]
+type = "wokwi-neopixel-canvas"
+id = "branch_right"
+attrs = { pin = "8", rows = "1", cols = "5", pixelate = "circle" }
+
+[[part]]
+type = "wokwi-neopixel-canvas"
+id = "twig_upper_left"
+attrs = { pin = "9", rows = "1", cols = "4", pixelate = "circle" }
+
+[[part]]
+type = "wokwi-neopixel-canvas"
+id = "twig_right"
+attrs = { pin = "10", rows = "1", cols = "4", pixelate = "circle" }
+
+[[connection]]
+from = "trunk:DIN"
+to = "nano:6"
+
+[[connection]]
+from = "trunk:GND"
+to = "nano:GND.1"
+
+[[connection]]
+from = "trunk:VCC"
+to = "nano:5V"
+
+[[connection]]
+from = "branch_lower_left:DIN"
+to = "nano:7"
+
+[[connection]]
+from = "branch_lower_left:GND"
+to = "nano:GND.1"
+
+[[connection]]
+from = "branch_lower_left:VCC"
+to = "nano:5V"
+
+[[connection]]
+from = "branch_right:DIN"
+to = "nano:8"
+
+[[connection]]
+from = "branch_right:GND"
+to = "nano:GND.1"
+
+[[connection]]
+from = "branch_right:VCC"
+to = "nano:5V"
+
+[[connection]]
+from = "twig_upper_left:DIN"
+to = "nano:9"
+
+[[connection]]
+from = "twig_upper_left:GND"
+to = "nano:GND.1"
+
+[[connection]]
+from = "twig_upper_left:VCC"
+to = "nano:5V"
+
+[[connection]]
+from = "twig_right:DIN"
+to = "nano:10"
+
+[[connection]]
+from = "twig_right:GND"
+to = "nano:GND.1"
+
+[[connection]]
+from = "twig_right:VCC"
+to = "nano:5V"

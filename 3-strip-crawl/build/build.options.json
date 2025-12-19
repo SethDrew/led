@@ -1,0 +1,9 @@
+{
+  "additionalFiles": "../../..,../..,../..",
+  "compiler.optimization_flags": "",
+  "customBuildProperties": "",
+  "fqbn": "arduino:avr:nano",
+  "hardwareFolders": "/Users/KO16K39/Library/Arduino15/packages/arduino/hardware/avr/1.8.6,/Users/KO16K39/Library/Arduino15/packages/arduino/hardware/avr/1.8.6",
+  "otherLibrariesFolders": "/Users/KO16K39/Documents/Arduino/libraries",
+  "sketchLocation": "/Users/KO16K39/Documents/led"
+}

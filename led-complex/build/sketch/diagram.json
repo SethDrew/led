@@ -1,0 +1,98 @@
+#line 1 "/Users/KO16K39/Documents/led/led-complex/diagram.json"
+{
+  "version": 1,
+  "author": "LED Tree Designer",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "wokwi-arduino-nano",
+      "id": "nano",
+      "top": 200,
+      "left": 0,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-neopixel-canvas",
+      "id": "trunk",
+      "top": 500,
+      "left": 300,
+      "rotate": 90,
+      "attrs": {
+        "pin": "6",
+        "rows": "1",
+        "cols": "10",
+        "pixelate": "circle"
+      }
+    },
+    {
+      "type": "wokwi-neopixel-canvas",
+      "id": "branch_lower_left",
+      "top": 120,
+      "left": 200,
+      "rotate": 135,
+      "attrs": {
+        "pin": "7",
+        "rows": "1",
+        "cols": "7",
+        "pixelate": "circle"
+      }
+    },
+    {
+      "type": "wokwi-neopixel-canvas",
+      "id": "branch_right",
+      "top": 800,
+      "left": 380,
+      "rotate": 0,
+      "attrs": {
+        "pin": "8",
+        "rows": "1",
+        "cols": "5",
+        "pixelate": "circle"
+      }
+    },
+    {
+      "type": "wokwi-neopixel-canvas",
+      "id": "twig_upper_left",
+      "top": 30,
+      "left": 180,
+      "rotate": 120,
+      "attrs": {
+        "pin": "9",
+        "rows": "1",
+        "cols": "4",
+        "pixelate": "circle"
+      }
+    },
+    {
+      "type": "wokwi-neopixel-canvas",
+      "id": "twig_right",
+      "top": 50,
+      "left": 420,
+      "rotate": 60,
+      "attrs": {
+        "pin": "10",
+        "rows": "1",
+        "cols": "4",
+        "pixelate": "circle"
+      }
+    }
+  ],
+  "connections": [
+    [ "trunk:DIN", "nano:6", "green", [ "v0" ] ],
+    [ "trunk:GND", "nano:GND.1", "black", [ "v0" ] ],
+    [ "trunk:VCC", "nano:5V", "red", [ "v0" ] ],
+    [ "branch_lower_left:DIN", "nano:7", "green", [ "v0" ] ],
+    [ "branch_lower_left:GND", "nano:GND.1", "black", [ "v0" ] ],
+    [ "branch_lower_left:VCC", "nano:5V", "red", [ "v0" ] ],
+    [ "branch_right:DIN", "nano:8", "green", [ "v0" ] ],
+    [ "branch_right:GND", "nano:GND.1", "black", [ "v0" ] ],
+    [ "branch_right:VCC", "nano:5V", "red", [ "v0" ] ],
+    [ "twig_upper_left:DIN", "nano:9", "green", [ "v0" ] ],
+    [ "twig_upper_left:GND", "nano:GND.1", "black", [ "v0" ] ],
+    [ "twig_upper_left:VCC", "nano:5V", "red", [ "v0" ] ],
+    [ "twig_right:DIN", "nano:10", "green", [ "v0" ] ],
+    [ "twig_right:GND", "nano:GND.1", "black", [ "v0" ] ],
+    [ "twig_right:VCC", "nano:5V", "red", [ "v0" ] ]
+  ],
+  "dependencies": {}
+}

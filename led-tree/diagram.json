@@ -15,7 +15,7 @@
       "id": "trunk",
       "top": 80,
       "left": 300,
-      "rotate": 90,
+      "rotate": 270,
       "attrs": {
         "pin": "6",
         "rows": "1",
@@ -28,7 +28,7 @@
       "id": "branch_lower_left",
       "top": -69,
       "left": 280,
-      "rotate": 45,
+      "rotate": 225,
       "attrs": {
         "pin": "7",
         "rows": "1",
@@ -41,7 +41,7 @@
       "id": "twig_upper_left",
       "top": -125,
       "left": 300,
-      "rotate": 80,
+      "rotate": 260,
       "attrs": {
         "pin": "9",
         "rows": "1",
@@ -54,7 +54,7 @@
       "id": "branch_right",
       "top": 1,
       "left": 400,
-      "rotate": 135,
+      "rotate": 315,
       "attrs": {
         "pin": "8",
         "rows": "1",
@@ -62,13 +62,13 @@
         "pixelate": "circle"
       }
     },
-    
+
     {
       "type": "wokwi-neopixel-canvas",
       "id": "twig_right",
       "top": -20,
       "left": 465,
-      "rotate": 160,
+      "rotate": 340,
       "attrs": {
         "pin": "10",
         "rows": "1",

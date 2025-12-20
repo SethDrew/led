@@ -21,6 +21,42 @@ Adafruit_NeoPixel rightBranch(RIGHT_LEDS, RIGHT_PIN, NEO_GRB + NEO_KHZ800);
 Adafruit_NeoPixel upperLeft(UPPER_LEFT_LEDS, UPPER_LEFT_PIN, NEO_GRB + NEO_KHZ800);
 Adafruit_NeoPixel rightTwig(RIGHT_TWIG_LEDS, RIGHT_TWIG_PIN, NEO_GRB + NEO_KHZ800);
 
+// Virtual tree structure - maps continuous index (0-29) to physical strips
+// Total virtual LEDs in tree
+#define VIRTUAL_TREE_SIZE 30
+
+// Trunk segments (split at right branch junction at position 6 and left branch at position 9)
+const int trunkPart1[] = {0, 1, 2, 3, 4, 5, 6};  // Base to right branch (7 LEDs)
+const int trunkPart1Size = 7;
+const int trunkPart2[] = {16, 17, 18};  // Right branch to left branch junction (3 LEDs)
+const int trunkPart2Size = 3;
+
+// Right branch segments (splits at position 3 for right twig)
+const int rightBranchPart1[] = {7, 8, 9, 10};  // Junction to right twig split (4 LEDs)
+const int rightBranchPart1Size = 4;
+const int rightBranchPart2[] = {15};  // After right twig to tip (1 LED)
+const int rightBranchPart2Size = 1;
+
+// Right twig (connects at rightBranch[3])
+const int rightTwig_virtual[] = {11, 12, 13, 14};  // 4 LEDs
+const int rightTwigSize_virtual = 4;
+
+// Left branch segments (splits at position 4 for upper left twig)
+const int leftBranchPart1[] = {19, 20, 21, 22, 23};  // Junction to upper left split (5 LEDs)
+const int leftBranchPart1Size = 5;
+const int leftBranchPart2[] = {28, 29};  // After upper left twig to tip (2 LEDs)
+const int leftBranchPart2Size = 2;
+
+// Upper left twig (connects at leftBranch[4])
+const int upperLeftTwig_virtual[] = {24, 25, 26, 27};  // 4 LEDs
+const int upperLeftTwigSize_virtual = 4;
+
+// Structure to hold physical strip mapping
+struct PhysicalLED {
+  Adafruit_NeoPixel* strip;
+  int index;
+};
+
 // Tree colors
 uint32_t barkBrown;
 uint32_t leafGreen;
@@ -101,6 +137,80 @@ void setAllBrightness(int brightness) {
   rightTwig.show();
 }
 
+// Map virtual tree index to physical strip and LED index
+PhysicalLED getPhysicalLED(int virtualIndex) {
+  PhysicalLED led;
+
+  // Trunk part 1: virtual indices 0-6 -> trunk[0-6]
+  if (virtualIndex >= 0 && virtualIndex <= 6) {
+    led.strip = &trunk;
+    led.index = virtualIndex;
+    return led;
+  }
+
+  // Right branch part 1: virtual indices 7-10 -> rightBranch[0-3]
+  if (virtualIndex >= 7 && virtualIndex <= 10) {
+    led.strip = &rightBranch;
+    led.index = virtualIndex - 7;
+    return led;
+  }
+
+  // Right twig: virtual indices 11-14 -> rightTwig[0-3]
+  if (virtualIndex >= 11 && virtualIndex <= 14) {
+    led.strip = &rightTwig;
+    led.index = virtualIndex - 11;
+    return led;
+  }
+
+  // Right branch part 2: virtual index 15 -> rightBranch[4]
+  if (virtualIndex == 15) {
+    led.strip = &rightBranch;
+    led.index = 4;
+    return led;
+  }
+
+  // Trunk part 2: virtual indices 16-18 -> trunk[7-9]
+  if (virtualIndex >= 16 && virtualIndex <= 18) {
+    led.strip = &trunk;
+    led.index = virtualIndex - 16 + 7;
+    return led;
+  }
+
+  // Left branch part 1: virtual indices 19-23 -> lowerLeft[0-4]
+  if (virtualIndex >= 19 && virtualIndex <= 23) {
+    led.strip = &lowerLeft;
+    led.index = virtualIndex - 19;
+    return led;
+  }
+
+  // Upper left twig: virtual indices 24-27 -> upperLeft[0-3]
+  if (virtualIndex >= 24 && virtualIndex <= 27) {
+    led.strip = &upperLeft;
+    led.index = virtualIndex - 24;
+    return led;
+  }
+
+  // Left branch part 2: virtual indices 28-29 -> lowerLeft[5-6]
+  if (virtualIndex >= 28 && virtualIndex <= 29) {
+    led.strip = &lowerLeft;
+    led.index = virtualIndex - 28 + 5;
+    return led;
+  }
+
+  // Default case (should not happen)
+  led.strip = &trunk;
+  led.index = 0;
+  return led;
+}
+
+// Set color on virtual tree using virtual index
+void setVirtualPixelColor(int virtualIndex, uint32_t color) {
+  if (virtualIndex < 0 || virtualIndex >= VIRTUAL_TREE_SIZE) return;
+
+  PhysicalLED led = getPhysicalLED(virtualIndex);
+  led.strip->setPixelColor(led.index, color);
+}
+
 // Clear all LEDs
 void clearAll() {
   trunk.clear();
@@ -115,9 +225,9 @@ void clearAll() {
   rightTwig.show();
 }
 
-// Slow crawl of brown and green across all branches
+// Slow crawl of brown and green across virtual tree structure
 void colorCrawl(int wait) {
-  static int offset = 0;
+  static int offset = 0;  // Start at trunk base
 
   // Brown and green colors
   int brownR = 139, brownG = 69, brownB = 19;
@@ -126,25 +236,42 @@ void colorCrawl(int wait) {
   // Wave width
   float waveWidth = 3.0;
 
-  // Apply wave to each branch
-  applyWaveToBranch(trunk, TRUNK_LEDS, offset, waveWidth, brownR, brownG, brownB, greenR, greenG, greenB);
-  applyWaveToBranch(lowerLeft, LOWER_LEFT_LEDS, offset, waveWidth, brownR, brownG, brownB, greenR, greenG, greenB);
-  applyWaveToBranch(rightBranch, RIGHT_LEDS, offset, waveWidth, brownR, brownG, brownB, greenR, greenG, greenB);
-  applyWaveToBranch(upperLeft, UPPER_LEFT_LEDS, offset, waveWidth, brownR, brownG, brownB, greenR, greenG, greenB);
-  applyWaveToBranch(rightTwig, RIGHT_TWIG_LEDS, offset, waveWidth, brownR, brownG, brownB, greenR, greenG, greenB);
+  // Apply wave to entire virtual tree
+  for (int i = 0; i < VIRTUAL_TREE_SIZE; i++) {
+    float distance = abs(i - offset);
+
+    // Calculate blend between brown and green based on position in wave
+    float blend = 0.0;
+    if (distance <= waveWidth) {
+      // Use cosine for smooth transition
+      blend = (cos(distance / waveWidth * 3.14159) + 1.0) / 2.0;  // 0 to 1
+    }
+
+    // Interpolate between brown and green
+    int r = brownR * (1 - blend) + greenR * blend;
+    int g = brownG * (1 - blend) + greenG * blend;
+    int b = brownB * (1 - blend) + greenB * blend;
+
+    // Set color on virtual tree (maps to physical strips)
+    PhysicalLED led = getPhysicalLED(i);
+    led.strip->setPixelColor(led.index, led.strip->Color(r, g, b));
+  }
+
+  // Show all strips
+  trunk.show();
+  lowerLeft.show();
+  rightBranch.show();
+  upperLeft.show();
+  rightTwig.show();
 
   // Move wave forward
-  offset+= 1 * direction;
+  offset += 1 * direction;
 
-  // Get max length for proper cycling
-  int maxLen = max(max(TRUNK_LEDS, LOWER_LEFT_LEDS), max(RIGHT_LEDS, max(UPPER_LEFT_LEDS, RIGHT_TWIG_LEDS)));
-
-  // Reset when wave completes
-  if (offset > maxLen + (int)waveWidth || offset < waveWidth* -1) {
+  // Reset when wave completes full cycle through virtual tree
+  if (offset > VIRTUAL_TREE_SIZE + (int)waveWidth || offset < (int)waveWidth * -1) {
     delay(1000);
     direction = direction * -1;
   }
-  
 
   delay(wait);
 }

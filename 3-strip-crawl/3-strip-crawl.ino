@@ -33,7 +33,7 @@ void setup() {
 
 void loop() {
   // Continuous soft white crawl across all strips
-  softWhiteCrawl(200);  // 50ms delay = slow crawl
+  softWhiteCrawl(50); 
 }
 
 // Soft white crawl effect - a gentle wave of warm white light
@@ -46,7 +46,7 @@ void softWhiteCrawl(int wait) {
   int warmWhiteB = 200;
 
   // Wave width - how many LEDs the gradient spans
-  float waveWidth = 2.0;
+  float waveWidth = 4.0;
 
   for(int i = 0; i < NUM_PIXELS; i++) {
     // Calculate distance from current LED to wave center (no wrapping)

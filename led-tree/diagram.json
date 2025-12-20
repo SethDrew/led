@@ -19,8 +19,7 @@
       "attrs": {
         "pin": "6",
         "rows": "1",
-        "cols": "10",
-        "pixelate": "circle"
+        "cols": "10"
       }
     },
 {
@@ -32,8 +31,7 @@
       "attrs": {
         "pin": "7",
         "rows": "1",
-        "cols": "7",
-        "pixelate": "circle"
+        "cols": "7"
       }
     },
     {
@@ -45,8 +43,7 @@
       "attrs": {
         "pin": "9",
         "rows": "1",
-        "cols": "4",
-        "pixelate": "circle"
+        "cols": "4"
       }
     },
     {
@@ -58,8 +55,7 @@
       "attrs": {
         "pin": "8",
         "rows": "1",
-        "cols": "5",
-        "pixelate": "circle"
+        "cols": "5"
       }
     },
 
@@ -72,8 +68,7 @@
       "attrs": {
         "pin": "10",
         "rows": "1",
-        "cols": "4",
-        "pixelate": "circle"
+        "cols": "4"
       }
     }
   ],

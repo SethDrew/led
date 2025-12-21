@@ -254,6 +254,17 @@ void diagonalCrawl(int wait, bool wrapMode, float frequency) {
   static float phase = 0.0;  // Current position
   static int direction = 1;  // 1 = forward, -1 = backward (for bounce mode)
 
+  // Position history for smooth trail fading
+  #define TRAIL_HISTORY_SIZE 20
+  static float phaseHistory[TRAIL_HISTORY_SIZE];
+  static int historyIndex = 0;
+  static bool historyFilled = false;
+
+  // Store current phase in history
+  phaseHistory[historyIndex] = phase;
+  historyIndex = (historyIndex + 1) % TRAIL_HISTORY_SIZE;
+  if (historyIndex == 0) historyFilled = true;
+
   // Clear all strips
   for (int strip = 0; strip < NUM_STRIPS; strip++) {
     strips[strip]->clear();
@@ -261,50 +272,56 @@ void diagonalCrawl(int wait, bool wrapMode, float frequency) {
 
   // Diagonal parameters
   float trailLength = 8.0;   // How many LEDs of fading trail (configurable)
+  float pauseLength = 10.0;  // Pause duration at edges (in phase units)
 
   // Soft warm white color
   int warmWhiteR = 255;
   int warmWhiteG = 240;
   int warmWhiteB = 200;
 
-  // Draw diagonal line
+  // Draw diagonal line using position history for smooth trailing
   for (int i = 0; i < NUM_PIXELS; i++) {
-    // Calculate distance from the lead (current position)
-    float distanceFromLead;
+    float maxBrightness = 0.0;
+    float stripFloat = 0.0;
 
-    if (direction == 1) {
-      // Forward: trail behind the lead
-      distanceFromLead = phase - i;
-    } else {
-      // Backward: trail behind the lead (in reverse)
-      distanceFromLead = i - phase;
+    // Check all history positions to find the brightest contribution
+    int historyLength = historyFilled ? TRAIL_HISTORY_SIZE : historyIndex;
+    for (int h = 0; h < historyLength && h < trailLength; h++) {
+      int histIdx = (historyIndex - 1 - h + TRAIL_HISTORY_SIZE) % TRAIL_HISTORY_SIZE;
+      float histPhase = phaseHistory[histIdx];
+
+      // Calculate distance from this historical position
+      float distance = abs(i - histPhase);
+
+      // Calculate brightness based on distance (temporal fade based on history position)
+      if (distance < 1.0) {
+        float brightness = (1.0 - (h / trailLength)) * (1.0 - distance);
+        if (brightness > maxBrightness) {
+          maxBrightness = brightness;
+
+          // Calculate which strip this LED position maps to (diagonal line)
+          // Frequency controls how many times the pattern repeats over the strip length
+          if (wrapMode || direction == 1) {
+            // Forward direction or wrap mode
+            stripFloat = fmod(i * NUM_STRIPS * frequency / (float)NUM_PIXELS, NUM_STRIPS);
+          } else {
+            // Backward direction in bounce mode - reverse the strip order
+            stripFloat = NUM_STRIPS - 1 - fmod(i * NUM_STRIPS * frequency / (float)NUM_PIXELS, NUM_STRIPS);
+          }
+        }
+      }
     }
 
-    // Only draw if within trail length (fading behind the lead)
-    if (distanceFromLead >= 0 && distanceFromLead <= trailLength) {
-      // Calculate brightness - fades as we get further from lead
-      float brightness = 1.0 - (distanceFromLead / trailLength);
-      brightness = max(0.0, brightness);
-
-      // Calculate which strip this LED position maps to (diagonal line)
-      // Frequency controls how many times the pattern repeats over the strip length
-      float stripFloat;
-      if (wrapMode || direction == 1) {
-        // Forward direction or wrap mode
-        stripFloat = fmod(i * NUM_STRIPS * frequency / (float)NUM_PIXELS, NUM_STRIPS);
-      } else {
-        // Backward direction in bounce mode - reverse the strip order
-        stripFloat = NUM_STRIPS - 1 - fmod(i * NUM_STRIPS * frequency / (float)NUM_PIXELS, NUM_STRIPS);
-      }
-
+    // Only draw if brightness is significant
+    if (maxBrightness > 0.01) {
       int primaryStrip = (int)stripFloat;
       int secondaryStrip = (primaryStrip + 1) % NUM_STRIPS;
       float blend = stripFloat - primaryStrip;
 
       // Apply brightness to warm white
-      int r = warmWhiteR * brightness;
-      int g = warmWhiteG * brightness;
-      int b = warmWhiteB * brightness;
+      int r = warmWhiteR * maxBrightness;
+      int g = warmWhiteG * maxBrightness;
+      int b = warmWhiteB * maxBrightness;
 
       // Set color on primary strip
       if (primaryStrip >= 0 && primaryStrip < NUM_STRIPS) {
@@ -313,9 +330,9 @@ void diagonalCrawl(int wait, bool wrapMode, float frequency) {
 
       // Blend to secondary strip for smooth transitions
       if (blend > 0.1 && secondaryStrip < NUM_STRIPS) {
-        int r2 = warmWhiteR * brightness * blend;
-        int g2 = warmWhiteG * brightness * blend;
-        int b2 = warmWhiteB * brightness * blend;
+        int r2 = warmWhiteR * maxBrightness * blend;
+        int g2 = warmWhiteG * maxBrightness * blend;
+        int b2 = warmWhiteB * maxBrightness * blend;
         strips[secondaryStrip]->setPixelColor(i, strips[secondaryStrip]->Color(r2, g2, b2));
       }
     }
@@ -329,23 +346,23 @@ void diagonalCrawl(int wait, bool wrapMode, float frequency) {
   // Move forward or backward
   phase += 0.5 * direction;
 
-  // Wrap or bounce based on mode
+  // Wrap or bounce based on mode (with pause at edges)
   if (wrapMode) {
-    // Wrap mode - continuous loop
-    if (phase >= NUM_PIXELS) {
-      phase -= NUM_PIXELS;
+    // Wrap mode - continuous loop with pause
+    if (phase >= NUM_PIXELS + pauseLength) {
+      phase = -pauseLength;
     }
-    if (phase < 0) {
-      phase += NUM_PIXELS;
+    if (phase < -pauseLength) {
+      phase = NUM_PIXELS + pauseLength - 0.5;
     }
   } else {
-    // Bounce mode - reverse direction at ends
-    if (phase >= NUM_PIXELS) {
-      phase = NUM_PIXELS - 0.5;
+    // Bounce mode - reverse direction at ends with pause
+    if (phase >= NUM_PIXELS + pauseLength) {
+      phase = NUM_PIXELS + pauseLength - 0.5;
       direction = -1;
     }
-    if (phase < 0) {
-      phase = 0.5;
+    if (phase < -pauseLength) {
+      phase = -pauseLength + 0.5;
       direction = 1;
     }
   }

@@ -45,6 +45,30 @@
         "cols": "30",
         "pixelate": "circle"
       }
+    },
+    {
+      "type": "wokwi-neopixel-canvas",
+      "id": "strip4",
+      "top": 250,
+      "left": 300,
+      "attrs": {
+        "pin": "9",
+        "rows": "1",
+        "cols": "30",
+        "pixelate": "circle"
+      }
+    },
+    {
+      "type": "wokwi-neopixel-canvas",
+      "id": "strip5",
+      "top": 300,
+      "left": 300,
+      "attrs": {
+        "pin": "10",
+        "rows": "1",
+        "cols": "30",
+        "pixelate": "circle"
+      }
     }
   ],
   "connections": [
@@ -56,7 +80,13 @@
     [ "strip2:VCC", "nano:5V", "red", [ "v0" ] ],
     [ "strip3:DIN", "nano:8", "green", [ "v0" ] ],
     [ "strip3:GND", "nano:GND.1", "black", [ "v0" ] ],
-    [ "strip3:VCC", "nano:5V", "red", [ "v0" ] ]
+    [ "strip3:VCC", "nano:5V", "red", [ "v0" ] ],
+    [ "strip4:DIN", "nano:9", "green", [ "v0" ] ],
+    [ "strip4:GND", "nano:GND.1", "black", [ "v0" ] ],
+    [ "strip4:VCC", "nano:5V", "red", [ "v0" ] ],
+    [ "strip5:DIN", "nano:10", "green", [ "v0" ] ],
+    [ "strip5:GND", "nano:GND.1", "black", [ "v0" ] ],
+    [ "strip5:VCC", "nano:5V", "red", [ "v0" ] ]
   ],
   "dependencies": {}
 }

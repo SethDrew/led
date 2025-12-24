@@ -1,0 +1,25 @@
+[wokwi]
+version = 1
+firmware = "build/single-strip.ino.hex"
+elf = "build/single-strip.ino.elf"
+
+[[part]]
+type = "wokwi-arduino-nano"
+id = "nano"
+
+[[part]]
+type = "wokwi-neopixel-canvas"
+id = "strip1"
+attrs = { pin = "6", rows = "10", cols = "10", layout = "zigzag" }
+
+[[connection]]
+from = "strip1:DIN"
+to = "nano:6"
+
+[[connection]]
+from = "strip1:GND"
+to = "nano:GND.1"
+
+[[connection]]
+from = "strip1:VCC"
+to = "nano:5V"

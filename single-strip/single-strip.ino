@@ -71,8 +71,8 @@ void nebulaAnimation() {
 // Update background pulsating waves combining breathing and spatial effects
 void updateBackgroundWaves(float* ledValues_background, unsigned long frameCount) {
   const float BREATH_FREQUENCY = 0.035;
-  const float BREATH_CENTER = 0.15;
-  const float BREATH_AMPLITUDE = 0.08;
+  const float BREATH_CENTER = 0.08;
+  const float BREATH_AMPLITUDE = 0.07;
   const float SPATIAL_AMPLITUDE = 0.10;
   const float SPATIAL_SPEED = 0.02;
   const float BACKGROUND_MAX = 0.25;

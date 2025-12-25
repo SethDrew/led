@@ -569,10 +569,16 @@ void collision() {
   enum State { APPROACHING, COLLIDING, PAUSED, SPARKLING, RESET };
   static State state = APPROACHING;
 
-  static float crawler1Pos = 0;
-  static float crawler2Pos = NUM_PIXELS - 1;
-  const float crawlerSpeed = 0.8;
   const float waveWidth = 6.0;
+
+  static float crawler1Pos = -8;  // Start off strip (-(waveWidth + 2))
+  static float crawler2Pos = 108;  // Start off strip (NUM_PIXELS + waveWidth + 2)
+  static float crawler1Speed = 0.8;
+  static float crawler2Speed = 0.8;
+
+  static int crawler1SpawnDelay = 0;
+  static int crawler2SpawnDelay = 0;
+  static int framesSinceReset = 0;
 
   static int collisionPoint = 0;
   static int pauseFrames = 0;
@@ -589,18 +595,24 @@ void collision() {
     sparksInitialized = true;
   }
 
-  // Clear all LEDs each frame
+  // Set background to dim purple-red
   for (int i = 0; i < NUM_PIXELS; i++) {
-    strip.setPixelColor(i, 0);
+    strip.setPixelColor(i, strip.Color(20, 3, 10));
   }
 
   // State machine
   switch(state) {
     case APPROACHING:
       {
-        // Move crawlers
-        crawler1Pos += crawlerSpeed;
-        crawler2Pos -= crawlerSpeed;
+        framesSinceReset++;
+
+        // Move crawlers only after their spawn delay
+        if (framesSinceReset >= crawler1SpawnDelay) {
+          crawler1Pos += crawler1Speed;
+        }
+        if (framesSinceReset >= crawler2SpawnDelay) {
+          crawler2Pos -= crawler2Speed;
+        }
 
         // Optimized: only process pixels near crawlers
         int start1 = max(0, (int)(crawler1Pos - waveWidth));
@@ -608,36 +620,42 @@ void collision() {
         int start2 = max(0, (int)(crawler2Pos - waveWidth));
         int end2 = min(NUM_PIXELS - 1, (int)(crawler2Pos + waveWidth + 1));
 
-        // Render crawler 1
+        // Render crawler 1 (additive over background)
         for (int i = start1; i <= end1; i++) {
           float distance = abs((float)i - crawler1Pos);
-          float b = cos(distance / waveWidth * 3.14159 / 2);
-          int r = 255 * b;
-          int g = 240 * b;
-          int blue = 200 * b;
-          strip.setPixelColor(i, strip.Color(r, g, blue));
+          if (distance <= waveWidth) {
+            float b = cos(distance / waveWidth * 3.14159 / 2);
+            // Add crawler to background instead of replacing
+            int r = min(255, 20 + (int)(255 * b));
+            int g = min(255, 3 + (int)(240 * b));
+            int blue = min(255, 10 + (int)(200 * b));
+            strip.setPixelColor(i, strip.Color(r, g, blue));
+          }
         }
 
         // Render crawler 2 (additive if overlapping)
         for (int i = start2; i <= end2; i++) {
           float distance = abs((float)i - crawler2Pos);
-          float b = cos(distance / waveWidth * 3.14159 / 2);
+          if (distance <= waveWidth) {
+            float b = cos(distance / waveWidth * 3.14159 / 2);
 
-          // Check if overlapping with crawler 1
-          if (i >= start1 && i <= end1) {
-            uint32_t existing = strip.getPixelColor(i);
-            uint8_t er = (existing >> 16) & 0xFF;
-            uint8_t eg = (existing >> 8) & 0xFF;
-            uint8_t eb = existing & 0xFF;
-            int r = min(255, (int)er + (int)(255 * b));
-            int g = min(255, (int)eg + (int)(240 * b));
-            int blue = min(255, (int)eb + (int)(200 * b));
-            strip.setPixelColor(i, strip.Color(r, g, blue));
-          } else {
-            int r = 255 * b;
-            int g = 240 * b;
-            int blue = 200 * b;
-            strip.setPixelColor(i, strip.Color(r, g, blue));
+            // Check if overlapping with crawler 1
+            if (i >= start1 && i <= end1) {
+              uint32_t existing = strip.getPixelColor(i);
+              uint8_t er = (existing >> 16) & 0xFF;
+              uint8_t eg = (existing >> 8) & 0xFF;
+              uint8_t eb = existing & 0xFF;
+              int r = min(255, (int)er + (int)(255 * b));
+              int g = min(255, (int)eg + (int)(240 * b));
+              int blue = min(255, (int)eb + (int)(200 * b));
+              strip.setPixelColor(i, strip.Color(r, g, blue));
+            } else {
+              // Add crawler to background
+              int r = min(255, 20 + (int)(255 * b));
+              int g = min(255, 3 + (int)(240 * b));
+              int blue = min(255, 10 + (int)(200 * b));
+              strip.setPixelColor(i, strip.Color(r, g, blue));
+            }
           }
         }
 
@@ -652,8 +670,8 @@ void collision() {
     case COLLIDING:
       {
         // Continue moving forward
-        crawler1Pos += crawlerSpeed;
-        crawler2Pos -= crawlerSpeed;
+        crawler1Pos += crawler1Speed;
+        crawler2Pos -= crawler2Speed;
 
         // Optimized: only process pixels near crawlers with masking
         int start1 = max(0, (int)(crawler1Pos - waveWidth));
@@ -661,44 +679,57 @@ void collision() {
         int start2 = max(collisionPoint, (int)(crawler2Pos - waveWidth));
         int end2 = min(NUM_PIXELS - 1, (int)(crawler2Pos + waveWidth + 1));
 
-        // Render crawler 1 (only up to collision point)
+        // Render crawler 1 (only up to collision point, additive over background)
         for (int i = start1; i <= end1; i++) {
           float distance = abs((float)i - crawler1Pos);
-          float b = cos(distance / waveWidth * 3.14159 / 2);
-          int r = 255 * b;
-          int g = 240 * b;
-          int blue = 200 * b;
-          strip.setPixelColor(i, strip.Color(r, g, blue));
+          if (distance <= waveWidth) {
+            float b = cos(distance / waveWidth * 3.14159 / 2);
+            // Add crawler to background
+            int r = min(255, 20 + (int)(255 * b));
+            int g = min(255, 3 + (int)(240 * b));
+            int blue = min(255, 10 + (int)(200 * b));
+            strip.setPixelColor(i, strip.Color(r, g, blue));
+          }
         }
 
         // Render crawler 2 (only from collision point onwards)
         for (int i = start2; i <= end2; i++) {
           float distance = abs((float)i - crawler2Pos);
-          float b = cos(distance / waveWidth * 3.14159 / 2);
+          if (distance <= waveWidth) {
+            float b = cos(distance / waveWidth * 3.14159 / 2);
 
-          // Check if overlapping at collision point
-          if (i == collisionPoint && i >= start1 && i <= end1) {
-            uint32_t existing = strip.getPixelColor(i);
-            uint8_t er = (existing >> 16) & 0xFF;
-            uint8_t eg = (existing >> 8) & 0xFF;
-            uint8_t eb = existing & 0xFF;
-            int r = min(255, (int)er + (int)(255 * b));
-            int g = min(255, (int)eg + (int)(240 * b));
-            int blue = min(255, (int)eb + (int)(200 * b));
-            strip.setPixelColor(i, strip.Color(r, g, blue));
-          } else {
-            int r = 255 * b;
-            int g = 240 * b;
-            int blue = 200 * b;
-            strip.setPixelColor(i, strip.Color(r, g, blue));
+            // Check if overlapping at collision point
+            if (i == collisionPoint && i >= start1 && i <= end1) {
+              uint32_t existing = strip.getPixelColor(i);
+              uint8_t er = (existing >> 16) & 0xFF;
+              uint8_t eg = (existing >> 8) & 0xFF;
+              uint8_t eb = existing & 0xFF;
+              int r = min(255, (int)er + (int)(255 * b));
+              int g = min(255, (int)eg + (int)(240 * b));
+              int blue = min(255, (int)eb + (int)(200 * b));
+              strip.setPixelColor(i, strip.Color(r, g, blue));
+            } else {
+              // Add crawler to background
+              int r = min(255, 20 + (int)(255 * b));
+              int g = min(255, 3 + (int)(240 * b));
+              int blue = min(255, 10 + (int)(200 * b));
+              strip.setPixelColor(i, strip.Color(r, g, blue));
+            }
           }
         }
 
         // Check if both tails have passed through collision point
         if (crawler1Pos - waveWidth >= collisionPoint &&
             crawler2Pos + waveWidth <= collisionPoint) {
-          state = PAUSED;
-          pauseFrames = 2;
+          // Spawn sparks immediately
+          for (int i = 0; i < 35; i++) {
+            sparks[i].active = true;
+            sparks[i].position = collisionPoint;
+            sparks[i].velocity = (random(20, 60) / 100.0) * (random(0, 2) == 0 ? 1 : -1);
+            sparks[i].age = 0;
+            sparks[i].lifetime = 25 + random(30);
+          }
+          state = SPARKLING;
         }
       }
       break;
@@ -786,8 +817,15 @@ void collision() {
       {
         resetDelay--;
         if (resetDelay <= 0) {
-          crawler1Pos = 0;
-          crawler2Pos = NUM_PIXELS - 1;
+          crawler1Pos = -8;
+          crawler2Pos = 108;
+          // Randomize speeds (0.5 to 1.5)
+          crawler1Speed = 0.5 + (random(0, 100) / 100.0);
+          crawler2Speed = 0.5 + (random(0, 100) / 100.0);
+          // Randomize spawn delays (0 to 40 frames)
+          crawler1SpawnDelay = random(0, 40);
+          crawler2SpawnDelay = random(0, 40);
+          framesSinceReset = 0;
           state = APPROACHING;
         }
       }

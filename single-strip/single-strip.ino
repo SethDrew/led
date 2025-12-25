@@ -71,8 +71,8 @@ void nebulaAnimation() {
 // Update background pulsating waves combining breathing and spatial effects
 void updateBackgroundWaves(float* ledValues_background, unsigned long frameCount) {
   const float BREATH_FREQUENCY = 0.035;
-  const float BREATH_CENTER = 0.08;
-  const float BREATH_AMPLITUDE = 0.07;
+  const float BREATH_CENTER = 0.09;
+  const float BREATH_AMPLITUDE = 0.06;
   const float SPATIAL_AMPLITUDE = 0.10;
   const float SPATIAL_SPEED = 0.02;
   const float BACKGROUND_MAX = 0.25;
@@ -114,7 +114,7 @@ void updateOrbs(Orb* orbs, float* ledValues_stars, int maxOrbs, float orbSize, f
         orbs[i].position = random(0, NUM_PIXELS);
         orbs[i].velocity = (random(0, 2) == 0 ? 1 : -1) * speed * (0.5 + random(100) / 200.0);
         orbs[i].age = 0;
-        orbs[i].lifetime = 40 + random(160);  // 40-200 frames lifetime
+        orbs[i].lifetime = 40 + random(100);  // 40-140 frames lifetime
         break;
       }
     }
@@ -287,7 +287,7 @@ void crawlingStars(int maxOrbs, float orbSize, float speed) {
         orbs[i].position = random(0, NUM_PIXELS);
         orbs[i].velocity = (random(0, 2) == 0 ? 1 : -1) * speed * (0.5 + random(100) / 200.0);
         orbs[i].age = 0;
-        orbs[i].lifetime = 40 + random(160);  // 40-200 frames lifetime
+        orbs[i].lifetime = 40 + random(100);  // 40-140 frames lifetime
         break;
       }
     }

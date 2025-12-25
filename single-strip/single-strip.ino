@@ -51,7 +51,7 @@ void loop() {
   // nebulaAnimation(); delay(20);
   // rainbowCircleAnimation();
   // enhancedCrawlAnimation(); delay(20);
-  collisionAnimation(); delay(20);
+  collisionAnimation(); delay(7);  // 3x faster (was 20ms)
 }
 
 // ===== Animation Wrappers =====
@@ -589,7 +589,7 @@ void collision() {
     sparksInitialized = true;
   }
 
-  // Clear all LEDs
+  // Clear all LEDs each frame
   for (int i = 0; i < NUM_PIXELS; i++) {
     strip.setPixelColor(i, 0);
   }
@@ -602,34 +602,38 @@ void collision() {
         crawler1Pos += crawlerSpeed;
         crawler2Pos -= crawlerSpeed;
 
-        // Calculate brightness for both crawlers
-        float brightness[NUM_PIXELS];
-        for (int i = 0; i < NUM_PIXELS; i++) {
-          brightness[i] = 0;
-        }
+        // Optimized: only process pixels near crawlers
+        int start1 = max(0, (int)(crawler1Pos - waveWidth));
+        int end1 = min(NUM_PIXELS - 1, (int)(crawler1Pos + waveWidth + 1));
+        int start2 = max(0, (int)(crawler2Pos - waveWidth));
+        int end2 = min(NUM_PIXELS - 1, (int)(crawler2Pos + waveWidth + 1));
 
-        // Add crawler 1 brightness
-        for (int i = 0; i < NUM_PIXELS; i++) {
+        // Render crawler 1
+        for (int i = start1; i <= end1; i++) {
           float distance = abs((float)i - crawler1Pos);
-          if (distance <= waveWidth) {
-            float b = cos(distance / waveWidth * 3.14159 / 2);
-            if (b > 0) brightness[i] += b;
-          }
+          float b = cos(distance / waveWidth * 3.14159 / 2);
+          int r = 255 * b;
+          int g = 240 * b;
+          int blue = 200 * b;
+          strip.setPixelColor(i, strip.Color(r, g, blue));
         }
 
-        // Add crawler 2 brightness
-        for (int i = 0; i < NUM_PIXELS; i++) {
+        // Render crawler 2 (additive if overlapping)
+        for (int i = start2; i <= end2; i++) {
           float distance = abs((float)i - crawler2Pos);
-          if (distance <= waveWidth) {
-            float b = cos(distance / waveWidth * 3.14159 / 2);
-            if (b > 0) brightness[i] += b;
-          }
-        }
+          float b = cos(distance / waveWidth * 3.14159 / 2);
 
-        // Render all pixels
-        for (int i = 0; i < NUM_PIXELS; i++) {
-          if (brightness[i] > 0) {
-            float b = min(1.0f, brightness[i]);
+          // Check if overlapping with crawler 1
+          if (i >= start1 && i <= end1) {
+            uint32_t existing = strip.getPixelColor(i);
+            uint8_t er = (existing >> 16) & 0xFF;
+            uint8_t eg = (existing >> 8) & 0xFF;
+            uint8_t eb = existing & 0xFF;
+            int r = min(255, (int)er + (int)(255 * b));
+            int g = min(255, (int)eg + (int)(240 * b));
+            int blue = min(255, (int)eb + (int)(200 * b));
+            strip.setPixelColor(i, strip.Color(r, g, blue));
+          } else {
             int r = 255 * b;
             int g = 240 * b;
             int blue = 200 * b;
@@ -651,38 +655,38 @@ void collision() {
         crawler1Pos += crawlerSpeed;
         crawler2Pos -= crawlerSpeed;
 
-        // Calculate brightness with masking
-        float brightness[NUM_PIXELS];
-        for (int i = 0; i < NUM_PIXELS; i++) {
-          brightness[i] = 0;
+        // Optimized: only process pixels near crawlers with masking
+        int start1 = max(0, (int)(crawler1Pos - waveWidth));
+        int end1 = min(collisionPoint, (int)(crawler1Pos + waveWidth + 1));
+        int start2 = max(collisionPoint, (int)(crawler2Pos - waveWidth));
+        int end2 = min(NUM_PIXELS - 1, (int)(crawler2Pos + waveWidth + 1));
+
+        // Render crawler 1 (only up to collision point)
+        for (int i = start1; i <= end1; i++) {
+          float distance = abs((float)i - crawler1Pos);
+          float b = cos(distance / waveWidth * 3.14159 / 2);
+          int r = 255 * b;
+          int g = 240 * b;
+          int blue = 200 * b;
+          strip.setPixelColor(i, strip.Color(r, g, blue));
         }
 
-        // Crawler 1: only draw LEDs up to and including collision point
-        for (int i = 0; i < NUM_PIXELS; i++) {
-          if (i <= collisionPoint) {
-            float distance = abs((float)i - crawler1Pos);
-            if (distance <= waveWidth) {
-              float b = cos(distance / waveWidth * 3.14159 / 2);
-              if (b > 0) brightness[i] += b;
-            }
-          }
-        }
+        // Render crawler 2 (only from collision point onwards)
+        for (int i = start2; i <= end2; i++) {
+          float distance = abs((float)i - crawler2Pos);
+          float b = cos(distance / waveWidth * 3.14159 / 2);
 
-        // Crawler 2: only draw LEDs from collision point onwards
-        for (int i = 0; i < NUM_PIXELS; i++) {
-          if (i >= collisionPoint) {
-            float distance = abs((float)i - crawler2Pos);
-            if (distance <= waveWidth) {
-              float b = cos(distance / waveWidth * 3.14159 / 2);
-              if (b > 0) brightness[i] += b;
-            }
-          }
-        }
-
-        // Render all pixels
-        for (int i = 0; i < NUM_PIXELS; i++) {
-          if (brightness[i] > 0) {
-            float b = min(1.0f, brightness[i]);
+          // Check if overlapping at collision point
+          if (i == collisionPoint && i >= start1 && i <= end1) {
+            uint32_t existing = strip.getPixelColor(i);
+            uint8_t er = (existing >> 16) & 0xFF;
+            uint8_t eg = (existing >> 8) & 0xFF;
+            uint8_t eb = existing & 0xFF;
+            int r = min(255, (int)er + (int)(255 * b));
+            int g = min(255, (int)eg + (int)(240 * b));
+            int blue = min(255, (int)eb + (int)(200 * b));
+            strip.setPixelColor(i, strip.Color(r, g, blue));
+          } else {
             int r = 255 * b;
             int g = 240 * b;
             int blue = 200 * b;
@@ -744,17 +748,17 @@ void collision() {
           brightness = brightness * flicker;
           brightness = min(1.0f, max(0.0f, brightness));
 
-          // Color variants
+          // Color variants - white-ish with yellow emphasis
           int colorChoice = i % 7;
           int r, g, b;
           switch(colorChoice) {
-            case 0: r = 255 * brightness; g = 255 * brightness; b = 30 * brightness; break;
-            case 1: r = 255 * brightness; g = 240 * brightness; b = 200 * brightness; break;
-            case 2: r = 255 * brightness; g = 255 * brightness; b = 120 * brightness; break;
-            case 3: r = 255 * brightness; g = 255 * brightness; b = 255 * brightness; break;
-            case 4: r = 255 * brightness; g = 220 * brightness; b = 80 * brightness; break;
-            case 5: r = 255 * brightness; g = 200 * brightness; b = 100 * brightness; break;
-            default: r = 255 * brightness; g = 250 * brightness; b = 180 * brightness; break;
+            case 0: r = 255 * brightness; g = 255 * brightness; b = 150 * brightness; break;  // Bright yellow-white
+            case 1: r = 255 * brightness; g = 255 * brightness; b = 100 * brightness; break;  // Pale yellow
+            case 2: r = 255 * brightness; g = 240 * brightness; b = 200 * brightness; break;  // Warm white
+            case 3: r = 255 * brightness; g = 255 * brightness; b = 180 * brightness; break;  // Cream
+            case 4: r = 255 * brightness; g = 255 * brightness; b = 0; break;                 // Pure yellow (accent)
+            case 5: r = 255 * brightness; g = 245 * brightness; b = 150 * brightness; break;  // Golden white
+            default: r = 255 * brightness; g = 255 * brightness; b = 120 * brightness; break;  // Soft yellow
           }
 
           int pixelPos = (int)sparks[i].position;

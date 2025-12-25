@@ -28,6 +28,12 @@ void nebulaWithBackground(int maxOrbs, float orbSize, float speed);
 void updateBackgroundWaves(float* ledValues_background, unsigned long frameCount);
 void updateOrbs(Orb* orbs, float* ledValues_stars, int maxOrbs, float orbSize, float speed);
 void renderComposited(const float* ledValues_stars, const float* ledValues_background, unsigned long frameCount);
+void rainbowCircleAnimation();
+void rainbowCircle(float circleWidth, float speed);
+void enhancedCrawlAnimation();
+void enhancedCrawl(float waveWidth, int colorMode, int baseHue, float colorShiftSpeed);
+void collisionAnimation();
+void collision();
 
 void setup() {
   Serial.begin(115200);
@@ -42,7 +48,10 @@ void setup() {
 void loop() {
   // softWhiteCrawlAnimation(); delay(20);
   // crawlingStarsAnimation(); delay(20);
-  nebulaAnimation(); delay(20);
+  // nebulaAnimation(); delay(20);
+  // rainbowCircleAnimation();
+  // enhancedCrawlAnimation(); delay(20);
+  collisionAnimation(); delay(20);
 }
 
 // ===== Animation Wrappers =====
@@ -64,6 +73,24 @@ void nebulaAnimation() {
   float orbSize = 7.0;    // Size of each orb glow (in LEDs)
   float speed = 0.6;     // How fast orbs drift
   nebulaWithBackground(maxOrbs, orbSize, speed);
+}
+
+void rainbowCircleAnimation() {
+  float circleWidth = 15.0;  // Width of the circular wave
+  float speed = 0.1;         // How fast the circle moves (slower for better resolution)
+  rainbowCircle(circleWidth, speed);
+}
+
+void enhancedCrawlAnimation() {
+  float waveWidth = 15.0;     // How many LEDs the gradient spans
+  int colorMode = 1;          // 0=solid, 1=rainbow gradient, 2=color-shifting, 3=custom RGB
+  int baseHue = 0;            // Starting hue (0-255) - used in solid/color-shift modes
+  float colorShiftSpeed = 0.5; // Speed of color changes (used in color-shift mode)
+  enhancedCrawl(waveWidth, colorMode, baseHue, colorShiftSpeed);
+}
+
+void collisionAnimation() {
+  collision();
 }
 
 // ===== Helper Functions for Nebula Animation =====
@@ -245,6 +272,75 @@ void softWhiteCrawl(float waveWidth) {
   }
 }
 
+// Enhanced crawl effect with dynamic color control
+// waveWidth: how many LEDs the gradient spans
+// colorMode: 0=solid color, 1=rainbow gradient, 2=color-shifting wave, 3=custom RGB
+// baseHue: hue value (0-255) for solid/color-shift modes
+// colorShiftSpeed: speed of hue changes in color-shift mode
+void enhancedCrawl(float waveWidth, int colorMode, int baseHue, float colorShiftSpeed) {
+  static int offset = 0;           // Track position of the wave
+  static float shiftingHue = 0;    // For color-shifting mode
+
+  for(int i = 0; i < NUM_PIXELS; i++) {
+    // Calculate distance from current LED to wave center
+    float distance = abs(i - offset);
+
+    // Create soft gradient using cosine for smooth falloff
+    float brightness = 0.0;
+    if (distance <= waveWidth) {
+      brightness = max(0.0, cos(distance / waveWidth * 3.14159 / 2));
+    }
+
+    uint32_t color;
+
+    switch(colorMode) {
+      case 0: // Solid color mode - entire wave is one hue
+        color = strip.ColorHSV((baseHue * 256) % 65536, 255, (int)(brightness * 255));
+        break;
+
+      case 1: // Rainbow gradient mode - wave itself is a rainbow
+        {
+          // Map distance within wave to a hue (creates rainbow across the wave)
+          int hue = (int)((distance / waveWidth) * 255);
+          color = strip.ColorHSV((hue * 256) % 65536, 255, (int)(brightness * 255));
+        }
+        break;
+
+      case 2: // Color-shifting mode - entire wave cycles through colors over time
+        color = strip.ColorHSV(((int)shiftingHue * 256) % 65536, 255, (int)(brightness * 255));
+        break;
+
+      case 3: // Custom RGB mode - warm white (like original)
+      default:
+        {
+          int r = 255 * brightness;
+          int g = 240 * brightness;
+          int b = 200 * brightness;
+          color = strip.Color(r, g, b);
+        }
+        break;
+    }
+
+    strip.setPixelColor(i, color);
+  }
+
+  strip.show();
+
+  // Move the wave forward
+  offset++;
+
+  // Update shifting hue for color-shift mode
+  if (colorMode == 2) {
+    shiftingHue += colorShiftSpeed;
+    if (shiftingHue >= 256) shiftingHue = 0;
+  }
+
+  // Check if wave has fully exited the strip (trailing edge cleared)
+  if (offset > NUM_PIXELS + (int)waveWidth) {
+    offset = -(int)waveWidth;  // Reset to start just before the strip
+  }
+}
+
 // Crawling stars effect - star-like orbs that fade in, drift, and fade out independently
 // Uses history-based decay: only orb positions are set to brightness, everything else decays
 // maxOrbs: maximum number of orbs at once
@@ -391,4 +487,308 @@ void nebulaWithBackground(int maxOrbs, float orbSize, float speed) {
 
   // Increment frame counter for animation timing
   frameCount++;
+}
+
+// Rainbow circle effect - visualizes a 2D circle passing through the 1D strip
+// Shows the cross-section: starts as 1 point, expands to 2 points, then contracts back
+// radius: radius of the circle
+// speed: how fast the circle passes through
+void rainbowCircle(float radius, float speed) {
+  static float verticalPos = -radius;  // Circle's vertical position (starts above strip)
+  static int pauseFrames = 0;           // Counter for pause between cycles
+  const int PAUSE_DURATION = 2000;      // Pause frames (no delay, so higher count needed)
+
+  // Center of the LED strip (where the circle passes through)
+  const float stripCenter = NUM_PIXELS / 2.0;
+
+  // Handle pause between cycles
+  if (pauseFrames > 0) {
+    // Clear all LEDs during pause
+    for (int i = 0; i < NUM_PIXELS; i++) {
+      strip.setPixelColor(i, 0);
+    }
+    strip.show();
+    pauseFrames--;
+    return;
+  }
+
+  // Clear all LEDs first
+  for (int i = 0; i < NUM_PIXELS; i++) {
+    strip.setPixelColor(i, 0);
+  }
+
+  // Calculate if the horizontal strip intersects the circle at this vertical position
+  float distanceFromCenter = abs(verticalPos);
+
+  if (distanceFromCenter <= radius) {
+    // Calculate horizontal distance from center to intersection points
+    // Using circle equation: x² + y² = r²  →  x = ±sqrt(r² - y²)
+    float halfWidth = sqrt(radius * radius - distanceFromCenter * distanceFromCenter);
+
+    // Calculate the two intersection points (or one if at the very edge)
+    int leftPoint = (int)(stripCenter - halfWidth);
+    int rightPoint = (int)(stripCenter + halfWidth);
+
+    // Determine hue based on vertical position through the circle
+    int hue = (int)((verticalPos + radius) / (2.0 * radius) * 255);
+
+    // Fill interior with 10% brightness
+    for (int i = max(0, leftPoint); i <= min(NUM_PIXELS - 1, rightPoint); i++) {
+      uint32_t fillColor = strip.ColorHSV((hue * 256) % 65536, 255, 25);  // 10% brightness
+      strip.setPixelColor(i, fillColor);
+    }
+
+    // Light up edge points at full brightness (overwrite the fill)
+    if (leftPoint >= 0 && leftPoint < NUM_PIXELS) {
+      uint32_t edgeColor = strip.ColorHSV((hue * 256) % 65536, 255, 255);
+      strip.setPixelColor(leftPoint, edgeColor);
+    }
+
+    if (rightPoint >= 0 && rightPoint < NUM_PIXELS && rightPoint != leftPoint) {
+      uint32_t edgeColor = strip.ColorHSV((hue * 256) % 65536, 255, 255);
+      strip.setPixelColor(rightPoint, edgeColor);
+    }
+  }
+
+  strip.show();
+
+  // Move the circle vertically through the strip
+  verticalPos += speed;
+
+  // Reset when circle fully exits below the strip
+  if (verticalPos > radius) {
+    verticalPos = -radius;
+    pauseFrames = PAUSE_DURATION;  // Start pause before next cycle
+  }
+}
+
+// Collision effect - two soft white crawlers collide and create firework sparks
+// Crawlers start at opposite ends, move toward each other, and explode on collision
+void collision() {
+  // State machine
+  enum State { APPROACHING, COLLIDING, PAUSED, SPARKLING, RESET };
+  static State state = APPROACHING;
+
+  static float crawler1Pos = 0;
+  static float crawler2Pos = NUM_PIXELS - 1;
+  const float crawlerSpeed = 0.8;
+  const float waveWidth = 6.0;
+
+  static int collisionPoint = 0;
+  static int pauseFrames = 0;
+  static int resetDelay = 0;
+
+  // Spark particles
+  static Orb sparks[35];
+  static bool sparksInitialized = false;
+
+  if (!sparksInitialized) {
+    for (int i = 0; i < 35; i++) {
+      sparks[i].active = false;
+    }
+    sparksInitialized = true;
+  }
+
+  // Clear all LEDs
+  for (int i = 0; i < NUM_PIXELS; i++) {
+    strip.setPixelColor(i, 0);
+  }
+
+  // State machine
+  switch(state) {
+    case APPROACHING:
+      {
+        // Move crawlers
+        crawler1Pos += crawlerSpeed;
+        crawler2Pos -= crawlerSpeed;
+
+        // Calculate brightness for both crawlers
+        float brightness[NUM_PIXELS];
+        for (int i = 0; i < NUM_PIXELS; i++) {
+          brightness[i] = 0;
+        }
+
+        // Add crawler 1 brightness
+        for (int i = 0; i < NUM_PIXELS; i++) {
+          float distance = abs((float)i - crawler1Pos);
+          if (distance <= waveWidth) {
+            float b = cos(distance / waveWidth * 3.14159 / 2);
+            if (b > 0) brightness[i] += b;
+          }
+        }
+
+        // Add crawler 2 brightness
+        for (int i = 0; i < NUM_PIXELS; i++) {
+          float distance = abs((float)i - crawler2Pos);
+          if (distance <= waveWidth) {
+            float b = cos(distance / waveWidth * 3.14159 / 2);
+            if (b > 0) brightness[i] += b;
+          }
+        }
+
+        // Render all pixels
+        for (int i = 0; i < NUM_PIXELS; i++) {
+          if (brightness[i] > 0) {
+            float b = min(1.0f, brightness[i]);
+            int r = 255 * b;
+            int g = 240 * b;
+            int blue = 200 * b;
+            strip.setPixelColor(i, strip.Color(r, g, blue));
+          }
+        }
+
+        // Check for collision when fronts touch
+        if (crawler1Pos + waveWidth >= crawler2Pos - waveWidth) {
+          state = COLLIDING;
+          collisionPoint = (int)((crawler1Pos + crawler2Pos) / 2);
+        }
+      }
+      break;
+
+    case COLLIDING:
+      {
+        // Continue moving forward
+        crawler1Pos += crawlerSpeed;
+        crawler2Pos -= crawlerSpeed;
+
+        // Calculate brightness with masking
+        float brightness[NUM_PIXELS];
+        for (int i = 0; i < NUM_PIXELS; i++) {
+          brightness[i] = 0;
+        }
+
+        // Crawler 1: only draw LEDs up to and including collision point
+        for (int i = 0; i < NUM_PIXELS; i++) {
+          if (i <= collisionPoint) {
+            float distance = abs((float)i - crawler1Pos);
+            if (distance <= waveWidth) {
+              float b = cos(distance / waveWidth * 3.14159 / 2);
+              if (b > 0) brightness[i] += b;
+            }
+          }
+        }
+
+        // Crawler 2: only draw LEDs from collision point onwards
+        for (int i = 0; i < NUM_PIXELS; i++) {
+          if (i >= collisionPoint) {
+            float distance = abs((float)i - crawler2Pos);
+            if (distance <= waveWidth) {
+              float b = cos(distance / waveWidth * 3.14159 / 2);
+              if (b > 0) brightness[i] += b;
+            }
+          }
+        }
+
+        // Render all pixels
+        for (int i = 0; i < NUM_PIXELS; i++) {
+          if (brightness[i] > 0) {
+            float b = min(1.0f, brightness[i]);
+            int r = 255 * b;
+            int g = 240 * b;
+            int blue = 200 * b;
+            strip.setPixelColor(i, strip.Color(r, g, blue));
+          }
+        }
+
+        // Check if both tails have passed through collision point
+        if (crawler1Pos - waveWidth >= collisionPoint &&
+            crawler2Pos + waveWidth <= collisionPoint) {
+          state = PAUSED;
+          pauseFrames = 2;
+        }
+      }
+      break;
+
+    case PAUSED:
+      {
+        pauseFrames--;
+        if (pauseFrames <= 0) {
+          // Spawn sparks
+          for (int i = 0; i < 35; i++) {
+            sparks[i].active = true;
+            sparks[i].position = collisionPoint;
+            sparks[i].velocity = (random(20, 60) / 100.0) * (random(0, 2) == 0 ? 1 : -1);
+            sparks[i].age = 0;
+            sparks[i].lifetime = 25 + random(30);
+          }
+          state = SPARKLING;
+        }
+      }
+      break;
+
+    case SPARKLING:
+      {
+        bool anyActive = false;
+
+        for (int i = 0; i < 35; i++) {
+          if (!sparks[i].active) continue;
+          anyActive = true;
+
+          sparks[i].age += 1.0;
+          if (sparks[i].age >= sparks[i].lifetime) {
+            sparks[i].active = false;
+            continue;
+          }
+
+          sparks[i].position += sparks[i].velocity;
+          if (sparks[i].position < 0 || sparks[i].position >= NUM_PIXELS) {
+            sparks[i].active = false;
+            continue;
+          }
+
+          // Calculate brightness with flickering
+          float lifecycle = sparks[i].age / sparks[i].lifetime;
+          float brightness = 1.0 - lifecycle;
+          brightness = brightness * brightness;
+          float flicker = 0.7 + (random(0, 60) / 100.0);
+          brightness = brightness * flicker;
+          brightness = min(1.0f, max(0.0f, brightness));
+
+          // Color variants
+          int colorChoice = i % 7;
+          int r, g, b;
+          switch(colorChoice) {
+            case 0: r = 255 * brightness; g = 255 * brightness; b = 30 * brightness; break;
+            case 1: r = 255 * brightness; g = 240 * brightness; b = 200 * brightness; break;
+            case 2: r = 255 * brightness; g = 255 * brightness; b = 120 * brightness; break;
+            case 3: r = 255 * brightness; g = 255 * brightness; b = 255 * brightness; break;
+            case 4: r = 255 * brightness; g = 220 * brightness; b = 80 * brightness; break;
+            case 5: r = 255 * brightness; g = 200 * brightness; b = 100 * brightness; break;
+            default: r = 255 * brightness; g = 250 * brightness; b = 180 * brightness; break;
+          }
+
+          int pixelPos = (int)sparks[i].position;
+          if (pixelPos >= 0 && pixelPos < NUM_PIXELS) {
+            uint32_t existing = strip.getPixelColor(pixelPos);
+            uint8_t er = (existing >> 16) & 0xFF;
+            uint8_t eg = (existing >> 8) & 0xFF;
+            uint8_t eb = existing & 0xFF;
+            strip.setPixelColor(pixelPos, strip.Color(
+              min(255, (int)er + r),
+              min(255, (int)eg + g),
+              min(255, (int)eb + b)
+            ));
+          }
+        }
+
+        if (!anyActive) {
+          state = RESET;
+          resetDelay = 60;
+        }
+      }
+      break;
+
+    case RESET:
+      {
+        resetDelay--;
+        if (resetDelay <= 0) {
+          crawler1Pos = 0;
+          crawler2Pos = NUM_PIXELS - 1;
+          state = APPROACHING;
+        }
+      }
+      break;
+  }
+
+  strip.show();
 }

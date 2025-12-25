@@ -10,7 +10,7 @@ id = "nano"
 [[part]]
 type = "wokwi-neopixel-canvas"
 id = "strip1"
-attrs = { pin = "6", rows = "10", cols = "10", layout = "zigzag" }
+attrs = { pin = "6", rows = "1", cols = "100" }
 
 [[connection]]
 from = "strip1:DIN"

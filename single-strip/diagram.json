@@ -14,12 +14,13 @@
       "type": "wokwi-neopixel-canvas",
       "id": "strip1",
       "top": 100,
-      "left": 300,
+      "left": 100,
+      "rotate": 0,
       "attrs": {
         "pin": "6",
-        "rows": "10",
-        "cols": "10",
-        "layout": "zigzag"
+        "rows": "1",
+        "cols": "100",
+        "pixelSpacing": "12"
       }
     }
   ],

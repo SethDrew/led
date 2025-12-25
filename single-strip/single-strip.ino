@@ -18,6 +18,16 @@ struct Orb {
   bool active;       // Whether this orb slot is in use
 };
 
+// Color particle for fragmentation effect
+struct ColorParticle {
+  float position;
+  float velocity;
+  float originalVelocity;  // Store for reversal
+  int spawnFrame;          // When this particle should activate
+  int r, g, b;
+  bool active;
+};
+
 // Forward declarations
 void softWhiteCrawlAnimation();
 void softWhiteCrawl(float waveWidth);
@@ -34,6 +44,8 @@ void enhancedCrawlAnimation();
 void enhancedCrawl(float waveWidth, int colorMode, int baseHue, float colorShiftSpeed);
 void collisionAnimation();
 void collision();
+void fragmentationAnimation();
+void fragmentation();
 
 void setup() {
   Serial.begin(115200);
@@ -51,7 +63,8 @@ void loop() {
   // nebulaAnimation(); delay(20);
   // rainbowCircleAnimation();
   // enhancedCrawlAnimation(); delay(20);
-  collisionAnimation(); delay(7);  // 3x faster (was 20ms)
+  // collisionAnimation(); delay(20);
+  fragmentationAnimation(); delay(20);
 }
 
 // ===== Animation Wrappers =====
@@ -827,6 +840,226 @@ void collision() {
           crawler2SpawnDelay = random(0, 40);
           framesSinceReset = 0;
           state = APPROACHING;
+        }
+      }
+      break;
+  }
+
+  strip.show();
+}
+
+void fragmentationAnimation() {
+  fragmentation();
+}
+
+// Fragmentation effect - white crawler decomposes into RGB particles and reforms
+void fragmentation() {
+  enum State { STABLE, FRAGMENTING, REFORMING };
+  static State state = STABLE;
+
+  const float centerPos = NUM_PIXELS / 2.0;
+  const float waveWidth = 6.0;
+  const int numParticles = 30;
+
+  static ColorParticle particles[30];
+  static bool initialized = false;
+  static int stableFrames = 0;
+  static int fragmentFrames = 0;
+
+  if (!initialized) {
+    for (int i = 0; i < numParticles; i++) {
+      particles[i].active = false;
+    }
+    initialized = true;
+  }
+
+  // Clear background
+  for (int i = 0; i < NUM_PIXELS; i++) {
+    strip.setPixelColor(i, strip.Color(0, 0, 0));
+  }
+
+  switch(state) {
+    case STABLE:
+      {
+        // Show white crawler at center
+        for (int i = 0; i < NUM_PIXELS; i++) {
+          float distance = fabs((float)i - centerPos);
+          if (distance <= waveWidth) {
+            float b = cos(distance / waveWidth * 3.14159 / 2);
+            int brightness = 255 * b;
+            strip.setPixelColor(i, strip.Color(brightness, brightness, brightness));
+          }
+        }
+
+        stableFrames++;
+        if (stableFrames >= 60) {  // Stay stable for 60 frames
+          state = FRAGMENTING;
+          stableFrames = 0;
+          fragmentFrames = 0;
+
+          // Initialize particles - assign positions but don't activate yet
+          for (int i = 0; i < numParticles; i++) {
+            particles[i].active = false;
+            // Spawn particles randomly across the crawler's width
+            particles[i].position = centerPos + ((random(0, 170) - 85) / 10.0);  // ±8.5 LEDs from center
+
+            // Calculate spawn time based on distance from center (outer spawns first)
+            float distFromCenter = fabs(particles[i].position - centerPos);
+            particles[i].spawnFrame = (int)((waveWidth - distFromCenter) / waveWidth * 50);  // 0 to 50
+
+            particles[i].velocity = ((random(0, 80) - 40) / 100.0);  // Faster: -0.4 to 0.4
+            particles[i].originalVelocity = particles[i].velocity;
+
+            // Assign RGB component colors
+            int colorType = i % 6;
+            switch(colorType) {
+              case 0: particles[i].r = 255; particles[i].g = 0; particles[i].b = 0; break;     // Red
+              case 1: particles[i].r = 0; particles[i].g = 255; particles[i].b = 0; break;     // Green
+              case 2: particles[i].r = 0; particles[i].g = 0; particles[i].b = 255; break;     // Blue
+              case 3: particles[i].r = 255; particles[i].g = 255; particles[i].b = 0; break;   // Yellow (R+G)
+              case 4: particles[i].r = 255; particles[i].g = 0; particles[i].b = 255; break;   // Magenta (R+B)
+              case 5: particles[i].r = 0; particles[i].g = 255; particles[i].b = 255; break;   // Cyan (G+B)
+            }
+          }
+        }
+      }
+      break;
+
+    case FRAGMENTING:
+      {
+        fragmentFrames++;
+
+        // Render the fading crawler (gradually disappears as it frays)
+        float crawlerBrightness = max(0.0f, 1.0 - (fragmentFrames / 50.0));
+        for (int i = 0; i < NUM_PIXELS; i++) {
+          float distance = fabs((float)i - centerPos);
+          if (distance <= waveWidth) {
+            float b = cos(distance / waveWidth * 3.14159 / 2) * crawlerBrightness;
+            int brightness = 255 * b;
+            strip.setPixelColor(i, strip.Color(brightness, brightness, brightness));
+          }
+        }
+
+        // Activate and move particles
+        for (int i = 0; i < numParticles; i++) {
+          // Activate particle when its spawn time arrives
+          if (!particles[i].active && fragmentFrames >= particles[i].spawnFrame) {
+            particles[i].active = true;
+          }
+
+          if (particles[i].active) {
+            particles[i].position += particles[i].velocity;
+
+            // Render particle
+            int pixelPos = (int)particles[i].position;
+            if (pixelPos >= 0 && pixelPos < NUM_PIXELS) {
+              // Brightness based on time since activation
+              int framesSinceSpawn = fragmentFrames - particles[i].spawnFrame;
+              float brightness = 1.0 - (framesSinceSpawn / 100.0);
+              brightness = max(0.0f, min(1.0f, brightness));
+
+              int r = particles[i].r * brightness;
+              int g = particles[i].g * brightness;
+              int b = particles[i].b * brightness;
+
+              // Additive blending
+              uint32_t existing = strip.getPixelColor(pixelPos);
+              uint8_t er = (existing >> 16) & 0xFF;
+              uint8_t eg = (existing >> 8) & 0xFF;
+              uint8_t eb = existing & 0xFF;
+
+              strip.setPixelColor(pixelPos, strip.Color(
+                min(255, (int)er + r),
+                min(255, (int)eg + g),
+                min(255, (int)eb + b)
+              ));
+            }
+          }
+        }
+
+        // After 100 frames, start reforming
+        if (fragmentFrames >= 100) {
+          state = REFORMING;
+          fragmentFrames = 0;
+
+          // Reverse velocities only for active particles
+          for (int i = 0; i < numParticles; i++) {
+            if (particles[i].active) {
+              particles[i].velocity = -particles[i].originalVelocity * 1.0;
+            }
+          }
+        }
+      }
+      break;
+
+    case REFORMING:
+      {
+        fragmentFrames++;
+
+        bool allReturned = true;
+
+        // Render the reforming crawler (gradually reappears from center outward)
+        float crawlerBrightness = fragmentFrames / 100.0;
+        crawlerBrightness = min(1.0f, crawlerBrightness);
+        for (int i = 0; i < NUM_PIXELS; i++) {
+          float distance = fabs((float)i - centerPos);
+          if (distance <= waveWidth) {
+            float b = cos(distance / waveWidth * 3.14159 / 2) * crawlerBrightness;
+            int brightness = 255 * b;
+            strip.setPixelColor(i, strip.Color(brightness, brightness, brightness));
+          }
+        }
+
+        // Move particles and deactivate in reverse order (center first, edges last)
+        for (int i = 0; i < numParticles; i++) {
+          if (particles[i].active) {
+            // Calculate despawn frame (reverse of spawn order)
+            // Particles that spawned first (frame 0, edges) despawn last (frame 100)
+            // Particles that spawned last (frame 50, center) despawn first (frame 0)
+            int despawnFrame = 100 - particles[i].spawnFrame * 2;
+
+            // Deactivate particle when its despawn time arrives
+            if (fragmentFrames >= despawnFrame) {
+              particles[i].active = false;
+              continue;
+            }
+
+            allReturned = false;
+            particles[i].position += particles[i].velocity;
+
+            // Render particle
+            int pixelPos = (int)particles[i].position;
+            if (pixelPos >= 0 && pixelPos < NUM_PIXELS) {
+              // Brightness fades in during reforming
+              float brightness = min(1.0f, fragmentFrames / 50.0);
+
+              int r = particles[i].r * brightness;
+              int g = particles[i].g * brightness;
+              int b = particles[i].b * brightness;
+
+              // Additive blending
+              uint32_t existing = strip.getPixelColor(pixelPos);
+              uint8_t er = (existing >> 16) & 0xFF;
+              uint8_t eg = (existing >> 8) & 0xFF;
+              uint8_t eb = existing & 0xFF;
+
+              strip.setPixelColor(pixelPos, strip.Color(
+                min(255, (int)er + r),
+                min(255, (int)eg + g),
+                min(255, (int)eb + b)
+              ));
+            }
+          }
+        }
+
+        // When all particles have despawned, go back to stable
+        if (allReturned || fragmentFrames >= 100) {
+          // Clean up all particles before transitioning
+          for (int i = 0; i < numParticles; i++) {
+            particles[i].active = false;
+          }
+          state = STABLE;
+          stableFrames = 0;
         }
       }
       break;

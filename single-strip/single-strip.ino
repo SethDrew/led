@@ -859,9 +859,9 @@ void fragmentation() {
 
   const float centerPos = NUM_PIXELS / 2.0;
   const float waveWidth = 6.0;
-  const int numParticles = 30;
+  const int numParticles = 40;
 
-  static ColorParticle particles[30];
+  static ColorParticle particles[40];
   static bool initialized = false;
   static int stableFrames = 0;
   static int fragmentFrames = 0;
@@ -897,29 +897,58 @@ void fragmentation() {
           stableFrames = 0;
           fragmentFrames = 0;
 
-          // Initialize particles - assign positions but don't activate yet
-          for (int i = 0; i < numParticles; i++) {
-            particles[i].active = false;
-            // Spawn particles randomly across the crawler's width
-            particles[i].position = centerPos + ((random(0, 170) - 85) / 10.0);  // ±8.5 LEDs from center
+          // Initialize particles from crawler pixels - each pixel decomposes into RGB components
+          int particleIndex = 0;
 
-            // Calculate spawn time based on distance from center (outer spawns first)
-            float distFromCenter = fabs(particles[i].position - centerPos);
-            particles[i].spawnFrame = (int)((waveWidth - distFromCenter) / waveWidth * 50);  // 0 to 50
+          // Iterate through crawler pixels
+          for (int pixelPos = (int)(centerPos - waveWidth); pixelPos <= (int)(centerPos + waveWidth) && particleIndex < numParticles - 2; pixelPos++) {
+            if (pixelPos < 0 || pixelPos >= NUM_PIXELS) continue;
 
-            particles[i].velocity = ((random(0, 80) - 40) / 100.0);  // Faster: -0.4 to 0.4
-            particles[i].originalVelocity = particles[i].velocity;
+            // Calculate brightness of this pixel in the crawler
+            float distance = fabs((float)pixelPos - centerPos);
+            if (distance <= waveWidth) {
+              float brightness = cos(distance / waveWidth * 3.14159 / 2);
 
-            // Assign RGB component colors
-            int colorType = i % 6;
-            switch(colorType) {
-              case 0: particles[i].r = 255; particles[i].g = 0; particles[i].b = 0; break;     // Red
-              case 1: particles[i].r = 0; particles[i].g = 255; particles[i].b = 0; break;     // Green
-              case 2: particles[i].r = 0; particles[i].g = 0; particles[i].b = 255; break;     // Blue
-              case 3: particles[i].r = 255; particles[i].g = 255; particles[i].b = 0; break;   // Yellow (R+G)
-              case 4: particles[i].r = 255; particles[i].g = 0; particles[i].b = 255; break;   // Magenta (R+B)
-              case 5: particles[i].r = 0; particles[i].g = 255; particles[i].b = 255; break;   // Cyan (G+B)
+              // Only create particles for visible pixels (brightness > 0.3)
+              if (brightness > 0.3) {
+                // Calculate spawn time based on distance from center (outer spawns first)
+                int spawnFrame = (int)((waveWidth - distance) / waveWidth * 50);
+
+                // Create 3 particles (R, G, B components) from this pixel
+                for (int component = 0; component < 3; component++) {
+                  if (particleIndex >= numParticles) break;
+
+                  particles[particleIndex].active = false;
+                  particles[particleIndex].position = (float)pixelPos;
+                  particles[particleIndex].spawnFrame = spawnFrame;
+                  particles[particleIndex].velocity = ((random(0, 80) - 40) / 100.0);
+                  particles[particleIndex].originalVelocity = particles[particleIndex].velocity;
+
+                  // Assign component color based on which component (R, G, or B)
+                  int scaledBrightness = (int)(255 * brightness);
+                  if (component == 0) {  // Red component
+                    particles[particleIndex].r = scaledBrightness;
+                    particles[particleIndex].g = 0;
+                    particles[particleIndex].b = 0;
+                  } else if (component == 1) {  // Green component
+                    particles[particleIndex].r = 0;
+                    particles[particleIndex].g = scaledBrightness;
+                    particles[particleIndex].b = 0;
+                  } else {  // Blue component
+                    particles[particleIndex].r = 0;
+                    particles[particleIndex].g = 0;
+                    particles[particleIndex].b = scaledBrightness;
+                  }
+
+                  particleIndex++;
+                }
+              }
             }
+          }
+
+          // Deactivate any unused particle slots
+          for (int i = particleIndex; i < numParticles; i++) {
+            particles[i].active = false;
           }
         }
       }
@@ -929,14 +958,21 @@ void fragmentation() {
       {
         fragmentFrames++;
 
-        // Render the fading crawler (gradually disappears as it frays)
-        float crawlerBrightness = max(0.0f, 1.0 - (fragmentFrames / 50.0));
+        // Render crawler - pixels disappear as particles spawn from them (outside to inside)
         for (int i = 0; i < NUM_PIXELS; i++) {
           float distance = fabs((float)i - centerPos);
           if (distance <= waveWidth) {
-            float b = cos(distance / waveWidth * 3.14159 / 2) * crawlerBrightness;
-            int brightness = 255 * b;
-            strip.setPixelColor(i, strip.Color(brightness, brightness, brightness));
+            float brightness = cos(distance / waveWidth * 3.14159 / 2);
+
+            // Calculate when particles from this pixel spawn
+            int pixelSpawnFrame = (int)((waveWidth - distance) / waveWidth * 50);
+
+            // Only render pixel if its particles haven't spawned yet (crawler being consumed from outside in)
+            if (fragmentFrames < pixelSpawnFrame && brightness > 0.3) {
+              int b = 255 * brightness;
+              strip.setPixelColor(i, strip.Color(b, b, b));
+            }
+            // If particles have spawned, pixel is consumed (don't render)
           }
         }
 

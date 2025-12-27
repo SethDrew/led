@@ -23,9 +23,10 @@ struct ColorParticle {
   float position;
   float velocity;
   float originalVelocity;  // Store for reversal
-  int spawnFrame;          // When this particle should activate
-  int r, g, b;
+  uint8_t spawnFrame;      // When this particle should activate (0-255 frames)
+  uint8_t r, g, b;         // RGB color components
   bool active;
+  float homePosition;      // Original position to return to when reforming
 };
 
 // Forward declarations
@@ -67,7 +68,8 @@ void loop() {
   // enhancedCrawlAnimation(); delay(20);
   // collisionAnimation(); delay(20);
   // fragmentationAnimation(); delay(20);
-  workshopFragmentationAnimation(); delay(20);
+  // workshopFragmentationAnimation(); delay(20);
+  driftingDecayAnimation(); delay(20);
 }
 
 // ===== Animation Wrappers =====
@@ -1133,14 +1135,14 @@ void workshopFragmentation() {
   static int fragmentFrames = 0;
 
   const float centerPos = NUM_PIXELS / 2.0;
-  const int numParticles = 6;  // Max 2 pixels × 3 RGB components each
+  const int maxParticles = 6;  // Max 2 pixels × 3 RGB components
 
   static ColorParticle particles[6];
   static int activeParticleCount = 0;
   static bool needsInit = true;
 
-  // Color buffer for proper additive blending (RGB format)
-  static int pixelColors[NUM_PIXELS][3];  // [pixel][RGB]
+  // Color buffer for proper additive blending (RGB format) - uint8_t to save RAM
+  static uint8_t pixelColors[NUM_PIXELS][3];  // [pixel][RGB]
 
   // Pixel positions (adjacent pixels at center)
   const int pixel1Pos = (int)centerPos;
@@ -1152,13 +1154,14 @@ void workshopFragmentation() {
   // Initialize/re-initialize particles (called at startup and after each reform)
   if (needsInit) {
     // Clear all particles first to avoid rendering old data
-    for (int i = 0; i < numParticles; i++) {
+    for (int i = 0; i < maxParticles; i++) {
       particles[i].active = false;
       particles[i].position = 0;
       particles[i].velocity = 0;
       particles[i].r = 0;
       particles[i].g = 0;
       particles[i].b = 0;
+      particles[i].homePosition = 0;
     }
 
     int particleIndex = 0;
@@ -1170,6 +1173,7 @@ void workshopFragmentation() {
     for (int i = 0; i < numParticles1; i++) {
       particles[particleIndex].active = true;
       particles[particleIndex].position = pixel1Pos;
+      particles[particleIndex].homePosition = pixel1Pos;  // Remember home for reforming
       particles[particleIndex].velocity = 0;  // Start stationary
       particles[particleIndex].spawnFrame = 10;  // Both pixels fragment simultaneously
 
@@ -1206,6 +1210,7 @@ void workshopFragmentation() {
     for (int i = 0; i < numParticles2; i++) {
       particles[particleIndex].active = true;
       particles[particleIndex].position = pixel2Pos;
+      particles[particleIndex].homePosition = pixel2Pos;  // Remember home for reforming
       particles[particleIndex].velocity = 0;  // Start stationary
       particles[particleIndex].spawnFrame = 10;  // Both pixels fragment simultaneously
 
@@ -1248,47 +1253,6 @@ void workshopFragmentation() {
 
   switch (state) {
     case STABLE:
-      // Debug: Print particle info on first stable frame
-      if (stableFrames == 0) {
-        Serial.println("\n=== STABLE Frame 0 ===");
-        Serial.print("Active particles: "); Serial.println(activeParticleCount);
-        for (int i = 0; i < activeParticleCount; i++) {
-          Serial.print("P"); Serial.print(i);
-          Serial.print(" pos="); Serial.print(particles[i].position, 2);
-          Serial.print(" vel="); Serial.print(particles[i].velocity, 2);
-          Serial.print(" RGB=("); Serial.print(particles[i].r);
-          Serial.print(","); Serial.print(particles[i].g);
-          Serial.print(","); Serial.print(particles[i].b);
-          Serial.print(") active="); Serial.println(particles[i].active);
-        }
-
-        // Calculate summed values at each pixel
-        int sum_pixel1_r = 0, sum_pixel1_g = 0, sum_pixel1_b = 0;
-        int sum_pixel2_r = 0, sum_pixel2_g = 0, sum_pixel2_b = 0;
-        for (int i = 0; i < activeParticleCount; i++) {
-          if (particles[i].active) {
-            int pixelPos = (int)particles[i].position;
-            if (pixelPos == pixel1Pos) {
-              sum_pixel1_r += particles[i].r;
-              sum_pixel1_g += particles[i].g;
-              sum_pixel1_b += particles[i].b;
-            } else if (pixelPos == pixel2Pos) {
-              sum_pixel2_r += particles[i].r;
-              sum_pixel2_g += particles[i].g;
-              sum_pixel2_b += particles[i].b;
-            }
-          }
-        }
-        Serial.print("Pixel "); Serial.print(pixel1Pos);
-        Serial.print(" sum RGB=("); Serial.print(sum_pixel1_r);
-        Serial.print(","); Serial.print(sum_pixel1_g);
-        Serial.print(","); Serial.print(sum_pixel1_b); Serial.println(")");
-        Serial.print("Pixel "); Serial.print(pixel2Pos);
-        Serial.print(" sum RGB=("); Serial.print(sum_pixel2_r);
-        Serial.print(","); Serial.print(sum_pixel2_g);
-        Serial.print(","); Serial.print(sum_pixel2_b); Serial.println(")");
-      }
-
       stableFrames++;
       if (stableFrames >= 30) {
         state = FRAGMENTING;
@@ -1299,14 +1263,16 @@ void workshopFragmentation() {
     case FRAGMENTING:
       // Give particles their velocities at the appropriate spawn frame
       for (int i = 0; i < activeParticleCount; i++) {
-        if (fragmentFrames == particles[i].spawnFrame) {
+        if (particles[i].active && fragmentFrames == particles[i].spawnFrame) {
           particles[i].velocity = particles[i].originalVelocity;
         }
       }
 
-      // Move and fade out particles
+      // Move particles
       for (int i = 0; i < activeParticleCount; i++) {
-        particles[i].position += particles[i].velocity;
+        if (particles[i].active) {
+          particles[i].position += particles[i].velocity;
+        }
       }
 
       fragmentFrames++;
@@ -1314,25 +1280,32 @@ void workshopFragmentation() {
         state = REFORMING;
         fragmentFrames = 0;
 
-        // Reverse velocities
+        // Reverse all particles' velocities
         for (int i = 0; i < activeParticleCount; i++) {
-          particles[i].velocity = -particles[i].velocity;
+          if (particles[i].active) {
+            particles[i].velocity = -particles[i].velocity;
+          }
         }
       }
       break;
 
     case REFORMING:
-      // Stop particles at their spawn frames (reverse order)
+      // Stop particles when they reach their despawn frame
       for (int i = 0; i < activeParticleCount; i++) {
+        if (!particles[i].active) continue;
+
+        // Since all particles spawn at frame 10, they all despawn at frame 90
         int despawnFrame = 100 - particles[i].spawnFrame;
-        if (fragmentFrames == despawnFrame) {
+        if (fragmentFrames >= despawnFrame) {
           particles[i].velocity = 0;
         }
       }
 
       // Move particles
       for (int i = 0; i < activeParticleCount; i++) {
-        particles[i].position += particles[i].velocity;
+        if (particles[i].active) {
+          particles[i].position += particles[i].velocity;
+        }
       }
 
       fragmentFrames++;
@@ -1363,29 +1336,14 @@ void workshopFragmentation() {
     int pixelPos = (int)particles[i].position;
     if (pixelPos >= 0 && pixelPos < NUM_PIXELS) {
       // Additive blending using our color buffer
-      int er = pixelColors[pixelPos][0];
-      int eg = pixelColors[pixelPos][1];
-      int eb = pixelColors[pixelPos][2];
-
-      int final_r = min(255, er + r);
-      int final_g = min(255, eg + g);
-      int final_b = min(255, eb + b);
+      int final_r = min(255, (int)pixelColors[pixelPos][0] + r);
+      int final_g = min(255, (int)pixelColors[pixelPos][1] + g);
+      int final_b = min(255, (int)pixelColors[pixelPos][2] + b);
 
       // Update color buffer
-      pixelColors[pixelPos][0] = final_r;
-      pixelColors[pixelPos][1] = final_g;
-      pixelColors[pixelPos][2] = final_b;
-
-      // Debug: Print rendering on first stable frame
-      if (state == STABLE && stableFrames == 0) {
-        Serial.print("  Render P"); Serial.print(i);
-        Serial.print(" to pixel "); Serial.print(pixelPos);
-        Serial.print(": brightness="); Serial.print(brightness, 2);
-        Serial.print(" rgb=("); Serial.print(r); Serial.print(","); Serial.print(g); Serial.print(","); Serial.print(b);
-        Serial.print(") existing=("); Serial.print(er); Serial.print(","); Serial.print(eg); Serial.print(","); Serial.print(eb);
-        Serial.print(") final=("); Serial.print(final_r); Serial.print(","); Serial.print(final_g); Serial.print(","); Serial.print(final_b);
-        Serial.println(")");
-      }
+      pixelColors[pixelPos][0] = (uint8_t)final_r;
+      pixelColors[pixelPos][1] = (uint8_t)final_g;
+      pixelColors[pixelPos][2] = (uint8_t)final_b;
     }
   }
 
@@ -1394,17 +1352,194 @@ void workshopFragmentation() {
     strip.setPixelColor(i, strip.Color(pixelColors[i][0], pixelColors[i][1], pixelColors[i][2]));
   }
 
-  // Debug: Print final LED values on first stable frame
-  if (state == STABLE && stableFrames == 0) {
-    Serial.println("Final LED values:");
-    Serial.print("  LED "); Serial.print(pixel1Pos); Serial.print(": RGB=(");
-    Serial.print(pixelColors[pixel1Pos][0]); Serial.print(",");
-    Serial.print(pixelColors[pixel1Pos][1]); Serial.print(",");
-    Serial.print(pixelColors[pixel1Pos][2]); Serial.println(")");
-    Serial.print("  LED "); Serial.print(pixel2Pos); Serial.print(": RGB=(");
-    Serial.print(pixelColors[pixel2Pos][0]); Serial.print(",");
-    Serial.print(pixelColors[pixel2Pos][1]); Serial.print(",");
-    Serial.print(pixelColors[pixel2Pos][2]); Serial.println(")");
+  strip.show();
+}
+
+// ===== Drifting Decay Crawler (Object-Oriented) =====
+
+class DriftCrawler {
+private:
+  struct Particle {
+    float position;
+    float velocity;
+    uint8_t r, g, b;
+    float brightness;  // 0.0 to 1.0
+  };
+
+  Particle particles[5];
+  uint8_t state;  // 0=fade_in, 1=drift, 2=done
+  int age;
+  uint8_t rDecayRate, gDecayRate, bDecayRate;  // Consistent decay rates for this crawler
+
+public:
+  DriftCrawler() {
+    state = 2;  // Start inactive
+  }
+
+  void spawn(float centerPos) {
+    // Set consistent decay rates for this crawler
+    rDecayRate = random(6, 12);
+    gDecayRate = random(6, 12);
+    bDecayRate = random(6, 12);
+
+    // Initialize 5 particles as white, clustered at center
+    for (int i = 0; i < 5; i++) {
+      particles[i].position = centerPos + (i - 2);  // -2, -1, 0, 1, 2
+      particles[i].velocity = (random(-40, 40) / 100.0);  // -0.4 to 0.4
+      particles[i].r = 255;
+      particles[i].g = 255;
+      particles[i].b = 255;
+      particles[i].brightness = 0.0;  // Start invisible
+    }
+    state = 0;  // fade_in
+    age = 0;
+  }
+
+  void update() {
+    if (state == 2) return;  // Inactive
+
+    age++;
+
+    if (state == 0) {  // Fade in
+      for (int i = 0; i < 5; i++) {
+        particles[i].brightness = min(1.0f, particles[i].brightness + 0.05f);
+      }
+      if (particles[0].brightness >= 1.0f) {
+        state = 1;  // Start drifting
+      }
+    } else if (state == 1) {  // Drift and decay
+      for (int i = 0; i < 5; i++) {
+        // Move
+        particles[i].position += particles[i].velocity;
+
+        // RGB decay with minimum threshold (keep total >= 200 for visibility)
+        int totalRGB = particles[i].r + particles[i].g + particles[i].b;
+        if (totalRGB > 200) {
+          // Calculate new values
+          int newR = (particles[i].r > rDecayRate) ? particles[i].r - rDecayRate : 0;
+          int newG = (particles[i].g > gDecayRate) ? particles[i].g - gDecayRate : 0;
+          int newB = (particles[i].b > bDecayRate) ? particles[i].b - bDecayRate : 0;
+          int newTotal = newR + newG + newB;
+
+          // Only apply if we stay above threshold
+          if (newTotal >= 200) {
+            particles[i].r = newR;
+            particles[i].g = newG;
+            particles[i].b = newB;
+          }
+        }
+
+        // Brightness decay (now controls final fade to black)
+        float brightDecay = random(4, 7) / 1000.0f;  // 0.004-0.006 per frame (3-5 seconds)
+        particles[i].brightness = max(0.0f, particles[i].brightness - brightDecay);
+      }
+
+      // Check if all particles are dead (primarily controlled by brightness now)
+      bool allDead = true;
+      for (int i = 0; i < 5; i++) {
+        if (particles[i].brightness > 0.01f) {
+          allDead = false;
+          break;
+        }
+      }
+      if (allDead) {
+        state = 2;  // Done
+      }
+    }
+  }
+
+  void render(uint8_t pixelColors[][3]) {
+    if (state == 2) return;  // Don't render if inactive
+
+    for (int i = 0; i < 5; i++) {
+      int pixelPos = (int)particles[i].position;
+      if (pixelPos >= 0 && pixelPos < NUM_PIXELS && particles[i].brightness > 0.01f) {
+        int r = particles[i].r * particles[i].brightness;
+        int g = particles[i].g * particles[i].brightness;
+        int b = particles[i].b * particles[i].brightness;
+
+        // Additive blending
+        pixelColors[pixelPos][0] = min(255, (int)pixelColors[pixelPos][0] + r);
+        pixelColors[pixelPos][1] = min(255, (int)pixelColors[pixelPos][1] + g);
+        pixelColors[pixelPos][2] = min(255, (int)pixelColors[pixelPos][2] + b);
+      }
+    }
+  }
+
+  bool isActive() {
+    return state != 2;
+  }
+
+  float getCenterPosition() {
+    if (state == 2) return -999;  // Return invalid position if inactive
+    // Return average position of particles
+    float sum = 0;
+    for (int i = 0; i < 5; i++) {
+      sum += particles[i].position;
+    }
+    return sum / 5.0;
+  }
+};
+
+void driftingDecayAnimation() {
+  const int MAX_CRAWLERS = 4;
+  static DriftCrawler crawlers[MAX_CRAWLERS];
+  static int frameCount = 0;
+  static uint8_t pixelColors[NUM_PIXELS][3];
+
+  frameCount++;
+
+  // Spawn new crawler more frequently
+  if (frameCount % 50 == 0) {  // Every 50 frames (~1 second)
+    // Find an inactive slot
+    for (int i = 0; i < MAX_CRAWLERS; i++) {
+      if (!crawlers[i].isActive()) {
+        // Try to find a non-overlapping position
+        bool validPosition = false;
+        float randomPos = 0;
+        int attempts = 0;
+
+        while (!validPosition && attempts < 20) {
+          randomPos = random(20, NUM_PIXELS - 20);
+          validPosition = true;
+
+          // Check distance from all active crawlers
+          for (int j = 0; j < MAX_CRAWLERS; j++) {
+            if (j != i && crawlers[j].isActive()) {
+              float otherPos = crawlers[j].getCenterPosition();
+              if (otherPos > -100 && fabs(randomPos - otherPos) < 15) {  // 15 pixel minimum separation
+                validPosition = false;
+                break;
+              }
+            }
+          }
+          attempts++;
+        }
+
+        if (validPosition) {
+          crawlers[i].spawn(randomPos);
+        }
+        break;
+      }
+    }
+  }
+
+  // Clear color buffer
+  for (int i = 0; i < NUM_PIXELS; i++) {
+    pixelColors[i][0] = 0;
+    pixelColors[i][1] = 0;
+    pixelColors[i][2] = 0;
+  }
+
+  // Update and render all crawlers
+  for (int i = 0; i < MAX_CRAWLERS; i++) {
+    crawlers[i].update();
+    crawlers[i].render(pixelColors);
+  }
+
+  // Write to strip
+  for (int i = 0; i < NUM_PIXELS; i++) {
+    strip.setPixelColor(i, strip.Color(pixelColors[i][0], pixelColors[i][1], pixelColors[i][2]));
   }
 
   strip.show();

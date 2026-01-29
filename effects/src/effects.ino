@@ -52,14 +52,25 @@
 
 // ===== HARDWARE CONFIGURATION =====
 
-#define LED_PIN 6
+#define LED_PIN 12
+
+// NUM_PIXELS can be set via build flags (see platformio.ini)
+// Default to 25 for Wokwi simulation if not defined
+#ifndef NUM_PIXELS
 #define NUM_PIXELS 25
+#endif
 
 Adafruit_NeoPixel strip(NUM_PIXELS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 // ===== RENDERING PARAMETERS =====
 
-const float GLOBAL_BRIGHTNESS = 1.00;  // 0.0 to 1.0
+// GLOBAL_BRIGHTNESS_PERCENT can be set via build flags (see platformio.ini)
+// Default to 100% for Wokwi simulation if not defined
+#ifndef GLOBAL_BRIGHTNESS_PERCENT
+#define GLOBAL_BRIGHTNESS_PERCENT 100
+#endif
+
+const float GLOBAL_BRIGHTNESS = GLOBAL_BRIGHTNESS_PERCENT / 100.0;  // 0.0 to 1.0
 const int MIN_LED_VALUE = 5;           // Minimum per channel for WS2812B
 
 // ===== SHARED BUFFER SYSTEM =====
@@ -220,15 +231,15 @@ void setup() {
 void loop() {
   // Uncomment one animation to run:
 
-  // nebulaStarsAnimation();           // Nebula + stars
+  nebulaStarsAnimation();           // Nebula + stars ← ACTIVE
   // nebulaSparksAnimation();       // Nebula + sparks
   // nebulaCollisionAnimation();    // Nebula + collision
   // purpleRainbowAnimation();      // Purple + rainbow
   // pulsingCrawlAnimation();       // Pulsing blue + crawl
   // fragmentationAnimation();      // Fragmentation
-  driftingDecayAnimation();      // Drifting decay
+  // driftingDecayAnimation();      // Drifting decay
   // rainbowCircleOnlyAnimation();  // Rainbow circle only
   // fireworksAnimation();          // Fireworks style
 
-  delay(20);
+  // No delay - run as fast as possible for smooth animations!
 }

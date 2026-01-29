@@ -4,25 +4,26 @@
 #include "Effect.h"
 
 // Crawling stars - glowing orbs that move along the strip
+// OPTIMIZED: Uses uint8_t instead of float (75% memory savings)
 class CrawlingStarsForeground : public ForegroundEffect {
 private:
   Orb orbs[10];
-  float* ledValues;
+  uint8_t* ledValues;  // Changed from float* to uint8_t*
   int numPixels;
   int maxOrbs;
   float orbSize;
   float speed;
 
   // Star color (warm white)
-  const int STAR_R = 255;
-  const int STAR_G = 240;
-  const int STAR_B = 200;
+  const uint8_t STAR_R = 255;
+  const uint8_t STAR_G = 240;
+  const uint8_t STAR_B = 200;
 
 public:
   CrawlingStarsForeground(int pixels, int max_orbs, float orb_size, float orb_speed)
     : numPixels(pixels), maxOrbs(max_orbs), orbSize(orb_size), speed(orb_speed) {
 
-    ledValues = new float[pixels];
+    ledValues = new uint8_t[pixels];
 
     for (int i = 0; i < 10; i++) {
       orbs[i].active = false;
@@ -37,11 +38,14 @@ public:
   }
 
   void update() override {
-    // Decay all LEDs
-    float decayFactor = 1.0 - (1.0 / orbSize);
+    // Decay all LEDs (multiply by decay factor, similar to float version)
+    // decayFactor = 1.0 - (1.0 / orbSize), converted to 8-bit integer math
+    // We use 256 as "1.0" for fixed-point math
+    uint16_t decayFactor = 256 - (256 / (uint16_t)(orbSize + 0.5));
+
     for (int i = 0; i < numPixels; i++) {
-      ledValues[i] *= decayFactor;
-      if (ledValues[i] < 0.01) ledValues[i] = 0.0;
+      ledValues[i] = ((uint16_t)ledValues[i] * decayFactor) >> 8;  // >> 8 divides by 256
+      if (ledValues[i] < 3) ledValues[i] = 0;  // Threshold (was 0.01 * 255)
     }
 
     // Count active orbs
@@ -78,7 +82,7 @@ public:
       if (orbs[i].position < 0) orbs[i].position += numPixels;
       if (orbs[i].position >= numPixels) orbs[i].position -= numPixels;
 
-      // Calculate lifecycle brightness
+      // Calculate lifecycle brightness (smoothstep fade in/out)
       float lifecycle = orbs[i].age / orbs[i].lifetime;
       float lifeBrightness = 1.0;
       if (lifecycle < 0.4) {
@@ -89,27 +93,34 @@ public:
         lifeBrightness = t * t * (3.0 - 2.0 * t);
       }
 
+      // Add orb brightness to LED (0.6 scale factor = 153 in 8-bit)
       int orbPixel = (int)orbs[i].position;
       if (orbPixel >= 0 && orbPixel < numPixels) {
-        ledValues[orbPixel] = min(1.0f, ledValues[orbPixel] + lifeBrightness * 0.6f);
+        uint16_t addition = (uint16_t)(lifeBrightness * 153);  // 0.6 * 255
+        uint16_t newValue = (uint16_t)ledValues[orbPixel] + addition;
+        ledValues[orbPixel] = (newValue > 255) ? 255 : (uint8_t)newValue;
       }
     }
   }
 
   void render(uint8_t buffer[][3], BlendMode blend = ADD) override {
     for (int i = 0; i < numPixels; i++) {
-      if (ledValues[i] > 0.01) {
-        int r = STAR_R * ledValues[i];
-        int g = STAR_G * ledValues[i];
-        int b = STAR_B * ledValues[i];
+      if (ledValues[i] > 2) {  // Threshold (was 0.01 * 255)
+        // Scale color by brightness using 16-bit math to avoid overflow
+        uint16_t r = ((uint16_t)STAR_R * ledValues[i]) / 255;
+        uint16_t g = ((uint16_t)STAR_G * ledValues[i]) / 255;
+        uint16_t b = ((uint16_t)STAR_B * ledValues[i]) / 255;
 
         if (blend == ADD) {
-          // Additive blending
-          buffer[i][0] = min(255, (int)buffer[i][0] + r);
-          buffer[i][1] = min(255, (int)buffer[i][1] + g);
-          buffer[i][2] = min(255, (int)buffer[i][2] + b);
+          // Additive blending with saturation
+          uint16_t new_r = (uint16_t)buffer[i][0] + r;
+          uint16_t new_g = (uint16_t)buffer[i][1] + g;
+          uint16_t new_b = (uint16_t)buffer[i][2] + b;
+
+          buffer[i][0] = (new_r > 255) ? 255 : (uint8_t)new_r;
+          buffer[i][1] = (new_g > 255) ? 255 : (uint8_t)new_g;
+          buffer[i][2] = (new_b > 255) ? 255 : (uint8_t)new_b;
         } else if (blend == REPLACE) {
-          // Replace mode
           buffer[i][0] = r;
           buffer[i][1] = g;
           buffer[i][2] = b;

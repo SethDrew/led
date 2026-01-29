@@ -1,0 +1,12 @@
+# PlatformIO
+.pio/
+.vscode/
+.platformio/
+
+# Build artifacts
+*.o
+*.elf
+*.hex
+
+# OS files
+.DS_Store

@@ -1,0 +1,18 @@
+{
+  "defaultMode": "bypassPermissions",
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(*)",
+      "Edit(*)",
+      "Write(*)",
+      "WebFetch(*)",
+      "Grep(*)",
+      "Glob(*)",
+      "LSP(*)"
+    ]
+  },
+  "sandbox": {
+    "enabled": false
+  }
+}

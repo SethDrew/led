@@ -7,9 +7,16 @@
  * Available Effects:
  *   - DepthWaveForeground: Wave flowing up/down tree
  *   - SapFlowForeground: Particles rising through tree
+ *
+ * Modes:
+ *   - STREAMING_MODE: Receive RGB data from serial (see streaming_receiver.cpp)
+ *   - Normal mode: Run preset animations
  */
 
 #include "TreeTopology.h"
+
+#ifndef STREAMING_MODE
+
 #include "TreeEffect.h"
 #include "foregrounds/DepthWaveForeground.h"
 #include "foregrounds/SapFlowForeground.h"
@@ -26,9 +33,9 @@ void classicWaveAnimation() {
   wave.render();
 }
 
-// Animation 2: Bright green sap flow
+// Animation 2: Forest green sap flow
 void sapFlowAnimation() {
-  static SapFlowForeground sap(&tree, 100, 255, 100, 8);  // Bright green
+  static SapFlowForeground sap(&tree, 34, 139, 34, 8);  // Forest green, moderate spawn rate
   sap.update();
   sap.render();
 }
@@ -54,6 +61,18 @@ void whiteSapAnimation() {
   sap.render();
 }
 
+// Animation 6: Solid white - all LEDs on
+void solidWhiteAnimation() {
+  static bool initialized = false;
+  if (!initialized) {
+    for (uint8_t i = 0; i < tree.getNumLEDs(); i++) {
+      tree.setNodeColor(i, 255, 255, 255);
+    }
+    tree.show();
+    initialized = true;
+  }
+}
+
 // ===== MAIN =====
 
 void setup() {
@@ -69,11 +88,14 @@ void setup() {
 void loop() {
   // Uncomment one animation:
 
-  classicWaveAnimation();      // Green wave ← ACTIVE
-  // sapFlowAnimation();       // Green sap flow
+  // classicWaveAnimation();   // Green wave
+  sapFlowAnimation();          // Green sap flow ← ACTIVE
   // blueWaveAnimation();      // Blue wave
   // orangeWaveAnimation();    // Orange wave
   // whiteSapAnimation();      // White sap
+  // solidWhiteAnimation();    // Solid white - all LEDs
 
   delay(40);  // ~25 FPS
 }
+
+#endif  // !STREAMING_MODE

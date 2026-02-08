@@ -184,12 +184,12 @@ class LEDStreamer:
 
 def main():
     parser = argparse.ArgumentParser(description='Stream LED effects to Arduino')
-    parser.add_argument('--port', default='/dev/cu.usbserial-1230', help='Serial port')
+    parser.add_argument('--port', default='/dev/cu.usbserial-11230', help='Serial port')
     parser.add_argument('--leds', type=int, default=150, help='Number of LEDs')
     parser.add_argument('--fps', type=int, default=60, help='Target frames per second')
     parser.add_argument('--brightness', type=float, default=0.5, help='Brightness (0.0-1.0)')
-    parser.add_argument('--speed', type=float, default=1.0, help='Animation speed multiplier (0.5=half speed, 2.0=double speed)')
-    parser.add_argument('--tail-length', type=float, default=15.0, help='Orb tail length (7=short, 15=medium, 30=long)')
+    parser.add_argument('--speed', type=float, default=.4, help='Animation speed multiplier (0.5=half speed, 2.0=double speed)')
+    parser.add_argument('--tail-length', type=float, default=30.0, help='Orb tail length (7=short, 15=medium, 30=long)')
     parser.add_argument('--orbs', type=int, default=5, help='Maximum number of orbs (1-10)')
     parser.add_argument('--min-lifetime', type=int, default=200, help='Minimum orb lifetime in frames (default: 200)')
     parser.add_argument('--max-lifetime', type=int, default=300, help='Maximum orb lifetime in frames (default: 300)')

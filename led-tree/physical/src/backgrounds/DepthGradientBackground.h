@@ -5,6 +5,7 @@
 
 // Gradient background based on tree depth
 // Goes from baseColor at depth 0 to tipColor at max depth
+// Optimized: Renders directly to tree (no buffer)
 class DepthGradientBackground : public TreeBackgroundEffect {
 private:
   uint8_t baseR, baseG, baseB;  // Color at base (depth 0)
@@ -25,7 +26,7 @@ public:
     // Static gradient, nothing to update
   }
 
-  void render(uint8_t buffer[][3], BlendMode blend = REPLACE) override {
+  void render() override {
     for (uint8_t i = 0; i < tree->getNumLEDs(); i++) {
       uint8_t depth = tree->getDepth(i);
 
@@ -38,10 +39,14 @@ public:
       uint8_t b = baseB + (tipB - baseB) * t;
 
       // Apply intensity
-      buffer[i][0] = (uint16_t)r * intensity;
-      buffer[i][1] = (uint16_t)g * intensity;
-      buffer[i][2] = (uint16_t)b * intensity;
+      uint8_t final_r = (uint16_t)r * intensity;
+      uint8_t final_g = (uint16_t)g * intensity;
+      uint8_t final_b = (uint16_t)b * intensity;
+
+      tree->setNodeColor(i, final_r, final_g, final_b);
     }
+
+    tree->show();
   }
 };
 

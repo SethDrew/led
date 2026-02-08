@@ -146,17 +146,17 @@ public:
 
   void begin() {
     strip1.begin();
-    strip1.setBrightness(153);  // 60% brightness
+    strip1.setBrightness(255);  // 100% brightness
     strip1.clear();
     strip1.show();
 
     strip2.begin();
-    strip2.setBrightness(153);
+    strip2.setBrightness(255);
     strip2.clear();
     strip2.show();
 
     strip3.begin();
-    strip3.setBrightness(153);
+    strip3.setBrightness(255);
     strip3.clear();
     strip3.show();
   }

@@ -1,0 +1,54 @@
+- id: no_sound
+  filename: no_sound.wav
+  duration_seconds: 2.8
+  sample_rate: 44100
+  channels: 2
+  recorded: '2026-02-05T16:22:08.710622'
+- id: Opiate Intro
+  filename: Opiate Intro.wav
+  duration_seconds: 43.5
+  sample_rate: 44100
+  channels: 2
+  recorded: '2026-02-05T16:24:13.836431'
+  song: Opiate
+  artist: Tool
+  genre: Psychadelic Rock
+  notes: rock with a beat
+- id: ambient
+  filename: ambient.wav
+  duration_seconds: 29.7
+  sample_rate: 44100
+  channels: 2
+  recorded: '2026-02-05T16:38:55.834550'
+  song: tayla (every night)
+  artist: Fred again..
+  genre: electronic
+- id: electronic_beat
+  filename: electronic_beat.wav
+  duration_seconds: 49.6
+  sample_rate: 44100
+  channels: 2
+  recorded: '2026-02-05T16:41:08.474343'
+  song: Tanya (maybe life)
+  artist: Fred again..
+  genre: Electronic
+- id: fred_drop_1_br
+  filename: fred_drop_1_br.wav
+  duration_seconds: 133.8
+  sample_rate: 44100
+  channels: 2
+  recorded: '2026-02-06T09:55:18.336264'
+  song: fred_br
+  artist: Fred again..
+  genre: electronic
+- id: fa_br_drop1
+  filename: fa_br_drop1.wav
+  duration_seconds: 128.6
+  sample_rate: 44100
+  channels: 2
+  recorded: '2026-02-06T10:00:14.673617'
+  song: fred_br
+  artist: Fred Again..
+  genre: Electronic
+  notes: "Maximalist EDM drop structure. Sections: normal_song (0-29s), build_primer/edging (29-83s), build_sustained (83-113s), bridge (113-121s), drop (121-129s). Has annotations."
+  annotations: fa_br_drop1.annotations.yaml

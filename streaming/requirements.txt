@@ -1,0 +1,8 @@
+# LED Streaming Requirements
+# Install with: pip install -r requirements.txt
+
+# Serial communication with Arduino
+pyserial>=3.5
+
+# Numerical computation for effects
+numpy>=1.24.0

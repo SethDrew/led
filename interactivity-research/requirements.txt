@@ -1,0 +1,10 @@
+# Audio Analysis & Visualization Requirements
+
+# Audio processing
+numpy>=1.24.0
+librosa>=0.10.0
+sounddevice>=0.4.6
+soundfile>=0.12.1
+
+# Visualization
+matplotlib>=3.7.0

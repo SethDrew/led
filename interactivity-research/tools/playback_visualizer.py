@@ -25,6 +25,7 @@ import matplotlib.gridspec as gridspec
 from matplotlib.animation import FuncAnimation
 import sounddevice as sd
 import soundfile as sf
+import yaml
 
 FREQUENCY_BANDS = {
     'Sub-bass': (20, 80),
@@ -44,10 +45,11 @@ BAND_COLORS = {
 
 
 class SyncedVisualizer:
-    def __init__(self, filepath, focus_panel=None, show_beats=False):
+    def __init__(self, filepath, focus_panel=None, show_beats=False, annotations_path=None):
         self.filepath = filepath
         self.focus_panel = focus_panel  # Which panel to maximize (None = show all)
         self.show_beats = show_beats  # Whether to show beat detection
+        self.annotations_path_override = annotations_path
         self.playback_start_time = None
         self.playback_offset = 0.0  # Current playback position in seconds
         self.is_playing = False
@@ -62,6 +64,20 @@ class SyncedVisualizer:
         self.y_playback, self.sr_playback = sf.read(filepath)
 
         print(f"Duration: {self.duration:.1f}s, Sample rate: {self.sr} Hz")
+
+        # Load annotations if present
+        self.annotations = {}
+        if self.annotations_path_override:
+            ann_path = Path(self.annotations_path_override)
+        else:
+            ann_path = Path(filepath).with_suffix('.annotations.yaml')
+            if not ann_path.exists():
+                # Also check without _short suffix variant
+                ann_path = Path(filepath).parent / (Path(filepath).stem.rsplit('_short', 1)[0] + '.annotations.yaml')
+        if ann_path.exists():
+            with open(ann_path) as f:
+                self.annotations = yaml.safe_load(f) or {}
+            print(f"Annotations: {ann_path.name} — {len(self.annotations)} layers ({', '.join(self.annotations.keys())})")
 
         # Analysis parameters
         self.n_fft = 2048
@@ -141,6 +157,8 @@ class SyncedVisualizer:
         # If focusing on one panel, make it bigger
         if self.focus_panel is not None:
             self.fig = plt.figure(figsize=(18, 10))
+        elif self.annotations:
+            self.fig = plt.figure(figsize=(18, 24))
         else:
             self.fig = plt.figure(figsize=(18, 20))
 
@@ -162,18 +180,33 @@ class SyncedVisualizer:
             gs = gridspec.GridSpec(1, 1, hspace=0.3)
             self._build_band_energy_panel(self.fig.add_subplot(gs[0]))
             self.axes = [self.axes[0]]
+        elif self.focus_panel == 'annotations' and self.annotations:
+            gs = gridspec.GridSpec(1, 1, hspace=0.3)
+            self._build_annotation_panel(self.fig.add_subplot(gs[0]))
+            self.axes = [self.axes[0]]
         elif self.focus_panel == 'centroid':
             gs = gridspec.GridSpec(1, 1, hspace=0.3)
             self._build_centroid_panel(self.fig.add_subplot(gs[0]))
             self.axes = [self.axes[0]]
         else:
-            # Show all panels (default)
-            gs = gridspec.GridSpec(5, 1, height_ratios=[1, 1.5, 1.5, 1.5, 1.5], hspace=0.3)
-            self._build_waveform_panel(self.fig.add_subplot(gs[0]))
-            self._build_spectrogram_panel(self.fig.add_subplot(gs[1]))
-            self._build_band_energy_panel(self.fig.add_subplot(gs[2]))
-            self._build_onset_panel(self.fig.add_subplot(gs[3]))
-            self._build_centroid_panel(self.fig.add_subplot(gs[4]))
+            # Show all panels (default), add annotation panel if annotations exist
+            if self.annotations:
+                n_layers = len(self.annotations)
+                ann_height = max(0.8, 0.4 * n_layers)  # scale with layer count
+                gs = gridspec.GridSpec(6, 1, height_ratios=[1, 1.5, 1.5, 1.5, ann_height, 1.5], hspace=0.3)
+                self._build_waveform_panel(self.fig.add_subplot(gs[0]))
+                self._build_spectrogram_panel(self.fig.add_subplot(gs[1]))
+                self._build_band_energy_panel(self.fig.add_subplot(gs[2]))
+                self._build_onset_panel(self.fig.add_subplot(gs[3]))
+                self._build_annotation_panel(self.fig.add_subplot(gs[4]))
+                self._build_centroid_panel(self.fig.add_subplot(gs[5]))
+            else:
+                gs = gridspec.GridSpec(5, 1, height_ratios=[1, 1.5, 1.5, 1.5, 1.5], hspace=0.3)
+                self._build_waveform_panel(self.fig.add_subplot(gs[0]))
+                self._build_spectrogram_panel(self.fig.add_subplot(gs[1]))
+                self._build_band_energy_panel(self.fig.add_subplot(gs[2]))
+                self._build_onset_panel(self.fig.add_subplot(gs[3]))
+                self._build_centroid_panel(self.fig.add_subplot(gs[4]))
 
         # Finalize figure (cursor lines, events, title)
         self._finalize_figure()
@@ -254,6 +287,30 @@ class SyncedVisualizer:
 
         ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
         ax.grid(True, alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_annotation_panel(self, ax):
+        """Panel: User tap annotations from annotate_segment.py"""
+        layer_colors = ['#FF4081', '#40C4FF', '#69F0AE', '#FFD740', '#E040FB', '#FF6E40']
+        layer_names = list(self.annotations.keys())
+
+        for i, (layer_name, taps) in enumerate(self.annotations.items()):
+            color = layer_colors[i % len(layer_colors)]
+            y_pos = len(layer_names) - i  # stack layers bottom to top
+            for t in taps:
+                if t <= self.duration:
+                    ax.plot(t, y_pos, '|', color=color, markersize=12, markeredgewidth=2, alpha=0.8)
+            # Label on the left
+            ax.text(-self.duration * 0.01, y_pos, layer_name, ha='right', va='center',
+                    fontsize=8, color=color, fontweight='bold')
+
+        ax.set_xlim([0, self.duration])
+        ax.set_ylim([0.3, len(layer_names) + 0.7])
+        ax.set_yticks([])
+        ax.set_title(f'User Annotations — {sum(len(v) for v in self.annotations.values())} taps across {len(layer_names)} layers', fontsize=11)
+        ax.grid(True, axis='x', alpha=0.2)
         if not hasattr(self, 'axes'):
             self.axes = []
         self.axes.append(ax)
@@ -430,10 +487,11 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description='Audio visualization with synced playback')
     parser.add_argument('audio_file', help='Path to audio file (.wav)')
-    parser.add_argument('--panel', choices=['waveform', 'spectrogram', 'bands', 'onset', 'centroid'],
+    parser.add_argument('--panel', choices=['waveform', 'spectrogram', 'bands', 'onset', 'centroid', 'annotations'],
                         help='Maximize specific panel (default: show all)')
     parser.add_argument('--show-beats', action='store_true',
                         help='Show beat detection markers (red lines)')
+    parser.add_argument('--annotations', help='Path to .annotations.yaml file (auto-detected if omitted)')
     args = parser.parse_args()
 
     if not Path(args.audio_file).exists():
@@ -450,7 +508,8 @@ def main():
         print("Beat detection: ON (red markers)")
     print()
 
-    viz = SyncedVisualizer(args.audio_file, focus_panel=args.panel, show_beats=args.show_beats)
+    viz = SyncedVisualizer(args.audio_file, focus_panel=args.panel, show_beats=args.show_beats,
+                           annotations_path=args.annotations)
     viz.run()
 
 

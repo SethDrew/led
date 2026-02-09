@@ -1,0 +1,66 @@
+# Harmonix dataset clips — 1-minute excerpts with professional beat + segment annotations
+# Source: https://github.com/urinieto/harmonixset (912-track dataset, ISMIR 2019)
+# Annotations: beats, downbeats (metronomic), segment spans (labeled sections)
+
+aroundtheworld:
+  file: aroundtheworld.wav
+  artist: Daft Punk
+  title: Around The World
+  genre: electronic
+  bpm: 121
+  source_window: "10-70s"
+  sections: "intro → chorus → instrumental → chorus"
+
+badromance:
+  file: badromance.wav
+  artist: Lady Gaga
+  title: Bad Romance
+  genre: electronic
+  bpm: 119
+  source_window: "40-100s"
+  sections: "verse → prechorus → chorus → intro"
+
+blackened:
+  file: blackened.wav
+  artist: Metallica
+  title: Blackened
+  genre: metal
+  bpm: 190
+  source_window: "75-135s"
+  sections: "intro → verse → chorus → verse"
+
+constantmotion:
+  file: constantmotion.wav
+  artist: Dream Theater
+  title: Constant Motion
+  genre: metal
+  bpm: 180
+  source_window: "80-140s"
+  sections: "verse → postchorus → verse → prechorus → chorus × 2 → bridge"
+
+floods:
+  file: floods.wav
+  artist: Pantera
+  title: Floods
+  genre: metal
+  bpm: 120
+  source_window: "60-120s"
+  sections: "verse → chorus → verse"
+
+cameraeye:
+  file: cameraeye.wav
+  artist: Rush
+  title: The Camera Eye
+  genre: rock
+  bpm: 166
+  source_window: "240-300s"
+  sections: "verse → bridge → chorus"
+
+limelight:
+  file: limelight.wav
+  artist: Rush
+  title: Limelight
+  genre: rock
+  bpm: 130
+  source_window: "55-115s"
+  sections: "verse → chorus → postchorus → instrumental → verse"

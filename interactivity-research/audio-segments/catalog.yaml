@@ -4,8 +4,8 @@
   sample_rate: 44100
   channels: 2
   recorded: '2026-02-05T16:22:08.710622'
-- id: Opiate Intro
-  filename: Opiate Intro.wav
+- id: opiate_intro
+  filename: opiate_intro.wav
   duration_seconds: 43.5
   sample_rate: 44100
   channels: 2
@@ -32,15 +32,6 @@
   song: Tanya (maybe life)
   artist: Fred again..
   genre: Electronic
-- id: fred_drop_1_br
-  filename: fred_drop_1_br.wav
-  duration_seconds: 133.8
-  sample_rate: 44100
-  channels: 2
-  recorded: '2026-02-06T09:55:18.336264'
-  song: fred_br
-  artist: Fred again..
-  genre: electronic
 - id: fa_br_drop1
   filename: fa_br_drop1.wav
   duration_seconds: 128.6

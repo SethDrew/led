@@ -21,8 +21,11 @@ package-lock.json
 
 # Large datasets (keep analysis results, ignore raw data)
 interactivity-research/datasets/harmonix/
-**/audio-segments/*.wav
-**/audio-segments/*.mp3
 
-# Keep small test segments for research
-!interactivity-research/audio-segments/*.wav
+# Audio: separated stems are regenerable (demucs/hpss), never commit
+interactivity-research/audio-segments/separated/
+
+# Audio: harmonix full tracks are downloadable, keep only small snippets
+interactivity-research/audio-segments/harmonix/*.wav
+!interactivity-research/audio-segments/harmonix/*_5s.wav
+!interactivity-research/audio-segments/harmonix/*_10s.wav

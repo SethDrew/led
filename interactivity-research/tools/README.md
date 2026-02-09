@@ -1,6 +1,6 @@
 # Tools
 
-Executable scripts for the audio-reactive LED pipeline. All tools use `venv/` at the repo root.
+Audio segment management CLI. All tools use `venv/` at the repo root.
 
 ```bash
 source ../../venv/bin/activate  # from tools/
@@ -8,118 +8,163 @@ source ../../venv/bin/activate  # from tools/
 
 ---
 
-## Real-Time LED Controllers
-
-### realtime_beat_led.py — Bass Flux Detector
-
-Bass-band spectral flux (20-250 Hz) beat detector. Flashes the LED tree red on kick drums.
+## Quick Reference
 
 ```bash
-python realtime_beat_led.py              # LED tree (auto-detect serial)
-python realtime_beat_led.py --no-leds    # Terminal meter only
+python segment.py web                               # Browser-based explorer
+python segment.py list                              # Show catalog
+python segment.py record                            # Record from BlackHole
+python segment.py trim "Opiate Intro.wav"           # Auto-trim silence
+python segment.py trim "Opiate Intro.wav" 2.5       # Manual trim at 2.5s
+python segment.py play "Opiate Intro.wav"           # Interactive viewer
+python segment.py play "Opiate Intro.wav" --annotate beat   # Tap annotation
+python segment.py stems electronic_beat.wav          # Stem viewer (demucs)
+python segment.py hpss electronic_beat.wav           # Harmonic/percussive viewer
+python segment.py export "Opiate Intro.wav"         # Static PNG
+python segment.py export                            # All WAVs
 ```
-
-### realtime_onset_led.py — Onset A/B Test
-
-Dual detector: bass flux vs full-spectrum onset. Color-coded for visual comparison.
-
-```bash
-python realtime_onset_led.py --detector both     # RED=bass, BLUE=onset, WHITE=both agree
-python realtime_onset_led.py --detector bass      # Bass only (RED)
-python realtime_onset_led.py --detector onset     # Onset only (BLUE)
-python realtime_onset_led.py --no-leds --detector both  # Terminal only
-```
-
-**Threshold tuning** (higher = fewer beats):
-```bash
-python realtime_onset_led.py --detector both --bass-threshold 2.0 --onset-threshold 3.0
-```
-
-**Troubleshooting:**
-- "BlackHole not found" — System Settings > Sound > Output > BlackHole 2ch
-- "No serial port" — plug in Arduino or use `--no-leds`
-- No beats — lower thresholds (`--bass-threshold 1.0 --onset-threshold 1.0`)
 
 ---
 
-## Audio Capture & Annotation
+## Subcommands
 
-### record_segment.py — Record Audio
+### `web` — Browser-Based Explorer
 
-Records audio from BlackHole for analysis.
+Opens a web-based audio analysis viewer with perfect audio sync. Scans `audio-segments/` and `harmonix/` for WAV files.
 
-### annotate_segment.py — Tap Annotation
+Three tabs:
+- **Analysis**: waveform, spectrogram, band energy, onset, centroid panels
+- **Annotations**: same panels + annotation layers (if `.annotations.yaml` exists)
+- **Stems**: 4 stem spectrograms (drums/bass/vocals/other via demucs, lazy)
 
-Play audio and press a key at musical moments. Multiple passes with different layer names build multi-layer annotations.
+Controls: Space play/pause, arrow keys +-5s, click panel or progress bar to seek.
 
 ```bash
-python annotate_segment.py ../audio-segments/opiate_intro.wav beat
-python annotate_segment.py ../audio-segments/opiate_intro.wav air
+python segment.py web              # Auto-pick port, opens browser
+python segment.py web --port 8080  # Fixed port
 ```
 
-### playback_segment.py / playback_visualizer.py — Playback
+### `list` — Show Catalog
 
-Play back recorded segments, optionally with real-time visualization.
+Reads `audio-segments/catalog.yaml` and prints a table of all recorded segments.
+
+### `record` — Record Audio
+
+Records stereo audio from BlackHole at 44.1kHz. Press ENTER to stop, then fill in metadata (song, artist, genre, BPM, notes). Saves WAV + updates `catalog.yaml`.
+
+### `trim <file> [start]` — Trim Silence
+
+Removes silence from the start of a WAV file. Auto-detects where music begins (RMS threshold), or accepts a manual start time in seconds. Creates a `_trimmed.wav` file. Uses only stdlib `wave` — no heavy dependencies.
+
+### `play <file>` — Interactive Visualizer
+
+Opens a matplotlib window with synced audio playback and analysis panels:
+- Waveform
+- Mel spectrogram (20 Hz - 22 kHz)
+- Band energy (sub-bass, bass, mids, high-mids, treble)
+- User annotations (if present)
+- Features: onset strength, spectral centroid, RMS (toggleable with O/C/E/B keys)
+
+**Normal mode controls:**
+| Key | Action |
+|-----|--------|
+| SPACE | Play / Pause |
+| CLICK | Seek to position |
+| O | Toggle onset strength + markers |
+| C | Toggle spectral centroid |
+| E | Toggle RMS energy |
+| B | Toggle librosa-beats |
+| Q | Quit |
+
+**Options:**
+- `--panel <name>` — Maximize one panel (waveform, spectrogram, bands, features, annotations)
+- `--show-beats` — Show librosa-beats markers on startup (also toggleable with B key)
+- `--save-png` — Save static PNG instead of opening viewer
+
+### `play <file> --annotate <layer>` — Tap Annotation
+
+Same visualizer, but in annotation mode. Tap SPACE while listening to mark moments. Multiple runs with different layer names build rich multi-layer annotations.
+
+**Annotation mode controls:**
+| Key | Action |
+|-----|--------|
+| SPACE | Record a tap |
+| P | Play / Pause |
+| R | Restart + clear taps |
+| Q | Save & quit |
+
+Taps are saved to `<file>.annotations.yaml` next to the WAV. New taps replace the target layer; other layers are preserved.
+
+**Common layers:** beat, kick, snare, airy, heavy, tension, drop
+
+### `stems <file>` — Instrument Decomposition
+
+Separates audio into 4 stems (drums, bass, vocals, other) using [demucs](https://github.com/adefossez/demucs) and opens an interactive 4-row spectrogram viewer with synced playback.
+
+First run separates the audio (~25s on CPU); subsequent runs use cached stems from `audio-segments/separated/htdemucs/<name>/`.
+
+**Controls:**
+| Key | Action |
+|-----|--------|
+| SPACE | Play / Pause |
+| CLICK | Seek to position |
+| 1 / 2 / 3 / 4 | Toggle drums / bass / vocals / other |
+| A | All stems on (reset) |
+| Q | Quit |
+
+Active stems play summed audio. Muted stems show dimmed spectrograms.
+
+### `hpss <file>` — Harmonic/Percussive Separation
+
+Splits audio into harmonic (pitched/tonal) and percussive (transient/drums) components using librosa's HPSS — no ML model, no downloads, instant computation. Same interactive viewer as `stems` but with 2 rows.
+
+**Controls:**
+| Key | Action |
+|-----|--------|
+| SPACE | Play / Pause |
+| CLICK | Seek to position |
+| 1 / 2 | Toggle harmonic / percussive |
+| A | All on (reset) |
+| Q | Quit |
+
+Useful for evaluating whether HPSS separation quality is sufficient for real-time LED effects (HPSS is frame-by-frame, trivially real-time on ESP32).
+
+### `export [file]` — Static PNG
+
+Generates a 6-panel analysis PNG (same layout as `play` but without interactivity). When no file is given, exports all WAV files in `audio-segments/`.
 
 ---
 
-## Visualization
+## LED Effect Testing
 
-### visualize_segment.py — Static Analysis
-
-Generates a multi-panel PNG: waveform, mel spectrogram, band energy (5 bands), onset/beat detection, spectral centroid, RMS energy.
+Real-time LED effects have moved to `comparison/` alongside WLED-SR algorithms:
 
 ```bash
-python visualize_segment.py ../audio-segments/electronic_beat.wav   # Single file
-python visualize_segment.py                                          # All WAVs
+cd ../comparison
+python runner.py --list                  # Show all effects
+python runner.py bass_flux --no-leds     # Bass flux detector (terminal only)
+python runner.py onset --no-leds         # Onset strength detector
+python runner.py wled_beat --no-leds     # WLED-SR beat reactive
 ```
 
-### trim_audio.py — Audio Trimming
-
-Trim audio segments to specific time ranges.
+See `comparison/` for full documentation on the A/B testing framework.
 
 ---
 
-## Architecture (Onset A/B Test)
-
-Both detectors share the same interface: `process_chunk(audio, use_realtime=True) -> (is_beat, strength, threshold)`
+## Architecture
 
 ```
-Audio Callback Thread (23ms chunks)     Main Thread (30 FPS fixed rate)
-  ├─ BassFluxDetector                     ├─ Read shared state (mutex)
-  │   └─ FFT → bass bins → flux           ├─ Update decay
-  ├─ OnsetDetector                        ├─ Render frame
-  │   └─ FFT → mel bands → flux           ├─ Send serial (591 bytes)
-  └─ Store in shared state                └─ Sleep to next frame target
+segment.py                     viewer.py              web_viewer.py
+  ├─ web    → lazy imports ─────────────────────────── run_server()
+  │                               │                      ├─ Agg PNG rendering
+  │                               │                      ├─ WAV Range serving
+  │                               │                      └─ HTML SPA + cursor sync
+  ├─ list   (inline, yaml)      ├─ SyncedVisualizer (interactive)
+  ├─ record (inline, sounddevice)│   ├─ Normal mode (play/pause/seek)
+  ├─ trim   (inline, stdlib wave)│   └─ Annotation mode (tap/save)
+  ├─ play   → lazy imports ──────┤
+  ├─ stems  → lazy imports ──────├─ StemVisualizer (4-stem viewer)
+  └─ export → lazy imports ──────└─ export_static_png() (batch)
 ```
 
-**Key design:** Audio callback ONLY stores state. Main loop ONLY reads state and sends frames. Decoupled to prevent WS2812B timing corruption.
-
-### Detector Parameters
-
-| Parameter | Bass Flux | Onset |
-|-----------|-----------|-------|
-| Frequency range | 20-250 Hz | 20-8000 Hz (mel) |
-| FFT size | 2048 | 2048 |
-| Mel bands | — | 40 |
-| Threshold | 1.5x std | 2.0x std |
-| Min interval | 0.3s (200 BPM) | 0.1s (600 BPM) |
-| History window | 3s | 3s |
-| Decay | 0.12 | 0.12 |
-| Gamma | 2.2 | 2.2 |
-
-### Performance (Opiate Intro)
-
-| Detector | Detected | True Positives | F1 |
-|----------|----------|----------------|-----|
-| Bass flux | 60 | 8 | 0.158 |
-| Onset | 62 | 13 | 0.252 |
-
-Both over-detect (expected — tuned for sensitivity). Onset scores 60% better on rock.
-
-### Offline Validation
-
-```bash
-cd ../analysis/scripts
-python validate_onset_detector.py
-```
+Light commands (list, record, trim) have no heavy dependencies. Heavy commands (play, export) lazy-import `viewer.py` which pulls in librosa + matplotlib.

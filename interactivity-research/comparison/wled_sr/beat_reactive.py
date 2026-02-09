@@ -56,6 +56,7 @@ class WLEDBeatReactive(AudioReactiveEffect):
         # Colors
         self.beat_color = np.array([255, 100, 0], dtype=np.float64)  # orange flash
         self.peak_decay = 0.15  # decay rate per frame
+        self._fail = ''
 
     @property
     def name(self):
@@ -107,15 +108,24 @@ class WLEDBeatReactive(AudioReactiveEffect):
         now = time.time()
         self.sample_peak = False
 
-        if (self.sample_avg > 1.0 and
-                self.max_vol > 0.0 and
-                self.bin_num > 4 and
-                peak_magnitude > self.max_vol and
-                (now - self.time_of_peak) > self.peak_delay):
+        # Track which condition fails for diagnostics
+        self._fail = ''
+        if self.sample_avg <= 1.0:
+            self._fail = 'vol<1'
+        elif self.max_vol <= 0.0:
+            self._fail = 'no_thresh'
+        elif self.bin_num <= 4:
+            self._fail = f'bin={self.bin_num}<=4'
+        elif peak_magnitude <= self.max_vol:
+            self._fail = f'mag{peak_magnitude:.0f}<thr{self.max_vol:.0f}'
+        elif (now - self.time_of_peak) <= self.peak_delay:
+            self._fail = 'cooldown'
+        else:
             self.sample_peak = True
             self.time_of_peak = now
             self.beat_count += 1
             self.brightness = 1.0
+            self._fail = ''
 
     def render(self, dt: float) -> np.ndarray:
         # Decay
@@ -136,7 +146,9 @@ class WLEDBeatReactive(AudioReactiveEffect):
             'beats': self.beat_count,
             'peak': 'BEAT!' if self.sample_peak else '',
             'freq': f'{self.fft_major_peak:.0f}Hz',
+            'bin': self.bin_num,
             'vol': f'{self.sample_avg:.0f}',
             'thresh': f'{self.max_vol:.0f}',
             'bright': f'{self.brightness:.2f}',
+            'BLOCKED': self._fail,
         }

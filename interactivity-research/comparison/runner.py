@@ -90,7 +90,57 @@ def get_effect_registry():
     except ImportError:
         pass
 
+    # Our custom detectors
+    try:
+        from ours.bass_flux import BassFluxBeatDetector
+        effects['bass_flux'] = BassFluxBeatDetector
+    except ImportError:
+        pass
+
+    try:
+        from ours.onset_strength import OnsetStrengthDetector
+        effects['onset'] = OnsetStrengthDetector
+    except ImportError:
+        pass
+
+    # All 12 WLED 1D effects side by side
+    try:
+        from wled_sr.all_effects import WLEDAllEffects
+        effects['wled_all'] = WLEDAllEffects
+    except ImportError:
+        pass
+
     return effects
+
+
+class MultiEffect(AudioReactiveEffect):
+    """Runs multiple effects in parallel, concatenates their LED output."""
+
+    def __init__(self, effects):
+        total_leds = sum(e.num_leds for e in effects)
+        super().__init__(total_leds)
+        self.effects = effects
+
+    @property
+    def name(self):
+        return ' + '.join(e.name for e in self.effects)
+
+    def process_audio(self, mono_chunk):
+        for effect in self.effects:
+            effect.process_audio(mono_chunk)
+
+    def render(self, dt):
+        frames = [effect.render(dt) for effect in self.effects]
+        return np.vstack(frames)
+
+    def get_diagnostics(self):
+        diag = {}
+        for effect in self.effects:
+            d = effect.get_diagnostics()
+            tag = effect.name.split()[-1].lower()[:4]
+            for k, v in d.items():
+                diag[f'{tag}.{k}'] = v
+        return diag
 
 
 class SerialLEDOutput:
@@ -103,8 +153,11 @@ class SerialLEDOutput:
         if port:
             try:
                 import serial
-                self.ser = serial.Serial(port, baud_rate, timeout=1)
-                time.sleep(2)  # Arduino reset
+                if port.startswith('rfc2217://'):
+                    self.ser = serial.serial_for_url(port, baudrate=baud_rate, timeout=1)
+                else:
+                    self.ser = serial.Serial(port, baud_rate, timeout=1)
+                    time.sleep(2)  # Arduino reset
                 while self.ser.in_waiting:
                     self.ser.readline()
                 print(f"  LED output: {port} ({num_leds} LEDs)")

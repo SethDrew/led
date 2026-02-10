@@ -1,0 +1,4 @@
+# Wokwi Library Dependencies
+# Add one library per line
+
+Adafruit NeoPixel

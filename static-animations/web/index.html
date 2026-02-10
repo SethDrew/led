@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LED Effects Gallery</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>LED Effects Gallery</h1>
+            <p class="subtitle">Preview and deploy LED animations</p>
+        </header>
+
+        <main>
+            <!-- Background Effects Section -->
+            <section class="effects-section">
+                <h2>Background Effects</h2>
+                <div class="effects-grid">
+                    <!-- Nebula Background -->
+                    <div class="effect-card" data-effect-type="background" data-effect-name="NebulaBackground">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-background.png" alt="Nebula Background" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Nebula</h3>
+                            <p class="effect-description">Breathing waves with color shifts</p>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Solid Color Background -->
+                    <div class="effect-card" data-effect-type="background" data-effect-name="SolidColorBackground">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-background.png" alt="Solid Color Background" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Solid Color</h3>
+                            <p class="effect-description">Static solid color background</p>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Pulsing Color Background -->
+                    <div class="effect-card" data-effect-type="background" data-effect-name="PulsingColorBackground">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-background.png" alt="Pulsing Color Background" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Pulsing Color</h3>
+                            <p class="effect-description">Pulsing solid color effect</p>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Foreground Effects Section -->
+            <section class="effects-section">
+                <h2>Foreground Effects</h2>
+                <div class="effects-grid">
+                    <!-- Crawling Stars -->
+                    <div class="effect-card" data-effect-type="foreground" data-effect-name="CrawlingStarsForeground">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-foreground.png" alt="Crawling Stars" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Crawling Stars</h3>
+                            <p class="effect-description">Glowing orbs that drift along the strip</p>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Sparks -->
+                    <div class="effect-card" data-effect-type="foreground" data-effect-name="SparksForeground">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-foreground.png" alt="Sparks" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Sparks</h3>
+                            <p class="effect-description">Random spark explosions</p>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Collision -->
+                    <div class="effect-card" data-effect-type="foreground" data-effect-name="CollisionForeground">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-foreground.png" alt="Collision" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Collision</h3>
+                            <p class="effect-description">Crawlers that collide and explode</p>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Rainbow Circle -->
+                    <div class="effect-card" data-effect-type="foreground" data-effect-name="RainbowCircleForeground">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-foreground.png" alt="Rainbow Circle" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Rainbow Circle</h3>
+                            <p class="effect-description">Rainbow circle passing through</p>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Enhanced Crawl -->
+                    <div class="effect-card" data-effect-type="foreground" data-effect-name="EnhancedCrawlForeground">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-foreground.png" alt="Enhanced Crawl" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Enhanced Crawl</h3>
+                            <p class="effect-description">Smooth wave with color modes</p>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Fragmentation -->
+                    <div class="effect-card" data-effect-type="foreground" data-effect-name="FragmentationForeground">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-foreground.png" alt="Fragmentation" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Fragmentation</h3>
+                            <p class="effect-description">White crawler decomposes to RGB fragments</p>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Drifting Decay -->
+                    <div class="effect-card" data-effect-type="foreground" data-effect-name="DriftingDecayForeground">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-foreground.png" alt="Drifting Decay" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Drifting Decay</h3>
+                            <p class="effect-description">White crawlers drift and decay</p>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Preset Combinations Section -->
+            <section class="effects-section">
+                <h2>Preset Combinations</h2>
+                <div class="effects-grid">
+                    <!-- Nebula + Stars -->
+                    <div class="effect-card preset-card" data-combo="nebulaStarsAnimation">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-combo.png" alt="Nebula + Stars" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Nebula + Stars</h3>
+                            <p class="effect-description">Breathing nebula with crawling stars</p>
+                            <div class="combo-tags">
+                                <span class="tag tag-bg">Nebula</span>
+                                <span class="tag tag-fg">Crawling Stars</span>
+                            </div>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Nebula + Sparks -->
+                    <div class="effect-card preset-card" data-combo="nebulaSparksAnimation">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-combo.png" alt="Nebula + Sparks" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Nebula + Sparks</h3>
+                            <p class="effect-description">Breathing nebula with random sparks</p>
+                            <div class="combo-tags">
+                                <span class="tag tag-bg">Nebula</span>
+                                <span class="tag tag-fg">Sparks</span>
+                            </div>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Nebula + Collision -->
+                    <div class="effect-card preset-card" data-combo="nebulaCollisionAnimation">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-combo.png" alt="Nebula + Collision" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Nebula + Collision</h3>
+                            <p class="effect-description">Breathing nebula with collision effects</p>
+                            <div class="combo-tags">
+                                <span class="tag tag-bg">Nebula</span>
+                                <span class="tag tag-fg">Collision</span>
+                            </div>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Purple + Rainbow -->
+                    <div class="effect-card preset-card" data-combo="purpleRainbowAnimation">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-combo.png" alt="Purple + Rainbow" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Purple + Rainbow</h3>
+                            <p class="effect-description">Solid purple with rainbow circle</p>
+                            <div class="combo-tags">
+                                <span class="tag tag-bg">Solid Color</span>
+                                <span class="tag tag-fg">Rainbow Circle</span>
+                            </div>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Pulsing + Crawl -->
+                    <div class="effect-card preset-card" data-combo="pulsingCrawlAnimation">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-combo.png" alt="Pulsing + Crawl" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Pulsing + Crawl</h3>
+                            <p class="effect-description">Pulsing blue with enhanced crawl</p>
+                            <div class="combo-tags">
+                                <span class="tag tag-bg">Pulsing Color</span>
+                                <span class="tag tag-fg">Enhanced Crawl</span>
+                            </div>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Fragmentation -->
+                    <div class="effect-card preset-card" data-combo="fragmentationAnimation">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-combo.png" alt="Fragmentation" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Fragmentation</h3>
+                            <p class="effect-description">Black background with fragmentation</p>
+                            <div class="combo-tags">
+                                <span class="tag tag-bg">Black</span>
+                                <span class="tag tag-fg">Fragmentation</span>
+                            </div>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Drifting Decay -->
+                    <div class="effect-card preset-card" data-combo="driftingDecayAnimation">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-combo.png" alt="Drifting Decay" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Drifting Decay</h3>
+                            <p class="effect-description">Black background with drifting decay</p>
+                            <div class="combo-tags">
+                                <span class="tag tag-bg">Black</span>
+                                <span class="tag tag-fg">Drifting Decay</span>
+                            </div>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Rainbow Circle Only -->
+                    <div class="effect-card preset-card" data-combo="rainbowCircleOnlyAnimation">
+                        <div class="preview-container">
+                            <img src="assets/previews/placeholder-combo.png" alt="Rainbow Circle Only" class="preview-image">
+                            <div class="preview-placeholder">
+                                <span>Screenshot Placeholder</span>
+                            </div>
+                        </div>
+                        <div class="effect-info">
+                            <h3>Rainbow Circle Only</h3>
+                            <p class="effect-description">No background, just rainbow circle</p>
+                            <div class="combo-tags">
+                                <span class="tag tag-fg">Rainbow Circle</span>
+                            </div>
+                            <div class="effect-actions">
+                                <button class="btn btn-wokwi" disabled>Run in Wokwi</button>
+                                <button class="btn btn-upload" disabled>Upload to Arduino</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p>LED Effects Gallery - Modular Header-Based System</p>
+        </footer>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

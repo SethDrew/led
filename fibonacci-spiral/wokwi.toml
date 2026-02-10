@@ -1,4 +1,0 @@
-[wokwi]
-version = 1
-firmware = "build/fibonacci-spiral.ino.hex"
-elf = "build/fibonacci-spiral.ino.elf"

@@ -10,10 +10,9 @@ matplotlib>=3.7.0
 # Beat tracking validation tools
 mir_eval>=0.7        # Standard MIR evaluation metrics
 jams>=0.3.4          # JAMS annotation format (for Harmonix Set)
-yt-dlp>=2024.0.0     # YouTube audio download (for validation track sourcing)
 
 # madmom (music information retrieval, beat/tempo detection)
 # NOTE: For Python 3.10+, must install from GitHub due to collections.MutableSequence fix
 # Install separately with: pip install git+https://github.com/CPJKU/madmom.git
-# See: interactivity-research/analysis/MADMOM_SUMMARY.md
+# See: audio-reactive/research/analysis/MADMOM_SUMMARY.md
 tqdm>=4.67.0

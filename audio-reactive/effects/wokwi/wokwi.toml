@@ -1,0 +1,5 @@
+[wokwi]
+version = 1
+firmware = "build/wokwi.ino.hex"
+elf = "build/wokwi.ino.elf"
+rfc2217ServerPort = 9012

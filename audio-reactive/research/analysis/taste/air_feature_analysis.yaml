@@ -1,0 +1,604 @@
+metadata:
+  audio_file: /Users/KO16K39/Documents/led/audio-reactive/research/audio-segments/opiate_intro.wav
+  duration_sec: 40.56775510204081
+  sample_rate: 44100
+  hop_length: 512
+  n_frames: 3495
+  window_ms: 250
+  n_air_taps: 24
+feature_rankings:
+  all_air:
+  - feature: novelty
+    air_mean: 0.9818767309188843
+    air_std: 0.004802810959517956
+    non_air_mean: 0.9854926466941833
+    non_air_std: 0.006184146273881197
+    effect_size: -0.6044633388519287
+    p_value: 6.364840227025296e-39
+  - feature: spectral_contrast
+    air_mean: 18.378333016273412
+    air_std: 2.318411340522792
+    non_air_mean: 19.336196136471656
+    non_air_std: 2.2754558337885973
+    effect_size: -0.4195298363777418
+    p_value: 7.911825466274698e-20
+  - feature: spectral_centroid
+    air_mean: 2932.498278513494
+    air_std: 1691.8842515373092
+    non_air_mean: 3338.9106949598995
+    non_air_std: 1634.1270661059414
+    effect_size: -0.24718357366691826
+    p_value: 7.007516708691604e-08
+  - feature: spectral_bandwidth
+    air_mean: 3707.609033250249
+    air_std: 1005.2382565947034
+    non_air_mean: 3902.9552651605504
+    non_air_std: 839.828982301348
+    effect_size: -0.2247280624056268
+    p_value: 9.438539257223991e-07
+  - feature: energy_trajectory
+    air_mean: 0.10014876943153384
+    air_std: 0.07778973182649482
+    non_air_mean: 0.11965416679725754
+    non_air_std: 0.0897975310183548
+    effect_size: -0.2217201886736219
+    p_value: 1.3142041641187582e-06
+  - feature: active_sources
+    air_mean: 9.246935201401051
+    air_std: 9.505108050324338
+    non_air_mean: 12.403214774281805
+    non_air_std: 15.235942027774582
+    effect_size: -0.2182779654682927
+    p_value: 1.909865979178867e-06
+  - feature: rms_energy
+    air_mean: 0.14053259789943695
+    air_std: 0.08532954752445221
+    non_air_mean: 0.12662939727306366
+    non_air_std: 0.08487702161073685
+    effect_size: 0.16361434757709503
+    p_value: 0.00035354113809389404
+  - feature: harmonic_ratio
+    air_mean: 0.7939703464508057
+    air_std: 0.09652761369943619
+    non_air_mean: 0.7806171178817749
+    non_air_std: 0.11446269601583481
+    effect_size: 0.11947974562644958
+    p_value: 0.00905516859091912
+  - feature: sparseness
+    air_mean: 2.5674255691768826
+    air_std: 1.1793272708988043
+    non_air_mean: 2.80437756497948
+    non_air_std: 2.3112838035405736
+    effect_size: -0.1093072668100129
+    p_value: 0.016943006333240977
+  - feature: onset_density
+    air_mean: 5.225919439579685
+    air_std: 2.907161395080719
+    non_air_mean: 5.011969904240766
+    non_air_std: 2.1094034994711772
+    effect_size: 0.09467963672077276
+    p_value: 0.038584044852999745
+  - feature: spectral_flatness
+    air_mean: 0.0015907002380117774
+    air_std: 0.0036847898736596107
+    non_air_mean: 0.002242815913632512
+    non_air_std: 0.007358487229794264
+    effect_size: -0.09457268565893173
+    p_value: 0.03880390302505373
+  cluster1:
+  - feature: spectral_bandwidth
+    air_mean: 2305.1643869332415
+    air_std: 317.0140162173423
+    non_air_mean: 3902.9552651605504
+    non_air_std: 839.828982301348
+    effect_size: -1.9510343038292397
+    p_value: 1.6244771295645707e-129
+  - feature: onset_density
+    air_mean: 1.1222222222222222
+    air_std: 0.8922851783517268
+    non_air_mean: 5.011969904240766
+    non_air_std: 2.1094034994711772
+    effect_size: -1.8889270627565804
+    p_value: 3.393062898379681e-122
+  - feature: spectral_centroid
+    air_mean: 575.2442877686719
+    air_std: 148.48540686517373
+    non_air_mean: 3338.9106949598995
+    non_air_std: 1634.1270661059414
+    effect_size: -1.7414927405947798
+    p_value: 1.807076732719183e-105
+  - feature: spectral_contrast
+    air_mean: 15.81270618336325
+    air_std: 1.31482673648489
+    non_air_mean: 19.336196136471656
+    non_air_std: 2.2754558337885973
+    effect_size: -1.5787699626867107
+    p_value: 3.7838748215526305e-88
+  - feature: energy_trajectory
+    air_mean: 0.004889263978434933
+    air_std: 0.003166163975884181
+    non_air_mean: 0.11965416679725754
+    non_air_std: 0.0897975310183548
+    effect_size: -1.3163164001294498
+    p_value: 5.391293233898995e-63
+  - feature: rms_energy
+    air_mean: 0.02941921353340149
+    air_std: 0.00887521542608738
+    non_air_mean: 0.12662939727306366
+    non_air_std: 0.08487702161073685
+    effect_size: -1.1792551279067993
+    p_value: 2.3945299940960015e-51
+  - feature: novelty
+    air_mean: 0.9784975051879883
+    air_std: 0.006403816863894463
+    non_air_mean: 0.9854926466941833
+    non_air_std: 0.006184146273881197
+    effect_size: -1.1284133195877075
+    p_value: 2.6524728925420776e-47
+  - feature: harmonic_ratio
+    air_mean: 0.8875150680541992
+    air_std: 0.04547568038105965
+    non_air_mean: 0.7806171178817749
+    non_air_std: 0.11446269601583481
+    effect_size: 0.9572774171829224
+    p_value: 7.778957693820699e-35
+  - feature: active_sources
+    air_mean: 3.9944444444444445
+    air_std: 1.19952408258082
+    non_air_mean: 12.403214774281805
+    non_air_std: 15.235942027774582
+    effect_size: -0.5683456634865482
+    p_value: 1.7345024430335003e-13
+  - feature: sparseness
+    air_mean: 1.9444444444444444
+    air_std: 0.7726018251641098
+    non_air_mean: 2.80437756497948
+    non_air_std: 2.3112838035405736
+    effect_size: -0.3819047479041108
+    p_value: 6.950604125184408e-07
+  - feature: spectral_flatness
+    air_mean: 1.8461092622601427e-05
+    air_std: 9.886050975183025e-06
+    non_air_mean: 0.002242815913632512
+    non_air_std: 0.007358487229794264
+    effect_size: -0.31134915351867676
+    p_value: 5.152930091821161e-05
+  cluster2:
+  - feature: onset_density
+    air_mean: 7.115089514066496
+    air_std: 0.8088717978379611
+    non_air_mean: 5.011969904240766
+    non_air_std: 2.1094034994711772
+    effect_size: 1.0509888624945518
+    p_value: 2.1484259264090082e-80
+  - feature: rms_energy
+    air_mean: 0.1916845589876175
+    air_std: 0.04792295768857002
+    non_air_mean: 0.12662939727306366
+    non_air_std: 0.08487702161073685
+    effect_size: 0.7990036606788635
+    p_value: 2.8429931591535656e-48
+  - feature: spectral_bandwidth
+    air_mean: 4353.235724649383
+    air_std: 327.32713721358533
+    non_air_mean: 3902.9552651605504
+    non_air_std: 839.828982301348
+    effect_size: 0.56499875447501
+    p_value: 2.3237455166390695e-25
+  - feature: spectral_centroid
+    air_mean: 4017.6791438180157
+    air_std: 659.1055625664923
+    non_air_mean: 3338.9106949598995
+    non_air_std: 1634.1270661059414
+    effect_size: 0.43740596293374107
+    p_value: 6.348272233710042e-16
+  - feature: novelty
+    air_mean: 0.9834322929382324
+    air_std: 0.002670351415872574
+    non_air_mean: 0.9854926466941833
+    non_air_std: 0.006184146273881197
+    effect_size: -0.35029688477516174
+    p_value: 8.917835771271108e-11
+  - feature: energy_trajectory
+    air_mean: 0.1440022502027814
+    air_std: 0.05226640400318867
+    non_air_mean: 0.11965416679725754
+    non_air_std: 0.0897975310183548
+    effect_size: 0.28229394392039386
+    p_value: 1.683562314192688e-07
+  - feature: harmonic_ratio
+    air_mean: 0.7509062886238098
+    air_std: 0.08229240775108337
+    non_air_mean: 0.7806171178817749
+    non_air_std: 0.11446269601583481
+    effect_size: -0.26721450686454773
+    p_value: 7.312216942904108e-07
+  - feature: spectral_contrast
+    air_mean: 19.559439998175787
+    air_std: 1.6212105567484714
+    non_air_mean: 19.336196136471656
+    non_air_std: 2.2754558337885973
+    effect_size: 0.10105828801420456
+    p_value: 0.06063970992447507
+  - feature: active_sources
+    air_mean: 11.664961636828645
+    air_std: 10.617399941617883
+    non_air_mean: 12.403214774281805
+    non_air_std: 15.235942027774582
+    effect_size: -0.04997996136331264
+    p_value: 0.3533829245597113
+  - feature: sparseness
+    air_mean: 2.8542199488491047
+    air_std: 1.2228541276894636
+    non_air_mean: 2.80437756497948
+    non_air_std: 2.3112838035405736
+    effect_size: 0.022536566947941122
+    p_value: 0.6755892774629013
+  - feature: spectral_flatness
+    air_mean: 0.002314493292942643
+    air_std: 0.004262202885001898
+    non_air_mean: 0.002242815913632512
+    non_air_std: 0.007358487229794264
+    effect_size: 0.010143454186618328
+    p_value: 0.850594939933071
+per_tap_features:
+- time_sec: 1.612
+  frame: 138
+  cluster: 1
+  features:
+    spectral_flatness: 9.482058885623701e-06
+    spectral_centroid: 395.56056515010425
+    spectral_bandwidth: 1787.257981867047
+    rms_energy: 0.040958769619464874
+    harmonic_ratio: 0.8287322521209717
+    spectral_contrast: 14.267585882737478
+    sparseness: 2.0
+    novelty: 0.9856901168823242
+    onset_density: 2.0
+    energy_trajectory: 0.0
+    active_sources: 5.0
+- time_sec: 1.848
+  frame: 159
+  cluster: 1
+  features:
+    spectral_flatness: 1.4549060324497987e-05
+    spectral_centroid: 476.36890156172484
+    spectral_bandwidth: 2168.5852303168754
+    rms_energy: 0.03320113196969032
+    harmonic_ratio: 0.8302336931228638
+    spectral_contrast: 15.026973560235339
+    sparseness: 3.0
+    novelty: 0.9748326539993286
+    onset_density: 2.0
+    energy_trajectory: 0.0
+    active_sources: 6.0
+- time_sec: 1.969
+  frame: 169
+  cluster: 1
+  features:
+    spectral_flatness: 8.573915692977607e-06
+    spectral_centroid: 431.2237131257921
+    spectral_bandwidth: 2069.714613421378
+    rms_energy: 0.025706764310598373
+    harmonic_ratio: 0.8451752662658691
+    spectral_contrast: 15.451462561987869
+    sparseness: 2.0
+    novelty: 0.9757121801376343
+    onset_density: 2.0
+    energy_trajectory: 0.006274409592151642
+    active_sources: 4.0
+- time_sec: 2.128
+  frame: 183
+  cluster: 1
+  features:
+    spectral_flatness: 1.7812881196732633e-05
+    spectral_centroid: 562.5280155566331
+    spectral_bandwidth: 2291.7538278196316
+    rms_energy: 0.022836657240986824
+    harmonic_ratio: 0.8586913347244263
+    spectral_contrast: 17.32424276801795
+    sparseness: 2.0
+    novelty: 0.9768396615982056
+    onset_density: 1.0
+    energy_trajectory: 0.008819865062832832
+    active_sources: 4.0
+- time_sec: 2.31
+  frame: 198
+  cluster: 1
+  features:
+    spectral_flatness: 5.865466300747357e-05
+    spectral_centroid: 958.9867079863373
+    spectral_bandwidth: 2484.2283127875294
+    rms_energy: 0.027624337002635002
+    harmonic_ratio: 0.8850764632225037
+    spectral_contrast: 17.523942892658404
+    sparseness: 3.0
+    novelty: 0.975084662437439
+    onset_density: 1.0
+    energy_trajectory: 0.0033554378896951675
+    active_sources: 6.0
+- time_sec: 2.433
+  frame: 209
+  cluster: 1
+  features:
+    spectral_flatness: 4.997068754164502e-05
+    spectral_centroid: 853.6252550489254
+    spectral_bandwidth: 2556.979950799479
+    rms_energy: 0.025138217955827713
+    harmonic_ratio: 0.9229900240898132
+    spectral_contrast: 17.31231919024244
+    sparseness: 3.0
+    novelty: 0.973534107208252
+    onset_density: 0.0
+    energy_trajectory: 0.005841556936502457
+    active_sources: 4.0
+- time_sec: 2.593
+  frame: 223
+  cluster: 1
+  features:
+    spectral_flatness: 2.2532591174240224e-05
+    spectral_centroid: 609.4902221130204
+    spectral_bandwidth: 2585.180324608803
+    rms_energy: 0.02800723910331726
+    harmonic_ratio: 0.9085257649421692
+    spectral_contrast: 16.950237096175723
+    sparseness: 3.0
+    novelty: 0.9741601943969727
+    onset_density: 0.0
+    energy_trajectory: 0.002972535789012909
+    active_sources: 4.0
+- time_sec: 2.728
+  frame: 234
+  cluster: 1
+  features:
+    spectral_flatness: 3.234957330278121e-05
+    spectral_centroid: 655.3378869893777
+    spectral_bandwidth: 2659.194754240568
+    rms_energy: 0.02459006756544113
+    harmonic_ratio: 0.9031397104263306
+    spectral_contrast: 15.857431868074887
+    sparseness: 2.0
+    novelty: 0.9748104810714722
+    onset_density: 0.0
+    energy_trajectory: 0.006389707326889038
+    active_sources: 6.0
+- time_sec: 3.895
+  frame: 335
+  cluster: 1
+  features:
+    spectral_flatness: 1.77648998942459e-05
+    spectral_centroid: 604.4474815816366
+    spectral_bandwidth: 2707.651941219496
+    rms_energy: 0.024028604850172997
+    harmonic_ratio: 0.9419841766357422
+    spectral_contrast: 15.08798691850358
+    sparseness: 1.0
+    novelty: 0.978413999080658
+    onset_density: 1.0
+    energy_trajectory: 0.006951170042157173
+    active_sources: 4.0
+- time_sec: 28.919
+  frame: 2490
+  cluster: 2
+  features:
+    spectral_flatness: 0.00034912704722955823
+    spectral_centroid: 3682.4659978635755
+    spectral_bandwidth: 3813.9051703238533
+    rms_energy: 0.20711667835712433
+    harmonic_ratio: 0.7906004786491394
+    spectral_contrast: 21.078089369476768
+    sparseness: 2.0
+    novelty: 0.9826653003692627
+    onset_density: 8.0
+    energy_trajectory: 0.11866782605648041
+    active_sources: 5.0
+- time_sec: 29.119
+  frame: 2508
+  cluster: 2
+  features:
+    spectral_flatness: 0.0008601778536103666
+    spectral_centroid: 4109.4593929902885
+    spectral_bandwidth: 4434.120534932753
+    rms_energy: 0.2231452465057373
+    harmonic_ratio: 0.735900342464447
+    spectral_contrast: 19.709780671058933
+    sparseness: 4.0
+    novelty: 0.9810892343521118
+    onset_density: 8.0
+    energy_trajectory: 0.10263925790786743
+    active_sources: 8.0
+- time_sec: 29.288
+  frame: 2522
+  cluster: 2
+  features:
+    spectral_flatness: 0.0005139411659911275
+    spectral_centroid: 3552.6369219563667
+    spectral_bandwidth: 4134.0027558847205
+    rms_energy: 0.2458822876214981
+    harmonic_ratio: 0.7780393958091736
+    spectral_contrast: 19.930190435965667
+    sparseness: 3.0
+    novelty: 0.9791695475578308
+    onset_density: 8.0
+    energy_trajectory: 0.07990221679210663
+    active_sources: 5.0
+- time_sec: 29.467
+  frame: 2538
+  cluster: 2
+  features:
+    spectral_flatness: 0.016240274533629417
+    spectral_centroid: 5253.593232019064
+    spectral_bandwidth: 4539.321304424151
+    rms_energy: 0.18763552606105804
+    harmonic_ratio: 0.52863609790802
+    spectral_contrast: 17.020308142290936
+    sparseness: 6.0
+    novelty: 0.9790946245193481
+    onset_density: 8.0
+    energy_trajectory: 0.1381489783525467
+    active_sources: 40.0
+- time_sec: 29.625
+  frame: 2551
+  cluster: 2
+  features:
+    spectral_flatness: 0.003446349874138832
+    spectral_centroid: 5432.73991688475
+    spectral_bandwidth: 4585.855709584257
+    rms_energy: 0.12088043242692947
+    harmonic_ratio: 0.7326870560646057
+    spectral_contrast: 20.2262627304634
+    sparseness: 4.0
+    novelty: 0.9835583567619324
+    onset_density: 9.0
+    energy_trajectory: 0.20490407943725586
+    active_sources: 45.0
+- time_sec: 30.144
+  frame: 2596
+  cluster: 2
+  features:
+    spectral_flatness: 0.006839354522526264
+    spectral_centroid: 5022.130202653327
+    spectral_bandwidth: 5335.142623490381
+    rms_energy: 0.1965186893939972
+    harmonic_ratio: 0.8317334651947021
+    spectral_contrast: 19.208888262000837
+    sparseness: 3.0
+    novelty: 0.9871718287467957
+    onset_density: 6.0
+    energy_trajectory: 0.12926581501960754
+    active_sources: 5.0
+- time_sec: 30.719
+  frame: 2645
+  cluster: 2
+  features:
+    spectral_flatness: 0.0011384893441572785
+    spectral_centroid: 4168.319681317422
+    spectral_bandwidth: 4645.499721414593
+    rms_energy: 0.1391439586877823
+    harmonic_ratio: 0.8180662393569946
+    spectral_contrast: 19.627682846319633
+    sparseness: 2.0
+    novelty: 0.9850297570228577
+    onset_density: 7.0
+    energy_trajectory: 0.14732639491558075
+    active_sources: 6.0
+- time_sec: 31.679
+  frame: 2728
+  cluster: 2
+  features:
+    spectral_flatness: 0.000515985768288374
+    spectral_centroid: 3189.58842447595
+    spectral_bandwidth: 3659.831822402431
+    rms_energy: 0.16311536729335785
+    harmonic_ratio: 0.7653017640113831
+    spectral_contrast: 20.963386568237393
+    sparseness: 3.0
+    novelty: 0.980612576007843
+    onset_density: 6.0
+    energy_trajectory: 0.19223372638225555
+    active_sources: 11.0
+- time_sec: 31.948
+  frame: 2751
+  cluster: 2
+  features:
+    spectral_flatness: 0.0023546074517071247
+    spectral_centroid: 3847.6803382580365
+    spectral_bandwidth: 3907.93577800047
+    rms_energy: 0.21450106799602509
+    harmonic_ratio: 0.713662326335907
+    spectral_contrast: 17.875301959343712
+    sparseness: 4.0
+    novelty: 0.980527400970459
+    onset_density: 7.0
+    energy_trajectory: 0.14084802567958832
+    active_sources: 20.0
+- time_sec: 32.2
+  frame: 2773
+  cluster: 2
+  features:
+    spectral_flatness: 0.00028022934566251934
+    spectral_centroid: 3035.6760236566106
+    spectral_bandwidth: 4215.590610045319
+    rms_energy: 0.20834332704544067
+    harmonic_ratio: 0.7857439517974854
+    spectral_contrast: 20.266120263768737
+    sparseness: 2.0
+    novelty: 0.9819257855415344
+    onset_density: 7.0
+    energy_trajectory: 0.14700576663017273
+    active_sources: 4.0
+- time_sec: 32.429
+  frame: 2793
+  cluster: 2
+  features:
+    spectral_flatness: 0.003689035540446639
+    spectral_centroid: 5159.31530416579
+    spectral_bandwidth: 4609.20789946526
+    rms_energy: 0.149929940700531
+    harmonic_ratio: 0.7280564904212952
+    spectral_contrast: 20.62590022428037
+    sparseness: 4.0
+    novelty: 0.986031174659729
+    onset_density: 8.0
+    energy_trajectory: 0.2054191529750824
+    active_sources: 19.0
+- time_sec: 32.624
+  frame: 2809
+  cluster: 2
+  features:
+    spectral_flatness: 0.0010517328046262264
+    spectral_centroid: 4365.855302650654
+    spectral_bandwidth: 4537.853384995604
+    rms_energy: 0.15676377713680267
+    harmonic_ratio: 0.8354606628417969
+    spectral_contrast: 20.90315947085866
+    sparseness: 4.0
+    novelty: 0.979892909526825
+    onset_density: 7.0
+    energy_trajectory: 0.19858531653881073
+    active_sources: 11.0
+- time_sec: 32.903
+  frame: 2834
+  cluster: 2
+  features:
+    spectral_flatness: 0.0007132543250918388
+    spectral_centroid: 3448.1396014440097
+    spectral_bandwidth: 4158.247331074794
+    rms_energy: 0.2033601999282837
+    harmonic_ratio: 0.7715972065925598
+    spectral_contrast: 19.080259830271796
+    sparseness: 2.0
+    novelty: 0.9876946806907654
+    onset_density: 7.0
+    energy_trajectory: 0.1519888937473297
+    active_sources: 10.0
+- time_sec: 33.246
+  frame: 2863
+  cluster: 2
+  features:
+    spectral_flatness: 0.0016360718291252851
+    spectral_centroid: 4035.4181814022604
+    spectral_bandwidth: 4314.068381650774
+    rms_energy: 0.21022066473960876
+    harmonic_ratio: 0.7553898692131042
+    spectral_contrast: 19.274637133681455
+    sparseness: 2.0
+    novelty: 0.9816476702690125
+    onset_density: 7.0
+    energy_trajectory: 0.14512842893600464
+    active_sources: 17.0
+- time_sec: 33.554
+  frame: 2890
+  cluster: 2
+  features:
+    spectral_flatness: 0.001761174644343555
+    spectral_centroid: 4379.6407029331685
+    spectral_bandwidth: 4758.7134289536725
+    rms_energy: 0.14839358627796173
+    harmonic_ratio: 0.8173574805259705
+    spectral_contrast: 19.86179372533022
+    sparseness: 2.0
+    novelty: 0.982882559299469
+    onset_density: 6.0
+    energy_trajectory: 0.17457492649555206
+    active_sources: 8.0

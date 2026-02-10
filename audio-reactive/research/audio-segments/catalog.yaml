@@ -1,0 +1,66 @@
+- channels: 2
+  duration_seconds: 2.8
+  filename: no_sound.wav
+  id: no_sound
+  recorded: '2026-02-05T16:22:08.710622'
+  sample_rate: 44100
+- artist: Tool
+  channels: 2
+  duration_seconds: 43.5
+  filename: opiate_intro.wav
+  genre: Psychadelic Rock
+  id: opiate_intro
+  notes: rock with a beat
+  recorded: '2026-02-05T16:24:13.836431'
+  sample_rate: 44100
+  song: Opiate
+- artist: Fred again..
+  channels: 2
+  duration_seconds: 29.7
+  filename: ambient.wav
+  genre: electronic
+  id: ambient
+  recorded: '2026-02-05T16:38:55.834550'
+  sample_rate: 44100
+  song: tayla (every night)
+- artist: Fred again..
+  channels: 2
+  duration_seconds: 49.6
+  filename: electronic_beat.wav
+  genre: Electronic
+  id: electronic_beat
+  recorded: '2026-02-05T16:41:08.474343'
+  sample_rate: 44100
+  song: Tanya (maybe life)
+- annotations: fa_br_drop1.annotations.yaml
+  artist: Fred Again..
+  channels: 2
+  duration_seconds: 128.6
+  filename: fa_br_drop1.wav
+  genre: Electronic
+  id: fa_br_drop1
+  notes: 'Maximalist EDM drop structure. Sections: normal_song (0-29s), build_primer/edging
+    (29-83s), build_sustained (83-113s), bridge (113-121s), drop (121-129s). Has annotations.'
+  recorded: '2026-02-06T10:00:14.673617'
+  sample_rate: 44100
+  song: fred_br
+- duration_seconds: 179.7
+  filename: lorn_sega_sunset.wav
+  id: lorn_sega_sunset
+  recorded: 2026-02-09 12:27
+  sample_rate: 44100
+- duration_seconds: 31.2
+  filename: complex_beat_glue.wav
+  id: complex_beat_glue
+  recorded: 2026-02-09 12:28
+  sample_rate: 44100
+- duration_seconds: 60.4
+  filename: complex_beat_glue.wav
+  id: complex_beat_glue
+  recorded: 2026-02-09 12:29
+  sample_rate: 44100
+- duration_seconds: 61.3
+  filename: talking.wav
+  id: talking
+  recorded: 2026-02-09 12:33
+  sample_rate: 44100

@@ -1,0 +1,24 @@
+electronic:
+  threshold_multiplier: 1.5
+  bass_high_hz: 200
+  min_beat_interval_sec: 0.3
+  flux_history_sec: 3.0
+  f1_score: 0.06013586536976995
+rock:
+  threshold_multiplier: 1.5
+  bass_high_hz: 300
+  min_beat_interval_sec: 0.3
+  flux_history_sec: 3.0
+  f1_score: 0.2688105223887818
+metal:
+  threshold_multiplier: 1.5
+  bass_high_hz: 200
+  min_beat_interval_sec: 0.3
+  flux_history_sec: 3.0
+  f1_score: 0.256800430395269
+universal:
+  threshold_multiplier: 1.5
+  bass_high_hz: 200
+  min_beat_interval_sec: 0.3
+  flux_history_sec: 3.0
+  f1_score: 0.20389920189068886

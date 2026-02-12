@@ -64,3 +64,23 @@
   id: talking
   recorded: 2026-02-09 12:33
   sample_rate: 44100
+- duration_seconds: 13.5
+  filename: fourtet_set.wav
+  id: fourtet_set
+  recorded: 2026-02-11 20:55
+  sample_rate: 44100
+- duration_seconds: 0.2
+  filename: fourtet_weird.wav
+  id: fourtet_weird
+  recorded: 2026-02-11 22:00
+  sample_rate: 44100
+- duration_seconds: 48.3
+  filename: fourtet_weird2.wav
+  id: fourtet_weird2
+  recorded: 2026-02-11 22:01
+  sample_rate: 44100
+- duration_seconds: 2.6
+  filename: segment_20260211_220457.wav
+  id: segment_20260211_220457
+  recorded: 2026-02-11 22:04
+  sample_rate: 44100

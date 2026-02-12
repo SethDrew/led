@@ -22,10 +22,16 @@
  *       └─ Branch E: LEDs 73-98 (depth 43-68) - splits at depth 43
  */
 
-// Pin assignments
+// Pin assignments (overridable via build flags for ESP32 etc.)
+#ifndef STRIP1_PIN
 #define STRIP1_PIN 13
+#endif
+#ifndef STRIP2_PIN
 #define STRIP2_PIN 12
+#endif
+#ifndef STRIP3_PIN
 #define STRIP3_PIN 11
+#endif
 
 // Strip LED counts
 #define STRIP1_LEDS 92
@@ -66,8 +72,8 @@ private:
       idx++;
     }
 
-    // Branch A: LEDs 38-61, depths 38-61
-    for (uint8_t i = 38; i <= 61; i++) {
+    // Branch A: LEDs 39-61, depths 39-61 (LED 38 is the fork point, already in trunk)
+    for (uint8_t i = 39; i <= 61; i++) {
       nodes[idx].stripId = 0;
       nodes[idx].stripIndex = i;
       nodes[idx].depth = i;

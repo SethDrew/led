@@ -6,12 +6,12 @@
  *
  * Key design:
  * - 197 nodes (3 strips), 591 bytes of RGB data per frame
- * - Reads bytes directly into strip pixels (NO frame buffer to save RAM)
+ * - Reads all bytes into flat buffer first, THEN copies to tree pixels
+ *   (matches proven strip receiver approach — Serial.read() byte-by-byte)
  * - Uses TreeTopology node mapping (strip1: 92 LEDs, strip2: 6 LEDs, strip3: 99 LEDs)
  * - 1Mbps baud rate for speed
  *
- * Memory usage: ~591 bytes for NeoPixel strip buffers + ~600 bytes for topology = ~1200 bytes
- * (ATmega328 has 2KB RAM, so this fits comfortably)
+ * Memory: ~591 frameBuffer + ~591 NeoPixel + ~591 topology = ~1773 bytes (of 2048)
  */
 
 #include <Arduino.h>
@@ -21,6 +21,11 @@
 const uint8_t START_BYTE_1 = 0xFF;
 const uint8_t START_BYTE_2 = 0xAA;
 
+#define NUM_NODES 197
+
+// Flat frame buffer — read all bytes here first, then copy to tree
+uint8_t frameBuffer[NUM_NODES * 3];
+
 // Global tree instance
 Tree tree;
 
@@ -29,7 +34,6 @@ unsigned long framesReceived = 0;
 unsigned long lastStatsTime = 0;
 
 void setup() {
-  // High baud rate for better FPS
   Serial.begin(1000000);  // 1 Mbps
 
   tree.begin();
@@ -47,53 +51,25 @@ void loop() {
   // Wait for start sequence
   if (Serial.available() >= 2) {
     if (Serial.read() == START_BYTE_1 && Serial.read() == START_BYTE_2) {
-      // Read RGB data for all nodes
-      int bytesNeeded = tree.getNumLEDs() * 3;  // 197 * 3 = 591 bytes
+      int bytesNeeded = NUM_NODES * 3;  // 591 bytes
       int bytesRead = 0;
 
-      // Temporary buffer for bulk reading (faster than single reads)
-      // We use a small rolling buffer to avoid allocating 591 bytes
-      uint8_t buf[30];  // Read in chunks of 30 bytes (10 pixels at a time)
-
-      // Read with timeout
+      // Read with timeout — byte-by-byte into flat buffer (proven approach)
       unsigned long startTime = millis();
-      uint8_t nodeIndex = 0;
-
       while (bytesRead < bytesNeeded && (millis() - startTime) < 100) {
-        // How many bytes can we read?
-        int available = Serial.available();
-        if (available > 0) {
-          // Read up to buffer size
-          int toRead = min(available, (int)sizeof(buf));
-          toRead = min(toRead, bytesNeeded - bytesRead);
-
-          int actuallyRead = Serial.readBytes(buf, toRead);
-
-          // Process the bytes we just read
-          for (int i = 0; i < actuallyRead; i++) {
-            int offset = bytesRead % 3;
-
-            // Accumulate RGB values
-            static uint8_t r, g, b;
-            if (offset == 0) {
-              r = buf[i];
-            } else if (offset == 1) {
-              g = buf[i];
-            } else {  // offset == 2
-              b = buf[i];
-              // We have a complete pixel - write it to the correct strip
-              tree.setNodeColor(nodeIndex, r, g, b);
-              nodeIndex++;
-            }
-
-            bytesRead++;
-          }
+        if (Serial.available()) {
+          frameBuffer[bytesRead++] = Serial.read();
         }
       }
 
-      // If we got a complete frame, display it
+      // If we got a complete frame, copy to tree and display
       if (bytesRead == bytesNeeded) {
+        for (int i = 0; i < NUM_NODES; i++) {
+          int idx = i * 3;
+          tree.setNodeColor(i, frameBuffer[idx], frameBuffer[idx+1], frameBuffer[idx+2]);
+        }
         tree.show();
+
         framesReceived++;
 
         // Print stats every second
@@ -104,7 +80,6 @@ void loop() {
           lastStatsTime = millis();
         }
       } else {
-        // Incomplete frame - just skip it
         Serial.print("Warning: Incomplete frame (got ");
         Serial.print(bytesRead);
         Serial.print("/");

@@ -30,7 +30,7 @@ def _build_depth_map():
     # Strip 1: Lower trunk (0-38), Branch A (38-61), Branch B (62-91)
     for i in range(39):          # 39 nodes: depth 0-38
         depths.append(i)
-    for i in range(38, 62):      # 24 nodes: Branch A, depth 38-61
+    for i in range(39, 62):      # 23 nodes: Branch A, depth 39-61 (LED 38 is fork point, in trunk)
         depths.append(i)
     for i in range(62, 92):      # 30 nodes: Branch B, depth 38-67
         depths.append(38 + (i - 62))

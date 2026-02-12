@@ -22,6 +22,12 @@ package-lock.json
 # Large datasets (keep analysis results, ignore raw data)
 audio-reactive/research/datasets/harmonix/
 
+# Effect preferences (user-specific ratings/order, created at runtime)
+audio-reactive/effects/effect_prefs.json
+
+# Generated analysis plots (regenerable from scripts)
+audio-reactive/research/analysis/scripts/*.png
+
 # Audio: separated stems are regenerable (demucs/hpss), never commit
 audio-reactive/research/audio-segments/separated/
 

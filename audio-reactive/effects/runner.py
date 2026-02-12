@@ -45,7 +45,7 @@ CHUNK_SIZE = 1024          # ~23ms per chunk
 LED_FPS = 30
 NUM_LEDS = 197             # Tree default
 BAUD_RATE = 1000000
-BRIGHTNESS_CAP = 0.03      # 3% for testing
+BRIGHTNESS_CAP = 0.30      # 30%
 START_BYTE_1 = 0xFF
 START_BYTE_2 = 0xAA
 
@@ -94,6 +94,90 @@ def get_effect_registry():
     try:
         from three_voices import ThreeVoicesEffect
         effects['three_voices'] = ThreeVoicesEffect
+    except ImportError:
+        pass
+
+    try:
+        from bass_pulse import BassPulseEffect
+        effects['bass_pulse'] = BassPulseEffect
+    except ImportError:
+        pass
+
+    try:
+        from absint_pulse import AbsIntPulseEffect
+        effects['absint_pulse'] = AbsIntPulseEffect
+    except ImportError:
+        pass
+
+    try:
+        from absint_proportional import AbsIntProportionalEffect
+        effects['absint_prop'] = AbsIntProportionalEffect
+    except ImportError:
+        pass
+
+    try:
+        from absint_predictive import AbsIntPredictiveEffect
+        effects['absint_pred'] = AbsIntPredictiveEffect
+    except ImportError:
+        pass
+
+    try:
+        from band_prop import BandProportionalEffect
+        effects['band_prop'] = BandProportionalEffect
+    except ImportError:
+        pass
+
+    try:
+        from absint_reds import AbsIntRedsEffect
+        effects['absint_reds'] = AbsIntRedsEffect
+    except ImportError:
+        pass
+
+    try:
+        from absint_downbeat import AbsIntDownbeatEffect
+        effects['absint_down'] = AbsIntDownbeatEffect
+    except ImportError:
+        pass
+
+    try:
+        from absint_sections import AbsIntSectionsEffect
+        effects['absint_sec'] = AbsIntSectionsEffect
+    except ImportError:
+        pass
+
+    try:
+        from longint_sections import LongIntSectionsEffect
+        effects['longint_sec'] = LongIntSectionsEffect
+    except ImportError:
+        pass
+
+    try:
+        from absint_breathe import AbsIntBreatheEffect
+        effects['absint_breathe'] = AbsIntBreatheEffect
+    except ImportError:
+        pass
+
+    try:
+        from tempo_pulse import TempoPulseEffect
+        effects['tempo_pulse'] = TempoPulseEffect
+    except ImportError:
+        pass
+
+    try:
+        from absint_snake import AbsIntSnakeEffect
+        effects['absint_snake'] = AbsIntSnakeEffect
+    except ImportError:
+        pass
+
+    try:
+        from absint_meter import AbsIntMeterEffect
+        effects['absint_meter'] = AbsIntMeterEffect
+    except ImportError:
+        pass
+
+    try:
+        from rms_meter import RMSMeterEffect
+        effects['rms_meter'] = RMSMeterEffect
     except ImportError:
         pass
 
@@ -167,6 +251,10 @@ class SerialLEDOutput:
                 packet.extend(frame.flatten().tobytes())
                 self.ser.write(packet)
                 self.ser.flush()
+                # Drain any Arduino responses (FPS stats, ready signals)
+                # to prevent RX buffer buildup
+                if self.ser.in_waiting:
+                    self.ser.read(self.ser.in_waiting)
             except Exception:
                 pass
 
@@ -202,13 +290,10 @@ def run_live(effect, led_output, device_id, brightness_cap=BRIGHTNESS_CAP):
       Main loop: render() + send_frame() at FIXED rate — no FFT here
     """
 
-    effect_lock = threading.Lock()
-
     def audio_callback(indata, frames, time_info, status):
         mono = np.mean(indata, axis=1) if indata.ndim > 1 else indata.flatten()
-        # Process audio in callback thread — keeps main loop timing clean
-        with effect_lock:
-            effect.process_audio(mono)
+        # Process audio in callback thread — effect handles its own locking
+        effect.process_audio(mono)
 
     stream = sd.InputStream(
         device=device_id,
@@ -228,8 +313,7 @@ def run_live(effect, led_output, device_id, brightness_cap=BRIGHTNESS_CAP):
 
         while True:
             # Render LED frame (reads pre-computed state from process_audio)
-            with effect_lock:
-                frame = effect.render(frame_interval)
+            frame = effect.render(frame_interval)
 
             # Apply brightness cap
             frame = (frame.astype(np.float32) * brightness_cap).astype(np.uint8)

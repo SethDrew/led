@@ -43,6 +43,129 @@ _demucs_status = {}     # filepath -> bool (True = ready)
 _demucs_locks = {}      # filepath -> threading.Lock
 _recording = None       # {'stream': sd.InputStream, 'frames': list} or None
 
+# ── Effects management ────────────────────────────────────────────────
+
+_effect_process = None   # subprocess.Popen or None
+_effects_cache = None    # list of effect names from runner.py --list
+
+EFFECTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'effects')
+EFFECT_PREFS_PATH = os.path.join(EFFECTS_DIR, 'effect_prefs.json')
+
+
+def _discover_effects():
+    """Run runner.py --list and parse available effect names."""
+    global _effects_cache
+    if _effects_cache is not None:
+        return _effects_cache
+
+    try:
+        result = subprocess.run(
+            [sys.executable, 'runner.py', '--list'],
+            cwd=EFFECTS_DIR, capture_output=True, text=True, timeout=10
+        )
+        names = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line or line.startswith('=') or line.startswith('Available') or line.startswith('('):
+                continue
+            # Lines like: "wled_volume          — WLED Volume Reactive"
+            if '—' not in line:
+                continue
+            name = line.split('—')[0].strip()
+            if name:
+                names.append(name)
+        _effects_cache = names
+    except Exception as e:
+        print(f"[effects] Discovery failed: {e}")
+        _effects_cache = []
+
+    return _effects_cache
+
+
+def _load_effect_prefs():
+    """Load effect preferences (ratings, order) from JSON file."""
+    if os.path.exists(EFFECT_PREFS_PATH):
+        try:
+            with open(EFFECT_PREFS_PATH) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_effect_prefs(prefs):
+    """Save effect preferences to JSON file."""
+    try:
+        with open(EFFECT_PREFS_PATH, 'w') as f:
+            json.dump(prefs, f, indent=2)
+    except Exception as e:
+        print(f"[effects] Save prefs failed: {e}")
+
+
+def _get_effects_list():
+    """Get effects list merged with preferences (ratings, order)."""
+    names = _discover_effects()
+    prefs = _load_effect_prefs()
+
+    effects = []
+    for name in names:
+        p = prefs.get(name, {})
+        effects.append({
+            'name': name,
+            'order': p.get('order', 999),
+            'rating': p.get('rating', 0),
+        })
+
+    effects.sort(key=lambda e: e['order'])
+    return effects
+
+
+def _start_effect(name):
+    """Start an effect subprocess. Kills any running effect first."""
+    global _effect_process
+    _stop_effect()
+
+    try:
+        _effect_process = subprocess.Popen(
+            [sys.executable, 'runner.py', name, '--no-leds'],
+            cwd=EFFECTS_DIR,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+        )
+        print(f"[effects] Started: {name} (pid {_effect_process.pid})")
+    except Exception as e:
+        print(f"[effects] Start failed: {e}")
+        _effect_process = None
+
+
+def _stop_effect():
+    """Stop the running effect subprocess."""
+    global _effect_process
+    if _effect_process is not None:
+        try:
+            _effect_process.terminate()
+            _effect_process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            _effect_process.kill()
+        except Exception:
+            pass
+        print(f"[effects] Stopped (pid {_effect_process.pid})")
+        _effect_process = None
+
+
+def _get_running_effect_name():
+    """Get the name of the currently running effect, or None."""
+    global _effect_process
+    if _effect_process is None:
+        return None
+    if _effect_process.poll() is not None:
+        _effect_process = None
+        return None
+    # Extract from command line args
+    args = _effect_process.args
+    if len(args) >= 3:
+        return args[2]
+    return None
+
 
 # ── File Discovery ────────────────────────────────────────────────────
 
@@ -308,6 +431,369 @@ def render_hpss(filepath):
     }
 
     _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
+
+
+def render_lab_repet(filepath):
+    """Compute REPET, save WAVs, render diagnostic PNG (beat spectrum + mask + separated specs)."""
+    cache_key = (filepath, 'lab-repet')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    import numpy as np
+    import soundfile as sf
+    import librosa
+    import librosa.display
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+
+    # Add simple-stems to path for import
+    simple_stems_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     '..', 'research', 'simple-stems')
+    if simple_stems_dir not in sys.path:
+        sys.path.insert(0, simple_stems_dir)
+    from repet import repet
+
+    stem_name = Path(filepath).stem
+    repet_dir = os.path.join(SEGMENTS_DIR, 'separated', 'repet', stem_name)
+    rep_path = os.path.join(repet_dir, 'repeating.wav')
+    nonrep_path = os.path.join(repet_dir, 'non-repeating.wav')
+    info_path = os.path.join(repet_dir, 'info.npz')
+
+    # Compute and save if not cached on disk
+    # Version check: re-run if info.npz missing 'periods' (old format)
+    needs_recompute = not (os.path.exists(rep_path) and os.path.exists(nonrep_path))
+    if not needs_recompute and os.path.exists(info_path):
+        try:
+            check = np.load(info_path, allow_pickle=True)
+            if 'periods' not in check:
+                needs_recompute = True
+        except Exception:
+            needs_recompute = True
+
+    if needs_recompute:
+        os.makedirs(repet_dir, exist_ok=True)
+        print(f"[lab-repet] Computing for {Path(filepath).name}...")
+
+        y_play, sr_play = sf.read(filepath)
+        y_mono, sr_mono = librosa.load(filepath, sr=None, mono=True)
+
+        y_rep, y_nonrep, info = repet(y_mono, sr_mono)
+
+        # Save info for later PNG rendering
+        periods_arr = np.array(info['periods'])  # list of (frames, seconds) tuples
+        np.savez(os.path.join(repet_dir, 'info.npz'),
+                 beat_spec=info['beat_spec'],
+                 mask=info['mask'],
+                 magnitude=info['magnitude'],
+                 periods=periods_arr,
+                 n_segments=info['n_segments'],
+                 hop_length=info['hop_length'],
+                 sr=info['sr'],
+                 sharpness=info['sharpness'],
+                 percentile=info['percentile'])
+
+        # REPET per channel for stereo playback
+        if y_play.ndim == 1:
+            y_play = y_play[:, np.newaxis]
+        n_ch = y_play.shape[1]
+        y_rep_play = np.zeros_like(y_play)
+        y_nonrep_play = np.zeros_like(y_play)
+        for ch in range(n_ch):
+            D_ch = librosa.stft(y_play[:, ch], n_fft=2048, hop_length=512)
+            mask = info['mask']
+            min_frames = min(mask.shape[1], D_ch.shape[1])
+            mask_ch = mask[:, :min_frames]
+            D_rep_ch = np.zeros_like(D_ch)
+            D_nonrep_ch = np.zeros_like(D_ch)
+            D_rep_ch[:, :min_frames] = mask_ch * D_ch[:, :min_frames]
+            D_nonrep_ch[:, :min_frames] = (1 - mask_ch) * D_ch[:, :min_frames]
+            y_rep_play[:, ch] = librosa.istft(D_rep_ch, hop_length=512,
+                                               length=y_play.shape[0])
+            y_nonrep_play[:, ch] = librosa.istft(D_nonrep_ch, hop_length=512,
+                                                   length=y_play.shape[0])
+
+        if n_ch == 1:
+            y_rep_play = y_rep_play.squeeze()
+            y_nonrep_play = y_nonrep_play.squeeze()
+
+        sf.write(rep_path, y_rep_play, sr_play)
+        sf.write(nonrep_path, y_nonrep_play, sr_play)
+        print(f"[lab-repet] Done: {Path(filepath).name}")
+
+    # Load info from disk
+    info_data = np.load(info_path, allow_pickle=True)
+    bs = info_data['beat_spec']
+    mask = info_data['mask']
+    periods = info_data['periods']  # array of (frames, seconds) pairs
+    n_segments = int(info_data['n_segments'])
+    hop_length = int(info_data['hop_length'])
+    sr = int(info_data['sr'])
+    sharpness = float(info_data['sharpness'])
+    percentile = int(info_data['percentile'])
+
+    # Load separated mono for spectrograms
+    y_rep_mono, sr_rep = librosa.load(rep_path, sr=None, mono=True)
+    y_nonrep_mono, sr_nonrep = librosa.load(nonrep_path, sr=None, mono=True)
+    duration = librosa.get_duration(y=y_rep_mono, sr=sr_rep)
+
+    # Build diagnostic figure
+    plt.style.use('dark_background')
+    fig = plt.figure(figsize=(18, 14))
+    gs = gridspec.GridSpec(4, 1, height_ratios=[1, 1.5, 2, 2], hspace=0.35)
+
+    # Panel 1: Beat spectrum with all detected periods marked
+    ax1 = fig.add_subplot(gs[0])
+    lag_times = np.arange(len(bs)) * hop_length / sr
+    ax1.plot(lag_times, bs, color='#00E5FF', linewidth=1.5)
+    period_colors = ['#FF4081', '#FFD740', '#69F0AE', '#40C4FF']
+    max_period_sec = 0
+    for i, (pf, ps) in enumerate(periods):
+        pf, ps = int(pf), float(ps)
+        color = period_colors[i % len(period_colors)]
+        n_seg = len(bs) // pf if pf > 0 else 0
+        ax1.axvline(x=ps, color=color, linewidth=2, linestyle='--',
+                    label=f'{ps:.3f}s ({n_seg} seg)')
+        max_period_sec = max(max_period_sec, ps)
+    ax1.set_xlim([0, min(lag_times[-1], max_period_sec * 3)])
+    ax1.set_ylabel('Autocorrelation')
+    period_strs = [f'{float(ps):.2f}s' for _, ps in periods]
+    ax1.set_title(f'Beat Spectrum — {len(periods)} periods detected: {", ".join(period_strs)} '
+                  f'| sharpness={sharpness}, percentile={percentile}', fontsize=11)
+    ax1.legend(loc='upper right', fontsize=9)
+    ax1.grid(True, alpha=0.2)
+
+    # Panel 2: Sharpened mask
+    ax2 = fig.add_subplot(gs[1])
+    librosa.display.specshow(
+        mask, sr=sr, hop_length=hop_length,
+        x_axis='time', y_axis='linear',
+        ax=ax2, cmap='magma', vmin=0, vmax=1
+    )
+    ax2.set_ylabel('Frequency (Hz)')
+    # Show mask statistics
+    pct_high = np.mean(mask > 0.8) * 100
+    pct_low = np.mean(mask < 0.2) * 100
+    ax2.set_title(f'Sharpened Mask (^{sharpness}) — '
+                  f'{pct_high:.0f}% > 0.8 (repeating), '
+                  f'{pct_low:.0f}% < 0.2 (non-repeating)', fontsize=11)
+
+    # Panel 3: Repeating spectrogram
+    ax3 = fig.add_subplot(gs[2])
+    mel_rep = librosa.feature.melspectrogram(
+        y=y_rep_mono, sr=sr_rep, n_fft=2048, hop_length=512,
+        n_mels=64, fmin=20, fmax=None
+    )
+    mel_rep_db = librosa.power_to_db(mel_rep, ref=np.max)
+    librosa.display.specshow(
+        mel_rep_db, sr=sr_rep, hop_length=512,
+        x_axis='time', y_axis='mel', fmin=20, fmax=None,
+        ax=ax3, cmap='magma'
+    )
+    ax3.set_ylabel('Frequency (Hz)')
+    rep_rms = np.sqrt(np.mean(y_rep_mono ** 2))
+    orig_y, _ = librosa.load(filepath, sr=None, mono=True)
+    orig_rms = np.sqrt(np.mean(orig_y ** 2))
+    ax3.set_title(f'Repeating Layer — {rep_rms/orig_rms*100:.0f}% of original RMS', fontsize=11)
+
+    # Panel 4: Non-repeating spectrogram
+    ax4 = fig.add_subplot(gs[3])
+    mel_nonrep = librosa.feature.melspectrogram(
+        y=y_nonrep_mono, sr=sr_nonrep, n_fft=2048, hop_length=512,
+        n_mels=64, fmin=20, fmax=None
+    )
+    mel_nonrep_db = librosa.power_to_db(mel_nonrep, ref=np.max)
+    librosa.display.specshow(
+        mel_nonrep_db, sr=sr_nonrep, hop_length=512,
+        x_axis='time', y_axis='mel', fmin=20, fmax=None,
+        ax=ax4, cmap='magma'
+    )
+    ax4.set_ylabel('Frequency (Hz)')
+    nonrep_rms = np.sqrt(np.mean(y_nonrep_mono ** 2))
+    ax4.set_title(f'Non-Repeating Layer — {nonrep_rms/orig_rms*100:.0f}% of original RMS', fontsize=11)
+
+    filename = Path(filepath).name
+    fig.suptitle(f'{filename} — lab-REPET', fontsize=14, fontweight='bold', y=0.995)
+    fig.canvas.draw()
+
+    # Cursor alignment from spectrogram panels
+    x_left = ax3.transData.transform((0, 0))[0]
+    x_right = ax3.transData.transform((duration, 0))[0]
+    fig_width = fig.get_figwidth() * DPI
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=DPI, facecolor=fig.get_facecolor())
+    matplotlib.pyplot.close(fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
+
+
+def render_lab_nmf(filepath):
+    """Run online NMF source decomposition, render per-source activation/spectrogram PNG."""
+    cache_key = (filepath, 'lab-nmf')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    import numpy as np
+    import librosa
+    import librosa.display
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+
+    simple_stems_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     '..', 'research', 'simple-stems')
+    if simple_stems_dir not in sys.path:
+        sys.path.insert(0, simple_stems_dir)
+    from nmf_separation import OnlineNMF
+
+    dict_path = os.path.join(simple_stems_dir, 'dictionaries.npz')
+    if not os.path.exists(dict_path):
+        raise FileNotFoundError(
+            "NMF dictionaries not found. Run: cd research/simple-stems && python train_nmf.py")
+
+    print(f"[lab-nmf] Processing {Path(filepath).name}...")
+    nmf = OnlineNMF.from_file(dict_path)
+
+    stem_name = Path(filepath).stem
+    nmf_dir = os.path.join(SEGMENTS_DIR, 'separated', 'nmf', stem_name)
+
+    y, sr = librosa.load(filepath, sr=nmf.sr, mono=True)
+    duration = librosa.get_duration(y=y, sr=sr)
+    result = nmf.process_audio_offline(y, sr)
+
+    # Synthesize per-source audio via Wiener masking on STFT
+    source_names_str = [str(n) for n in nmf.source_names]
+    wavs_exist = all(
+        os.path.exists(os.path.join(nmf_dir, f'{n}.wav'))
+        for n in source_names_str
+    )
+    if not wavs_exist:
+        import soundfile as sf
+        os.makedirs(nmf_dir, exist_ok=True)
+
+        # Load original audio for playback (may be stereo)
+        y_play, sr_play = sf.read(filepath)
+        if y_play.ndim == 1:
+            y_play = y_play[:, np.newaxis]
+        n_ch = y_play.shape[1]
+
+        for name in source_names_str:
+            mask_mel = result['masks'][name]  # (n_mels, n_frames)
+
+            # Upsample mel mask to full STFT resolution via mel filterbank pseudoinverse
+            mel_basis = nmf.mel_basis  # (n_mels, n_fft//2+1)
+            # Pseudoinverse: (n_fft//2+1, n_mels) @ (n_mels, n_frames) -> (n_fft//2+1, n_frames)
+            mel_pinv = np.linalg.pinv(mel_basis)
+            mask_stft = np.clip(mel_pinv @ mask_mel, 0, 1)
+
+            y_source = np.zeros_like(y_play)
+            for ch in range(n_ch):
+                D_ch = librosa.stft(y_play[:, ch], n_fft=nmf.n_fft,
+                                     hop_length=nmf.hop_length)
+                # Match frame count
+                min_f = min(mask_stft.shape[1], D_ch.shape[1])
+                D_masked = np.zeros_like(D_ch)
+                D_masked[:, :min_f] = mask_stft[:, :min_f] * D_ch[:, :min_f]
+                y_source[:, ch] = librosa.istft(D_masked, hop_length=nmf.hop_length,
+                                                 length=y_play.shape[0])
+
+            if n_ch == 1:
+                y_source = y_source.squeeze()
+            sf.write(os.path.join(nmf_dir, f'{name}.wav'), y_source, sr_play)
+
+    times = result['times']
+    source_names = nmf.source_names
+    n_sources = len(source_names)
+
+    # Compute relative energy for summary
+    total_act = sum(result['activations'][n] for n in source_names)
+    rel_energy = {}
+    for name in source_names:
+        ratio = result['activations'][name] / (total_act + 1e-10)
+        rel_energy[name] = ratio.mean() * 100
+
+    # Build figure: activation curves on top, then per-source masked spectrograms
+    plt.style.use('dark_background')
+    fig = plt.figure(figsize=(18, 3 + 2.5 * n_sources))
+    gs = gridspec.GridSpec(1 + n_sources, 1,
+                           height_ratios=[1.5] + [2] * n_sources,
+                           hspace=0.35)
+
+    source_colors = {
+        'drums': '#FF4081',
+        'bass': '#FF9100',
+        'vocals': '#40C4FF',
+        'other': '#69F0AE',
+    }
+
+    # Panel 1: Activation curves (all sources overlaid)
+    ax_act = fig.add_subplot(gs[0])
+    for name in source_names:
+        act = result['activations'][name]
+        # Normalize each source for visual comparison
+        act_norm = act / (act.max() + 1e-10)
+        color = source_colors.get(str(name), '#FFFFFF')
+        ax_act.plot(times, act_norm, color=color, linewidth=1.5,
+                    label=f'{name} ({rel_energy[name]:.0f}%)', alpha=0.9)
+    ax_act.set_xlim([0, duration])
+    ax_act.set_ylim([0, 1.1])
+    ax_act.set_ylabel('Activation')
+    ax_act.set_title(f'Source Activations (normalized) — 8 tracks, K=10/source, 0.07ms/frame',
+                     fontsize=11)
+    ax_act.legend(loc='upper right', fontsize=9)
+    ax_act.grid(True, alpha=0.2)
+
+    # Per-source masked spectrograms
+    mel_db = librosa.power_to_db(result['mel_spec'], ref=np.max)
+    axes = [ax_act]
+
+    for i, name in enumerate(source_names):
+        ax = fig.add_subplot(gs[1 + i])
+        # Apply Wiener mask to mel spectrogram
+        masked = result['masks'][name] * result['mel_spec']
+        masked_db = librosa.power_to_db(masked, ref=np.max(result['mel_spec']))
+        librosa.display.specshow(
+            masked_db, sr=sr, hop_length=nmf.hop_length,
+            x_axis='time', y_axis='mel', fmin=20, fmax=sr // 2,
+            ax=ax, cmap='magma', vmin=mel_db.min(), vmax=mel_db.max()
+        )
+        color = source_colors.get(str(name), '#FFFFFF')
+        ax.set_ylabel(f'{name}', fontsize=12, fontweight='bold', color=color)
+        ax.set_title(f'{name} — {rel_energy[name]:.0f}% of energy', fontsize=11)
+        axes.append(ax)
+
+    filename = Path(filepath).name
+    fig.suptitle(f'{filename} — lab-NMF (supervised, 4 sources)',
+                 fontsize=14, fontweight='bold', y=0.995)
+    fig.canvas.draw()
+
+    x_left = axes[1].transData.transform((0, 0))[0]
+    x_right = axes[1].transData.transform((duration, 0))[0]
+    fig_width = fig.get_figwidth() * DPI
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=DPI, facecolor=fig.get_facecolor())
+    matplotlib.pyplot.close(fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    print(f"[lab-nmf] Done: {filename}")
     return png_bytes, headers
 
 
@@ -770,6 +1256,48 @@ body {
     font-family: 'SF Mono', 'Menlo', monospace; font-size: 28px; color: #e94560;
 }
 .record-status { color: #888; font-size: 13px; }
+.effects-panel {
+    display: none; flex-direction: column; gap: 8px; padding: 20px;
+    width: 100%; max-width: 600px; overflow-y: auto; max-height: 100%;
+}
+.effects-panel.visible { display: flex; }
+.effect-card {
+    display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+    background: #16213e; border: 1px solid #333; border-radius: 6px;
+    cursor: grab; transition: border-color 0.15s, background 0.15s;
+}
+.effect-card:hover { border-color: #555; }
+.effect-card.dragging { opacity: 0.4; }
+.effect-card.drag-over { border-color: #e94560; background: #1a2a4e; }
+.effect-card.running { border-color: #e94560; }
+.effect-drag {
+    color: #555; font-size: 16px; cursor: grab; user-select: none;
+    line-height: 1;
+}
+.effect-name {
+    flex: 1; font-size: 14px; font-weight: 500; color: #e0e0e0;
+}
+.effect-name .running-dot {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: #e94560; margin-left: 6px; vertical-align: middle;
+    animation: pulse 1.5s ease-in-out infinite;
+}
+.effect-stars {
+    display: flex; gap: 2px;
+}
+.effect-star {
+    width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid #555;
+    background: transparent; cursor: pointer; transition: all 0.1s;
+    padding: 0;
+}
+.effect-star:hover { border-color: #e94560; }
+.effect-star.filled { background: #e94560; border-color: #e94560; }
+.effect-toggle {
+    background: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px;
+    padding: 4px 12px; cursor: pointer; font-size: 12px; white-space: nowrap;
+}
+.effect-toggle:hover { border-color: #e94560; }
+.effect-toggle.stop { background: #b71c1c; border-color: #e94560; }
 </style>
 </head>
 <body>
@@ -778,6 +1306,7 @@ body {
     <h1>Audio Explorer</h1>
     <select id="filePicker"></select>
     <button class="play-btn" id="playBtn" title="Play/Pause">&#9654;</button>
+    <button class="play-btn" id="replayBtn" title="Replay from start">&#8634;</button>
     <span class="time" id="timeDisplay">0:00.000 / 0:00.000</span>
     <span style="display:flex;align-items:center;gap:6px;margin-left:auto;">
         <span style="font-size:14px;cursor:pointer;" id="volIcon" title="Mute/unmute">&#128266;</span>
@@ -792,7 +1321,10 @@ body {
     <div class="tab" data-tab="record">Record</div>
     <div class="tab" data-tab="stems">Stems</div>
     <div class="tab" data-tab="hpss">HPSS</div>
+    <div class="tab" data-tab="lab-repet">lab-REPET</div>
+    <div class="tab" data-tab="lab-nmf">lab-NMF</div>
     <div class="tab" data-tab="lab">Lab</div>
+    <div class="tab" data-tab="effects">Effects</div>
     <div class="tab" data-tab="metrics-info">Metrics Info</div>
 </div>
 
@@ -857,6 +1389,16 @@ body {
         <p>Rate-of-change of loudness (dRMS/dt). Red = getting louder, blue = getting quieter. Our most validated finding: a build and its climax can have identical RMS, but the climax brightens 58x faster.</p>
         <p class="verdict">Now on the Analysis panel. The signal that distinguishes builds from drops.</p>
 
+        <h2>lab-NMF Tab</h2>
+        <p><strong>Online Supervised NMF</strong>: pre-trained spectral dictionaries (10 components per source from 8 demucs-separated tracks) decompose each audio frame into drums/bass/vocals/other activations. 0.07ms/frame &mdash; ESP32-feasible.</p>
+        <p>Top panel: per-source activation curves (normalized). Lower panels: Wiener-masked spectrograms per source. No stem audio toggle (NMF produces energy estimates, not separated audio).</p>
+        <p class="verdict">The most promising approach for real-time LED source attribution on ESP32. Dictionary: 64 mel bins &times; 40 components = 10KB.</p>
+
+        <h2>lab-REPET Tab</h2>
+        <p><strong>REPET</strong> (REPeating Pattern Extraction Technique) separates audio into repeating (background) and non-repeating (foreground) layers by detecting cyclic patterns in the spectrogram. No ML &mdash; just autocorrelation + median filtering + soft masking. ESP32-feasible.</p>
+        <p>Panels: beat spectrum (with detected period), soft mask, and spectrograms of each separated layer. Use 1/2 keys to solo/mute layers.</p>
+        <p class="verdict">Based on Rafii &amp; Pardo 2012. Tests whether pattern repetition alone can usefully decompose music for LED mapping.</p>
+
         <h2>Lab Tab</h2>
         <p>Four experimental features are visualized in the <strong>Lab</strong> tab: spectral flatness, chromagram, spectral contrast, and zero crossing rate. Use the Lab tab to evaluate whether these are useful indicators for LED mapping.</p>
     </div>
@@ -872,6 +1414,7 @@ body {
         <div class="record-elapsed" id="recordElapsed">0:00.0</div>
         <div class="record-status" id="recordStatus">Click to record from BlackHole</div>
     </div>
+    <div class="effects-panel" id="effectsPanel"></div>
 </div>
 
 <div class="progress-bar">
@@ -1353,7 +1896,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => {
         if (tab.classList.contains('disabled')) return;
         const prev = currentTab;
-        if ((prev === 'stems' || prev === 'hpss') && tab.dataset.tab !== prev) cleanupStemAudio();
+        if ((prev === 'stems' || prev === 'hpss' || prev === 'lab-repet' || prev === 'lab-nmf') && tab.dataset.tab !== prev) cleanupStemAudio();
         currentTab = tab.dataset.tab;
         updateTabUI();
         saveHashState();
@@ -1370,10 +1913,13 @@ async function loadPanel() {
 
     const recordPanel = document.getElementById('recordPanel');
 
+    const effectsPanel = document.getElementById('effectsPanel');
+
     if (currentTab === 'metrics-info') {
         imgContainer.style.display = 'none';
         infoPanel.style.display = 'block';
         recordPanel.style.display = 'none';
+        effectsPanel.style.display = 'none';
         cursorLine.style.display = 'none';
         document.getElementById('stemStatus').style.display = 'none';
         document.getElementById('controlsHint').innerHTML =
@@ -1384,15 +1930,29 @@ async function loadPanel() {
         imgContainer.style.display = 'none';
         infoPanel.style.display = 'none';
         recordPanel.style.display = 'flex';
+        effectsPanel.style.display = 'none';
         cursorLine.style.display = 'none';
         document.getElementById('stemStatus').style.display = 'none';
         document.getElementById('controlsHint').innerHTML =
             'Record audio from BlackHole loopback';
         return;
     }
+    if (currentTab === 'effects') {
+        imgContainer.style.display = 'none';
+        infoPanel.style.display = 'none';
+        recordPanel.style.display = 'none';
+        effectsPanel.style.display = 'flex';
+        cursorLine.style.display = 'none';
+        document.getElementById('stemStatus').style.display = 'none';
+        document.getElementById('controlsHint').innerHTML =
+            'Browse, start/stop, rate, and reorder audio-reactive LED effects';
+        loadEffects();
+        return;
+    }
     imgContainer.style.display = 'inline-block';
     infoPanel.style.display = 'none';
     recordPanel.style.display = 'none';
+    effectsPanel.style.display = 'none';
 
     if (!currentFile) return;
 
@@ -1406,6 +1966,14 @@ async function loadPanel() {
     }
     if (currentTab === 'lab') {
         await loadLab();
+        return;
+    }
+    if (currentTab === 'lab-repet') {
+        await loadLabRepet();
+        return;
+    }
+    if (currentTab === 'lab-nmf') {
+        await loadLabNMF();
         return;
     }
 
@@ -1559,6 +2127,61 @@ async function loadLab() {
     }
 }
 
+async function loadLabNMF() {
+    if (!currentFile) return;
+    showOverlay('Running NMF decomposition...');
+    document.getElementById('stemStatus').style.display = 'none';
+
+    try {
+        const resp = await fetch('/api/lab-nmf/' + encodeURIComponent(currentFile));
+        if (!resp.ok) { showOverlay('NMF render failed'); return; }
+
+        pixelMapping = {
+            xLeft: parseFloat(resp.headers.get('X-Left-Px')),
+            xRight: parseFloat(resp.headers.get('X-Right-Px')),
+            pngWidth: parseFloat(resp.headers.get('X-Png-Width')),
+            duration: parseFloat(resp.headers.get('X-Duration')),
+        };
+
+        const blob = await resp.blob();
+        panelImg.src = URL.createObjectURL(blob);
+        hideOverlay();
+        cursorLine.style.display = 'block';
+        const stemName = currentFile.split('/').pop().replace('.wav', '');
+        setupStemAudio(['drums', 'bass', 'vocals', 'other'],
+                       '/audio/separated/nmf/' + stemName + '/');
+    } catch (e) {
+        showOverlay('Error: ' + e.message);
+    }
+}
+
+async function loadLabRepet() {
+    if (!currentFile) return;
+    showOverlay('Computing REPET separation...');
+
+    try {
+        const resp = await fetch('/api/lab-repet/' + encodeURIComponent(currentFile));
+        if (!resp.ok) { showOverlay('REPET render failed'); return; }
+
+        pixelMapping = {
+            xLeft: parseFloat(resp.headers.get('X-Left-Px')),
+            xRight: parseFloat(resp.headers.get('X-Right-Px')),
+            pngWidth: parseFloat(resp.headers.get('X-Png-Width')),
+            duration: parseFloat(resp.headers.get('X-Duration')),
+        };
+
+        const blob = await resp.blob();
+        panelImg.src = URL.createObjectURL(blob);
+        hideOverlay();
+        cursorLine.style.display = 'block';
+        const stemName = currentFile.split('/').pop().replace('.wav', '');
+        setupStemAudio(['repeating', 'non-repeating'],
+                       '/audio/separated/repet/' + stemName + '/');
+    } catch (e) {
+        showOverlay('Error: ' + e.message);
+    }
+}
+
 // ── Overlay ──────────────────────────────────────────────────────
 
 function showOverlay(text) {
@@ -1654,6 +2277,14 @@ function togglePlay() {
 
 playBtn.addEventListener('click', togglePlay);
 
+document.getElementById('replayBtn').addEventListener('click', () => {
+    audio.currentTime = 0;
+    if (hasStemAudio()) stemSeek();
+    audio.play();
+    if (hasStemAudio()) stemPlay();
+    playBtn.innerHTML = '&#9646;&#9646;';
+});
+
 audio.addEventListener('ended', () => {
     playBtn.innerHTML = '&#9654;';
     if (hasStemAudio()) stemPause();
@@ -1726,6 +2357,173 @@ function readHashState() {
     };
 }
 
+// ── Effects ──────────────────────────────────────────────────────
+
+let effectsList = [];
+let effectsRunning = null;  // name of running effect or null
+let effectsPollTimer = null;
+
+async function loadEffects() {
+    const panel = document.getElementById('effectsPanel');
+    panel.innerHTML = '<span style="color:#888;">Loading effects...</span>';
+
+    try {
+        const resp = await fetch('/api/effects');
+        if (!resp.ok) { panel.innerHTML = '<span style="color:#e94560;">Failed to load effects</span>'; return; }
+        const data = await resp.json();
+        effectsList = data.effects || [];
+        effectsRunning = data.running;
+        renderEffectsCards();
+        startEffectsPoll();
+    } catch (e) {
+        panel.innerHTML = '<span style="color:#e94560;">Error: ' + e.message + '</span>';
+    }
+}
+
+function renderEffectsCards() {
+    const panel = document.getElementById('effectsPanel');
+    if (effectsList.length === 0) {
+        panel.innerHTML = '<span style="color:#888;">No effects found. Check runner.py --list</span>';
+        return;
+    }
+    panel.innerHTML = '';
+    effectsList.forEach((eff, idx) => {
+        const card = document.createElement('div');
+        card.className = 'effect-card' + (eff.name === effectsRunning ? ' running' : '');
+        card.draggable = true;
+        card.dataset.name = eff.name;
+        card.dataset.idx = idx;
+
+        // Drag handle
+        const drag = document.createElement('span');
+        drag.className = 'effect-drag';
+        drag.textContent = '\u2261';
+        card.appendChild(drag);
+
+        // Name
+        const nameEl = document.createElement('span');
+        nameEl.className = 'effect-name';
+        nameEl.textContent = eff.name;
+        if (eff.name === effectsRunning) {
+            const dot = document.createElement('span');
+            dot.className = 'running-dot';
+            nameEl.appendChild(dot);
+        }
+        card.appendChild(nameEl);
+
+        // Stars
+        const stars = document.createElement('span');
+        stars.className = 'effect-stars';
+        for (let s = 1; s <= 5; s++) {
+            const star = document.createElement('button');
+            star.className = 'effect-star' + (s <= (eff.rating || 0) ? ' filled' : '');
+            star.title = s + ' star' + (s > 1 ? 's' : '');
+            star.addEventListener('click', (e) => { e.stopPropagation(); rateEffect(eff.name, s); });
+            stars.appendChild(star);
+        }
+        card.appendChild(stars);
+
+        // Start/Stop button
+        const btn = document.createElement('button');
+        btn.className = 'effect-toggle' + (eff.name === effectsRunning ? ' stop' : '');
+        btn.textContent = eff.name === effectsRunning ? 'Stop' : 'Start';
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (eff.name === effectsRunning) stopEffect();
+            else startEffect(eff.name);
+        });
+        card.appendChild(btn);
+
+        // Drag events
+        card.addEventListener('dragstart', (e) => {
+            card.classList.add('dragging');
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', idx.toString());
+        });
+        card.addEventListener('dragend', () => card.classList.remove('dragging'));
+        card.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            card.classList.add('drag-over');
+        });
+        card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
+        card.addEventListener('drop', (e) => {
+            e.preventDefault();
+            card.classList.remove('drag-over');
+            const fromIdx = parseInt(e.dataTransfer.getData('text/plain'));
+            const toIdx = idx;
+            if (fromIdx !== toIdx) {
+                const moved = effectsList.splice(fromIdx, 1)[0];
+                effectsList.splice(toIdx, 0, moved);
+                renderEffectsCards();
+                reorderEffects(effectsList.map(ef => ef.name));
+            }
+        });
+
+        panel.appendChild(card);
+    });
+}
+
+async function startEffect(name) {
+    try {
+        await fetch('/api/effects/start/' + encodeURIComponent(name), { method: 'POST' });
+        effectsRunning = name;
+        renderEffectsCards();
+    } catch (e) { console.error('startEffect:', e); }
+}
+
+async function stopEffect() {
+    try {
+        await fetch('/api/effects/stop', { method: 'POST' });
+        effectsRunning = null;
+        renderEffectsCards();
+    } catch (e) { console.error('stopEffect:', e); }
+}
+
+async function rateEffect(name, rating) {
+    try {
+        await fetch('/api/effects/rate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, rating })
+        });
+        const eff = effectsList.find(e => e.name === name);
+        if (eff) eff.rating = rating;
+        renderEffectsCards();
+    } catch (e) { console.error('rateEffect:', e); }
+}
+
+async function reorderEffects(order) {
+    try {
+        await fetch('/api/effects/reorder', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ order })
+        });
+    } catch (e) { console.error('reorderEffects:', e); }
+}
+
+function startEffectsPoll() {
+    stopEffectsPoll();
+    effectsPollTimer = setInterval(async () => {
+        if (currentTab !== 'effects') { stopEffectsPoll(); return; }
+        try {
+            const resp = await fetch('/api/effects');
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const newRunning = data.running;
+            if (newRunning !== effectsRunning) {
+                effectsRunning = newRunning;
+                renderEffectsCards();
+            }
+        } catch (e) {}
+    }, 2000);
+}
+
+function stopEffectsPoll() {
+    if (effectsPollTimer) { clearInterval(effectsPollTimer); effectsPollTimer = null; }
+}
+
 // ── Init ─────────────────────────────────────────────────────────
 
 loadFileList();
@@ -1751,11 +2549,77 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._handle_record_start()
         elif path == '/api/record/stop':
             self._handle_record_stop()
+        elif path.startswith('/api/effects/start/'):
+            name = unquote(path[len('/api/effects/start/'):])
+            self._handle_effect_start(name)
+        elif path == '/api/effects/stop':
+            self._handle_effect_stop()
+        elif path == '/api/effects/rate':
+            self._handle_effect_rate()
+        elif path == '/api/effects/reorder':
+            self._handle_effect_reorder()
         elif path.startswith('/api/annotations/'):
             rel_path = path[len('/api/annotations/'):]
             self._save_annotation(rel_path)
         else:
             self.send_error(404)
+
+    def _handle_effect_start(self, name):
+        _start_effect(name)
+        self._json_response({'ok': True})
+
+    def _handle_effect_stop(self):
+        _stop_effect()
+        self._json_response({'ok': True})
+
+    def _handle_effect_rate(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        name = body.get('name', '')
+        rating = body.get('rating', 0)
+        if not name or not isinstance(rating, int) or rating < 0 or rating > 5:
+            self.send_error(400, 'Invalid name or rating')
+            return
+        prefs = _load_effect_prefs()
+        if name not in prefs:
+            prefs[name] = {}
+        prefs[name]['rating'] = rating
+        _save_effect_prefs(prefs)
+        self._json_response({'ok': True})
+
+    def _handle_effect_reorder(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        order = body.get('order', [])
+        if not isinstance(order, list):
+            self.send_error(400, 'Invalid order')
+            return
+        prefs = _load_effect_prefs()
+        for i, name in enumerate(order):
+            if name not in prefs:
+                prefs[name] = {}
+            prefs[name]['order'] = i
+        _save_effect_prefs(prefs)
+        self._json_response({'ok': True})
+
+    def _read_json_body(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError:
+            self.send_error(400, 'Invalid JSON')
+            return None
+
+    def _json_response(self, data, status=200):
+        payload = json.dumps(data).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
     def _handle_record_start(self):
         result = start_recording()
@@ -1870,9 +2734,20 @@ class ViewerHandler(BaseHTTPRequestHandler):
         elif path.startswith('/api/hpss/'):
             rel_path = path[len('/api/hpss/'):]
             self._serve_hpss(rel_path)
+        elif path.startswith('/api/lab-nmf/'):
+            rel_path = path[len('/api/lab-nmf/'):]
+            self._serve_lab_nmf(rel_path)
+        elif path.startswith('/api/lab-repet/'):
+            rel_path = path[len('/api/lab-repet/'):]
+            self._serve_lab_repet(rel_path)
         elif path.startswith('/api/lab/'):
             rel_path = path[len('/api/lab/'):]
             self._serve_lab(rel_path)
+        elif path == '/api/effects':
+            self._json_response({
+                'effects': _get_effects_list(),
+                'running': _get_running_effect_name(),
+            })
         elif path == '/api/record/level':
             data = json.dumps(get_recording_level()).encode('utf-8')
             self.send_response(200)
@@ -2016,6 +2891,56 @@ class ViewerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(png_bytes)
 
+    def _serve_lab_nmf(self, rel_path):
+        filepath = _resolve_audio_path(rel_path)
+        if filepath is None:
+            self.send_error(404)
+            return
+
+        try:
+            png_bytes, headers = render_lab_nmf(filepath)
+        except Exception as e:
+            print(f"[lab-nmf] Error: {e}")
+            import traceback
+            traceback.print_exc()
+            self.send_error(500, str(e))
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/png')
+        self.send_header('Content-Length', str(len(png_bytes)))
+        self.send_header('Cache-Control', 'max-age=3600')
+        exposed = ', '.join(headers.keys())
+        self.send_header('Access-Control-Expose-Headers', exposed)
+        for k, v in headers.items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(png_bytes)
+
+    def _serve_lab_repet(self, rel_path):
+        filepath = _resolve_audio_path(rel_path)
+        if filepath is None:
+            self.send_error(404)
+            return
+
+        try:
+            png_bytes, headers = render_lab_repet(filepath)
+        except Exception as e:
+            print(f"[lab-repet] Error: {e}")
+            self.send_error(500, str(e))
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/png')
+        self.send_header('Content-Length', str(len(png_bytes)))
+        self.send_header('Cache-Control', 'max-age=3600')
+        exposed = ', '.join(headers.keys())
+        self.send_header('Access-Control-Expose-Headers', exposed)
+        for k, v in headers.items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(png_bytes)
+
     def _serve_lab(self, rel_path):
         filepath = _resolve_audio_path(rel_path)
         if filepath is None:
@@ -2122,6 +3047,7 @@ def run_server(port=0):
     try:
         server.serve_forever()
     except KeyboardInterrupt:
+        _stop_effect()
         print("\nServer stopped.")
         server.server_close()
 

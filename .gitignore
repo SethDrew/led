@@ -28,6 +28,9 @@ audio-reactive/effects/effect_prefs.json
 # Generated analysis plots (regenerable from scripts)
 audio-reactive/research/analysis/scripts/*.png
 
+# Audio: segment wav files (too large for git, keep locally)
+audio-reactive/research/audio-segments/*.wav
+
 # Audio: separated stems are regenerable (demucs/hpss), never commit
 audio-reactive/research/audio-segments/separated/
 

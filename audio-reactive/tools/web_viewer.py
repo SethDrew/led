@@ -447,11 +447,11 @@ def render_lab_repet(filepath):
     import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
 
-    # Add simple-stems to path for import
-    simple_stems_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                     '..', 'research', 'simple-stems')
-    if simple_stems_dir not in sys.path:
-        sys.path.insert(0, simple_stems_dir)
+    # Add separation dir to path for import
+    separation_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   '..', 'research', 'separation')
+    if separation_dir not in sys.path:
+        sys.path.insert(0, separation_dir)
     from repet import repet
 
     stem_name = Path(filepath).stem
@@ -649,16 +649,16 @@ def render_lab_nmf(filepath):
     import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
 
-    simple_stems_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                     '..', 'research', 'simple-stems')
-    if simple_stems_dir not in sys.path:
-        sys.path.insert(0, simple_stems_dir)
+    separation_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   '..', 'research', 'separation')
+    if separation_dir not in sys.path:
+        sys.path.insert(0, separation_dir)
     from nmf_separation import OnlineNMF
 
-    dict_path = os.path.join(simple_stems_dir, 'dictionaries.npz')
+    dict_path = os.path.join(separation_dir, 'dictionaries.npz')
     if not os.path.exists(dict_path):
         raise FileNotFoundError(
-            "NMF dictionaries not found. Run: cd research/simple-stems && python train_nmf.py")
+            "NMF dictionaries not found. Run: cd research/separation && python train_nmf.py")
 
     print(f"[lab-nmf] Processing {Path(filepath).name}...")
     nmf = OnlineNMF.from_file(dict_path)
@@ -1107,6 +1107,19 @@ body {
 .tab:hover { color: #ccc; }
 .tab.active { color: #e94560; border-bottom-color: #e94560; }
 .tab.disabled { color: #444; cursor: default; pointer-events: none; }
+.tab-dropdown { position: relative; }
+.tab-dropdown-menu {
+    display: none; position: absolute; top: 100%; left: 0; z-index: 100;
+    background: #1a1a2e; border: 1px solid #333; border-top: none;
+    min-width: 160px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+.tab-dropdown.open .tab-dropdown-menu { display: block; }
+.tab-dropdown-item {
+    padding: 8px 20px; cursor: pointer; font-size: 13px; color: #888;
+    transition: all 0.15s;
+}
+.tab-dropdown-item:hover { color: #ccc; background: #16213e; }
+.tab-dropdown-item.active { color: #e94560; }
 .viewer {
     flex: 1; display: flex; justify-content: center; align-items: flex-start;
     overflow: auto; padding: 12px; position: relative;
@@ -1186,12 +1199,12 @@ body {
     display: inline-block; padding: 1px 8px; border-radius: 3px; font-size: 11px;
     font-weight: 600; margin-left: 8px; vertical-align: middle;
 }
-.info-panel .tag.essential { background: #1b5e20; color: #a5d6a7; }
-.info-panel .tag.standard { background: #0d47a1; color: #90caf9; }
-.info-panel .tag.expendable { background: #4e342e; color: #bcaaa4; }
+.info-panel .tag.core { background: #1b5e20; color: #a5d6a7; }
+.info-panel .tag.common { background: #0d47a1; color: #90caf9; }
+.info-panel .tag.deprecated { background: #4e342e; color: #bcaaa4; }
 .info-panel .tag.custom { background: #4a148c; color: #ce93d8; }
 .info-panel .tag.gap { background: #b71c1c; color: #ef9a9a; }
-.info-panel .tag.exploratory { background: #0d47a1; color: #64b5f6; }
+.info-panel .tag.experimental { background: #0d47a1; color: #64b5f6; }
 .info-panel .missing-table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
 .info-panel .missing-table th { text-align: left; color: #e94560; border-bottom: 1px solid #333; padding: 6px 8px; }
 .info-panel .missing-table td { padding: 6px 8px; border-bottom: 1px solid #222; vertical-align: top; }
@@ -1316,16 +1329,21 @@ body {
 </div>
 
 <div class="tabs">
+    <div class="tab" data-tab="record">Record</div>
     <div class="tab active" data-tab="analysis">Analysis</div>
     <div class="tab" data-tab="annotations" id="annTab">Annotations</div>
-    <div class="tab" data-tab="record">Record</div>
-    <div class="tab" data-tab="stems">Stems</div>
-    <div class="tab" data-tab="hpss">HPSS</div>
-    <div class="tab" data-tab="lab-repet">lab-REPET</div>
-    <div class="tab" data-tab="lab-nmf">lab-NMF</div>
-    <div class="tab" data-tab="lab">Lab</div>
+    <div class="tab" data-tab="stems">Stems (Demucs)</div>
+    <div class="tab" data-tab="hpss">Stems (HPSS)</div>
+    <div class="tab-dropdown">
+        <div class="tab" id="labDropdownToggle">Lab &#9662;</div>
+        <div class="tab-dropdown-menu" id="labDropdownMenu">
+            <div class="tab-dropdown-item" data-tab="lab-repet">REPET</div>
+            <div class="tab-dropdown-item" data-tab="lab-nmf">NMF</div>
+            <div class="tab-dropdown-item" data-tab="lab">Feature Sandbox</div>
+        </div>
+    </div>
     <div class="tab" data-tab="effects">Effects</div>
-    <div class="tab" data-tab="metrics-info">Metrics Info</div>
+    <div class="tab" data-tab="reference">Reference</div>
 </div>
 
 <div class="annotation-bar" id="annotationBar">
@@ -1342,22 +1360,22 @@ body {
         <canvas id="tapCanvas"></canvas>
     </div>
     <div class="info-panel" id="infoPanel">
-        <h2>First Class &mdash; Always Visible</h2>
+        <h2>Core Analysis</h2>
         <p style="color:#888;margin-bottom:16px;">These panels are always rendered. They represent the core audio properties that directly drive LED mapping and musical understanding.</p>
 
-        <h3>Waveform + RMS overlay <span class="tag essential">Essential</span></h3>
+        <h3>Waveform + RMS overlay <span class="tag core">Core</span></h3>
         <p>Raw audio samples (white) with optional RMS energy overlay (yellow, toggle with <kbd style="background:#333;padding:1px 6px;border-radius:3px;font-family:monospace;color:#FFD740;">E</kbd>). RMS is the root-mean-square of the waveform in each frame &mdash; smoothed loudness over time, scaled to match waveform amplitude.</p>
         <p class="origin">Origin: Waveform display dates to oscilloscopes in the 1940s. RMS as a power measure dates to 19th-century electrical engineering; standard in audio since VU meters in the 1930s. Every DAW has both.</p>
         <p>Waveform shows transient attacks, silence, macro structure. RMS reveals energy trends the raw waveform hides &mdash; our research found that derivatives of RMS matter more than absolute values (climax brightens 58x faster than build, despite identical static RMS).</p>
         <p class="verdict">Non-negotiable. RMS overlay hidden by default to reduce visual clutter &mdash; enable when analyzing energy trajectories.</p>
 
-        <h3>Mel Spectrogram <span class="tag essential">Essential</span></h3>
+        <h3>Mel Spectrogram <span class="tag core">Core</span></h3>
         <p>Short-time Fourier Transform (STFT) converted to mel scale and displayed as a heatmap. Time on x-axis, frequency on y-axis (low=bottom, high=top), color=loudness.</p>
         <p class="origin">Origin: The mel scale comes from Stevens, Volkmann &amp; Newman (1937) &mdash; psychoacoustic research showing humans perceive pitch logarithmically (200Hz&rarr;400Hz <em>sounds</em> the same as 400Hz&rarr;800Hz). The spectrogram (STFT) dates to Gabor (1946). Mel spectrograms became standard input for audio ML in the 1980s.</p>
         <p>You can <em>see</em> bass hits (bright blobs at bottom), vocals (middle bands), hi-hats (top). Harmonic content = horizontal lines. Percussive content = vertical lines &mdash; this is why HPSS works (median filtering by orientation).</p>
         <p class="verdict">The single most informative audio visualization. Industry standard.</p>
 
-        <h3>Band Energy <span class="tag standard">Standard</span></h3>
+        <h3>Band Energy <span class="tag common">Common</span></h3>
         <p>The mel spectrogram collapsed into 5 bands &mdash; Sub-bass (20&ndash;80Hz), Bass (80&ndash;250Hz), Mids (250&ndash;2kHz), High-mids (2&ndash;6kHz), Treble (6&ndash;8kHz) &mdash; each plotted as a line over time.</p>
         <p class="origin">Origin: Multi-band meters from mixing engineering. Band boundaries follow critical band theory (Fletcher, 1940s) and PA crossover points. &ldquo;Bass energy over time&rdquo; is the foundation of almost every audio-reactive LED system (WLED-SR&rsquo;s entire beat detection = threshold on the bass bin).</p>
         <p>Shows which frequency range dominates at each moment. A bass drop = Sub-bass/Bass spike. A cymbal crash = treble spike.</p>
@@ -1369,38 +1387,38 @@ body {
         <p>Note: tap annotations exhibit <strong>tactus ambiguity</strong> &mdash; listeners lock onto different metrical layers (kick, snare, off-beat) per song, so taps may be phase-shifted from the &ldquo;metric beat&rdquo; by 100&ndash;250ms (Martens 2011, London 2004). LEDs could exploit this: by flashing a specific layer, we may be able to <em>entrain</em> the audience&rsquo;s tactus rather than follow it.</p>
         <p class="verdict">Essential for research. Only shown when annotation data exists.</p>
 
-        <h2>Exploratory &mdash; Hidden by Default</h2>
+        <h2>Exploratory Features</h2>
         <p style="color:#888;margin-bottom:16px;">Real audio properties, hidden by default. Not directly useful as raw indicators for LED mapping, but promising as inputs for <em>derived</em> features &mdash; running averages, deviation from context, rate-of-change, etc.</p>
 
-        <h3>Onset Strength <span class="tag exploratory">Exploratory</span></h3>
+        <h3>Onset Strength <span class="tag experimental">Experimental</span></h3>
         <p>Spectral flux &mdash; how much the spectrum <em>changes</em> between adjacent frames. Peaks = &ldquo;something new happened.&rdquo; Toggle with <kbd style="background:#333;padding:1px 6px;border-radius:3px;font-family:monospace;color:#00E5FF;">O</kbd>.</p>
         <p>Measures something real (spectral novelty) but raw values don&rsquo;t map to perceived beats &mdash; F1=0.435 on Harmonix, only 48.5% of user taps align. Potential as a derived feature (e.g. deviation from local average could signal section changes).</p>
 
-        <h3>Spectral Centroid <span class="tag exploratory">Exploratory</span></h3>
+        <h3>Spectral Centroid <span class="tag experimental">Experimental</span></h3>
         <p>The &ldquo;center of mass&rdquo; of the spectrum &mdash; the frequency where half the energy is above and half below. Often called &ldquo;brightness.&rdquo; Toggle with <kbd style="background:#333;padding:1px 6px;border-radius:3px;font-family:monospace;color:#B388FF;">C</kbd>.</p>
         <p>A standard timbral descriptor (Grey, 1977). Raw centroid isn&rsquo;t directly useful for LED mapping, but derived features (running average, deviation = &ldquo;airiness&rdquo;) could detect timbral shifts between sections.</p>
 
-        <h3>Librosa Beats <span class="tag expendable">Weak</span></h3>
+        <h3>Librosa Beats <span class="tag deprecated">Deprecated</span></h3>
         <p>Beat tracking via <code>librosa.beat.beat_track</code> &mdash; estimates tempo then snaps onset peaks to a grid. Toggle with <kbd style="background:#333;padding:1px 6px;border-radius:3px;font-family:monospace;color:#FF1744;">B</kbd>.</p>
         <p><strong>Why second class:</strong> Doubles tempo on syncopated rock (161.5 vs ~83 BPM on Tool&rsquo;s Opiate). Built on top of onset strength, which is itself a weak beat discriminator. Best F1=0.500 on dense rock.</p>
         <p class="verdict">Useful as a sanity check. Not reliable enough to drive LED effects directly.</p>
 
-        <h3>RMS Derivative <span class="tag essential">Essential</span></h3>
+        <h3>RMS Derivative <span class="tag core">Core</span></h3>
         <p>Rate-of-change of loudness (dRMS/dt). Red = getting louder, blue = getting quieter. Our most validated finding: a build and its climax can have identical RMS, but the climax brightens 58x faster.</p>
         <p class="verdict">Now on the Analysis panel. The signal that distinguishes builds from drops.</p>
 
-        <h2>lab-NMF Tab</h2>
+        <h2>Lab &rsaquo; NMF</h2>
         <p><strong>Online Supervised NMF</strong>: pre-trained spectral dictionaries (10 components per source from 8 demucs-separated tracks) decompose each audio frame into drums/bass/vocals/other activations. 0.07ms/frame &mdash; ESP32-feasible.</p>
         <p>Top panel: per-source activation curves (normalized). Lower panels: Wiener-masked spectrograms per source. No stem audio toggle (NMF produces energy estimates, not separated audio).</p>
         <p class="verdict">The most promising approach for real-time LED source attribution on ESP32. Dictionary: 64 mel bins &times; 40 components = 10KB.</p>
 
-        <h2>lab-REPET Tab</h2>
+        <h2>Lab &rsaquo; REPET</h2>
         <p><strong>REPET</strong> (REPeating Pattern Extraction Technique) separates audio into repeating (background) and non-repeating (foreground) layers by detecting cyclic patterns in the spectrogram. No ML &mdash; just autocorrelation + median filtering + soft masking. ESP32-feasible.</p>
         <p>Panels: beat spectrum (with detected period), soft mask, and spectrograms of each separated layer. Use 1/2 keys to solo/mute layers.</p>
         <p class="verdict">Based on Rafii &amp; Pardo 2012. Tests whether pattern repetition alone can usefully decompose music for LED mapping.</p>
 
-        <h2>Lab Tab</h2>
-        <p>Four experimental features are visualized in the <strong>Lab</strong> tab: spectral flatness, chromagram, spectral contrast, and zero crossing rate. Use the Lab tab to evaluate whether these are useful indicators for LED mapping.</p>
+        <h2>Lab &rsaquo; Feature Sandbox</h2>
+        <p>Four experimental features: spectral flatness, chromagram, spectral contrast, and zero crossing rate. Use this tab to evaluate whether these are useful indicators for LED mapping.</p>
     </div>
     <div class="record-panel" id="recordPanel">
         <canvas class="record-waveform" id="recordWaveform"></canvas>
@@ -1886,23 +1904,56 @@ filePicker.addEventListener('change', () => selectFile(filePicker.value));
 
 // ── Tabs ─────────────────────────────────────────────────────────
 
+const labTabs = new Set(['lab-repet', 'lab-nmf', 'lab']);
+const labDropdown = document.querySelector('.tab-dropdown');
+const labToggle = document.getElementById('labDropdownToggle');
+
 function updateTabUI() {
-    document.querySelectorAll('.tab').forEach(t => {
+    document.querySelectorAll('.tabs > .tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.tab === currentTab);
+    });
+    // Lab dropdown: highlight toggle if a lab sub-tab is active
+    labToggle.classList.toggle('active', labTabs.has(currentTab));
+    document.querySelectorAll('.tab-dropdown-item').forEach(t => {
         t.classList.toggle('active', t.dataset.tab === currentTab);
     });
 }
 
-document.querySelectorAll('.tab').forEach(tab => {
+function switchTab(tabId) {
+    const prev = currentTab;
+    if ((prev === 'stems' || prev === 'hpss' || prev === 'lab-repet' || prev === 'lab-nmf') && tabId !== prev) cleanupStemAudio();
+    currentTab = tabId;
+    updateTabUI();
+    saveHashState();
+    loadPanel();
+}
+
+// Regular tab clicks
+document.querySelectorAll('.tabs > .tab').forEach(tab => {
     tab.addEventListener('click', () => {
         if (tab.classList.contains('disabled')) return;
-        const prev = currentTab;
-        if ((prev === 'stems' || prev === 'hpss' || prev === 'lab-repet' || prev === 'lab-nmf') && tab.dataset.tab !== prev) cleanupStemAudio();
-        currentTab = tab.dataset.tab;
-        updateTabUI();
-        saveHashState();
-        loadPanel();
+        if (tab.id === 'labDropdownToggle') return; // handled separately
+        switchTab(tab.dataset.tab);
     });
 });
+
+// Lab dropdown toggle
+labToggle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    labDropdown.classList.toggle('open');
+});
+
+// Lab dropdown item clicks
+document.querySelectorAll('.tab-dropdown-item').forEach(item => {
+    item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        labDropdown.classList.remove('open');
+        switchTab(item.dataset.tab);
+    });
+});
+
+// Close dropdown on outside click
+document.addEventListener('click', () => labDropdown.classList.remove('open'));
 
 // ── Panel loading ────────────────────────────────────────────────
 
@@ -1915,7 +1966,7 @@ async function loadPanel() {
 
     const effectsPanel = document.getElementById('effectsPanel');
 
-    if (currentTab === 'metrics-info') {
+    if (currentTab === 'reference') {
         imgContainer.style.display = 'none';
         infoPanel.style.display = 'block';
         recordPanel.style.display = 'none';

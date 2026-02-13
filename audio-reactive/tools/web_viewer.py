@@ -2369,6 +2369,11 @@ async function loadPanel() {
     };
 
     if (COMPUTE_TABS[currentTab]) {
+        // Demucs requires too much RAM for the public server
+        if (currentTab === 'stems' && isPublicMode) {
+            showDemucsUnavailable();
+            return;
+        }
         const info = COMPUTE_TABS[currentTab];
         showComputePrompt(info.label, info.desc, info.fn);
         return;
@@ -2572,6 +2577,24 @@ function showComputePrompt(label, desc, fn) {
         overlay.innerHTML = '<span class="overlay-text"></span>';
         fn();
     };
+}
+
+function showDemucsUnavailable() {
+    let overlay = viewer.querySelector('.overlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.className = 'overlay';
+        viewer.appendChild(overlay);
+    }
+    overlay.innerHTML = `
+        <div class="compute-prompt">
+            <p style="font-size:1.1em;margin-bottom:12px;">Demucs source separation requires ~4GB RAM — more than the demo server provides.</p>
+            <p class="compute-desc">Run locally with Docker for full Demucs support:</p>
+            <pre style="background:#1a1a2e;padding:12px;border-radius:6px;margin:12px 0;font-size:0.85em;text-align:left;overflow-x:auto;">docker run -p 8080:8080 -v ~/Music:/app/audio-reactive/research/audio-segments ghcr.io/sethdrew/led-viewer</pre>
+            <a href="https://github.com/SethDrew/led#run-locally-with-docker" target="_blank"
+               style="color:#4fc3f7;text-decoration:underline;">Setup instructions on GitHub</a>
+        </div>`;
+    overlay.style.display = 'flex';
 }
 
 // ── Cursor sync ──────────────────────────────────────────────────

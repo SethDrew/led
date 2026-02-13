@@ -58,7 +58,7 @@ EFFECTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ef
 # ── Auth ─────────────────────────────────────────────────────────────
 
 PUBLIC_MODE = os.environ.get('LED_VIEWER_PUBLIC', '') == '1'
-_PASSCODE = os.environ.get('LED_VIEWER_PASSCODE', 'trustthepeople')
+_PASSCODE = os.environ.get('LED_VIEWER_PASSCODE', '')  # Set via env var on server
 _AUTH_SECRET = os.environ.get('LED_VIEWER_SECRET', secrets.token_hex(32))
 _AUTH_COOKIE = 'led_session'
 _PROTECTED_PREFIXES = ('/api/stems', '/api/hpss/', '/api/lab-nmf/', '/api/lab-repet/', '/api/lab/')

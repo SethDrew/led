@@ -59,8 +59,8 @@ docker run -p 8080:8080 -v ~/Music:/app/audio-reactive/research/audio-segments l
 | Tap annotations | Yes | Yes |
 | Upload / record audio | Yes | Yes |
 | Demucs (4-stem separation) | Yes | No (needs ~4GB RAM) |
-| HPSS (harmonic/percussive) | Yes | Yes (with passcode) |
-| Lab (NMF, REPET, features) | Yes | Yes (with passcode) |
+| HPSS (harmonic/percussive) | Yes | Yes |
+| Lab (NMF, REPET, features) | Yes | Yes |
 | Browser recording | Yes | Yes |
 | LED effects | Yes (with hardware) | No |
 

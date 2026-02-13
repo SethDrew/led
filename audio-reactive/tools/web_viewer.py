@@ -61,7 +61,7 @@ PUBLIC_MODE = os.environ.get('LED_VIEWER_PUBLIC', '') == '1'
 _PASSCODE = os.environ.get('LED_VIEWER_PASSCODE', '')  # Set via env var on server
 _AUTH_SECRET = os.environ.get('LED_VIEWER_SECRET', secrets.token_hex(32))
 _AUTH_COOKIE = 'led_session'
-_PROTECTED_PREFIXES = ('/api/stems', '/api/hpss/', '/api/lab-nmf/', '/api/lab-repet/', '/api/lab/')
+_PROTECTED_PREFIXES = ('/api/stems',)  # Only Demucs is gated (can't run on public server)
 
 def _make_auth_token():
     """Create a signed session token."""
@@ -1810,7 +1810,7 @@ async function clearPanelCache(filePath) {
 // ── Auth ────────────────────────────────────────────────────────
 let isAuthenticated = false;
 let isPublicMode = false;
-const LOCKED_TABS = new Set(['stems', 'hpss', 'lab-repet', 'lab-nmf', 'lab']);
+const LOCKED_TABS = new Set(['stems']);  // Only Demucs gated
 const HIDDEN_TABS_PUBLIC = new Set(['effects']);
 const HIDDEN_TABS_LOCAL = new Set(['welcome']);
 

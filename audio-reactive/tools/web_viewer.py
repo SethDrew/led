@@ -2544,12 +2544,15 @@ async function loadFileList(selectPath) {
     const serverNames = new Set(files.map(f => f.name));
     const localFiles = await cacheDB.getAll('audioFiles');
     for (const { key, value } of localFiles) {
+        // Skip annotation entries (stored as ann:<path>)
+        if (typeof key === 'string' && key.startsWith('ann:')) continue;
         if (serverPaths.has(key)) continue;  // Already on server with same path
         // Check if server has this file under a sanitized name (stale IndexedDB entry)
-        if (serverNames.has(value.name)) {
+        if (value.name && serverNames.has(value.name)) {
             cacheDB.delete(key, 'audioFiles');  // Clean up stale entry
             continue;
         }
+        if (!value.name) continue;  // Skip malformed entries
         files.push({
             name: value.name,
             path: key,
@@ -3981,6 +3984,23 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._json_response(annotations)
         else:
             self._json_response({})
+
+    def do_HEAD(self):
+        """Handle HEAD requests — used by ensureFileOnServer to check if a file exists."""
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        if path.startswith('/audio/'):
+            rel_path = path[len('/audio/'):]
+            filepath = _resolve_audio_path(rel_path)
+            if filepath and os.path.exists(filepath):
+                self.send_response(200)
+                self.send_header('Content-Type', 'audio/wav')
+                self.send_header('Content-Length', str(os.path.getsize(filepath)))
+                self.end_headers()
+            else:
+                self.send_error(404)
+        else:
+            self.send_error(404)
 
     def do_GET(self):
         parsed = urlparse(self.path)

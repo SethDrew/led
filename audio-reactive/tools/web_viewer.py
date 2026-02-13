@@ -306,10 +306,9 @@ def render_analysis(filepath, with_annotations=False, features=None):
     from viewer import SyncedVisualizer
 
     if with_annotations:
-        viz = SyncedVisualizer(filepath, show_beats=True)
+        viz = SyncedVisualizer(filepath)
     else:
-        viz = SyncedVisualizer(filepath, show_beats=True,
-                               annotations_path='/dev/null/none.yaml')
+        viz = SyncedVisualizer(filepath, annotations_path='/dev/null/none.yaml')
 
     # Apply feature visibility overrides
     if features is not None and hasattr(viz, 'feature_toggle'):
@@ -1548,65 +1547,83 @@ body {
         <canvas id="tapCanvas"></canvas>
     </div>
     <div class="info-panel" id="infoPanel">
-        <h2>Core Analysis</h2>
-        <p style="color:#888;margin-bottom:16px;">These panels are always rendered. They represent the core audio properties that directly drive LED mapping and musical understanding.</p>
+        <h2>Analysis</h2>
+        <p style="color:#888;margin-bottom:16px;">Four panels rendered for every audio file. Waveform and spectrogram are industry standard; band energy and RMS derivative are our additions for LED mapping.</p>
 
-        <h3>Waveform + RMS overlay <span class="tag core">Core</span></h3>
+        <h3>Waveform + RMS overlay</h3>
         <p>Raw audio samples (white) with optional RMS energy overlay (yellow, toggle with <kbd style="background:#333;padding:1px 6px;border-radius:3px;font-family:monospace;color:#FFD740;">E</kbd>). RMS is the root-mean-square of the waveform in each frame &mdash; smoothed loudness over time, scaled to match waveform amplitude.</p>
         <p class="origin">Origin: Waveform display dates to oscilloscopes in the 1940s. RMS as a power measure dates to 19th-century electrical engineering; standard in audio since VU meters in the 1930s. Every DAW has both.</p>
         <p>Waveform shows transient attacks, silence, macro structure. RMS reveals energy trends the raw waveform hides &mdash; our research found that derivatives of RMS matter more than absolute values (climax brightens 58x faster than build, despite identical static RMS).</p>
-        <p class="verdict">Non-negotiable. RMS overlay hidden by default to reduce visual clutter &mdash; enable when analyzing energy trajectories.</p>
 
-        <h3>Mel Spectrogram <span class="tag core">Core</span></h3>
+        <h3>Mel Spectrogram</h3>
         <p>Short-time Fourier Transform (STFT) converted to mel scale and displayed as a heatmap. Time on x-axis, frequency on y-axis (low=bottom, high=top), color=loudness.</p>
         <p class="origin">Origin: The mel scale comes from Stevens, Volkmann &amp; Newman (1937) &mdash; psychoacoustic research showing humans perceive pitch logarithmically (200Hz&rarr;400Hz <em>sounds</em> the same as 400Hz&rarr;800Hz). The spectrogram (STFT) dates to Gabor (1946). Mel spectrograms became standard input for audio ML in the 1980s.</p>
         <p>You can <em>see</em> bass hits (bright blobs at bottom), vocals (middle bands), hi-hats (top). Harmonic content = horizontal lines. Percussive content = vertical lines &mdash; this is why HPSS works (median filtering by orientation).</p>
-        <p class="verdict">The single most informative audio visualization. Industry standard.</p>
 
-        <h3>Band Energy <span class="tag common">Common</span></h3>
+        <h3>Band Energy</h3>
         <p>The mel spectrogram collapsed into 5 bands &mdash; Sub-bass (20&ndash;80Hz), Bass (80&ndash;250Hz), Mids (250&ndash;2kHz), High-mids (2&ndash;6kHz), Treble (6&ndash;8kHz) &mdash; each plotted as a line over time.</p>
         <p class="origin">Origin: Multi-band meters from mixing engineering. Band boundaries follow critical band theory (Fletcher, 1940s) and PA crossover points. &ldquo;Bass energy over time&rdquo; is the foundation of almost every audio-reactive LED system (WLED-SR&rsquo;s entire beat detection = threshold on the bass bin).</p>
         <p>Shows which frequency range dominates at each moment. A bass drop = Sub-bass/Bass spike. A cymbal crash = treble spike.</p>
-        <p class="verdict">Standard in audio-reactive systems. Useful reference for understanding frequency content.</p>
 
-        <h3>Annotations <span class="tag custom">Custom</span></h3>
-        <p>Your own tap data overlaid on the analysis &mdash; beat taps, section changes, airy moments, flourishes. Whatever layers exist in the <code>.annotations.yaml</code> file.</p>
+        <h3>RMS Derivative <span class="tag custom">Custom</span></h3>
+        <p>Rate-of-change of loudness (dRMS/dt). Red = getting louder, blue = getting quieter. Our most validated finding: a build and its climax can have identical RMS, but the climax brightens 58x faster.</p>
+        <p class="verdict">The signal that distinguishes builds from drops. Derivatives &gt; absolutes.</p>
+
+        <h2>Annotations</h2>
+        <p style="color:#888;margin-bottom:16px;">Same four analysis panels, plus a swim-lane overlay for your tap annotations.</p>
+
+        <h3>Tap Annotations <span class="tag custom">Custom</span></h3>
+        <p>Your own tap data overlaid on the analysis &mdash; beat taps, section changes, airy moments, flourishes. Whatever layers exist in the <code>.annotations.yaml</code> file. Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;font-family:monospace;">T</kbd> to tap while playing.</p>
         <p class="origin">Origin: Custom to this project. Our &ldquo;test set&rdquo; for evaluating audio features against human perception.</p>
         <p>Note: tap annotations exhibit <strong>tactus ambiguity</strong> &mdash; listeners lock onto different metrical layers (kick, snare, off-beat) per song, so taps may be phase-shifted from the &ldquo;metric beat&rdquo; by 100&ndash;250ms (Martens 2011, London 2004). LEDs could exploit this: by flashing a specific layer, we may be able to <em>entrain</em> the audience&rsquo;s tactus rather than follow it.</p>
-        <p class="verdict">Essential for research. Only shown when annotation data exists.</p>
 
-        <h2>Exploratory Features</h2>
-        <p style="color:#888;margin-bottom:16px;">Real audio properties, hidden by default. Not directly useful as raw indicators for LED mapping, but promising as inputs for <em>derived</em> features &mdash; running averages, deviation from context, rate-of-change, etc.</p>
+        <h2>Decomposition</h2>
+        <p style="color:#888;margin-bottom:16px;">Four source separation algorithms, from deep learning to dictionary-based. Each decomposes audio into constituent parts. Use number keys to solo/mute stems where audio playback is available.</p>
 
-        <h3>Onset Strength <span class="tag experimental">Experimental</span></h3>
-        <p>Spectral flux &mdash; how much the spectrum <em>changes</em> between adjacent frames. Peaks = &ldquo;something new happened.&rdquo; Toggle with <kbd style="background:#333;padding:1px 6px;border-radius:3px;font-family:monospace;color:#00E5FF;">O</kbd>.</p>
-        <p>Measures something real (spectral novelty) but raw values don&rsquo;t map to perceived beats &mdash; F1=0.435 on Harmonix, only 48.5% of user taps align. Potential as a derived feature (e.g. deviation from local average could signal section changes).</p>
+        <h3>Decomposition &rsaquo; Demucs <span class="tag common">Common</span></h3>
+        <p><strong>htdemucs</strong> (Meta, 2022): deep learning 4-stem separation into drums, bass, vocals, and other. Mel spectrograms per stem with individual audio playback. ~25 seconds CPU for a 50-second track.</p>
+        <p class="origin">Origin: Hybrid Transformer Demucs (D&eacute;fossez, 2023). State-of-the-art offline source separation. Too slow for real-time on ESP32, but useful as ground truth for evaluating lighter methods.</p>
+        <p class="verdict">Reference-quality separation. Use as ground truth, not for real-time.</p>
 
-        <h3>Spectral Centroid <span class="tag experimental">Experimental</span></h3>
-        <p>The &ldquo;center of mass&rdquo; of the spectrum &mdash; the frequency where half the energy is above and half below. Often called &ldquo;brightness.&rdquo; Toggle with <kbd style="background:#333;padding:1px 6px;border-radius:3px;font-family:monospace;color:#B388FF;">C</kbd>.</p>
-        <p>A standard timbral descriptor (Grey, 1977). Raw centroid isn&rsquo;t directly useful for LED mapping, but derived features (running average, deviation = &ldquo;airiness&rdquo;) could detect timbral shifts between sections.</p>
+        <h3>Decomposition &rsaquo; HPSS</h3>
+        <p><strong>Harmonic-Percussive Source Separation</strong>: median filtering on the spectrogram &mdash; horizontal streaks (harmonic) vs vertical streaks (percussive). No ML, frame-by-frame, trivially real-time on ESP32.</p>
+        <p class="origin">Origin: Fitzgerald (2010). Exploits the visual structure of spectrograms &mdash; harmonic content forms horizontal lines, percussive content forms vertical lines.</p>
+        <p>Two stems with audio playback. A coarse but fast decomposition: drums and transients land in percussive, sustained notes and chords in harmonic.</p>
+        <p class="verdict">The simplest viable real-time decomposition. Already ESP32-feasible.</p>
 
-        <h3>Librosa Beats <span class="tag deprecated">Deprecated</span></h3>
-        <p>Beat tracking via <code>librosa.beat.beat_track</code> &mdash; estimates tempo then snaps onset peaks to a grid. Toggle with <kbd style="background:#333;padding:1px 6px;border-radius:3px;font-family:monospace;color:#FF1744;">B</kbd>.</p>
-        <p><strong>Why second class:</strong> Doubles tempo on syncopated rock (161.5 vs ~83 BPM on Tool&rsquo;s Opiate). Built on top of onset strength, which is itself a weak beat discriminator. Best F1=0.500 on dense rock.</p>
-        <p class="verdict">Useful as a sanity check. Not reliable enough to drive LED effects directly.</p>
-
-        <h3>RMS Derivative <span class="tag core">Core</span></h3>
-        <p>Rate-of-change of loudness (dRMS/dt). Red = getting louder, blue = getting quieter. Our most validated finding: a build and its climax can have identical RMS, but the climax brightens 58x faster.</p>
-        <p class="verdict">Now on the Analysis panel. The signal that distinguishes builds from drops.</p>
-
-        <h2>Lab &rsaquo; NMF</h2>
-        <p><strong>Online Supervised NMF</strong>: pre-trained spectral dictionaries (10 components per source from 8 demucs-separated tracks) decompose each audio frame into drums/bass/vocals/other activations. 0.07ms/frame &mdash; ESP32-feasible.</p>
-        <p>Top panel: per-source activation curves (normalized). Lower panels: Wiener-masked spectrograms per source. No stem audio toggle (NMF produces energy estimates, not separated audio).</p>
-        <p class="verdict">The most promising approach for real-time LED source attribution on ESP32. Dictionary: 64 mel bins &times; 40 components = 10KB.</p>
-
-        <h2>Lab &rsaquo; REPET</h2>
+        <h3>Decomposition &rsaquo; REPET</h3>
         <p><strong>REPET</strong> (REPeating Pattern Extraction Technique) separates audio into repeating (background) and non-repeating (foreground) layers by detecting cyclic patterns in the spectrogram. No ML &mdash; just autocorrelation + median filtering + soft masking. ESP32-feasible.</p>
         <p>Panels: beat spectrum (with detected period), soft mask, and spectrograms of each separated layer. Use 1/2 keys to solo/mute layers.</p>
         <p class="verdict">Based on Rafii &amp; Pardo 2012. Tests whether pattern repetition alone can usefully decompose music for LED mapping.</p>
 
-        <h2>Lab &rsaquo; Feature Sandbox</h2>
-        <p>Four experimental features: spectral flatness, chromagram, spectral contrast, and zero crossing rate. Use this tab to evaluate whether these are useful indicators for LED mapping.</p>
+        <h3>Decomposition &rsaquo; NMF</h3>
+        <p><strong>Online Supervised NMF</strong>: pre-trained spectral dictionaries (10 components per source from 8 demucs-separated tracks) decompose each audio frame into drums/bass/vocals/other activations. 0.07ms/frame &mdash; ESP32-feasible.</p>
+        <p>Top panel: per-source activation curves (normalized). Lower panels: Wiener-masked spectrograms per source. No stem audio toggle (NMF produces energy estimates, not separated audio).</p>
+        <p class="verdict">The most promising approach for real-time LED source attribution on ESP32. Dictionary: 64 mel bins &times; 40 components = 10KB.</p>
+
+        <h2>Lab</h2>
+        <p style="color:#888;margin-bottom:16px;">Experimental features we&rsquo;re evaluating for LED mapping potential. Not yet proven useful on their own, but may become inputs for derived features.</p>
+
+        <h3>Spectral Flatness</h3>
+        <p>How noise-like vs tonal each frame is (0 = pure tone, 1 = white noise). Could indicate texture changes between sections.</p>
+
+        <h3>Chromagram</h3>
+        <p>Pitch class energy over time &mdash; which notes (C, C#, D, &hellip;) are present in each frame. Could detect key changes or harmonic shifts.</p>
+
+        <h3>Spectral Contrast</h3>
+        <p>Peak-to-valley difference per frequency band. High contrast = clear tonal content. Low contrast = noise or dense mix.</p>
+
+        <h3>Zero Crossing Rate</h3>
+        <p>How often the waveform crosses zero per frame. High ZCR = percussive or noisy. Low ZCR = smooth, tonal.</p>
+
+        <h3>Onset Strength <span class="tag experimental">Experimental</span></h3>
+        <p>Spectral flux &mdash; how much the spectrum <em>changes</em> between adjacent frames. Peaks = &ldquo;something new happened.&rdquo;</p>
+        <p>Measures something real (spectral novelty) but raw values don&rsquo;t map to perceived beats &mdash; F1=0.435 on Harmonix, only 48.5% of user taps align. Potential as a derived feature (e.g. deviation from local average could signal section changes).</p>
+        <p class="verdict">Currently only in the local matplotlib viewer, not yet ported to the web.</p>
+
+        <h3>Librosa Beats <span class="tag deprecated">Deprecated</span></h3>
+        <p>Beat tracking via <code>librosa.beat.beat_track</code> &mdash; estimates tempo then snaps onset peaks to a grid.</p>
+        <p>Doubles tempo on syncopated rock (161.5 vs ~83 BPM on Tool&rsquo;s Opiate). Built on top of onset strength, which is itself a weak beat discriminator. Best F1=0.500 on dense rock. Not reliable enough to drive LED effects.</p>
     </div>
     <div class="record-panel" id="recordPanel">
         <div id="recordLocal">
@@ -2541,14 +2558,26 @@ if (isPublicMode) populateAudioDevices();
 
 async function loadFileList(selectPath) {
     const resp = await fetch('/api/files');
-    files = await resp.json();
+    let serverFiles = await resp.json();
 
-    // Merge with locally cached files (IndexedDB) that may have been deleted from server
+    // Get user's local files from IndexedDB
+    const localFiles = await cacheDB.getAll('audioFiles');
+    const localPaths = new Set();
+    for (const { key } of localFiles) {
+        if (typeof key === 'string' && !key.startsWith('ann:')) localPaths.add(key);
+    }
+
+    // In public mode, only show server files the user has in their own IndexedDB
+    if (isPublicMode) {
+        serverFiles = serverFiles.filter(f => localPaths.has(f.path));
+    }
+
+    files = serverFiles;
+
+    // Merge with locally cached files that may have been deleted from server
     const serverPaths = new Set(files.map(f => f.path));
     const serverNames = new Set(files.map(f => f.name));
-    const localFiles = await cacheDB.getAll('audioFiles');
     for (const { key, value } of localFiles) {
-        // Skip annotation entries (stored as ann:<path>)
         if (typeof key === 'string' && key.startsWith('ann:')) continue;
         if (serverPaths.has(key)) continue;  // Already on server with same path
         // Check if server has this file under a sanitized name (stale IndexedDB entry)

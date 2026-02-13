@@ -131,12 +131,31 @@ def _discover_effects():
     return _effects_cache
 
 
+_EFFECT_RENAME_MAP = {
+    'absint_pred': 'absint_predict',
+    'absint_down': 'absint_downbeat',
+    'absint_reds': 'absint_red_palette',
+    'absint_sec': 'absint_sections',
+    'absint_band': 'absint_bands',
+    'longint_sec': 'longint_sections',
+    'three_voices': 'hpss_voices',
+}
+
 def _load_effect_prefs():
     """Load effect preferences (ratings, order) from JSON file."""
     if os.path.exists(EFFECT_PREFS_PATH):
         try:
             with open(EFFECT_PREFS_PATH) as f:
-                return json.load(f)
+                prefs = json.load(f)
+            # One-time migration for renamed effects
+            migrated = False
+            for old_name, new_name in _EFFECT_RENAME_MAP.items():
+                if old_name in prefs and new_name not in prefs:
+                    prefs[new_name] = prefs.pop(old_name)
+                    migrated = True
+            if migrated:
+                _save_effect_prefs(prefs)
+            return prefs
         except Exception:
             pass
     return {}
@@ -1483,6 +1502,17 @@ body {
 }
 .effect-toggle:hover { border-color: #e94560; }
 .effect-toggle.stop { background: #b71c1c; border-color: #e94560; }
+.effects-selector { display: flex; gap: 1px; margin-bottom: 12px; border: 1px solid #333;
+    border-radius: 6px; overflow: hidden; flex-shrink: 0; }
+.selector-col { min-width: 110px; max-height: 180px; overflow-y: auto; background: #0f1a2e;
+    border-right: 1px solid #333; }
+.selector-col:last-child { border-right: none; }
+.selector-item { display: flex; align-items: center; gap: 6px; padding: 3px 10px;
+    cursor: pointer; font-size: 13px; color: #aaa; transition: background 0.1s; }
+.selector-item:hover { background: #1a2a4e; }
+.selector-item.checked { color: #e0e0e0; }
+.selector-item input[type="checkbox"] { accent-color: #e94560; width: 13px; height: 13px; }
+.selector-count { color: #555; font-size: 11px; margin-left: auto; }
 </style>
 </head>
 <body>
@@ -1490,9 +1520,9 @@ body {
 <div class="header">
     <h1>Audio Explorer</h1>
     <select id="filePicker"></select>
-    <label class="upload-btn" title="Upload WAV file">
+    <label class="upload-btn" title="Upload audio file">
         &#8679; Upload
-        <input type="file" id="uploadInput" accept=".wav,audio/wav" style="display:none"
+        <input type="file" id="uploadInput" accept=".wav,.mp3,.mp4,.m4a,.flac,.ogg,.aac,.wma,.opus,.webm,audio/*" style="display:none"
             onchange="handleFileUpload(this.files)">
     </label>
     <button class="play-btn" id="playBtn" title="Play/Pause">&#9654;</button>
@@ -1670,7 +1700,7 @@ body {
             </details>
             <hr style="border-color:#333; margin:24px 0;">
             <h3 style="color:#ccc;">Your Files</h3>
-            <p style="color:#aaa; margin-bottom:12px;">Drag and drop a <code>.wav</code> file anywhere on the page, or use the <strong>Upload</strong> button. Files persist in your browser across sessions.</p>
+            <p style="color:#aaa; margin-bottom:12px;">Drag and drop an audio file anywhere on the page, or use the <strong>Upload</strong> button. Supports WAV, MP3, MP4, M4A, FLAC, OGG, and more. Non-WAV files are converted automatically.</p>
             <div id="fileManager" style="max-height:300px; overflow-y:auto;"></div>
         </div>
     </div>
@@ -1709,7 +1739,7 @@ body {
 <audio id="audio" preload="auto"></audio>
 
 <div class="drop-overlay" id="dropOverlay">
-    <span class="drop-overlay-text">Drop WAV file to upload</span>
+    <span class="drop-overlay-text">Drop audio file to upload</span>
 </div>
 <div class="upload-progress" id="uploadProgress">Uploading...</div>
 
@@ -3219,6 +3249,7 @@ function readHashState() {
 let effectsList = [];
 let effectsRunning = null;  // name of running effect or null
 let effectsPollTimer = null;
+let selectorState = [];  // array of Sets, one per segment depth
 
 async function loadEffects() {
     const panel = document.getElementById('effectsPanel');
@@ -3230,11 +3261,87 @@ async function loadEffects() {
         const data = await resp.json();
         effectsList = data.effects || [];
         effectsRunning = data.running;
+        if (selectorState.length === 0) {
+            const maxSegs = Math.max(...effectsList.map(e => e.name.split('_').length));
+            selectorState = Array.from({length: maxSegs}, () => new Set());
+        }
         renderEffectsCards();
         startEffectsPoll();
     } catch (e) {
         panel.innerHTML = '<span style="color:#e94560;">Error: ' + e.message + '</span>';
     }
+}
+
+function getFilteredEffects() {
+    return effectsList.filter(eff => {
+        const parts = eff.name.split('_');
+        for (let d = 0; d < selectorState.length; d++) {
+            if (selectorState[d].size > 0 && !selectorState[d].has(parts[d] || '')) return false;
+        }
+        return true;
+    });
+}
+
+function buildSelector(panel) {
+    const container = document.createElement('div');
+    container.className = 'effects-selector';
+
+    for (let depth = 0; depth < selectorState.length; depth++) {
+        // Only show column if depth 0 or previous column has selections
+        if (depth > 0 && selectorState[depth - 1].size === 0) break;
+
+        // Get effects matching all selections at prior depths
+        const matching = effectsList.filter(eff => {
+            const parts = eff.name.split('_');
+            for (let d = 0; d < depth; d++) {
+                if (selectorState[d].size > 0 && !selectorState[d].has(parts[d] || '')) return false;
+            }
+            return true;
+        });
+
+        // Collect unique values at this depth with counts
+        const valueCounts = {};
+        matching.forEach(eff => {
+            const seg = eff.name.split('_')[depth];
+            if (seg) valueCounts[seg] = (valueCounts[seg] || 0) + 1;
+        });
+
+        const values = Object.keys(valueCounts).sort();
+        if (values.length === 0) break;
+
+        const col = document.createElement('div');
+        col.className = 'selector-col';
+
+        values.forEach(val => {
+            const item = document.createElement('label');
+            const isChecked = selectorState[depth].has(val);
+            item.className = 'selector-item' + (isChecked ? ' checked' : '');
+
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = isChecked;
+            cb.addEventListener('change', () => {
+                if (cb.checked) selectorState[depth].add(val);
+                else selectorState[depth].delete(val);
+                // Clear deeper selections when a parent changes
+                for (let d = depth + 1; d < selectorState.length; d++) selectorState[d].clear();
+                renderEffectsCards();
+            });
+
+            const count = document.createElement('span');
+            count.className = 'selector-count';
+            count.textContent = valueCounts[val];
+
+            item.appendChild(cb);
+            item.appendChild(document.createTextNode(val));
+            item.appendChild(count);
+            col.appendChild(item);
+        });
+
+        container.appendChild(col);
+    }
+
+    panel.appendChild(container);
 }
 
 function renderEffectsCards() {
@@ -3244,12 +3351,13 @@ function renderEffectsCards() {
         return;
     }
     panel.innerHTML = '';
-    effectsList.forEach((eff, idx) => {
+    buildSelector(panel);
+    const filtered = getFilteredEffects();
+    filtered.forEach((eff, idx) => {
         const card = document.createElement('div');
         card.className = 'effect-card' + (eff.name === effectsRunning ? ' running' : '');
         card.draggable = true;
         card.dataset.name = eff.name;
-        card.dataset.idx = idx;
 
         // Drag handle
         const drag = document.createElement('span');
@@ -3291,11 +3399,11 @@ function renderEffectsCards() {
         });
         card.appendChild(btn);
 
-        // Drag events
+        // Drag events (use name not index, since list may be filtered)
         card.addEventListener('dragstart', (e) => {
             card.classList.add('dragging');
             e.dataTransfer.effectAllowed = 'move';
-            e.dataTransfer.setData('text/plain', idx.toString());
+            e.dataTransfer.setData('text/plain', eff.name);
         });
         card.addEventListener('dragend', () => card.classList.remove('dragging'));
         card.addEventListener('dragover', (e) => {
@@ -3307,13 +3415,17 @@ function renderEffectsCards() {
         card.addEventListener('drop', (e) => {
             e.preventDefault();
             card.classList.remove('drag-over');
-            const fromIdx = parseInt(e.dataTransfer.getData('text/plain'));
-            const toIdx = idx;
-            if (fromIdx !== toIdx) {
-                const moved = effectsList.splice(fromIdx, 1)[0];
-                effectsList.splice(toIdx, 0, moved);
-                renderEffectsCards();
-                reorderEffects(effectsList.map(ef => ef.name));
+            const fromName = e.dataTransfer.getData('text/plain');
+            const toName = eff.name;
+            if (fromName !== toName) {
+                const fromIdx = effectsList.findIndex(ef => ef.name === fromName);
+                const toIdx = effectsList.findIndex(ef => ef.name === toName);
+                if (fromIdx >= 0 && toIdx >= 0) {
+                    const moved = effectsList.splice(fromIdx, 1)[0];
+                    effectsList.splice(toIdx, 0, moved);
+                    renderEffectsCards();
+                    reorderEffects(effectsList.map(ef => ef.name));
+                }
             }
         });
 
@@ -3443,13 +3555,16 @@ async function ensureFileOnServer(path) {
 async function handleFileUpload(files) {
     if (!files || files.length === 0) return;
     const file = files[0];
-    if (!file.name.toLowerCase().endsWith('.wav')) {
-        alert('Only WAV files are supported');
+    const allowedExts = ['.wav', '.mp3', '.mp4', '.m4a', '.flac', '.ogg', '.aac', '.wma', '.opus', '.webm'];
+    const ext = file.name.toLowerCase().slice(file.name.lastIndexOf('.'));
+    if (!allowedExts.includes(ext)) {
+        alert('Unsupported format. Accepted: ' + allowedExts.join(', '));
         return;
     }
 
     const progress = document.getElementById('uploadProgress');
-    progress.textContent = `Uploading ${file.name}...`;
+    const isWav = ext === '.wav';
+    progress.textContent = isWav ? `Uploading ${file.name}...` : `Uploading & converting ${file.name}...`;
     progress.style.display = 'block';
 
     try {
@@ -3792,7 +3907,9 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return None
 
     def _handle_upload(self):
-        """Handle WAV file upload. Saves to uploads/ subdirectory."""
+        """Handle audio file upload. Converts non-WAV formats to WAV via ffmpeg."""
+        ALLOWED_EXTENSIONS = {'.wav', '.mp3', '.mp4', '.m4a', '.flac', '.ogg', '.aac', '.wma', '.opus', '.webm'}
+
         content_length = int(self.headers.get('Content-Length', 0))
         max_size = 100 * 1024 * 1024  # 100MB
         if content_length > max_size:
@@ -3823,30 +3940,62 @@ class ViewerHandler(BaseHTTPRequestHandler):
         # Sanitize filename
         filename = os.path.basename(file_item.filename)
         filename = re.sub(r'[^\w\s\-.]', '_', filename)
-        if not filename.lower().endswith('.wav'):
-            self._json_response({'ok': False, 'error': 'Only WAV files are supported'}, status=400)
+        _, ext = os.path.splitext(filename.lower())
+        if ext not in ALLOWED_EXTENSIONS:
+            self._json_response({'ok': False, 'error': f'Unsupported format. Accepted: {", ".join(sorted(ALLOWED_EXTENSIONS))}'}, status=400)
             return
 
         # Save to uploads directory
         uploads_dir = os.path.join(SEGMENTS_DIR, 'uploads')
         os.makedirs(uploads_dir, exist_ok=True)
-        filepath = os.path.join(uploads_dir, filename)
 
-        # Avoid overwriting — add suffix if exists
-        base, ext = os.path.splitext(filename)
-        counter = 1
-        while os.path.exists(filepath):
-            filepath = os.path.join(uploads_dir, f"{base}_{counter}{ext}")
-            counter += 1
+        needs_conversion = ext != '.wav'
+        if needs_conversion:
+            # Save original to temp file, convert to WAV
+            import tempfile
+            import subprocess
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix=ext)
+            try:
+                with os.fdopen(tmp_fd, 'wb') as f:
+                    f.write(file_item.file.read())
 
-        with open(filepath, 'wb') as f:
-            f.write(file_item.file.read())
+                wav_filename = os.path.splitext(filename)[0] + '.wav'
+                filepath = os.path.join(uploads_dir, wav_filename)
+
+                # Avoid overwriting
+                base_name = os.path.splitext(wav_filename)[0]
+                counter = 1
+                while os.path.exists(filepath):
+                    filepath = os.path.join(uploads_dir, f"{base_name}_{counter}.wav")
+                    counter += 1
+
+                result = subprocess.run(
+                    ['ffmpeg', '-i', tmp_path, '-ar', '44100', '-ac', '2', filepath, '-y'],
+                    capture_output=True, timeout=120)
+                if result.returncode != 0:
+                    self._json_response({'ok': False, 'error': 'Conversion failed: ' + result.stderr.decode(errors='replace')[-200:]}, status=400)
+                    return
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+        else:
+            filepath = os.path.join(uploads_dir, filename)
+
+            # Avoid overwriting
+            base, wav_ext = os.path.splitext(filename)
+            counter = 1
+            while os.path.exists(filepath):
+                filepath = os.path.join(uploads_dir, f"{base}_{counter}{wav_ext}")
+                counter += 1
+
+            with open(filepath, 'wb') as f:
+                f.write(file_item.file.read())
 
         # Validate it's actually a WAV file
         dur = _get_wav_duration(filepath)
         if dur == 0.0:
             os.remove(filepath)
-            self._json_response({'ok': False, 'error': 'Invalid WAV file'}, status=400)
+            self._json_response({'ok': False, 'error': 'Invalid or unreadable audio file'}, status=400)
             return
 
         # Clear file list cache so it gets re-scanned

@@ -93,7 +93,7 @@ def get_effect_registry():
     # Our custom effects
     try:
         from three_voices import ThreeVoicesEffect
-        effects['three_voices'] = ThreeVoicesEffect
+        effects['hpss_voices'] = ThreeVoicesEffect
     except ImportError:
         pass
 
@@ -117,7 +117,7 @@ def get_effect_registry():
 
     try:
         from absint_predictive import AbsIntPredictiveEffect
-        effects['absint_pred'] = AbsIntPredictiveEffect
+        effects['absint_predict'] = AbsIntPredictiveEffect
     except ImportError:
         pass
 
@@ -129,25 +129,25 @@ def get_effect_registry():
 
     try:
         from absint_reds import AbsIntRedsEffect
-        effects['absint_reds'] = AbsIntRedsEffect
+        effects['absint_red_palette'] = AbsIntRedsEffect
     except ImportError:
         pass
 
     try:
         from absint_downbeat import AbsIntDownbeatEffect
-        effects['absint_down'] = AbsIntDownbeatEffect
+        effects['absint_downbeat'] = AbsIntDownbeatEffect
     except ImportError:
         pass
 
     try:
         from absint_sections import AbsIntSectionsEffect
-        effects['absint_sec'] = AbsIntSectionsEffect
+        effects['absint_sections'] = AbsIntSectionsEffect
     except ImportError:
         pass
 
     try:
         from longint_sections import LongIntSectionsEffect
-        effects['longint_sec'] = LongIntSectionsEffect
+        effects['longint_sections'] = LongIntSectionsEffect
     except ImportError:
         pass
 
@@ -166,6 +166,12 @@ def get_effect_registry():
     try:
         from absint_snake import AbsIntSnakeEffect
         effects['absint_snake'] = AbsIntSnakeEffect
+    except ImportError:
+        pass
+
+    try:
+        from absint_band_pulse import AbsIntBandPulseEffect
+        effects['absint_bands'] = AbsIntBandPulseEffect
     except ImportError:
         pass
 

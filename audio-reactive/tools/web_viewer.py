@@ -258,11 +258,12 @@ def discover_files():
     if uploads_dir.exists():
         for wav in sorted(uploads_dir.glob('*.wav')):
             dur = _get_wav_duration(str(wav))
+            ann_path = wav.with_suffix('.annotations.yaml')
             files.append({
                 'name': wav.name,
                 'path': f'uploads/{wav.name}',
                 'duration': dur,
-                'has_annotations': False,
+                'has_annotations': ann_path.exists(),
                 'group': 'uploads',
             })
 
@@ -1519,16 +1520,16 @@ body {
     <div class="tab" data-tab="record">Record</div>
     <div class="tab active" data-tab="analysis">Analysis</div>
     <div class="tab" data-tab="annotations" id="annTab">Annotations</div>
-    <div class="tab" data-tab="stems">Stems (Demucs)</div>
-    <div class="tab" data-tab="hpss">Stems (HPSS)</div>
     <div class="tab-dropdown">
-        <div class="tab" id="labDropdownToggle">Lab &#9662;</div>
-        <div class="tab-dropdown-menu" id="labDropdownMenu">
+        <div class="tab" id="decompDropdownToggle">Decomposition &#9662;</div>
+        <div class="tab-dropdown-menu" id="decompDropdownMenu">
+            <div class="tab-dropdown-item" data-tab="stems">Demucs</div>
+            <div class="tab-dropdown-item" data-tab="hpss">HPSS</div>
             <div class="tab-dropdown-item" data-tab="lab-repet">REPET</div>
             <div class="tab-dropdown-item" data-tab="lab-nmf">NMF</div>
-            <div class="tab-dropdown-item" data-tab="lab">Feature Sandbox</div>
         </div>
     </div>
+    <div class="tab" data-tab="lab">Lab</div>
     <div class="tab" data-tab="effects">Effects</div>
     <div class="tab" data-tab="reference">Reference</div>
 </div>
@@ -1779,7 +1780,10 @@ async function cachedFetchPNG(url) {
         };
     }
 
-    const resp = await fetch(url);
+    // Bypass browser HTTP cache — our IndexedDB layer is the cache;
+    // without this, Cache-Control: max-age=3600 serves stale PNGs
+    // after annotations are saved and IndexedDB is cleared.
+    const resp = await fetch(url, { cache: 'no-cache' });
     if (!resp.ok) return null;
 
     const pm = {
@@ -2656,16 +2660,16 @@ filePicker.addEventListener('change', () => {
 
 // ── Tabs ─────────────────────────────────────────────────────────
 
-const labTabs = new Set(['lab-repet', 'lab-nmf', 'lab']);
-const labDropdown = document.querySelector('.tab-dropdown');
-const labToggle = document.getElementById('labDropdownToggle');
+const decompTabs = new Set(['stems', 'hpss', 'lab-repet', 'lab-nmf']);
+const decompDropdown = document.querySelector('.tab-dropdown');
+const decompToggle = document.getElementById('decompDropdownToggle');
 
 function updateTabUI() {
     document.querySelectorAll('.tabs > .tab').forEach(t => {
         t.classList.toggle('active', t.dataset.tab === currentTab);
     });
-    // Lab dropdown: highlight toggle if a lab sub-tab is active
-    labToggle.classList.toggle('active', labTabs.has(currentTab));
+    // Decomposition dropdown: highlight toggle if a decomp sub-tab is active
+    decompToggle.classList.toggle('active', decompTabs.has(currentTab));
     document.querySelectorAll('.tab-dropdown-item').forEach(t => {
         t.classList.toggle('active', t.dataset.tab === currentTab);
     });
@@ -2686,28 +2690,28 @@ function switchTab(tabId) {
 document.querySelectorAll('.tabs > .tab').forEach(tab => {
     tab.addEventListener('click', () => {
         if (tab.classList.contains('disabled')) return;
-        if (tab.id === 'labDropdownToggle') return; // handled separately
+        if (tab.id === 'decompDropdownToggle') return; // handled separately
         switchTab(tab.dataset.tab);
     });
 });
 
-// Lab dropdown toggle
-labToggle.addEventListener('click', (e) => {
+// Decomposition dropdown toggle
+decompToggle.addEventListener('click', (e) => {
     e.stopPropagation();
-    labDropdown.classList.toggle('open');
+    decompDropdown.classList.toggle('open');
 });
 
-// Lab dropdown item clicks
+// Decomposition dropdown item clicks
 document.querySelectorAll('.tab-dropdown-item').forEach(item => {
     item.addEventListener('click', (e) => {
         e.stopPropagation();
-        labDropdown.classList.remove('open');
+        decompDropdown.classList.remove('open');
         switchTab(item.dataset.tab);
     });
 });
 
 // Close dropdown on outside click
-document.addEventListener('click', () => labDropdown.classList.remove('open'));
+document.addEventListener('click', () => decompDropdown.classList.remove('open'));
 
 // ── Panel loading ────────────────────────────────────────────────
 

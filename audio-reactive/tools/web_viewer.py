@@ -2557,9 +2557,6 @@ if (isPublicMode) populateAudioDevices();
 // ── File picker ──────────────────────────────────────────────────
 
 async function loadFileList(selectPath) {
-    const resp = await fetch('/api/files');
-    let serverFiles = await resp.json();
-
     // Get user's local files from IndexedDB
     const localFiles = await cacheDB.getAll('audioFiles');
     const localPaths = new Set();
@@ -2567,12 +2564,13 @@ async function loadFileList(selectPath) {
         if (typeof key === 'string' && !key.startsWith('ann:')) localPaths.add(key);
     }
 
-    // In public mode, only show server files the user has in their own IndexedDB
-    if (isPublicMode) {
-        serverFiles = serverFiles.filter(f => localPaths.has(f.path));
+    // In public mode, tell the server which files we own so it only returns those
+    let url = '/api/files';
+    if (isPublicMode && localPaths.size > 0) {
+        url += '?paths=' + encodeURIComponent([...localPaths].join(','));
     }
-
-    files = serverFiles;
+    const resp = await fetch(url);
+    files = await resp.json();
 
     // Merge with locally cached files that may have been deleted from server
     const serverPaths = new Set(files.map(f => f.path));
@@ -4051,7 +4049,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
         elif path == '/api/auth/status':
             self._json_response({'authenticated': _is_authenticated(self), 'public': PUBLIC_MODE})
         elif path == '/api/files':
-            self._serve_file_list()
+            self._serve_file_list(query)
         elif path.startswith('/api/render/'):
             rel_path = path[len('/api/render/'):]
             with_ann = 'annotations' in query
@@ -4126,8 +4124,15 @@ class ViewerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _serve_file_list(self):
-        data = json.dumps(discover_files()).encode('utf-8')
+    def _serve_file_list(self, query=None):
+        files = discover_files()
+        # In public mode, only return files the client claims to own
+        if PUBLIC_MODE:
+            allowed = set()
+            for p in (query or {}).get('paths', []):
+                allowed.update(p.split(','))
+            files = [f for f in files if f['path'] in allowed]
+        data = json.dumps(files).encode('utf-8')
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(data)))

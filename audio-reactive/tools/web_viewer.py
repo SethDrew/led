@@ -1278,6 +1278,37 @@ body {
 .compute-btn:hover { background: #c73652; }
 .compute-desc { color: #888; font-size: 13px; margin-top: 10px; }
 
+/* Welcome modal */
+.welcome-overlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(10, 10, 25, 0.92); display: flex; align-items: center;
+    justify-content: center; z-index: 1000;
+}
+.welcome-card {
+    background: #16213e; border: 1px solid #333; border-radius: 12px;
+    max-width: 560px; width: 90%; padding: 36px 40px; color: #ccc;
+    line-height: 1.7; font-size: 14px;
+}
+.welcome-card h1 { color: #e94560; font-size: 22px; margin: 0 0 6px 0; }
+.welcome-card .subtitle { color: #888; font-size: 13px; margin-bottom: 20px; }
+.welcome-card p { margin: 12px 0; }
+.welcome-card .storage-note {
+    background: #1a1a2e; border: 1px solid #333; border-radius: 6px;
+    padding: 12px 14px; font-size: 12px; color: #aaa; margin: 16px 0;
+}
+.welcome-card .storage-note code { color: #e94560; }
+.welcome-card .enter-btn {
+    display: inline-block; background: #e94560; color: #fff; border: none;
+    padding: 10px 32px; border-radius: 6px; font-size: 15px; cursor: pointer;
+    margin-top: 16px; transition: background 0.15s;
+}
+.welcome-card .enter-btn:hover { background: #c73652; }
+.welcome-card .contact-link {
+    color: #4fc3f7; text-decoration: none; cursor: pointer;
+    border-bottom: 1px dotted #4fc3f7;
+}
+.welcome-card .contact-link:hover { color: #81d4fa; border-color: #81d4fa; }
+
 /* Upload button */
 .upload-btn {
     background: none; border: 1px solid #555; color: #888; border-radius: 4px;
@@ -1463,6 +1494,21 @@ body {
 </style>
 </head>
 <body>
+
+<div class="welcome-overlay" id="welcomeModal" style="display:none;">
+    <div class="welcome-card">
+        <h1>Audio Explorer</h1>
+        <div class="subtitle">by Seth Drew</div>
+        <p>This is an interactive audio visualization and research tool. Upload or record any audio you like and explore it through spectrograms, source separation, beat annotations, and more.</p>
+        <p>No accounts required. Your audio files are stored locally in your browser's storage for copyright reasons &mdash; nothing is kept on the server long-term.</p>
+        <div class="storage-note">
+            Your files live in your browser's <strong>IndexedDB</strong> storage. You can manage them from the <strong>Record</strong> tab, or clear everything via<br>
+            <code>Settings &rarr; Privacy &rarr; Site Data &rarr; audio.sethdrew.com</code>
+        </div>
+        <p>Questions, ideas, or improvements? <a class="contact-link" id="contactLink">Get in touch</a>.</p>
+        <button class="enter-btn" onclick="dismissWelcome()">Explore</button>
+    </div>
+</div>
 
 <div class="header">
     <h1>Audio Explorer</h1>
@@ -1782,6 +1828,7 @@ async function checkAuth() {
         isAuthenticated = data.authenticated;
         isPublicMode = data.public;
         updateAuthUI();
+        if (isPublicMode) showWelcome();
     } catch {}
 }
 
@@ -3517,6 +3564,26 @@ document.addEventListener('drop', e => {
     dropOverlay.classList.remove('active');
     handleFileUpload(e.dataTransfer.files);
 });
+
+// ── Welcome modal ────────────────────────────────────────────────
+
+function showWelcome() {
+    if (localStorage.getItem('welcomed')) return;
+    const modal = document.getElementById('welcomeModal');
+    if (modal) modal.style.display = 'flex';
+    // Obfuscated email — assembled at runtime so scrapers can't find it
+    const link = document.getElementById('contactLink');
+    if (link) {
+        const u = 'seth'; const d = 'sethdrew'; const t = 'com';
+        link.href = 'mai' + 'lto:' + u + '@' + d + '.' + t;
+    }
+}
+
+function dismissWelcome() {
+    const modal = document.getElementById('welcomeModal');
+    if (modal) modal.style.display = 'none';
+    localStorage.setItem('welcomed', '1');
+}
 
 // ── Init ─────────────────────────────────────────────────────────
 

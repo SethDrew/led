@@ -1,6 +1,8 @@
 # Audio Explorer
 
-A browser-based audio analysis tool for visualizing and decomposing music. Built for understanding what makes music *feel* the way it does — not just volume, but builds, drops, airiness, groove.
+An interactive audio visualization and research tool. Upload or record any audio and explore it through spectrograms, source separation, beat annotations, and experimental decomposition algorithms.
+
+No accounts required. Your audio is stored locally in your browser for copyright reasons — nothing is kept on the server long-term.
 
 **Live demo:** [audio.sethdrew.com](https://audio.sethdrew.com)
 
@@ -10,7 +12,18 @@ A browser-based audio analysis tool for visualizing and decomposing music. Built
 - **Tap annotations** — record what you feel while listening, compare against algorithms
 - **Source separation** — Demucs (deep learning, 4-stem), HPSS (real-time, harmonic/percussive)
 - **Lab experiments** — NMF decomposition, REPET pattern extraction, spectral features
+- **Browser recording** — record system audio via BlackHole or microphone, no install needed
 - **Audio-reactive LED effects** — drive WS2812B LEDs from audio analysis (local only)
+
+## Your data
+
+All uploaded and recorded audio is cached in your browser's **IndexedDB** storage. You can manage your files from the **Record** tab in the app, or clear everything manually:
+
+- **Chrome/Edge:** Settings → Privacy → Site Data → `audio.sethdrew.com` → Remove
+- **Firefox:** Settings → Privacy → Manage Data → `audio.sethdrew.com` → Remove
+- **Safari:** Settings → Privacy → Manage Website Data → `audio.sethdrew.com` → Remove
+
+Analysis results (spectrograms, stems, etc.) are also cached locally so repeat visits are instant.
 
 ## Run locally with Docker
 
@@ -46,11 +59,11 @@ docker run -p 8080:8080 -v ~/Music:/app/audio-reactive/research/audio-segments l
 |---------|---------------|-------------|
 | Analysis + spectrogram | Yes | Yes |
 | Tap annotations | Yes | Yes |
-| Upload audio | Yes | Yes |
+| Upload / record audio | Yes | Yes |
 | Demucs (4-stem separation) | Yes | No (needs ~4GB RAM) |
 | HPSS (harmonic/percussive) | Yes | Yes (with passcode) |
 | Lab (NMF, REPET, features) | Yes | Yes (with passcode) |
-| Record system audio | Yes (with BlackHole) | No |
+| Browser recording | Yes | Yes |
 | LED effects | Yes (with hardware) | No |
 
 ## Run without Docker
@@ -71,11 +84,10 @@ python segment.py web
 To record what's playing on your computer, install [BlackHole](https://existential.audio/blackhole/) (free virtual audio driver):
 
 1. Install BlackHole 2ch
-2. Open **Audio MIDI Setup** (Spotlight search)
-3. Click **+** > **Create Multi-Output Device**
-4. Check both your speakers/headphones AND BlackHole 2ch
-5. Set the Multi-Output Device as system output
-6. Use the Record tab in the viewer
+2. Set BlackHole 2ch as your system sound output
+3. Use the Record tab in the viewer
+
+To hear the audio while recording, create a **Multi-Output Device** in Audio MIDI Setup that includes both your speakers and BlackHole, and set that as your output instead.
 
 ## Project structure
 
@@ -87,6 +99,10 @@ audio-reactive/
 firmware/         — Arduino/ESP32 LED controller firmware
 static-animations/ — non-audio-reactive LED effects
 ```
+
+## Contact
+
+Questions, ideas, or improvements — reach out to seth at sethdrew dot com.
 
 ## License
 

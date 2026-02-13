@@ -2469,17 +2469,22 @@ async function loadFileList(selectPath) {
 
     // Merge with locally cached files (IndexedDB) that may have been deleted from server
     const serverPaths = new Set(files.map(f => f.path));
+    const serverNames = new Set(files.map(f => f.name));
     const localFiles = await cacheDB.getAll('audioFiles');
     for (const { key, value } of localFiles) {
-        if (!serverPaths.has(key)) {
-            files.push({
-                name: value.name,
-                path: key,
-                duration: 0,
-                has_annotations: false,
-                group: 'your files',
-            });
+        if (serverPaths.has(key)) continue;  // Already on server with same path
+        // Check if server has this file under a sanitized name (stale IndexedDB entry)
+        if (serverNames.has(value.name)) {
+            cacheDB.delete(key, 'audioFiles');  // Clean up stale entry
+            continue;
         }
+        files.push({
+            name: value.name,
+            path: key,
+            duration: 0,
+            has_annotations: false,
+            group: 'your files',
+        });
     }
 
     // Group by group name
@@ -3308,14 +3313,6 @@ async function _renderFileManagerInto(container) {
         f.path.startsWith('uploads/') || f.group === 'your files' ||
         (!isPublicMode && f.group === 'user clips')
     );
-    // Also check IndexedDB for any cached files not on server
-    const localFiles = await cacheDB.getAll('audioFiles');
-    const allPaths = new Set(userFiles.map(f => f.path));
-    for (const { key, value } of localFiles) {
-        if (!allPaths.has(key)) {
-            userFiles.push({ name: value.name, path: key, duration: 0, group: 'your files' });
-        }
-    }
 
     if (userFiles.length === 0) {
         container.innerHTML = '<p style="color:#666; font-size:12px;">No uploaded files yet.</p>';
@@ -3323,17 +3320,59 @@ async function _renderFileManagerInto(container) {
     }
 
     container.innerHTML = '';
+
+    // Toolbar: select all + bulk delete
+    const toolbar = document.createElement('div');
+    toolbar.style.cssText = 'display:flex; align-items:center; gap:8px; margin-bottom:8px;';
+    toolbar.innerHTML = `
+        <label style="color:#888; font-size:12px; display:flex; align-items:center; gap:4px; cursor:pointer;">
+            <input type="checkbox" class="fm-select-all"> Select all
+        </label>
+        <button class="fm-bulk-delete" style="display:none; background:none; border:1px solid #e94560; color:#e94560; font-size:11px; padding:2px 10px; border-radius:3px; cursor:pointer; margin-left:auto;">Delete selected</button>`;
+    container.appendChild(toolbar);
+
+    const selectAllCb = toolbar.querySelector('.fm-select-all');
+    const bulkDeleteBtn = toolbar.querySelector('.fm-bulk-delete');
+
     for (const f of userFiles) {
         const item = document.createElement('div');
         item.className = 'file-item';
         const dur = f.duration ? formatTime(f.duration) : '?';
         item.innerHTML = `
+            <input type="checkbox" class="fm-cb" data-path="${f.path}" data-name="${f.name}">
             <span class="file-name" title="Click to select" data-path="${f.path}">${f.name}</span>
             <span class="file-dur">${dur}</span>
-            <button class="ren" data-path="${f.path}" data-name="${f.name}">rename</button>
-            <button class="del" data-path="${f.path}" data-name="${f.name}">delete</button>`;
+            <button class="ren" data-path="${f.path}" data-name="${f.name}">rename</button>`;
         container.appendChild(item);
     }
+
+    function updateBulkUI() {
+        const checked = container.querySelectorAll('.fm-cb:checked');
+        bulkDeleteBtn.style.display = checked.length > 0 ? 'inline-block' : 'none';
+        bulkDeleteBtn.textContent = 'Delete selected (' + checked.length + ')';
+        const allCbs = container.querySelectorAll('.fm-cb');
+        selectAllCb.checked = allCbs.length > 0 && checked.length === allCbs.length;
+        selectAllCb.indeterminate = checked.length > 0 && checked.length < allCbs.length;
+    }
+
+    selectAllCb.onchange = () => {
+        container.querySelectorAll('.fm-cb').forEach(cb => cb.checked = selectAllCb.checked);
+        updateBulkUI();
+    };
+
+    container.querySelectorAll('.fm-cb').forEach(cb => cb.onchange = updateBulkUI);
+
+    bulkDeleteBtn.onclick = async () => {
+        const checked = container.querySelectorAll('.fm-cb:checked');
+        const paths = Array.from(checked).map(cb => ({ path: cb.dataset.path, name: cb.dataset.name }));
+        if (paths.length === 0) return;
+        if (!confirm('Delete ' + paths.length + ' file(s)? This removes them from server and browser cache.')) return;
+        for (const { path } of paths) {
+            await _deleteFile(path);
+        }
+        await loadFileList();
+        renderFileManager();
+    };
 
     // Click handlers
     container.querySelectorAll('.file-name').forEach(el => {
@@ -3342,14 +3381,9 @@ async function _renderFileManagerInto(container) {
     container.querySelectorAll('.ren').forEach(el => {
         el.onclick = () => renameUserFile(el.dataset.path, el.dataset.name);
     });
-    container.querySelectorAll('.del').forEach(el => {
-        el.onclick = () => deleteUserFile(el.dataset.path, el.dataset.name);
-    });
 }
 
-async function deleteUserFile(path, name) {
-    if (!confirm('Delete "' + name + '"? This removes it from both server and your browser cache.')) return;
-
+async function _deleteFile(path) {
     // Delete from server
     try {
         await fetch('/api/files/delete', {
@@ -3358,22 +3392,21 @@ async function deleteUserFile(path, name) {
             body: JSON.stringify({ path })
         });
     } catch {}
-
     // Delete from IndexedDB
     await cacheDB.delete(path, 'audioFiles');
-
-    // Also clear any cached analysis panels for this file
+    // Clear cached analysis panels
     const panelKeys = await cacheDB.getAll('panels');
     for (const { key } of panelKeys) {
         if (typeof key === 'string' && key.includes(encodeURIComponent(path))) {
             await cacheDB.delete(key, 'panels');
         }
     }
+    if (currentFile === path) currentFile = null;
+}
 
-    // Refresh
-    if (currentFile === path) {
-        currentFile = null;
-    }
+async function deleteUserFile(path, name) {
+    if (!confirm('Delete "' + name + '"?')) return;
+    await _deleteFile(path);
     await loadFileList();
     renderFileManager();
 }

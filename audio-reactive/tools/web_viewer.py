@@ -1255,6 +1255,16 @@ body {
     font-size: 18px; color: #e94560; animation: pulse 1.5s ease-in-out infinite;
 }
 @keyframes pulse { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
+
+/* Compute prompt */
+.compute-prompt { text-align: center; }
+.compute-btn {
+    background: #e94560; color: #fff; border: none; padding: 12px 28px;
+    border-radius: 6px; font-size: 16px; cursor: pointer; transition: background 0.15s;
+}
+.compute-btn:hover { background: #c73652; }
+.compute-desc { color: #888; font-size: 13px; margin-top: 10px; }
+
 .play-btn {
     background: none; border: 1px solid #555; color: #e0e0e0; border-radius: 4px;
     padding: 4px 12px; cursor: pointer; font-size: 18px; line-height: 1;
@@ -2271,24 +2281,17 @@ async function loadPanel() {
 
     if (!currentFile) return;
 
-    if (currentTab === 'stems') {
-        await loadStems();
-        return;
-    }
-    if (currentTab === 'hpss') {
-        await loadHPSS();
-        return;
-    }
-    if (currentTab === 'lab') {
-        await loadLab();
-        return;
-    }
-    if (currentTab === 'lab-repet') {
-        await loadLabRepet();
-        return;
-    }
-    if (currentTab === 'lab-nmf') {
-        await loadLabNMF();
+    const COMPUTE_TABS = {
+        'stems': { label: 'Compute Stems (Demucs)', desc: 'Deep learning source separation — may take 30+ seconds', fn: loadStems },
+        'hpss': { label: 'Compute HPSS', desc: 'Harmonic-percussive separation', fn: loadHPSS },
+        'lab': { label: 'Compute Lab Features', desc: 'Spectral flatness, chromagram, contrast, ZCR', fn: loadLab },
+        'lab-repet': { label: 'Compute REPET', desc: 'Repeating pattern extraction', fn: loadLabRepet },
+        'lab-nmf': { label: 'Compute NMF', desc: 'Non-negative matrix factorization separation', fn: loadLabNMF },
+    };
+
+    if (COMPUTE_TABS[currentTab]) {
+        const info = COMPUTE_TABS[currentTab];
+        showComputePrompt(info.label, info.desc, info.fn);
         return;
     }
 
@@ -2471,6 +2474,25 @@ function showOverlay(text) {
 function hideOverlay() {
     const overlay = viewer.querySelector('.overlay');
     if (overlay) overlay.style.display = 'none';
+}
+
+function showComputePrompt(label, desc, fn) {
+    let overlay = viewer.querySelector('.overlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.className = 'overlay';
+        viewer.appendChild(overlay);
+    }
+    overlay.innerHTML = `
+        <div class="compute-prompt">
+            <button class="compute-btn" id="computeBtn">${label}</button>
+            <p class="compute-desc">${desc}</p>
+        </div>`;
+    overlay.style.display = 'flex';
+    document.getElementById('computeBtn').onclick = () => {
+        overlay.innerHTML = '<span class="overlay-text"></span>';
+        fn();
+    };
 }
 
 // ── Cursor sync ──────────────────────────────────────────────────

@@ -4126,12 +4126,13 @@ class ViewerHandler(BaseHTTPRequestHandler):
 
     def _serve_file_list(self, query=None):
         files = discover_files()
-        # In public mode, only return files the client claims to own
+        # In public mode, only return demo files + files the client claims to own
         if PUBLIC_MODE:
+            demo = {'cinematic_drums.wav', 'freq_sweep.wav'}
             allowed = set()
             for p in (query or {}).get('paths', []):
                 allowed.update(p.split(','))
-            files = [f for f in files if f['path'] in allowed]
+            files = [f for f in files if f['path'] in allowed or f['path'] in demo]
         data = json.dumps(files).encode('utf-8')
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')

@@ -2173,6 +2173,18 @@ async function saveAnnotation() {
 
     const sortedTaps = annotationTaps.slice().sort((a, b) => a - b);
 
+    if (isPublicMode) {
+        // Public mode: save to IndexedDB only (per-user, no server YAML)
+        const annKey = 'ann:' + currentFile;
+        const existing = await cacheDB.get(annKey, 'audioFiles') || {};
+        existing[layer] = sortedTaps;
+        await cacheDB.put(annKey, existing, 'audioFiles');
+        annotationTaps = [];
+        updateAnnotationUI();
+        drawTapMarkers();
+        return;
+    }
+
     const resp = await fetch('/api/annotations/' + encodeURIComponent(currentFile), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -2658,16 +2670,18 @@ async function selectFile(path) {
         await ensureFileOnServer(path);
     }
 
-    // Sync annotations: fetch from server, cache in IndexedDB
-    try {
-        const annResp = await fetch('/api/annotations/' + encodeURIComponent(path));
-        if (annResp.ok) {
-            const annData = await annResp.json();
-            if (Object.keys(annData).length > 0) {
-                await cacheDB.put('ann:' + path, annData, 'audioFiles');
+    // Sync annotations: fetch from server, cache in IndexedDB (local mode only)
+    if (!isPublicMode) {
+        try {
+            const annResp = await fetch('/api/annotations/' + encodeURIComponent(path));
+            if (annResp.ok) {
+                const annData = await annResp.json();
+                if (Object.keys(annData).length > 0) {
+                    await cacheDB.put('ann:' + path, annData, 'audioFiles');
+                }
             }
-        }
-    } catch {}
+        } catch {}
+    }
 
     // Set audio source
     audio.src = '/audio/' + encodeURIComponent(path);
@@ -3403,16 +3417,18 @@ async function ensureFileOnServer(path) {
     try {
         const data = await uploadWavBlob(blob, cached.name);
         if (data.ok) {
-            // Restore annotations from IndexedDB if any
-            const annKey = 'ann:' + path;
-            const annotations = await cacheDB.get(annKey, 'audioFiles');
-            if (annotations && Object.keys(annotations).length > 0) {
-                for (const [layer, taps] of Object.entries(annotations)) {
-                    await fetch('/api/annotations/' + encodeURIComponent(data.path), {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ layer, taps })
-                    });
+            // Restore annotations from IndexedDB if any (local mode only)
+            if (!isPublicMode) {
+                const annKey = 'ann:' + path;
+                const annotations = await cacheDB.get(annKey, 'audioFiles');
+                if (annotations && Object.keys(annotations).length > 0) {
+                    for (const [layer, taps] of Object.entries(annotations)) {
+                        await fetch('/api/annotations/' + encodeURIComponent(data.path), {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({ layer, taps })
+                        });
+                    }
                 }
             }
             progress.textContent = 'Ready';
@@ -3691,8 +3707,9 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
 
-        # Block record/effects in public mode
-        if PUBLIC_MODE and (path.startswith('/api/record') or path.startswith('/api/effects')):
+        # Block record/effects/annotation-save in public mode
+        if PUBLIC_MODE and (path.startswith('/api/record') or path.startswith('/api/effects')
+                           or path.startswith('/api/annotations/')):
             self._json_response({'error': 'Not available'}, status=403)
             return
 

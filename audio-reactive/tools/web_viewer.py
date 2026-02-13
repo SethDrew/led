@@ -3082,18 +3082,18 @@ class ViewerHandler(BaseHTTPRequestHandler):
 
 # ── Server entry point ───────────────────────────────────────────────
 
-def run_server(port=0):
+def run_server(port=0, host='127.0.0.1', no_browser=False):
     """Start the web viewer server and open the browser."""
-    import webbrowser
-
-    server = HTTPServer(('127.0.0.1', port), ViewerHandler)
+    server = HTTPServer((host, port), ViewerHandler)
     actual_port = server.server_address[1]
 
-    url = f'http://127.0.0.1:{actual_port}'
+    url = f'http://{host}:{actual_port}'
     print(f"Audio Explorer running at {url}")
     print("Press Ctrl+C to stop\n")
 
-    webbrowser.open(url)
+    if not no_browser:
+        import webbrowser
+        webbrowser.open(f'http://127.0.0.1:{actual_port}')
 
     try:
         server.serve_forever()

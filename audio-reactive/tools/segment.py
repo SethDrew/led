@@ -465,7 +465,7 @@ def cmd_hpss(args):
 def cmd_web(args):
     """Launch browser-based audio explorer."""
     from web_viewer import run_server
-    run_server(port=args.port)
+    run_server(port=args.port, host=args.host, no_browser=args.no_browser)
 
 
 # ── main ──────────────────────────────────────────────────────────────
@@ -494,6 +494,8 @@ Examples:
     # web
     p_web = subparsers.add_parser('web', help='Browser-based audio explorer')
     p_web.add_argument('--port', type=int, default=0, help='Server port (0=auto)')
+    p_web.add_argument('--host', default='127.0.0.1', help='Bind address (default localhost)')
+    p_web.add_argument('--no-browser', action='store_true', help='Skip opening browser')
 
     # list
     subparsers.add_parser('list', help='Show segment catalog')

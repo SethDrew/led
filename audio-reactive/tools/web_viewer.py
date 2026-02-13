@@ -15,13 +15,18 @@ Architecture:
     audio.currentTime is sample-accurate — zero drift by definition.
 """
 
+import hashlib
+import hmac
+import http.cookies
 import io
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import threading
+import time
 import wave
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -49,6 +54,50 @@ _effect_process = None   # subprocess.Popen or None
 _effects_cache = None    # list of effect names from runner.py --list
 
 EFFECTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'effects')
+
+# ── Auth ─────────────────────────────────────────────────────────────
+
+PUBLIC_MODE = os.environ.get('LED_VIEWER_PUBLIC', '') == '1'
+_PASSCODE = os.environ.get('LED_VIEWER_PASSCODE', 'trustthepeople')
+_AUTH_SECRET = os.environ.get('LED_VIEWER_SECRET', secrets.token_hex(32))
+_AUTH_COOKIE = 'led_session'
+_PROTECTED_PREFIXES = ('/api/stems', '/api/hpss/', '/api/lab-nmf/', '/api/lab-repet/', '/api/lab/')
+
+def _make_auth_token():
+    """Create a signed session token."""
+    payload = f"authorized:{int(time.time())}"
+    sig = hmac.new(_AUTH_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}:{sig}"
+
+def _verify_auth_token(token):
+    """Verify a signed session token. Returns True if valid."""
+    if not token:
+        return False
+    parts = token.rsplit(':', 1)
+    if len(parts) != 2:
+        return False
+    payload, sig = parts
+    expected = hmac.new(_AUTH_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(sig, expected)
+
+def _is_authenticated(handler):
+    """Check if the request has a valid auth cookie."""
+    if not PUBLIC_MODE:
+        return True  # Local mode: everything unlocked
+    cookie_header = handler.headers.get('Cookie', '')
+    cookies = http.cookies.SimpleCookie()
+    try:
+        cookies.load(cookie_header)
+    except http.cookies.CookieError:
+        return False
+    morsel = cookies.get(_AUTH_COOKIE)
+    if morsel is None:
+        return False
+    return _verify_auth_token(morsel.value)
+
+def _is_protected(path):
+    """Check if a path requires authentication."""
+    return any(path.startswith(p) for p in _PROTECTED_PREFIXES)
 EFFECT_PREFS_PATH = os.path.join(EFFECTS_DIR, 'effect_prefs.json')
 
 
@@ -1120,6 +1169,43 @@ body {
 }
 .tab-dropdown-item:hover { color: #ccc; background: #16213e; }
 .tab-dropdown-item.active { color: #e94560; }
+
+/* Auth UI */
+.auth-area { position: relative; margin-left: 12px; }
+.auth-link {
+    color: #888; cursor: pointer; font-size: 13px; padding: 4px 10px;
+    border: 1px solid #444; border-radius: 4px; transition: all 0.15s;
+    user-select: none;
+}
+.auth-link:hover { color: #ccc; border-color: #666; }
+.auth-link.authed { color: #4caf50; border-color: #4caf50; }
+.auth-box {
+    display: none; position: absolute; top: calc(100% + 8px); right: 0;
+    background: #1a1a2e; border: 1px solid #444; border-radius: 6px;
+    padding: 12px; z-index: 200; min-width: 200px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+.auth-box.open { display: flex; gap: 8px; flex-direction: column; }
+.auth-box input {
+    background: #0f0f23; border: 1px solid #444; color: #eee; padding: 6px 10px;
+    border-radius: 4px; font-size: 13px; outline: none;
+}
+.auth-box input:focus { border-color: #e94560; }
+.auth-box button {
+    background: #e94560; color: #fff; border: none; padding: 6px 12px;
+    border-radius: 4px; cursor: pointer; font-size: 13px;
+}
+.auth-box button:hover { background: #c73652; }
+.auth-error { color: #ff6b6b; font-size: 12px; display: none; }
+
+/* Locked tabs */
+.tab.locked, .tab-dropdown-item.locked {
+    opacity: 0.35; cursor: not-allowed !important;
+}
+.tab.locked:hover, .tab-dropdown-item.locked:hover {
+    color: #888 !important; background: transparent !important;
+}
+
 .viewer {
     flex: 1; display: flex; justify-content: center; align-items: flex-start;
     overflow: auto; padding: 12px; position: relative;
@@ -1326,6 +1412,15 @@ body {
         <input type="range" id="volSlider" min="0" max="1" step="0.01" value="0.8"
             style="width:80px;accent-color:#e94560;cursor:pointer;">
     </span>
+    <div class="auth-area" id="authArea">
+        <span class="auth-link" id="authLink" onclick="toggleAuthBox()">Sign In</span>
+        <div class="auth-box" id="authBox">
+            <input type="password" id="passcodeInput" placeholder="Passcode"
+                onkeydown="if(event.key==='Enter')submitPasscode()">
+            <button onclick="submitPasscode()">Go</button>
+            <div class="auth-error" id="authError"></div>
+        </div>
+    </div>
 </div>
 
 <div class="tabs">
@@ -1518,6 +1613,107 @@ async function cachedFetchPNG(url) {
 
     return { blob, pixelMapping: pm };
 }
+
+// ── Auth ────────────────────────────────────────────────────────
+let isAuthenticated = false;
+let isPublicMode = false;
+const LOCKED_TABS = new Set(['stems', 'hpss', 'lab-repet', 'lab-nmf', 'lab']);
+const HIDDEN_TABS_PUBLIC = new Set(['record', 'effects']);
+
+async function checkAuth() {
+    try {
+        const resp = await fetch('/api/auth/status');
+        const data = await resp.json();
+        isAuthenticated = data.authenticated;
+        isPublicMode = data.public;
+        updateAuthUI();
+    } catch {}
+}
+
+function updateAuthUI() {
+    const authLink = document.getElementById('authLink');
+    const authArea = document.getElementById('authArea');
+    if (!isPublicMode) {
+        authArea.style.display = 'none';
+        return;
+    }
+    authArea.style.display = 'block';
+    if (isAuthenticated) {
+        authLink.textContent = 'Signed In';
+        authLink.classList.add('authed');
+    } else {
+        authLink.textContent = 'Sign In';
+        authLink.classList.remove('authed');
+    }
+    updateLockedTabs();
+}
+
+function updateLockedTabs() {
+    // Lock/unlock tabs
+    document.querySelectorAll('.tab[data-tab], .tab-dropdown-item[data-tab]').forEach(el => {
+        const tab = el.dataset.tab;
+        if (LOCKED_TABS.has(tab)) {
+            if (isPublicMode && !isAuthenticated) {
+                el.classList.add('locked');
+                el.title = 'Sign in to unlock';
+            } else {
+                el.classList.remove('locked');
+                el.title = '';
+            }
+        }
+        if (HIDDEN_TABS_PUBLIC.has(tab)) {
+            el.style.display = isPublicMode ? 'none' : '';
+        }
+    });
+}
+
+function toggleAuthBox() {
+    if (isAuthenticated) {
+        // Clicking "Signed In" logs out
+        fetch('/api/auth/logout', {method: 'POST'}).then(() => {
+            isAuthenticated = false;
+            updateAuthUI();
+        });
+        return;
+    }
+    const box = document.getElementById('authBox');
+    box.classList.toggle('open');
+    if (box.classList.contains('open')) {
+        document.getElementById('passcodeInput').focus();
+    }
+}
+
+async function submitPasscode() {
+    const input = document.getElementById('passcodeInput');
+    const errEl = document.getElementById('authError');
+    const passcode = input.value.trim();
+    if (!passcode) return;
+
+    const resp = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({passcode})
+    });
+    const data = await resp.json();
+    if (data.ok) {
+        isAuthenticated = true;
+        input.value = '';
+        errEl.style.display = 'none';
+        document.getElementById('authBox').classList.remove('open');
+        updateAuthUI();
+    } else {
+        errEl.textContent = data.error || 'Invalid passcode';
+        errEl.style.display = 'block';
+    }
+}
+
+// Close auth box on outside click
+document.addEventListener('click', e => {
+    const area = document.getElementById('authArea');
+    if (area && !area.contains(e.target)) {
+        document.getElementById('authBox').classList.remove('open');
+    }
+});
 
 const audio = document.getElementById('audio');
 const filePicker = document.getElementById('filePicker');
@@ -1986,6 +2182,8 @@ function updateTabUI() {
 }
 
 function switchTab(tabId) {
+    // Block locked tabs
+    if (isPublicMode && !isAuthenticated && LOCKED_TABS.has(tabId)) return;
     const prev = currentTab;
     if ((prev === 'stems' || prev === 'hpss' || prev === 'lab-repet' || prev === 'lab-nmf') && tabId !== prev) cleanupStemAudio();
     currentTab = tabId;
@@ -2600,6 +2798,7 @@ function stopEffectsPoll() {
 
 // ── Init ─────────────────────────────────────────────────────────
 
+checkAuth();
 loadFileList();
 </script>
 </body>
@@ -2618,6 +2817,39 @@ class ViewerHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
+
+        if path == '/api/auth/login':
+            body = self._read_json_body()
+            if body is None:
+                return
+            if body.get('passcode') == _PASSCODE:
+                token = _make_auth_token()
+                payload = json.dumps({'ok': True}).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(payload)))
+                self.send_header('Set-Cookie',
+                    f'{_AUTH_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000')
+                self.end_headers()
+                self.wfile.write(payload)
+            else:
+                self._json_response({'ok': False, 'error': 'Invalid passcode'}, status=403)
+            return
+        elif path == '/api/auth/logout':
+            payload = json.dumps({'ok': True}).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(payload)))
+            self.send_header('Set-Cookie',
+                f'{_AUTH_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0')
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        # Block record/effects in public mode
+        if PUBLIC_MODE and (path.startswith('/api/record') or path.startswith('/api/effects')):
+            self._json_response({'error': 'Not available'}, status=403)
+            return
 
         if path == '/api/record/start':
             self._handle_record_start()
@@ -2783,10 +3015,17 @@ class ViewerHandler(BaseHTTPRequestHandler):
         path = unquote(parsed.path)
         query = parse_qs(parsed.query)
 
+        # Auth gate for protected endpoints
+        if _is_protected(path) and not _is_authenticated(self):
+            self._json_response({'error': 'Sign in to access this feature'}, status=401)
+            return
+
         if path == '/':
             self._serve_html()
         elif path == '/favicon.ico':
             self._serve_favicon()
+        elif path == '/api/auth/status':
+            self._json_response({'authenticated': _is_authenticated(self), 'public': PUBLIC_MODE})
         elif path == '/api/files':
             self._serve_file_list()
         elif path.startswith('/api/render/'):

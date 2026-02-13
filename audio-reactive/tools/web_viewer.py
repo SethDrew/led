@@ -253,6 +253,19 @@ def discover_files():
                 'group': 'harmonix',
             })
 
+    # Uploaded files
+    uploads_dir = segments_path / 'uploads'
+    if uploads_dir.exists():
+        for wav in sorted(uploads_dir.glob('*.wav')):
+            dur = _get_wav_duration(str(wav))
+            files.append({
+                'name': wav.name,
+                'path': f'uploads/{wav.name}',
+                'duration': dur,
+                'has_annotations': False,
+                'group': 'uploads',
+            })
+
     _file_list_cache = files
     return files
 
@@ -1265,6 +1278,30 @@ body {
 .compute-btn:hover { background: #c73652; }
 .compute-desc { color: #888; font-size: 13px; margin-top: 10px; }
 
+/* Upload button */
+.upload-btn {
+    background: none; border: 1px solid #555; color: #888; border-radius: 4px;
+    padding: 5px 12px; cursor: pointer; font-size: 13px; transition: all 0.15s;
+}
+.upload-btn:hover { border-color: #e94560; color: #ccc; }
+
+/* Drag-and-drop overlay */
+.drop-overlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(233, 69, 96, 0.1); border: 3px dashed #e94560;
+    display: none; align-items: center; justify-content: center; z-index: 500;
+}
+.drop-overlay.active { display: flex; }
+.drop-overlay-text { font-size: 24px; color: #e94560; pointer-events: none; }
+
+/* Upload progress */
+.upload-progress {
+    position: fixed; bottom: 20px; right: 20px; background: #1a1a2e;
+    border: 1px solid #444; border-radius: 8px; padding: 12px 20px;
+    color: #ccc; font-size: 13px; z-index: 300; display: none;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+
 .play-btn {
     background: none; border: 1px solid #555; color: #e0e0e0; border-radius: 4px;
     padding: 4px 12px; cursor: pointer; font-size: 18px; line-height: 1;
@@ -1414,6 +1451,11 @@ body {
 <div class="header">
     <h1>Audio Explorer</h1>
     <select id="filePicker"></select>
+    <label class="upload-btn" title="Upload WAV file">
+        &#8679; Upload
+        <input type="file" id="uploadInput" accept=".wav,audio/wav" style="display:none"
+            onchange="handleFileUpload(this.files)">
+    </label>
     <button class="play-btn" id="playBtn" title="Play/Pause">&#9654;</button>
     <button class="play-btn" id="replayBtn" title="Replay from start">&#8634;</button>
     <span class="time" id="timeDisplay">0:00.000 / 0:00.000</span>
@@ -1526,16 +1568,36 @@ body {
         <p>Four experimental features: spectral flatness, chromagram, spectral contrast, and zero crossing rate. Use this tab to evaluate whether these are useful indicators for LED mapping.</p>
     </div>
     <div class="record-panel" id="recordPanel">
-        <canvas class="record-waveform" id="recordWaveform"></canvas>
-        <div class="record-level">
-            <span style="color:#888;">Level</span>
-            <div class="record-level-bar"><div class="record-level-fill" id="recordLevelFill"></div></div>
-            <span style="color:#888;font-family:monospace;min-width:40px;" id="recordLevelDb">-∞ dB</span>
+        <div id="recordLocal">
+            <canvas class="record-waveform" id="recordWaveform"></canvas>
+            <div class="record-level">
+                <span style="color:#888;">Level</span>
+                <div class="record-level-bar"><div class="record-level-fill" id="recordLevelFill"></div></div>
+                <span style="color:#888;font-family:monospace;min-width:40px;" id="recordLevelDb">-∞ dB</span>
+            </div>
+            <input type="text" id="recordName" placeholder="segment name (e.g. tool_lateralus_intro)" spellcheck="false">
+            <button class="record-btn" id="recordBtn" onclick="toggleRecord()"><span class="dot"></span></button>
+            <div class="record-elapsed" id="recordElapsed">0:00.0</div>
+            <div class="record-status" id="recordStatus">Click to record from BlackHole</div>
         </div>
-        <input type="text" id="recordName" placeholder="segment name (e.g. tool_lateralus_intro)" spellcheck="false">
-        <button class="record-btn" id="recordBtn" onclick="toggleRecord()"><span class="dot"></span></button>
-        <div class="record-elapsed" id="recordElapsed">0:00.0</div>
-        <div class="record-status" id="recordStatus">Click to record from BlackHole</div>
+        <div id="recordPublic" style="display:none; max-width:600px; line-height:1.6;">
+            <h2 style="color:#e94560; margin-bottom:16px;">Upload &amp; Record Audio</h2>
+            <h3 style="color:#ccc;">Upload a WAV file</h3>
+            <p style="color:#aaa;">Drag and drop a <code>.wav</code> file anywhere on the page, or use the <strong>Upload</strong> button in the header. Your file will be analyzed server-side and appear in the file picker.</p>
+            <p style="color:#888; font-size:12px;">Uploaded files are automatically deleted after 1 hour. Max file size: 100MB.</p>
+            <h3 style="color:#ccc; margin-top:24px;">Record system audio with BlackHole</h3>
+            <p style="color:#aaa;">To record what's playing on your computer, you need <a href="https://existential.audio/blackhole/" target="_blank" style="color:#e94560;">BlackHole</a> (free, open-source virtual audio driver for macOS).</p>
+            <ol style="color:#aaa; padding-left:20px;">
+                <li>Install BlackHole 2ch from <a href="https://existential.audio/blackhole/" target="_blank" style="color:#e94560;">existential.audio/blackhole</a></li>
+                <li>Open <strong>Audio MIDI Setup</strong> (search in Spotlight)</li>
+                <li>Click <strong>+</strong> &rarr; <strong>Create Multi-Output Device</strong></li>
+                <li>Check both your speakers/headphones AND BlackHole 2ch</li>
+                <li>Set the Multi-Output Device as your system output (System Preferences &rarr; Sound)</li>
+                <li>Run the viewer locally: <code>python segment.py web</code></li>
+                <li>Use the Record tab to capture audio from BlackHole</li>
+            </ol>
+            <p style="color:#888; font-size:12px; margin-top:16px;">Recording requires running the viewer locally because browsers cannot capture system audio. The uploaded recordings will appear here for analysis.</p>
+        </div>
     </div>
     <div class="effects-panel" id="effectsPanel"></div>
 </div>
@@ -1556,6 +1618,11 @@ body {
 </div>
 
 <audio id="audio" preload="auto"></audio>
+
+<div class="drop-overlay" id="dropOverlay">
+    <span class="drop-overlay-text">Drop WAV file to upload</span>
+</div>
+<div class="upload-progress" id="uploadProgress">Uploading...</div>
 
 <script>
 // ── IndexedDB cache for analysis results ────────────────────────
@@ -1628,7 +1695,7 @@ async function cachedFetchPNG(url) {
 let isAuthenticated = false;
 let isPublicMode = false;
 const LOCKED_TABS = new Set(['stems', 'hpss', 'lab-repet', 'lab-nmf', 'lab']);
-const HIDDEN_TABS_PUBLIC = new Set(['record', 'effects']);
+const HIDDEN_TABS_PUBLIC = new Set(['effects']);
 
 async function checkAuth() {
     try {
@@ -1655,6 +1722,14 @@ function updateAuthUI() {
         authLink.textContent = 'Sign In';
         authLink.classList.remove('authed');
     }
+    // Toggle record panel content
+    const recordLocal = document.getElementById('recordLocal');
+    const recordPublic = document.getElementById('recordPublic');
+    if (recordLocal && recordPublic) {
+        recordLocal.style.display = isPublicMode ? 'none' : '';
+        recordPublic.style.display = isPublicMode ? 'block' : 'none';
+    }
+
     updateLockedTabs();
 }
 
@@ -2112,7 +2187,7 @@ function drawRecordWaveform(waveform) {
 
 // ── File picker ──────────────────────────────────────────────────
 
-async function loadFileList() {
+async function loadFileList(selectPath) {
     const resp = await fetch('/api/files');
     files = await resp.json();
 
@@ -2139,13 +2214,17 @@ async function loadFileList() {
     }
 
     if (files.length > 0) {
-        const saved = readHashState();
-        const savedFile = saved.file && files.find(f => f.path === saved.file);
-        if (saved.tab) {
-            currentTab = saved.tab;
-            updateTabUI();
+        if (selectPath) {
+            selectFile(selectPath);
+        } else {
+            const saved = readHashState();
+            const savedFile = saved.file && files.find(f => f.path === saved.file);
+            if (saved.tab) {
+                currentTab = saved.tab;
+                updateTabUI();
+            }
+            selectFile(savedFile ? savedFile.path : files[0].path);
         }
-        selectFile(savedFile ? savedFile.path : files[0].path);
     }
 }
 
@@ -2818,6 +2897,73 @@ function stopEffectsPoll() {
     if (effectsPollTimer) { clearInterval(effectsPollTimer); effectsPollTimer = null; }
 }
 
+// ── File upload ──────────────────────────────────────────────────
+
+async function handleFileUpload(files) {
+    if (!files || files.length === 0) return;
+    const file = files[0];
+    if (!file.name.toLowerCase().endsWith('.wav')) {
+        alert('Only WAV files are supported');
+        return;
+    }
+
+    const progress = document.getElementById('uploadProgress');
+    progress.textContent = `Uploading ${file.name}...`;
+    progress.style.display = 'block';
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        const resp = await fetch('/api/upload', { method: 'POST', body: formData });
+        const data = await resp.json();
+        if (data.ok) {
+            progress.textContent = `Uploaded ${data.name}`;
+            setTimeout(() => progress.style.display = 'none', 2000);
+            // Reload file list and select the new file
+            await loadFileList(data.path);
+        } else {
+            progress.textContent = `Error: ${data.error}`;
+            setTimeout(() => progress.style.display = 'none', 3000);
+        }
+    } catch (e) {
+        progress.textContent = `Upload failed: ${e.message}`;
+        setTimeout(() => progress.style.display = 'none', 3000);
+    }
+    // Reset input so same file can be re-uploaded
+    document.getElementById('uploadInput').value = '';
+}
+
+// Drag and drop
+let dragCounter = 0;
+const dropOverlay = document.getElementById('dropOverlay');
+
+document.addEventListener('dragenter', e => {
+    e.preventDefault();
+    dragCounter++;
+    if (e.dataTransfer.types.includes('Files')) {
+        dropOverlay.classList.add('active');
+    }
+});
+
+document.addEventListener('dragleave', e => {
+    e.preventDefault();
+    dragCounter--;
+    if (dragCounter <= 0) {
+        dragCounter = 0;
+        dropOverlay.classList.remove('active');
+    }
+});
+
+document.addEventListener('dragover', e => e.preventDefault());
+
+document.addEventListener('drop', e => {
+    e.preventDefault();
+    dragCounter = 0;
+    dropOverlay.classList.remove('active');
+    handleFileUpload(e.dataTransfer.files);
+});
+
 // ── Init ─────────────────────────────────────────────────────────
 
 checkAuth();
@@ -2871,6 +3017,10 @@ class ViewerHandler(BaseHTTPRequestHandler):
         # Block record/effects in public mode
         if PUBLIC_MODE and (path.startswith('/api/record') or path.startswith('/api/effects')):
             self._json_response({'error': 'Not available'}, status=403)
+            return
+
+        if path == '/api/upload':
+            self._handle_upload()
             return
 
         if path == '/api/record/start':
@@ -2940,6 +3090,77 @@ class ViewerHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self.send_error(400, 'Invalid JSON')
             return None
+
+    def _handle_upload(self):
+        """Handle WAV file upload. Saves to uploads/ subdirectory."""
+        content_length = int(self.headers.get('Content-Length', 0))
+        max_size = 100 * 1024 * 1024  # 100MB
+        if content_length > max_size:
+            self._json_response({'ok': False, 'error': 'File too large (max 100MB)'}, status=413)
+            return
+        if content_length == 0:
+            self._json_response({'ok': False, 'error': 'No file data'}, status=400)
+            return
+
+        # Parse multipart form data
+        content_type = self.headers.get('Content-Type', '')
+        if 'multipart/form-data' not in content_type:
+            self._json_response({'ok': False, 'error': 'Expected multipart/form-data'}, status=400)
+            return
+
+        import cgi
+        form = cgi.FieldStorage(
+            fp=self.rfile,
+            headers=self.headers,
+            environ={'REQUEST_METHOD': 'POST',
+                     'CONTENT_TYPE': content_type})
+
+        file_item = form['file'] if 'file' in form else None
+        if file_item is None or not file_item.filename:
+            self._json_response({'ok': False, 'error': 'No file provided'}, status=400)
+            return
+
+        # Sanitize filename
+        filename = os.path.basename(file_item.filename)
+        filename = re.sub(r'[^\w\s\-.]', '_', filename)
+        if not filename.lower().endswith('.wav'):
+            self._json_response({'ok': False, 'error': 'Only WAV files are supported'}, status=400)
+            return
+
+        # Save to uploads directory
+        uploads_dir = os.path.join(SEGMENTS_DIR, 'uploads')
+        os.makedirs(uploads_dir, exist_ok=True)
+        filepath = os.path.join(uploads_dir, filename)
+
+        # Avoid overwriting — add suffix if exists
+        base, ext = os.path.splitext(filename)
+        counter = 1
+        while os.path.exists(filepath):
+            filepath = os.path.join(uploads_dir, f"{base}_{counter}{ext}")
+            counter += 1
+
+        with open(filepath, 'wb') as f:
+            f.write(file_item.file.read())
+
+        # Validate it's actually a WAV file
+        dur = _get_wav_duration(filepath)
+        if dur == 0.0:
+            os.remove(filepath)
+            self._json_response({'ok': False, 'error': 'Invalid WAV file'}, status=400)
+            return
+
+        # Clear file list cache so it gets re-scanned
+        global _file_list_cache
+        _file_list_cache = None
+
+        saved_name = os.path.basename(filepath)
+        print(f"[upload] Saved {saved_name} ({dur:.1f}s)")
+        self._json_response({
+            'ok': True,
+            'name': saved_name,
+            'path': f'uploads/{saved_name}',
+            'duration': dur,
+        })
 
     def _json_response(self, data, status=200):
         payload = json.dumps(data).encode('utf-8')

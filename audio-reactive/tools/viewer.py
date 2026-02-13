@@ -27,7 +27,10 @@ import librosa.display
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.animation import FuncAnimation
-import sounddevice as sd
+try:
+    import sounddevice as sd
+except OSError:
+    sd = None  # PortAudio not available (headless server)
 import soundfile as sf
 import yaml
 

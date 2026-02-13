@@ -1402,6 +1402,22 @@ body {
     font-family: 'SF Mono', 'Menlo', monospace; font-size: 28px; color: #e94560;
 }
 .record-status { color: #888; font-size: 13px; }
+.file-item {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+    background: #1a1a2e; border: 1px solid #333; border-radius: 4px; margin-bottom: 4px;
+}
+.file-item:hover { border-color: #555; }
+.file-item .file-name {
+    flex: 1; color: #ccc; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
+}
+.file-item .file-name:hover { color: #e94560; }
+.file-item .file-dur { color: #666; font-size: 11px; font-family: monospace; min-width: 40px; text-align: right; }
+.file-item button {
+    background: none; border: 1px solid #444; color: #888; font-size: 11px; padding: 2px 8px;
+    border-radius: 3px; cursor: pointer;
+}
+.file-item button:hover { color: #ccc; border-color: #888; }
+.file-item button.del:hover { color: #e94560; border-color: #e94560; }
 .effects-panel {
     display: none; flex-direction: column; gap: 8px; padding: 20px;
     width: 100%; max-width: 600px; overflow-y: auto; max-height: 100%;
@@ -1579,6 +1595,9 @@ body {
             <button class="record-btn" id="recordBtn" onclick="toggleRecord()"><span class="dot"></span></button>
             <div class="record-elapsed" id="recordElapsed">0:00.0</div>
             <div class="record-status" id="recordStatus">Click to record from BlackHole</div>
+            <hr style="border-color:#333; margin:24px 0;">
+            <h3 style="color:#ccc; font-size:14px; margin-bottom:8px;">Your Files</h3>
+            <div id="fileManagerLocal" style="max-height:300px; overflow-y:auto;"></div>
         </div>
         <div id="recordPublic" style="display:none; max-width:600px; line-height:1.6;">
             <h3 style="color:#ccc;">Record Audio</h3>
@@ -1602,16 +1621,15 @@ body {
                 <summary style="color:#ccc; cursor:pointer;">Setup: Record system audio with BlackHole (macOS)</summary>
                 <ol style="padding-left:20px; margin-top:8px;">
                     <li>Install BlackHole 2ch from <a href="https://existential.audio/blackhole/" target="_blank" style="color:#e94560;">existential.audio/blackhole</a></li>
-                    <li>Open <strong>Audio MIDI Setup</strong> (search in Spotlight)</li>
-                    <li>Click <strong>+</strong> &rarr; <strong>Create Multi-Output Device</strong></li>
-                    <li>Check both your speakers/headphones AND BlackHole 2ch</li>
-                    <li>Set the Multi-Output Device as your system output (System Preferences &rarr; Sound)</li>
+                    <li>In System Settings &rarr; Sound &rarr; Output, select <strong>BlackHole 2ch</strong></li>
                     <li>Refresh this page &mdash; BlackHole will appear in the input dropdown above</li>
                 </ol>
+                <p style="color:#888; font-size:12px; margin-top:8px;"><strong>Note:</strong> With this setup you won't hear the audio while recording. To hear it too, open <strong>Audio MIDI Setup</strong>, click <strong>+</strong> &rarr; <strong>Create Multi-Output Device</strong>, check both your speakers and BlackHole, then set that as your system output instead.</p>
             </details>
             <hr style="border-color:#333; margin:24px 0;">
-            <h3 style="color:#ccc;">Upload a WAV file</h3>
-            <p style="color:#aaa;">Drag and drop a <code>.wav</code> file anywhere on the page, or use the <strong>Upload</strong> button in the header. Your files are cached locally in your browser and persist across sessions.</p>
+            <h3 style="color:#ccc;">Your Files</h3>
+            <p style="color:#aaa; margin-bottom:12px;">Drag and drop a <code>.wav</code> file anywhere on the page, or use the <strong>Upload</strong> button. Files persist in your browser across sessions.</p>
+            <div id="fileManager" style="max-height:300px; overflow-y:auto;"></div>
         </div>
     </div>
     <div class="effects-panel" id="effectsPanel"></div>
@@ -2618,6 +2636,7 @@ async function loadPanel() {
         document.getElementById('controlsHint').innerHTML =
             isPublicMode ? 'Record from microphone or system audio' : 'Record audio from BlackHole loopback';
         if (isPublicMode) populateAudioDevices();
+        renderFileManager();
         return;
     }
     if (currentTab === 'effects') {
@@ -3202,16 +3221,18 @@ function stopEffectsPoll() {
 // ── File upload ──────────────────────────────────────────────────
 
 async function uploadWavBlob(blob, filename) {
-    // Cache WAV in IndexedDB for persistence across sessions
-    const buf = await blob.arrayBuffer();
-    const path = 'uploads/' + filename;
-    await cacheDB.put(path, { name: filename, wav: buf, savedAt: Date.now() }, 'audioFiles');
-
-    // Upload to server
+    // Upload to server first to get canonical path
     const formData = new FormData();
     formData.append('file', blob, filename);
     const resp = await fetch('/api/upload', { method: 'POST', body: formData });
-    return await resp.json();
+    const data = await resp.json();
+
+    // Cache in IndexedDB using the server's canonical path (handles sanitization + dedup)
+    if (data.ok && data.path) {
+        const buf = await blob.arrayBuffer();
+        await cacheDB.put(data.path, { name: data.name, wav: buf, savedAt: Date.now() }, 'audioFiles');
+    }
+    return data;
 }
 
 async function ensureFileOnServer(path) {
@@ -3269,6 +3290,125 @@ async function handleFileUpload(files) {
         setTimeout(() => progress.style.display = 'none', 3000);
     }
     document.getElementById('uploadInput').value = '';
+}
+
+// ── File manager ─────────────────────────────────────────────────
+
+async function renderFileManager() {
+    // Render into whichever file manager container is visible
+    const containers = [document.getElementById('fileManager'), document.getElementById('fileManagerLocal')].filter(Boolean);
+    if (containers.length === 0) return;
+    for (const container of containers) await _renderFileManagerInto(container);
+}
+
+async function _renderFileManagerInto(container) {
+
+    // Get manageable files: uploads + recordings (user clips on local, uploads on public)
+    const userFiles = files.filter(f =>
+        f.path.startsWith('uploads/') || f.group === 'your files' ||
+        (!isPublicMode && f.group === 'user clips')
+    );
+    // Also check IndexedDB for any cached files not on server
+    const localFiles = await cacheDB.getAll('audioFiles');
+    const allPaths = new Set(userFiles.map(f => f.path));
+    for (const { key, value } of localFiles) {
+        if (!allPaths.has(key)) {
+            userFiles.push({ name: value.name, path: key, duration: 0, group: 'your files' });
+        }
+    }
+
+    if (userFiles.length === 0) {
+        container.innerHTML = '<p style="color:#666; font-size:12px;">No uploaded files yet.</p>';
+        return;
+    }
+
+    container.innerHTML = '';
+    for (const f of userFiles) {
+        const item = document.createElement('div');
+        item.className = 'file-item';
+        const dur = f.duration ? formatTime(f.duration) : '?';
+        item.innerHTML = `
+            <span class="file-name" title="Click to select" data-path="${f.path}">${f.name}</span>
+            <span class="file-dur">${dur}</span>
+            <button class="ren" data-path="${f.path}" data-name="${f.name}">rename</button>
+            <button class="del" data-path="${f.path}" data-name="${f.name}">delete</button>`;
+        container.appendChild(item);
+    }
+
+    // Click handlers
+    container.querySelectorAll('.file-name').forEach(el => {
+        el.onclick = () => { selectFile(el.dataset.path); currentTab = 'analysis'; updateTabUI(); loadPanel(); };
+    });
+    container.querySelectorAll('.ren').forEach(el => {
+        el.onclick = () => renameUserFile(el.dataset.path, el.dataset.name);
+    });
+    container.querySelectorAll('.del').forEach(el => {
+        el.onclick = () => deleteUserFile(el.dataset.path, el.dataset.name);
+    });
+}
+
+async function deleteUserFile(path, name) {
+    if (!confirm('Delete "' + name + '"? This removes it from both server and your browser cache.')) return;
+
+    // Delete from server
+    try {
+        await fetch('/api/files/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path })
+        });
+    } catch {}
+
+    // Delete from IndexedDB
+    await cacheDB.delete(path, 'audioFiles');
+
+    // Also clear any cached analysis panels for this file
+    const panelKeys = await cacheDB.getAll('panels');
+    for (const { key } of panelKeys) {
+        if (typeof key === 'string' && key.includes(encodeURIComponent(path))) {
+            await cacheDB.delete(key, 'panels');
+        }
+    }
+
+    // Refresh
+    if (currentFile === path) {
+        currentFile = null;
+    }
+    await loadFileList();
+    renderFileManager();
+}
+
+async function renameUserFile(path, oldName) {
+    const newName = prompt('New name for "' + oldName + '":', oldName.replace('.wav', ''));
+    if (!newName || newName === oldName.replace('.wav', '')) return;
+
+    const finalName = newName.endsWith('.wav') ? newName : newName + '.wav';
+
+    try {
+        const resp = await fetch('/api/files/rename', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path, newName: finalName })
+        });
+        const data = await resp.json();
+
+        if (data.ok) {
+            // Update IndexedDB: copy to new key, delete old
+            const cached = await cacheDB.get(path, 'audioFiles');
+            if (cached) {
+                await cacheDB.put(data.path, { ...cached, name: data.name }, 'audioFiles');
+                await cacheDB.delete(path, 'audioFiles');
+            }
+
+            const wasSelected = currentFile === path;
+            await loadFileList(wasSelected ? data.path : undefined);
+            renderFileManager();
+        } else {
+            alert('Rename failed: ' + (data.error || 'unknown error'));
+        }
+    } catch (e) {
+        alert('Rename failed: ' + e.message);
+    }
 }
 
 // Drag and drop
@@ -3358,6 +3498,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
 
         if path == '/api/upload':
             self._handle_upload()
+            return
+        elif path == '/api/files/delete':
+            self._handle_file_delete()
+            return
+        elif path == '/api/files/rename':
+            self._handle_file_rename()
             return
 
         if path == '/api/record/start':
@@ -3498,6 +3644,70 @@ class ViewerHandler(BaseHTTPRequestHandler):
             'path': f'uploads/{saved_name}',
             'duration': dur,
         })
+
+    def _handle_file_delete(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        path = body.get('path', '')
+        if '..' in path or '/' in path.replace('uploads/', '', 1).replace('harmonix/', '', 1):
+            self._json_response({'ok': False, 'error': 'Invalid path'}, status=400)
+            return
+        # Public mode: only allow deleting uploads
+        if PUBLIC_MODE and not path.startswith('uploads/'):
+            self._json_response({'ok': False, 'error': 'Cannot delete built-in files'}, status=403)
+            return
+        filepath = os.path.join(SEGMENTS_DIR, path)
+        if os.path.exists(filepath):
+            os.remove(filepath)
+            # Also remove annotations if they exist
+            ann_path = filepath.replace('.wav', '.annotations.yaml')
+            if os.path.exists(ann_path):
+                os.remove(ann_path)
+            print(f"[delete] Removed {path}")
+        global _file_list_cache
+        _file_list_cache = None
+        self._json_response({'ok': True})
+
+    def _handle_file_rename(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        path = body.get('path', '')
+        new_name = body.get('newName', '')
+        if '..' in path:
+            self._json_response({'ok': False, 'error': 'Invalid path'}, status=400)
+            return
+        # Public mode: only allow renaming uploads
+        if PUBLIC_MODE and not path.startswith('uploads/'):
+            self._json_response({'ok': False, 'error': 'Cannot rename built-in files'}, status=403)
+            return
+        new_name = re.sub(r'[^\w\s\-.]', '_', os.path.basename(new_name))
+        if not new_name.lower().endswith('.wav'):
+            self._json_response({'ok': False, 'error': 'Name must end with .wav'}, status=400)
+            return
+        old_filepath = os.path.join(SEGMENTS_DIR, path)
+        # Keep in same directory
+        parent = os.path.dirname(old_filepath)
+        new_filepath = os.path.join(parent, new_name)
+        if not os.path.exists(old_filepath):
+            self._json_response({'ok': False, 'error': 'File not found'}, status=404)
+            return
+        if os.path.exists(new_filepath) and old_filepath != new_filepath:
+            self._json_response({'ok': False, 'error': 'A file with that name already exists'}, status=409)
+            return
+        os.rename(old_filepath, new_filepath)
+        # Also rename annotations if they exist
+        old_ann = old_filepath.replace('.wav', '.annotations.yaml')
+        new_ann = new_filepath.replace('.wav', '.annotations.yaml')
+        if os.path.exists(old_ann):
+            os.rename(old_ann, new_ann)
+        global _file_list_cache
+        _file_list_cache = None
+        new_path = path.rsplit('/', 1)
+        new_path = (new_path[0] + '/' + new_name) if len(new_path) > 1 else new_name
+        print(f"[rename] {path} -> {new_path}")
+        self._json_response({'ok': True, 'name': new_name, 'path': new_path})
 
     def _json_response(self, data, status=200):
         payload = json.dumps(data).encode('utf-8')

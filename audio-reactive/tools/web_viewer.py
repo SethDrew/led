@@ -1278,15 +1278,13 @@ body {
 .compute-btn:hover { background: #c73652; }
 .compute-desc { color: #888; font-size: 13px; margin-top: 10px; }
 
-/* Welcome modal */
-.welcome-overlay {
-    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(10, 10, 25, 0.92); display: flex; align-items: center;
-    justify-content: center; z-index: 1000;
+/* Welcome panel */
+.welcome-panel {
+    display: none; align-items: center; justify-content: center;
+    width: 100%; height: 100%; padding: 20px; box-sizing: border-box;
 }
 .welcome-card {
-    background: #16213e; border: 1px solid #333; border-radius: 12px;
-    max-width: 560px; width: 90%; padding: 36px 40px; color: #ccc;
+    max-width: 560px; width: 100%; color: #ccc;
     line-height: 1.7; font-size: 14px;
 }
 .welcome-card h1 { color: #e94560; font-size: 22px; margin: 0 0 6px 0; }
@@ -1297,12 +1295,6 @@ body {
     padding: 12px 14px; font-size: 12px; color: #aaa; margin: 16px 0;
 }
 .welcome-card .storage-note code { color: #e94560; }
-.welcome-card .enter-btn {
-    display: inline-block; background: #e94560; color: #fff; border: none;
-    padding: 10px 32px; border-radius: 6px; font-size: 15px; cursor: pointer;
-    margin-top: 16px; transition: background 0.15s;
-}
-.welcome-card .enter-btn:hover { background: #c73652; }
 .welcome-card .contact-link {
     color: #4fc3f7; text-decoration: none; cursor: pointer;
     border-bottom: 1px dotted #4fc3f7;
@@ -1495,21 +1487,6 @@ body {
 </head>
 <body>
 
-<div class="welcome-overlay" id="welcomeModal" style="display:none;">
-    <div class="welcome-card">
-        <h1>Audio Explorer</h1>
-        <div class="subtitle">by Seth Drew</div>
-        <p>This is an interactive audio visualization and audio interactivity research testbed. It's configured to require no user accounts. It allows you to upload or record and analyze any audio you would like.</p>
-        <p>This audio is stored on your machine only for copyright reasons, which you can clean up using the <strong>Record</strong> tab or manually via:</p>
-        <div class="storage-note">
-            <code>Settings &rarr; Privacy &rarr; Site Data &rarr; audio.sethdrew.com</code>
-        </div>
-        <p>Glad to have you! If you have any questions feel free to reach out directly to me with questions or improvements &mdash; <span class="contact-link" id="contactLink" onclick="copyContact()">copy my email</span>.</p>
-        <span class="contact-copied" id="contactCopied" style="display:none; color:#4caf50; font-size:12px; margin-left:6px;">Copied!</span>
-        <button class="enter-btn" onclick="dismissWelcome()">Explore</button>
-    </div>
-</div>
-
 <div class="header">
     <h1>Audio Explorer</h1>
     <select id="filePicker"></select>
@@ -1538,6 +1515,7 @@ body {
 </div>
 
 <div class="tabs">
+    <div class="tab" data-tab="welcome" id="welcomeTab">Welcome</div>
     <div class="tab" data-tab="record">Record</div>
     <div class="tab active" data-tab="analysis">Analysis</div>
     <div class="tab" data-tab="annotations" id="annTab">Annotations</div>
@@ -1679,6 +1657,20 @@ body {
         </div>
     </div>
     <div class="effects-panel" id="effectsPanel"></div>
+    <div class="welcome-panel" id="welcomePanel" style="display:none;">
+        <div class="welcome-card">
+            <h1>Audio Explorer</h1>
+            <div class="subtitle">by Seth Drew</div>
+            <p>This is an interactive audio visualization and audio interactivity research testbed. It's configured to require no user accounts. It allows you to upload or record and analyze any audio you would like.</p>
+            <p>This audio is stored on your machine only for copyright reasons, which you can clean up using the <strong>Record</strong> tab or manually via:</p>
+            <div class="storage-note">
+                <code>Settings &rarr; Privacy &rarr; Site Data &rarr; audio.sethdrew.com</code>
+            </div>
+            <p>Glad to have you! If you have any questions feel free to reach out directly to me with questions or improvements &mdash; <span class="contact-link" id="contactLink" onclick="copyContact()">copy my email</span>
+            <span class="contact-copied" id="contactCopied" style="display:none; color:#4caf50; font-size:12px;">Copied!</span></p>
+            <p style="margin-top:20px; color:#888;">Select a file above or go to the <strong>Record</strong> tab to upload or record audio.</p>
+        </div>
+    </div>
 </div>
 
 <div class="progress-bar">
@@ -1820,6 +1812,7 @@ let isAuthenticated = false;
 let isPublicMode = false;
 const LOCKED_TABS = new Set(['stems', 'hpss', 'lab-repet', 'lab-nmf', 'lab']);
 const HIDDEN_TABS_PUBLIC = new Set(['effects']);
+const HIDDEN_TABS_LOCAL = new Set(['welcome']);
 
 async function checkAuth() {
     try {
@@ -1828,7 +1821,15 @@ async function checkAuth() {
         isAuthenticated = data.authenticated;
         isPublicMode = data.public;
         updateAuthUI();
-        if (isPublicMode) showWelcome();
+        // Default to welcome tab on public mode (unless URL hash has a saved state)
+        if (isPublicMode) {
+            const saved = readHashState();
+            if (!saved.tab && !saved.file) {
+                currentTab = 'welcome';
+                updateTabUI();
+                loadPanel();
+            }
+        }
     } catch {}
 }
 
@@ -1873,6 +1874,9 @@ function updateLockedTabs() {
         }
         if (HIDDEN_TABS_PUBLIC.has(tab)) {
             el.style.display = isPublicMode ? 'none' : '';
+        }
+        if (HIDDEN_TABS_LOCAL.has(tab)) {
+            el.style.display = isPublicMode ? '' : 'none';
         }
     });
 }
@@ -1982,7 +1986,7 @@ function updateVolIcon() {
 }
 
 let currentFile = null;
-let currentTab = 'analysis';
+let currentTab = 'analysis'; // overridden to 'welcome' after checkAuth on public mode
 let pixelMapping = null;   // {xLeft, xRight, pngWidth, duration}
 let files = [];
 let stemsPollTimer = null;
@@ -2580,6 +2584,14 @@ async function loadFileList(selectPath) {
     if (files.length > 0) {
         if (selectPath) {
             selectFile(selectPath);
+        } else if (currentTab === 'welcome') {
+            // Don't auto-select a file on the welcome tab — add placeholder option
+            const placeholder = document.createElement('option');
+            placeholder.value = '';
+            placeholder.textContent = 'Select a file...';
+            placeholder.disabled = true;
+            placeholder.selected = true;
+            filePicker.insertBefore(placeholder, filePicker.firstChild);
         } else {
             const saved = readHashState();
             const savedFile = saved.file && files.find(f => f.path === saved.file);
@@ -2631,7 +2643,13 @@ async function selectFile(path) {
     loadPanel();
 }
 
-filePicker.addEventListener('change', () => selectFile(filePicker.value));
+filePicker.addEventListener('change', () => {
+    if (currentTab === 'welcome') {
+        currentTab = 'analysis';
+        updateTabUI();
+    }
+    selectFile(filePicker.value);
+});
 
 // ── Tabs ─────────────────────────────────────────────────────────
 
@@ -2696,8 +2714,21 @@ async function loadPanel() {
     annBar.style.display = currentTab === 'annotations' ? 'flex' : 'none';
 
     const recordPanel = document.getElementById('recordPanel');
-
     const effectsPanel = document.getElementById('effectsPanel');
+    const welcomePanel = document.getElementById('welcomePanel');
+
+    if (currentTab === 'welcome') {
+        imgContainer.style.display = 'none';
+        infoPanel.style.display = 'none';
+        recordPanel.style.display = 'none';
+        effectsPanel.style.display = 'none';
+        welcomePanel.style.display = 'flex';
+        cursorLine.style.display = 'none';
+        document.getElementById('stemStatus').style.display = 'none';
+        document.getElementById('controlsHint').innerHTML = '';
+        return;
+    }
+    welcomePanel.style.display = 'none';
 
     if (currentTab === 'reference') {
         imgContainer.style.display = 'none';
@@ -3565,19 +3596,7 @@ document.addEventListener('drop', e => {
     handleFileUpload(e.dataTransfer.files);
 });
 
-// ── Welcome modal ────────────────────────────────────────────────
-
-function showWelcome() {
-    if (localStorage.getItem('welcomed')) return;
-    const modal = document.getElementById('welcomeModal');
-    if (modal) modal.style.display = 'flex';
-}
-
-function dismissWelcome() {
-    const modal = document.getElementById('welcomeModal');
-    if (modal) modal.style.display = 'none';
-    localStorage.setItem('welcomed', '1');
-}
+// ── Welcome ──────────────────────────────────────────────────────
 
 function copyContact() {
     // Obfuscated email — assembled at runtime so scrapers can't find it in source

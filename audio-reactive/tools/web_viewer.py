@@ -1581,22 +1581,37 @@ body {
             <div class="record-status" id="recordStatus">Click to record from BlackHole</div>
         </div>
         <div id="recordPublic" style="display:none; max-width:600px; line-height:1.6;">
-            <h2 style="color:#e94560; margin-bottom:16px;">Upload &amp; Record Audio</h2>
+            <h3 style="color:#ccc;">Record Audio</h3>
+            <p style="color:#aaa; margin-bottom:12px;">Record from your microphone or system audio (via <a href="https://existential.audio/blackhole/" target="_blank" style="color:#e94560;">BlackHole</a>).</p>
+            <div style="margin-bottom:12px;">
+                <label style="color:#888; font-size:12px; display:block; margin-bottom:4px;">Audio Input</label>
+                <select id="audioDeviceSelect" style="background:#1a1a2e; color:#ccc; border:1px solid #333; padding:6px 10px; border-radius:4px; width:100%; font-size:13px;"></select>
+            </div>
+            <canvas class="record-waveform" id="browserRecordWaveform"></canvas>
+            <div class="record-level">
+                <span style="color:#888;">Level</span>
+                <div class="record-level-bar"><div class="record-level-fill" id="browserLevelFill"></div></div>
+                <span style="color:#888;font-family:monospace;min-width:40px;" id="browserLevelDb">&minus;&infin; dB</span>
+            </div>
+            <input type="text" id="browserRecordName" placeholder="segment name (optional)" spellcheck="false" style="background:#1a1a2e; color:#ccc; border:1px solid #333; padding:6px 10px; border-radius:4px; width:100%; box-sizing:border-box; margin-bottom:8px;">
+            <button class="record-btn" id="browserRecordBtn" onclick="toggleBrowserRecord()"><span class="dot"></span></button>
+            <div class="record-elapsed" id="browserRecordElapsed">0:00.0</div>
+            <div class="record-status" id="browserRecordStatus">Select an audio input and click to record</div>
+            <hr style="border-color:#333; margin:24px 0;">
+            <details style="color:#aaa;">
+                <summary style="color:#ccc; cursor:pointer;">Setup: Record system audio with BlackHole (macOS)</summary>
+                <ol style="padding-left:20px; margin-top:8px;">
+                    <li>Install BlackHole 2ch from <a href="https://existential.audio/blackhole/" target="_blank" style="color:#e94560;">existential.audio/blackhole</a></li>
+                    <li>Open <strong>Audio MIDI Setup</strong> (search in Spotlight)</li>
+                    <li>Click <strong>+</strong> &rarr; <strong>Create Multi-Output Device</strong></li>
+                    <li>Check both your speakers/headphones AND BlackHole 2ch</li>
+                    <li>Set the Multi-Output Device as your system output (System Preferences &rarr; Sound)</li>
+                    <li>Refresh this page &mdash; BlackHole will appear in the input dropdown above</li>
+                </ol>
+            </details>
+            <hr style="border-color:#333; margin:24px 0;">
             <h3 style="color:#ccc;">Upload a WAV file</h3>
-            <p style="color:#aaa;">Drag and drop a <code>.wav</code> file anywhere on the page, or use the <strong>Upload</strong> button in the header. Your file will be analyzed server-side and appear in the file picker.</p>
-            <p style="color:#888; font-size:12px;">Uploaded files are automatically deleted after 1 hour. Max file size: 100MB.</p>
-            <h3 style="color:#ccc; margin-top:24px;">Record system audio with BlackHole</h3>
-            <p style="color:#aaa;">To record what's playing on your computer, you need <a href="https://existential.audio/blackhole/" target="_blank" style="color:#e94560;">BlackHole</a> (free, open-source virtual audio driver for macOS).</p>
-            <ol style="color:#aaa; padding-left:20px;">
-                <li>Install BlackHole 2ch from <a href="https://existential.audio/blackhole/" target="_blank" style="color:#e94560;">existential.audio/blackhole</a></li>
-                <li>Open <strong>Audio MIDI Setup</strong> (search in Spotlight)</li>
-                <li>Click <strong>+</strong> &rarr; <strong>Create Multi-Output Device</strong></li>
-                <li>Check both your speakers/headphones AND BlackHole 2ch</li>
-                <li>Set the Multi-Output Device as your system output (System Preferences &rarr; Sound)</li>
-                <li>Run the viewer locally: <code>python segment.py web</code></li>
-                <li>Use the Record tab to capture audio from BlackHole</li>
-            </ol>
-            <p style="color:#888; font-size:12px; margin-top:16px;">Recording requires running the viewer locally because browsers cannot capture system audio. The uploaded recordings will appear here for analysis.</p>
+            <p style="color:#aaa;">Drag and drop a <code>.wav</code> file anywhere on the page, or use the <strong>Upload</strong> button in the header. Your files are cached locally in your browser and persist across sessions.</p>
         </div>
     </div>
     <div class="effects-panel" id="effectsPanel"></div>
@@ -1629,37 +1644,71 @@ body {
 const cacheDB = (() => {
     let db = null;
     const DB_NAME = 'led-viewer-cache';
-    const STORE = 'panels';
+    const DB_VERSION = 2;
 
     function open() {
         if (db) return Promise.resolve(db);
         return new Promise((resolve, reject) => {
-            const req = indexedDB.open(DB_NAME, 1);
-            req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+            const req = indexedDB.open(DB_NAME, DB_VERSION);
+            req.onupgradeneeded = (e) => {
+                const d = req.result;
+                if (!d.objectStoreNames.contains('panels')) d.createObjectStore('panels');
+                if (!d.objectStoreNames.contains('audioFiles')) d.createObjectStore('audioFiles');
+            };
             req.onsuccess = () => { db = req.result; resolve(db); };
             req.onerror = () => resolve(null);
         });
     }
 
     return {
-        async get(key) {
+        async get(key, store = 'panels') {
             try {
                 const d = await open();
                 if (!d) return null;
                 return new Promise(resolve => {
-                    const tx = d.transaction(STORE, 'readonly');
-                    const req = tx.objectStore(STORE).get(key);
+                    const tx = d.transaction(store, 'readonly');
+                    const req = tx.objectStore(store).get(key);
                     req.onsuccess = () => resolve(req.result || null);
                     req.onerror = () => resolve(null);
                 });
             } catch { return null; }
         },
-        async put(key, value) {
+        async put(key, value, store = 'panels') {
             try {
                 const d = await open();
                 if (!d) return;
-                const tx = d.transaction(STORE, 'readwrite');
-                tx.objectStore(STORE).put(value, key);
+                const tx = d.transaction(store, 'readwrite');
+                tx.objectStore(store).put(value, key);
+            } catch {}
+        },
+        async getAll(store = 'panels') {
+            try {
+                const d = await open();
+                if (!d) return [];
+                return new Promise(resolve => {
+                    const tx = d.transaction(store, 'readonly');
+                    const req = tx.objectStore(store).getAll();
+                    const keyReq = tx.objectStore(store).getAllKeys();
+                    const results = {};
+                    req.onsuccess = () => { results.values = req.result; };
+                    keyReq.onsuccess = () => {
+                        results.keys = keyReq.result;
+                        const out = [];
+                        for (let i = 0; i < results.keys.length; i++) {
+                            out.push({ key: results.keys[i], value: results.values[i] });
+                        }
+                        resolve(out);
+                    };
+                    keyReq.onerror = () => resolve([]);
+                });
+            } catch { return []; }
+        },
+        async delete(key, store = 'panels') {
+            try {
+                const d = await open();
+                if (!d) return;
+                const tx = d.transaction(store, 'readwrite');
+                tx.objectStore(store).delete(key);
             } catch {}
         }
     };
@@ -2185,11 +2234,235 @@ function drawRecordWaveform(waveform) {
     }
 }
 
+// ── Browser recording (public mode) ──────────────────────────────
+
+let browserStream = null;
+let browserAudioCtx = null;
+let browserProcessor = null;
+let browserAnalyser = null;
+let browserChunks = [];
+let browserRecording = false;
+let browserRecordStart = null;
+let browserRecordTimer = null;
+let browserAnimFrame = null;
+
+async function populateAudioDevices() {
+    const select = document.getElementById('audioDeviceSelect');
+    if (!select) return;
+    try {
+        // Request permission first so device labels are visible
+        await navigator.mediaDevices.getUserMedia({ audio: true }).then(s => s.getTracks().forEach(t => t.stop()));
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const audioInputs = devices.filter(d => d.kind === 'audioinput');
+        select.innerHTML = '';
+        audioInputs.forEach(d => {
+            const opt = document.createElement('option');
+            opt.value = d.deviceId;
+            opt.textContent = d.label || ('Microphone ' + (select.options.length + 1));
+            select.appendChild(opt);
+        });
+    } catch (e) {
+        select.innerHTML = '<option>Microphone access denied</option>';
+    }
+}
+
+async function toggleBrowserRecord() {
+    if (browserRecording) {
+        await stopBrowserRecord();
+    } else {
+        await startBrowserRecord();
+    }
+}
+
+async function startBrowserRecord() {
+    const select = document.getElementById('audioDeviceSelect');
+    const deviceId = select ? select.value : undefined;
+    const status = document.getElementById('browserRecordStatus');
+
+    try {
+        browserStream = await navigator.mediaDevices.getUserMedia({
+            audio: { deviceId: deviceId ? { exact: deviceId } : undefined, echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+        });
+    } catch (e) {
+        status.textContent = 'Microphone access denied. Check browser permissions.';
+        return;
+    }
+
+    browserAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
+    const source = browserAudioCtx.createMediaStreamSource(browserStream);
+
+    // Analyser for live waveform
+    browserAnalyser = browserAudioCtx.createAnalyser();
+    browserAnalyser.fftSize = 2048;
+    source.connect(browserAnalyser);
+
+    // ScriptProcessor to capture raw PCM
+    browserProcessor = browserAudioCtx.createScriptProcessor(4096, 1, 1);
+    browserChunks = [];
+    browserProcessor.onaudioprocess = (e) => {
+        if (browserRecording) {
+            browserChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+        }
+    };
+    source.connect(browserProcessor);
+    browserProcessor.connect(browserAudioCtx.destination);
+
+    browserRecording = true;
+    browserRecordStart = Date.now();
+    document.getElementById('browserRecordBtn').classList.add('recording');
+    status.textContent = 'Recording... click to stop';
+
+    browserRecordTimer = setInterval(() => {
+        const elapsed = (Date.now() - browserRecordStart) / 1000;
+        const m = Math.floor(elapsed / 60);
+        const s = (elapsed - m * 60).toFixed(1).padStart(4, '0');
+        document.getElementById('browserRecordElapsed').textContent = m + ':' + s;
+    }, 100);
+
+    // Animate waveform
+    function drawLive() {
+        if (!browserRecording) return;
+        const canvas = document.getElementById('browserRecordWaveform');
+        if (!canvas || !browserAnalyser) return;
+        const ctx = canvas.getContext('2d');
+        const dpr = window.devicePixelRatio || 1;
+        const w = canvas.clientWidth;
+        const h = canvas.clientHeight;
+        canvas.width = w * dpr;
+        canvas.height = h * dpr;
+        ctx.scale(dpr, dpr);
+
+        const bufLen = browserAnalyser.fftSize;
+        const data = new Float32Array(bufLen);
+        browserAnalyser.getFloatTimeDomainData(data);
+
+        ctx.fillStyle = '#111';
+        ctx.fillRect(0, 0, w, h);
+        ctx.strokeStyle = '#333';
+        ctx.beginPath(); ctx.moveTo(0, h/2); ctx.lineTo(w, h/2); ctx.stroke();
+
+        ctx.strokeStyle = '#e94560';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        for (let i = 0; i < bufLen; i++) {
+            const x = (i / bufLen) * w;
+            const y = (0.5 + data[i] * 0.45) * h;
+            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // Update level meter
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+        const rms = Math.sqrt(sum / data.length);
+        const pct = Math.min(100, rms * 300);
+        document.getElementById('browserLevelFill').style.width = pct + '%';
+        const db = rms > 0 ? (20 * Math.log10(rms)).toFixed(1) : '-Inf';
+        document.getElementById('browserLevelDb').textContent = db + ' dB';
+
+        browserAnimFrame = requestAnimationFrame(drawLive);
+    }
+    drawLive();
+}
+
+async function stopBrowserRecord() {
+    browserRecording = false;
+    clearInterval(browserRecordTimer);
+    if (browserAnimFrame) cancelAnimationFrame(browserAnimFrame);
+
+    const status = document.getElementById('browserRecordStatus');
+    const btn = document.getElementById('browserRecordBtn');
+    btn.classList.remove('recording');
+    status.textContent = 'Encoding WAV...';
+
+    // Stop audio pipeline
+    if (browserProcessor) { browserProcessor.disconnect(); browserProcessor = null; }
+    if (browserAnalyser) { browserAnalyser.disconnect(); browserAnalyser = null; }
+    if (browserAudioCtx) { browserAudioCtx.close(); browserAudioCtx = null; }
+    if (browserStream) { browserStream.getTracks().forEach(t => t.stop()); browserStream = null; }
+
+    // Encode WAV
+    const wavBlob = encodeBrowserWAV(browserChunks, 44100);
+    browserChunks = [];
+
+    const nameInput = document.getElementById('browserRecordName');
+    const name = (nameInput.value.trim() || 'recording_' + new Date().toISOString().slice(0,19).replace(/[:-]/g, '')) + '.wav';
+
+    status.textContent = 'Uploading ' + name + '...';
+
+    try {
+        const data = await uploadWavBlob(wavBlob, name);
+        if (data.ok) {
+            const dur = (data.duration || 0).toFixed(1);
+            status.textContent = 'Saved: ' + data.name + ' (' + dur + 's)';
+            document.getElementById('browserRecordElapsed').textContent = '0:00.0';
+            nameInput.value = '';
+            await loadFileList(data.path);
+        } else {
+            status.textContent = 'Error: ' + (data.error || 'upload failed');
+        }
+    } catch (e) {
+        status.textContent = 'Upload failed: ' + e.message;
+    }
+}
+
+function encodeBrowserWAV(chunks, sampleRate) {
+    let totalLength = 0;
+    for (const c of chunks) totalLength += c.length;
+    const samples = new Float32Array(totalLength);
+    let offset = 0;
+    for (const c of chunks) { samples.set(c, offset); offset += c.length; }
+
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+
+    function writeStr(off, str) { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)); }
+
+    writeStr(0, 'RIFF');
+    view.setUint32(4, 36 + samples.length * 2, true);
+    writeStr(8, 'WAVE');
+    writeStr(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeStr(36, 'data');
+    view.setUint32(40, samples.length * 2, true);
+
+    for (let i = 0; i < samples.length; i++) {
+        const s = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    }
+
+    return new Blob([buffer], { type: 'audio/wav' });
+}
+
+// Populate devices when record tab is shown
+if (isPublicMode) populateAudioDevices();
+
 // ── File picker ──────────────────────────────────────────────────
 
 async function loadFileList(selectPath) {
     const resp = await fetch('/api/files');
     files = await resp.json();
+
+    // Merge with locally cached files (IndexedDB) that may have been deleted from server
+    const serverPaths = new Set(files.map(f => f.path));
+    const localFiles = await cacheDB.getAll('audioFiles');
+    for (const { key, value } of localFiles) {
+        if (!serverPaths.has(key)) {
+            files.push({
+                name: value.name,
+                path: key,
+                duration: 0,
+                has_annotations: false,
+                group: 'your files',
+            });
+        }
+    }
 
     // Group by group name
     const groups = {};
@@ -2205,7 +2478,7 @@ async function loadFileList(selectPath) {
         items.forEach(f => {
             const opt = document.createElement('option');
             opt.value = f.path;
-            const dur = formatTime(f.duration);
+            const dur = f.duration ? formatTime(f.duration) : '?';
             const ann = f.has_annotations ? ' [ann]' : '';
             opt.textContent = f.name + ' (' + dur + ')' + ann;
             optgroup.appendChild(opt);
@@ -2228,7 +2501,7 @@ async function loadFileList(selectPath) {
     }
 }
 
-function selectFile(path) {
+async function selectFile(path) {
     cleanupStemAudio();
     audio.pause();
     playBtn.innerHTML = '&#9654;';
@@ -2242,6 +2515,11 @@ function selectFile(path) {
     // Clear pending taps when switching files
     annotationTaps = [];
     updateAnnotationUI();
+
+    // Ensure file exists on server (re-upload from IndexedDB if needed)
+    if (path.startsWith('uploads/')) {
+        await ensureFileOnServer(path);
+    }
 
     // Set audio source
     audio.src = '/audio/' + encodeURIComponent(path);
@@ -2338,7 +2616,8 @@ async function loadPanel() {
         cursorLine.style.display = 'none';
         document.getElementById('stemStatus').style.display = 'none';
         document.getElementById('controlsHint').innerHTML =
-            'Record audio from BlackHole loopback';
+            isPublicMode ? 'Record from microphone or system audio' : 'Record audio from BlackHole loopback';
+        if (isPublicMode) populateAudioDevices();
         return;
     }
     if (currentTab === 'effects') {
@@ -2922,6 +3201,47 @@ function stopEffectsPoll() {
 
 // ── File upload ──────────────────────────────────────────────────
 
+async function uploadWavBlob(blob, filename) {
+    // Cache WAV in IndexedDB for persistence across sessions
+    const buf = await blob.arrayBuffer();
+    const path = 'uploads/' + filename;
+    await cacheDB.put(path, { name: filename, wav: buf, savedAt: Date.now() }, 'audioFiles');
+
+    // Upload to server
+    const formData = new FormData();
+    formData.append('file', blob, filename);
+    const resp = await fetch('/api/upload', { method: 'POST', body: formData });
+    return await resp.json();
+}
+
+async function ensureFileOnServer(path) {
+    // Check if the server has this file by trying to fetch its audio
+    try {
+        const resp = await fetch('/audio/' + encodeURIComponent(path), { method: 'HEAD' });
+        if (resp.ok) return true;
+    } catch {}
+
+    // File missing on server — re-upload from IndexedDB
+    const cached = await cacheDB.get(path, 'audioFiles');
+    if (!cached) return false;
+
+    const blob = new Blob([cached.wav], { type: 'audio/wav' });
+    const progress = document.getElementById('uploadProgress');
+    progress.textContent = 'Re-uploading ' + cached.name + '...';
+    progress.style.display = 'block';
+
+    try {
+        const data = await uploadWavBlob(blob, cached.name);
+        if (data.ok) {
+            progress.textContent = 'Ready';
+            setTimeout(() => progress.style.display = 'none', 1000);
+            return true;
+        }
+    } catch {}
+    progress.style.display = 'none';
+    return false;
+}
+
 async function handleFileUpload(files) {
     if (!files || files.length === 0) return;
     const file = files[0];
@@ -2934,16 +3254,11 @@ async function handleFileUpload(files) {
     progress.textContent = `Uploading ${file.name}...`;
     progress.style.display = 'block';
 
-    const formData = new FormData();
-    formData.append('file', file);
-
     try {
-        const resp = await fetch('/api/upload', { method: 'POST', body: formData });
-        const data = await resp.json();
+        const data = await uploadWavBlob(file, file.name);
         if (data.ok) {
             progress.textContent = `Uploaded ${data.name}`;
             setTimeout(() => progress.style.display = 'none', 2000);
-            // Reload file list and select the new file
             await loadFileList(data.path);
         } else {
             progress.textContent = `Error: ${data.error}`;
@@ -2953,7 +3268,6 @@ async function handleFileUpload(files) {
         progress.textContent = `Upload failed: ${e.message}`;
         setTimeout(() => progress.style.display = 'none', 3000);
     }
-    // Reset input so same file can be re-uploaded
     document.getElementById('uploadInput').value = '';
 }
 

@@ -1453,6 +1453,72 @@ body {
 <audio id="audio" preload="auto"></audio>
 
 <script>
+// ── IndexedDB cache for analysis results ────────────────────────
+const cacheDB = (() => {
+    let db = null;
+    const DB_NAME = 'led-viewer-cache';
+    const STORE = 'panels';
+
+    function open() {
+        if (db) return Promise.resolve(db);
+        return new Promise((resolve, reject) => {
+            const req = indexedDB.open(DB_NAME, 1);
+            req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+            req.onsuccess = () => { db = req.result; resolve(db); };
+            req.onerror = () => resolve(null);
+        });
+    }
+
+    return {
+        async get(key) {
+            try {
+                const d = await open();
+                if (!d) return null;
+                return new Promise(resolve => {
+                    const tx = d.transaction(STORE, 'readonly');
+                    const req = tx.objectStore(STORE).get(key);
+                    req.onsuccess = () => resolve(req.result || null);
+                    req.onerror = () => resolve(null);
+                });
+            } catch { return null; }
+        },
+        async put(key, value) {
+            try {
+                const d = await open();
+                if (!d) return;
+                const tx = d.transaction(STORE, 'readwrite');
+                tx.objectStore(STORE).put(value, key);
+            } catch {}
+        }
+    };
+})();
+
+async function cachedFetchPNG(url) {
+    const cached = await cacheDB.get(url);
+    if (cached) {
+        return {
+            blob: new Blob([cached.png], {type: 'image/png'}),
+            pixelMapping: cached.pixelMapping
+        };
+    }
+
+    const resp = await fetch(url);
+    if (!resp.ok) return null;
+
+    const pm = {
+        xLeft: parseFloat(resp.headers.get('X-Left-Px')),
+        xRight: parseFloat(resp.headers.get('X-Right-Px')),
+        pngWidth: parseFloat(resp.headers.get('X-Png-Width')),
+        duration: parseFloat(resp.headers.get('X-Duration')),
+    };
+    const blob = await resp.blob();
+    const buf = await blob.arrayBuffer();
+
+    await cacheDB.put(url, { png: buf, pixelMapping: pm });
+
+    return { blob, pixelMapping: pm };
+}
+
 const audio = document.getElementById('audio');
 const filePicker = document.getElementById('filePicker');
 const panelImg = document.getElementById('panelImg');
@@ -2052,18 +2118,10 @@ async function loadPanel() {
     showOverlay('Rendering...');
 
     try {
-        const resp = await fetch(url);
-        if (!resp.ok) { showOverlay('Render failed'); return; }
-
-        pixelMapping = {
-            xLeft: parseFloat(resp.headers.get('X-Left-Px')),
-            xRight: parseFloat(resp.headers.get('X-Right-Px')),
-            pngWidth: parseFloat(resp.headers.get('X-Png-Width')),
-            duration: parseFloat(resp.headers.get('X-Duration')),
-        };
-
-        const blob = await resp.blob();
-        panelImg.src = URL.createObjectURL(blob);
+        const result = await cachedFetchPNG(url);
+        if (!result) { showOverlay('Render failed'); return; }
+        pixelMapping = result.pixelMapping;
+        panelImg.src = URL.createObjectURL(result.blob);
         hideOverlay();
         cursorLine.style.display = 'block';
     } catch (e) {
@@ -2089,18 +2147,11 @@ async function loadStems() {
     showOverlay('Rendering stems...');
 
     try {
-        const resp = await fetch('/api/stems/' + encodeURIComponent(currentFile));
-        if (!resp.ok) { showOverlay('Stems render failed'); return; }
-
-        pixelMapping = {
-            xLeft: parseFloat(resp.headers.get('X-Left-Px')),
-            xRight: parseFloat(resp.headers.get('X-Right-Px')),
-            pngWidth: parseFloat(resp.headers.get('X-Png-Width')),
-            duration: parseFloat(resp.headers.get('X-Duration')),
-        };
-
-        const blob = await resp.blob();
-        panelImg.src = URL.createObjectURL(blob);
+        const stemUrl = '/api/stems/' + encodeURIComponent(currentFile);
+        const result = await cachedFetchPNG(stemUrl);
+        if (!result) { showOverlay('Stems render failed'); return; }
+        pixelMapping = result.pixelMapping;
+        panelImg.src = URL.createObjectURL(result.blob);
         hideOverlay();
         cursorLine.style.display = 'block';
         const stemName = currentFile.split('/').pop().replace('.wav', '');
@@ -2129,18 +2180,11 @@ async function loadHPSS() {
     showOverlay('Computing HPSS...');
 
     try {
-        const resp = await fetch('/api/hpss/' + encodeURIComponent(currentFile));
-        if (!resp.ok) { showOverlay('HPSS render failed'); return; }
-
-        pixelMapping = {
-            xLeft: parseFloat(resp.headers.get('X-Left-Px')),
-            xRight: parseFloat(resp.headers.get('X-Right-Px')),
-            pngWidth: parseFloat(resp.headers.get('X-Png-Width')),
-            duration: parseFloat(resp.headers.get('X-Duration')),
-        };
-
-        const blob = await resp.blob();
-        panelImg.src = URL.createObjectURL(blob);
+        const hpssUrl = '/api/hpss/' + encodeURIComponent(currentFile);
+        const result = await cachedFetchPNG(hpssUrl);
+        if (!result) { showOverlay('HPSS render failed'); return; }
+        pixelMapping = result.pixelMapping;
+        panelImg.src = URL.createObjectURL(result.blob);
         hideOverlay();
         cursorLine.style.display = 'block';
         const stemName = currentFile.split('/').pop().replace('.wav', '');
@@ -2159,18 +2203,11 @@ async function loadLab() {
     document.getElementById('stemStatus').style.display = 'none';
 
     try {
-        const resp = await fetch('/api/lab/' + encodeURIComponent(currentFile));
-        if (!resp.ok) { showOverlay('Lab render failed'); return; }
-
-        pixelMapping = {
-            xLeft: parseFloat(resp.headers.get('X-Left-Px')),
-            xRight: parseFloat(resp.headers.get('X-Right-Px')),
-            pngWidth: parseFloat(resp.headers.get('X-Png-Width')),
-            duration: parseFloat(resp.headers.get('X-Duration')),
-        };
-
-        const blob = await resp.blob();
-        panelImg.src = URL.createObjectURL(blob);
+        const labUrl = '/api/lab/' + encodeURIComponent(currentFile);
+        const result = await cachedFetchPNG(labUrl);
+        if (!result) { showOverlay('Lab render failed'); return; }
+        pixelMapping = result.pixelMapping;
+        panelImg.src = URL.createObjectURL(result.blob);
         hideOverlay();
         cursorLine.style.display = 'block';
     } catch (e) {
@@ -2184,18 +2221,11 @@ async function loadLabNMF() {
     document.getElementById('stemStatus').style.display = 'none';
 
     try {
-        const resp = await fetch('/api/lab-nmf/' + encodeURIComponent(currentFile));
-        if (!resp.ok) { showOverlay('NMF render failed'); return; }
-
-        pixelMapping = {
-            xLeft: parseFloat(resp.headers.get('X-Left-Px')),
-            xRight: parseFloat(resp.headers.get('X-Right-Px')),
-            pngWidth: parseFloat(resp.headers.get('X-Png-Width')),
-            duration: parseFloat(resp.headers.get('X-Duration')),
-        };
-
-        const blob = await resp.blob();
-        panelImg.src = URL.createObjectURL(blob);
+        const nmfUrl = '/api/lab-nmf/' + encodeURIComponent(currentFile);
+        const result = await cachedFetchPNG(nmfUrl);
+        if (!result) { showOverlay('NMF render failed'); return; }
+        pixelMapping = result.pixelMapping;
+        panelImg.src = URL.createObjectURL(result.blob);
         hideOverlay();
         cursorLine.style.display = 'block';
         const stemName = currentFile.split('/').pop().replace('.wav', '');
@@ -2211,18 +2241,11 @@ async function loadLabRepet() {
     showOverlay('Computing REPET separation...');
 
     try {
-        const resp = await fetch('/api/lab-repet/' + encodeURIComponent(currentFile));
-        if (!resp.ok) { showOverlay('REPET render failed'); return; }
-
-        pixelMapping = {
-            xLeft: parseFloat(resp.headers.get('X-Left-Px')),
-            xRight: parseFloat(resp.headers.get('X-Right-Px')),
-            pngWidth: parseFloat(resp.headers.get('X-Png-Width')),
-            duration: parseFloat(resp.headers.get('X-Duration')),
-        };
-
-        const blob = await resp.blob();
-        panelImg.src = URL.createObjectURL(blob);
+        const repetUrl = '/api/lab-repet/' + encodeURIComponent(currentFile);
+        const result = await cachedFetchPNG(repetUrl);
+        if (!result) { showOverlay('REPET render failed'); return; }
+        pixelMapping = result.pixelMapping;
+        panelImg.src = URL.createObjectURL(result.blob);
         hideOverlay();
         cursorLine.style.display = 'block';
         const stemName = currentFile.split('/').pop().replace('.wav', '');

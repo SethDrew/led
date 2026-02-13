@@ -1499,13 +1499,13 @@ body {
     <div class="welcome-card">
         <h1>Audio Explorer</h1>
         <div class="subtitle">by Seth Drew</div>
-        <p>This is an interactive audio visualization and research tool. Upload or record any audio you like and explore it through spectrograms, source separation, beat annotations, and more.</p>
-        <p>No accounts required. Your audio files are stored locally in your browser's storage for copyright reasons &mdash; nothing is kept on the server long-term.</p>
+        <p>This is an interactive audio visualization and audio interactivity research testbed. It's configured to require no user accounts. It allows you to upload or record and analyze any audio you would like.</p>
+        <p>This audio is stored on your machine only for copyright reasons, which you can clean up using the <strong>Record</strong> tab or manually via:</p>
         <div class="storage-note">
-            Your files live in your browser's <strong>IndexedDB</strong> storage. You can manage them from the <strong>Record</strong> tab, or clear everything via<br>
             <code>Settings &rarr; Privacy &rarr; Site Data &rarr; audio.sethdrew.com</code>
         </div>
-        <p>Questions, ideas, or improvements? <a class="contact-link" id="contactLink">Get in touch</a>.</p>
+        <p>Glad to have you! If you have any questions feel free to reach out directly to me with questions or improvements &mdash; <span class="contact-link" id="contactLink" onclick="copyContact()">copy my email</span>.</p>
+        <span class="contact-copied" id="contactCopied" style="display:none; color:#4caf50; font-size:12px; margin-left:6px;">Copied!</span>
         <button class="enter-btn" onclick="dismissWelcome()">Explore</button>
     </div>
 </div>
@@ -3571,18 +3571,22 @@ function showWelcome() {
     if (localStorage.getItem('welcomed')) return;
     const modal = document.getElementById('welcomeModal');
     if (modal) modal.style.display = 'flex';
-    // Obfuscated email — assembled at runtime so scrapers can't find it
-    const link = document.getElementById('contactLink');
-    if (link) {
-        const u = 'seth'; const d = 'sethdrew'; const t = 'com';
-        link.href = 'mai' + 'lto:' + u + '@' + d + '.' + t;
-    }
 }
 
 function dismissWelcome() {
     const modal = document.getElementById('welcomeModal');
     if (modal) modal.style.display = 'none';
     localStorage.setItem('welcomed', '1');
+}
+
+function copyContact() {
+    // Obfuscated email — assembled at runtime so scrapers can't find it in source
+    const u = 'seth'; const d = 'sethdrew'; const t = 'com';
+    const addr = u + '@' + d + '.' + t;
+    navigator.clipboard.writeText(addr).then(() => {
+        const el = document.getElementById('contactCopied');
+        if (el) { el.style.display = 'inline'; setTimeout(() => el.style.display = 'none', 2000); }
+    });
 }
 
 // ── Init ─────────────────────────────────────────────────────────

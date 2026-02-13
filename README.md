@@ -1,8 +1,6 @@
 # Audio Explorer
 
-An interactive audio visualization and research tool. Upload or record any audio and explore it through spectrograms, source separation, beat annotations, and experimental decomposition algorithms.
-
-No accounts required. Your audio is stored locally in your browser for copyright reasons — nothing is kept on the server long-term.
+An interactive audio visualization and audio interactivity research testbed. It's configured to require no user accounts. It allows you to upload or record and analyze any audio you would like. This audio is stored on your machine only for copyright reasons.
 
 **Live demo:** [audio.sethdrew.com](https://audio.sethdrew.com)
 

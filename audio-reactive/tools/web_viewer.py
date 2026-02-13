@@ -1758,6 +1758,17 @@ async function cachedFetchPNG(url) {
     return { blob, pixelMapping: pm };
 }
 
+async function clearPanelCache(filePath) {
+    // Clear all cached panels for a given file path
+    const encoded = encodeURIComponent(filePath);
+    const all = await cacheDB.getAll('panels');
+    for (const { key } of all) {
+        if (typeof key === 'string' && key.includes(encoded)) {
+            await cacheDB.delete(key, 'panels');
+        }
+    }
+}
+
 // ── Auth ────────────────────────────────────────────────────────
 let isAuthenticated = false;
 let isPublicMode = false;
@@ -2088,19 +2099,29 @@ async function saveAnnotation() {
     const layer = document.getElementById('layerInput').value.trim();
     if (!layer) { alert('Enter a layer name'); return; }
 
+    const sortedTaps = annotationTaps.slice().sort((a, b) => a - b);
+
     const resp = await fetch('/api/annotations/' + encodeURIComponent(currentFile), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ layer: layer, taps: annotationTaps.slice().sort((a, b) => a - b) })
+        body: JSON.stringify({ layer: layer, taps: sortedTaps })
     });
 
     if (resp.ok) {
+        // Also cache annotations in IndexedDB for persistence
+        const annKey = 'ann:' + currentFile;
+        const existing = await cacheDB.get(annKey, 'audioFiles') || {};
+        existing[layer] = sortedTaps;
+        await cacheDB.put(annKey, existing, 'audioFiles');
+
         annotationTaps = [];
         updateAnnotationUI();
         drawTapMarkers();
         // Update file info to reflect new annotations
         const fileInfo = files.find(f => f.path === currentFile);
         if (fileInfo) fileInfo.has_annotations = true;
+        // Clear cached panels so annotation render is fresh
+        await clearPanelCache(currentFile);
         // Re-render annotations tab to show saved data
         loadPanel();
     } else {
@@ -2543,6 +2564,17 @@ async function selectFile(path) {
     if (path.startsWith('uploads/')) {
         await ensureFileOnServer(path);
     }
+
+    // Sync annotations: fetch from server, cache in IndexedDB
+    try {
+        const annResp = await fetch('/api/annotations/' + encodeURIComponent(path));
+        if (annResp.ok) {
+            const annData = await annResp.json();
+            if (Object.keys(annData).length > 0) {
+                await cacheDB.put('ann:' + path, annData, 'audioFiles');
+            }
+        }
+    } catch {}
 
     // Set audio source
     audio.src = '/audio/' + encodeURIComponent(path);
@@ -3259,6 +3291,18 @@ async function ensureFileOnServer(path) {
     try {
         const data = await uploadWavBlob(blob, cached.name);
         if (data.ok) {
+            // Restore annotations from IndexedDB if any
+            const annKey = 'ann:' + path;
+            const annotations = await cacheDB.get(annKey, 'audioFiles');
+            if (annotations && Object.keys(annotations).length > 0) {
+                for (const [layer, taps] of Object.entries(annotations)) {
+                    await fetch('/api/annotations/' + encodeURIComponent(data.path), {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ layer, taps })
+                    });
+                }
+            }
             progress.textContent = 'Ready';
             setTimeout(() => progress.style.display = 'none', 1000);
             return true;
@@ -3833,6 +3877,21 @@ class ViewerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(result)
 
+    def _serve_annotations(self, rel_path):
+        """Serve annotation YAML as JSON for a given audio file."""
+        import yaml
+        filepath = _resolve_audio_path(rel_path)
+        if filepath is None:
+            self._json_response({})
+            return
+        ann_path = Path(filepath).with_suffix('.annotations.yaml')
+        if ann_path.exists():
+            with open(ann_path) as f:
+                annotations = yaml.safe_load(f) or {}
+            self._json_response(annotations)
+        else:
+            self._json_response({})
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
@@ -3879,6 +3938,9 @@ class ViewerHandler(BaseHTTPRequestHandler):
         elif path.startswith('/api/lab/'):
             rel_path = path[len('/api/lab/'):]
             self._serve_lab(rel_path)
+        elif path.startswith('/api/annotations/'):
+            rel_path = path[len('/api/annotations/'):]
+            self._serve_annotations(rel_path)
         elif path == '/api/effects':
             self._json_response({
                 'effects': _get_effects_list(),

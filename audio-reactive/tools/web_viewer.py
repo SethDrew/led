@@ -3646,8 +3646,7 @@ function copyContact() {
 
 // ── Init ─────────────────────────────────────────────────────────
 
-checkAuth();
-loadFileList();
+checkAuth().then(() => loadFileList());
 </script>
 </body>
 </html>

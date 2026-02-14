@@ -1148,6 +1148,8 @@ def get_recording_level():
 
 # ── HTML Generation ───────────────────────────────────────────────────
 
+_server_start_iso = None
+
 def generate_html():
     """Generate the single-page app HTML."""
     # Using string.Template to avoid JS % escaping issues
@@ -1734,6 +1736,7 @@ body {
     <kbd>Space</kbd> play/pause &nbsp;
     <kbd>&larr;</kbd> <kbd>&rarr;</kbd> &plusmn;5s &nbsp;
     Click panel to seek
+    <span id="buildTime" style="float:right; color:#555; font-size:11px;"></span>
 </div>
 
 <audio id="audio" preload="auto"></audio>
@@ -3773,13 +3776,26 @@ function copyContact() {
     });
 }
 
+// ── Build time ───────────────────────────────────────────────────
+
+(() => {
+    const iso = '$server_start_iso';
+    if (!iso) return;
+    const d = new Date(iso);
+    if (isNaN(d)) return;
+    const el = document.getElementById('buildTime');
+    if (!el) return;
+    const fmt = d.toLocaleString(undefined, {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+    el.textContent = 'deployed ' + fmt;
+})();
+
 // ── Init ─────────────────────────────────────────────────────────
 
 checkAuth().then(() => loadFileList());
 </script>
 </body>
 </html>
-''').safe_substitute()  # No substitutions needed, but safe_substitute avoids $-escaping
+''').safe_substitute(server_start_iso=_server_start_iso or '')
 
 
 # ── HTTP Handler ──────────────────────────────────────────────────────
@@ -4546,6 +4562,10 @@ class ViewerHandler(BaseHTTPRequestHandler):
 
 def run_server(port=0, host='127.0.0.1', no_browser=False):
     """Start the web viewer server and open the browser."""
+    global _server_start_iso
+    from datetime import datetime, timezone
+    _server_start_iso = datetime.now(timezone.utc).isoformat()
+
     server = HTTPServer((host, port), ViewerHandler)
     actual_port = server.server_address[1]
 

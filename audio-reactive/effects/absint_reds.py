@@ -63,6 +63,10 @@ class AbsIntRedsEffect(AudioReactiveEffect):
     def name(self):
         return "AbsInt Reds"
 
+    @property
+    def description(self):
+        return "Proportional abs-integral brightness in night mode (80% cap) with deep red to orange to magenta color gradient."
+
     def _sample_palette(self, t):
         """Sample color from palette at position t (0-1)."""
         t = np.clip(t, 0, 1)

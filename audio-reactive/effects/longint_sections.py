@@ -130,6 +130,10 @@ class LongIntSectionsEffect(AudioReactiveEffect):
     def name(self):
         return "LongInt Sections"
 
+    @property
+    def description(self):
+        return "Blends 80% long-horizon RMS (10s energy envelope) with 20% bass abs-integral (kick transients); Fibonacci sections, orange-to-purple."
+
     def process_audio(self, mono_chunk: np.ndarray):
         n = len(mono_chunk)
         pos = self.audio_buf_pos

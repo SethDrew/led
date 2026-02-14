@@ -46,6 +46,10 @@ class RMSMeterEffect(AudioReactiveEffect):
     def name(self):
         return "RMS Meter"
 
+    @property
+    def description(self):
+        return "Simple volume meter: lit LED count equals current RMS normalized against slow-decay peak; no derivatives or integrals."
+
     def process_audio(self, mono_chunk: np.ndarray):
         rms = np.sqrt(np.mean(mono_chunk ** 2))
         self.rms_peak = max(rms, self.rms_peak * self.peak_decay)

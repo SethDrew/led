@@ -62,6 +62,10 @@ class WLEDBeatReactive(AudioReactiveEffect):
     def name(self):
         return "WLED Beat"
 
+    @property
+    def description(self):
+        return "WLED's peak detection: finds dominant FFT bin, checks if magnitude exceeds adaptive threshold with 100ms cooldown."
+
     def process_audio(self, mono_chunk: np.ndarray):
         # Fill buffer
         chunk_len = min(len(mono_chunk), self.n_fft)

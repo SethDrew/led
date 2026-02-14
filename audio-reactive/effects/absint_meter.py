@@ -60,6 +60,10 @@ class AbsIntMeterEffect(AudioReactiveEffect):
     def name(self):
         return "AbsInt Meter"
 
+    @property
+    def description(self):
+        return "Volume meter where lit LED count is proportional to abs-integral magnitude; red-to-magenta gradient from base to tip."
+
     def process_audio(self, mono_chunk: np.ndarray):
         n = len(mono_chunk)
         pos = self.audio_buf_pos

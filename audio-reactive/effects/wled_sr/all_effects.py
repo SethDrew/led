@@ -456,6 +456,10 @@ class WLEDAllEffects(AudioReactiveEffect):
     def name(self):
         return "WLED All 12 Effects"
 
+    @property
+    def description(self):
+        return "All 12 WLED 1D audio effects stacked vertically: Juggles, Midnoise, Noisemeter, Plasmoid, Blurz, DJLight, Freqmap, Freqmatrix, Freqpixels, Freqwave, Noisemove, Rocktaves."
+
     def process_audio(self, mono_chunk):
         self.audio_state.process(mono_chunk)
 

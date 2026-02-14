@@ -87,6 +87,10 @@ class AbsIntBandPulseEffect(AudioReactiveEffect):
     def name(self):
         return "AbsInt Band Pulse"
 
+    @property
+    def description(self):
+        return "Multi-band beat detection (bass/mid/high) spawning Gaussian pulses that travel across the strip; warm red, blue, and white."
+
     def _spawn_pulse(self, band_idx, strength):
         """Spawn a Gaussian pulse for the given band."""
         _, color, _, _ = BANDS[band_idx]

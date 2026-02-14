@@ -33,6 +33,8 @@ import time
 import argparse
 import threading
 import glob
+import json
+import base64
 
 import numpy as np
 import sounddevice as sd
@@ -416,10 +418,104 @@ def run_wav(effect, led_output, wav_path, brightness_cap=BRIGHTNESS_CAP):
     print(f"\n  Finished. {frame_num} frames rendered.")
 
 
+def analyze_effect(effect_name, wav_path, num_leds=NUM_LEDS, sample_rate=SAMPLE_RATE):
+    """Run effect offline at full speed, collecting LED frames and diagnostics.
+
+    Returns dict with led_data (base64), diagnostics, waveform_peaks, etc.
+    """
+    import soundfile as sf
+
+    effects = get_effect_registry()
+    if effect_name not in effects:
+        return {'error': f'Unknown effect: {effect_name}'}
+
+    effect = effects[effect_name](num_leds=num_leds, sample_rate=sample_rate)
+
+    audio, sr = sf.read(wav_path, dtype='float32')
+    if audio.ndim > 1:
+        audio = np.mean(audio, axis=1)
+
+    duration = len(audio) / sr
+    frame_interval = 1.0 / LED_FPS
+
+    # Collect results
+    led_frames = []
+    diag_list = []
+    waveform_peaks = []
+
+    # Track time in audio samples to decide when to render
+    samples_per_frame = int(sr / LED_FPS)
+    chunk_idx = 0
+    next_render_sample = samples_per_frame  # render after first frame's worth of audio
+
+    while chunk_idx < len(audio):
+        chunk_end = min(chunk_idx + CHUNK_SIZE, len(audio))
+        chunk = audio[chunk_idx:chunk_end]
+        effect.process_audio(chunk)
+
+        # Waveform peak for this chunk
+        waveform_peaks.append(float(np.max(np.abs(chunk))))
+
+        chunk_idx = chunk_end
+
+        # Render at 30fps boundaries
+        while chunk_idx >= next_render_sample and next_render_sample <= len(audio):
+            frame = effect.render(frame_interval)
+            # Clamp to uint8
+            frame = np.clip(frame, 0, 255).astype(np.uint8)
+            led_frames.append(frame)
+
+            # Collect diagnostics
+            diag = effect.get_diagnostics()
+            normalized = {}
+            for k, v in diag.items():
+                if isinstance(v, bool):
+                    normalized[k] = 1.0 if v else 0.0
+                elif isinstance(v, (int, float)):
+                    normalized[k] = float(v)
+                elif isinstance(v, str):
+                    # Strings like "BEAT!" → 1.0, empty/quiet → 0.0
+                    normalized[k] = 0.0 if v in ('', '-', 'n', 'no', 'off') else 1.0
+                else:
+                    normalized[k] = 0.0
+            diag_list.append(normalized)
+
+            next_render_sample += samples_per_frame
+
+    # Build LED data as flat uint8 array, base64 encoded
+    if led_frames:
+        led_array = np.stack(led_frames)  # (N, num_leds, 3)
+        led_b64 = base64.b64encode(led_array.tobytes()).decode('ascii')
+    else:
+        led_array = np.zeros((0, num_leds, 3), dtype=np.uint8)
+        led_b64 = ''
+
+    # Collect all diagnostic keys across all frames
+    all_keys = []
+    seen = set()
+    for d in diag_list:
+        for k in d:
+            if k not in seen:
+                all_keys.append(k)
+                seen.add(k)
+
+    return {
+        'num_frames': len(led_frames),
+        'num_leds': num_leds,
+        'fps': LED_FPS,
+        'duration': duration,
+        'led_data': led_b64,
+        'diagnostics': diag_list,
+        'diag_keys': all_keys,
+        'waveform_peaks': waveform_peaks,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description='Audio-reactive effect runner')
     parser.add_argument('effect', nargs='?', help='Effect name (use --list to see options)')
     parser.add_argument('--list', action='store_true', help='List available effects')
+    parser.add_argument('--analyze', action='store_true', help='Offline analysis mode — outputs JSON')
     parser.add_argument('--wav', help='WAV file to play (instead of live audio)')
     parser.add_argument('--no-leds', action='store_true', help='Terminal visualization only')
     parser.add_argument('--port', default=None, help='Serial port (auto-detect if omitted)')
@@ -427,6 +523,18 @@ def main():
     parser.add_argument('--brightness', type=float, default=BRIGHTNESS_CAP,
                         help='Brightness cap (0-1, default 0.03)')
     args = parser.parse_args()
+
+    # Analyze mode — run offline, output JSON to stdout
+    if args.analyze:
+        if not args.effect:
+            print(json.dumps({'error': 'Effect name required'}))
+            sys.exit(1)
+        if not args.wav:
+            print(json.dumps({'error': '--wav required for --analyze'}))
+            sys.exit(1)
+        result = analyze_effect(args.effect, args.wav, num_leds=args.leds)
+        json.dump(result, sys.stdout)
+        sys.exit(0)
 
     brightness_cap = args.brightness
 
@@ -438,10 +546,11 @@ def main():
         if not effects:
             print("  (none found — implement effects in wled_sr/ or ours/)")
         for name, cls in effects.items():
-            # Instantiate briefly to get the name
+            # Instantiate briefly to get the name and description
             try:
                 e = cls(num_leds=1)
-                print(f"  {name:20s} — {e.name}")
+                desc = f" | {e.description}" if e.description else ""
+                print(f"  {name:20s} — {e.name}{desc}")
             except Exception as ex:
                 print(f"  {name:20s} — (error: {ex})")
         print()

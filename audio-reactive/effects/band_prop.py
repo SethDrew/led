@@ -91,6 +91,10 @@ class BandProportionalEffect(AudioReactiveEffect):
     def name(self):
         return "Band Proportional"
 
+    @property
+    def description(self):
+        return "Three independent abs-integral signals mapped to RGB (bass=red, mid=green, high=blue); color shows which frequency bands are changing."
+
     def process_audio(self, mono_chunk: np.ndarray):
         """Accumulate audio into frames."""
         n = len(mono_chunk)

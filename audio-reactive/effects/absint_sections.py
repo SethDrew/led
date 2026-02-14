@@ -117,6 +117,10 @@ class AbsIntSectionsEffect(AudioReactiveEffect):
     def name(self):
         return "AbsInt Sections"
 
+    @property
+    def description(self):
+        return "Fibonacci-sized strip sections with proportional abs-integral brightness; orange-to-purple gradient from tip to base."
+
     def process_audio(self, mono_chunk: np.ndarray):
         n = len(mono_chunk)
         pos = self.audio_buf_pos

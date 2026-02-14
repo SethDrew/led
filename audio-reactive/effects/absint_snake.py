@@ -96,6 +96,10 @@ class AbsIntSnakeEffect(AudioReactiveEffect):
     def name(self):
         return "AbsInt Snake"
 
+    @property
+    def description(self):
+        return "Beats spawn traveling pulses whose size and travel distance scale with beat strength; autocorrelation tempo prediction; red-to-magenta gradient."
+
     def _spawn_snake(self, strength):
         """Spawn a new snake with properties scaled by beat strength (0-1)."""
         s = np.clip(strength, 0, 1)

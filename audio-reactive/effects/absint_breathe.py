@@ -61,6 +61,10 @@ class AbsIntBreatheEffect(AudioReactiveEffect):
     def name(self):
         return "AbsInt Breathe"
 
+    @property
+    def description(self):
+        return "Symmetric fade-on and fade-off pulse from abs-integral signal; gentler and more organic than snap-on/slow-off effects."
+
     def _sample_palette(self, t):
         """Sample color from palette at position t (0-1)."""
         t = np.clip(t, 0, 1)

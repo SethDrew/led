@@ -59,6 +59,10 @@ class AbsIntProportionalEffect(AudioReactiveEffect):
     def name(self):
         return "AbsInt Proportional"
 
+    @property
+    def description(self):
+        return "Maps abs-integral of RMS derivative directly to brightness without beat detection; false positives stay proportionally dim."
+
     def process_audio(self, mono_chunk: np.ndarray):
         """Accumulate audio into RMS frames."""
         n = len(mono_chunk)

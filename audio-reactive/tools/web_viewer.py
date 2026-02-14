@@ -51,9 +51,60 @@ _recording = None       # {'stream': sd.InputStream, 'frames': list} or None
 # ── Effects management ────────────────────────────────────────────────
 
 _effect_process = None   # subprocess.Popen or None
-_effects_cache = None    # list of effect names from runner.py --list
+_effects_cache = None    # list of {name, description} dicts from runner.py --list
+_active_controller = None  # id of the controller the running effect is using, or None
 
 EFFECTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'effects')
+
+# ── Controllers ──────────────────────────────────────────────────────
+
+def _load_controllers():
+    """Load LED controller definitions from controllers.json."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'controllers.json')
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"[controllers] Could not load controllers.json: {e}")
+        return []
+
+def _resolve_controller_ports(controllers):
+    """Match controllers to connected serial ports by USB VID/PID.
+
+    Each controller in controllers.json specifies vid/pid (hex strings).
+    We scan connected ports and assign the 'port' field at runtime.
+    If multiple devices share the same VID/PID, assignment is arbitrary.
+    """
+    try:
+        from serial.tools import list_ports
+        connected = list(list_ports.comports())
+    except ImportError:
+        print("[controllers] pyserial not installed — cannot auto-detect ports")
+        return
+
+    # Build a lookup: (vid, pid) -> list of device paths
+    by_vidpid = {}
+    for p in connected:
+        if p.vid is not None and p.pid is not None:
+            key = (f"{p.vid:04x}", f"{p.pid:04x}")
+            by_vidpid.setdefault(key, []).append(p.device)
+
+    for c in controllers:
+        vid = c.get('vid')
+        pid = c.get('pid')
+        if not vid or not pid:
+            continue
+        key = (vid.lower(), pid.lower())
+        ports = by_vidpid.get(key, [])
+        if ports:
+            c['port'] = ports.pop(0)  # consume one; arbitrary if >1
+            print(f"[controllers] {c['name']}: {c['port']} (vid={vid} pid={pid})")
+        else:
+            c['port'] = None
+            print(f"[controllers] {c['name']}: not connected (vid={vid} pid={pid})")
+
+_controllers = _load_controllers()
+_resolve_controller_ports(_controllers)
 
 # ── Auth ─────────────────────────────────────────────────────────────
 
@@ -102,7 +153,7 @@ EFFECT_PREFS_PATH = os.path.join(EFFECTS_DIR, 'effect_prefs.json')
 
 
 def _discover_effects():
-    """Run runner.py --list and parse available effect names."""
+    """Run runner.py --list and parse available effect names + descriptions."""
     global _effects_cache
     if _effects_cache is not None:
         return _effects_cache
@@ -112,18 +163,25 @@ def _discover_effects():
             [sys.executable, 'runner.py', '--list'],
             cwd=EFFECTS_DIR, capture_output=True, text=True, timeout=10
         )
-        names = []
+        entries = []
         for line in result.stdout.splitlines():
             line = line.strip()
             if not line or line.startswith('=') or line.startswith('Available') or line.startswith('('):
                 continue
-            # Lines like: "wled_volume          — WLED Volume Reactive"
-            if '—' not in line:
+            # Lines like: "wled_volume          — WLED Volume | Description here"
+            if '\u2014' not in line:
                 continue
-            name = line.split('—')[0].strip()
+            name_part, rest = line.split('\u2014', 1)
+            name = name_part.strip()
+            # Parse description after " | " if present
+            rest = rest.strip()
+            if ' | ' in rest:
+                _, desc = rest.split(' | ', 1)
+            else:
+                desc = ''
             if name:
-                names.append(name)
-        _effects_cache = names
+                entries.append({'name': name, 'description': desc})
+        _effects_cache = entries
     except Exception as e:
         print(f"[effects] Discovery failed: {e}")
         _effects_cache = []
@@ -172,14 +230,17 @@ def _save_effect_prefs(prefs):
 
 def _get_effects_list():
     """Get effects list merged with preferences (ratings, order)."""
-    names = _discover_effects()
+    entries = _discover_effects()
     prefs = _load_effect_prefs()
 
     effects = []
-    for name in names:
+    for entry in entries:
+        name = entry['name'] if isinstance(entry, dict) else entry
+        desc = entry.get('description', '') if isinstance(entry, dict) else ''
         p = prefs.get(name, {})
         effects.append({
             'name': name,
+            'description': desc,
             'order': p.get('order', 999),
             'rating': p.get('rating', 0),
         })
@@ -188,26 +249,40 @@ def _get_effects_list():
     return effects
 
 
-def _start_effect(name):
+def _start_effect(name, controller_id=None):
     """Start an effect subprocess. Kills any running effect first."""
-    global _effect_process
+    global _effect_process, _active_controller
     _stop_effect()
+
+    cmd = [sys.executable, 'runner.py', name]
+
+    # Look up controller config; fall back to --no-leds
+    controller = None
+    if controller_id:
+        controller = next((c for c in _controllers if c['id'] == controller_id), None)
+
+    if controller and controller.get('port'):
+        cmd += ['--port', controller['port'], '--leds', str(controller['leds'])]
+    else:
+        cmd.append('--no-leds')
 
     try:
         _effect_process = subprocess.Popen(
-            [sys.executable, 'runner.py', name, '--no-leds'],
+            cmd,
             cwd=EFFECTS_DIR,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT
         )
-        print(f"[effects] Started: {name} (pid {_effect_process.pid})")
+        _active_controller = controller_id if controller else None
+        print(f"[effects] Started: {name} (pid {_effect_process.pid}) cmd: {' '.join(cmd)}")
     except Exception as e:
         print(f"[effects] Start failed: {e}")
         _effect_process = None
+        _active_controller = None
 
 
 def _stop_effect():
     """Stop the running effect subprocess."""
-    global _effect_process
+    global _effect_process, _active_controller
     if _effect_process is not None:
         try:
             _effect_process.terminate()
@@ -218,15 +293,17 @@ def _stop_effect():
             pass
         print(f"[effects] Stopped (pid {_effect_process.pid})")
         _effect_process = None
+        _active_controller = None
 
 
 def _get_running_effect_name():
     """Get the name of the currently running effect, or None."""
-    global _effect_process
+    global _effect_process, _active_controller
     if _effect_process is None:
         return None
     if _effect_process.poll() is not None:
         _effect_process = None
+        _active_controller = None
         return None
     # Extract from command line args
     args = _effect_process.args
@@ -1351,6 +1428,7 @@ body {
     padding: 4px 12px; cursor: pointer; font-size: 18px; line-height: 1;
 }
 .play-btn:hover { border-color: #e94560; }
+.play-btn.active { border-color: #e94560; color: #e94560; }
 .stem-status {
     display: none; padding: 4px 20px; background: #16213e;
     text-align: center; font-size: 12px;
@@ -1515,6 +1593,49 @@ body {
 .selector-item.checked { color: #e0e0e0; }
 .selector-item input[type="checkbox"] { accent-color: #e94560; width: 13px; height: 13px; }
 .selector-count { color: #555; font-size: 11px; margin-left: auto; }
+.effect-name { cursor: pointer; }
+.effect-name:hover { text-decoration: underline; text-decoration-color: #555; text-underline-offset: 3px; }
+.effect-detail { display: flex; flex-direction: column; gap: 12px; max-width: 900px; width: 100%; }
+.effect-detail-header { display: flex; align-items: center; gap: 12px; }
+.effect-detail-header h2 { margin: 0; font-size: 18px; color: #e0e0e0; font-weight: 500; }
+.effect-detail-back {
+    background: #16213e; color: #aaa; border: 1px solid #333; border-radius: 4px;
+    padding: 4px 12px; cursor: pointer; font-size: 13px;
+}
+.effect-detail-back:hover { border-color: #e94560; color: #e0e0e0; }
+.effect-detail-controls { display: flex; align-items: center; gap: 10px; }
+.effect-detail-controls select {
+    background: #0f1a2e; color: #e0e0e0; border: 1px solid #333; border-radius: 4px;
+    padding: 5px 10px; font-size: 13px; flex: 1; min-width: 200px;
+}
+.effect-detail-controls button {
+    background: #e94560; color: #fff; border: none; border-radius: 4px;
+    padding: 6px 16px; cursor: pointer; font-size: 13px; white-space: nowrap;
+}
+.effect-detail-controls button:disabled { opacity: 0.5; cursor: not-allowed; }
+.effect-detail-controls button:hover:not(:disabled) { background: #d13550; }
+.effect-detail-viz { position: relative; width: 100%; }
+.effect-detail-viz canvas { display: block; width: 100%; cursor: crosshair; }
+.effect-detail-cursor {
+    position: absolute; top: 0; bottom: 0; width: 1px;
+    background: rgba(255,255,255,0.7); pointer-events: none; z-index: 10;
+}
+.effect-detail-diag-legend {
+    display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12px; color: #aaa;
+}
+.effect-detail-diag-legend span { display: flex; align-items: center; gap: 4px; }
+.effect-detail-diag-legend .swatch {
+    display: inline-block; width: 10px; height: 3px; border-radius: 1px;
+}
+.effect-detail-status { color: #888; font-size: 13px; font-style: italic; }
+.controller-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-shrink: 0; }
+.controller-bar label { color: #888; font-size: 13px; white-space: nowrap; }
+.controller-bar select {
+    background: #0f1a2e; color: #e0e0e0; border: 1px solid #333; border-radius: 4px;
+    padding: 5px 10px; font-size: 13px; cursor: pointer; min-width: 200px;
+}
+.controller-bar select:hover { border-color: #e94560; }
+.controller-bar select:focus { outline: none; border-color: #e94560; }
 </style>
 </head>
 <body>
@@ -1524,11 +1645,11 @@ body {
     <select id="filePicker"></select>
     <label class="upload-btn" title="Upload audio file">
         &#8679; Upload
-        <input type="file" id="uploadInput" accept=".wav,.mp3,.mp4,.m4a,.flac,.ogg,.aac,.wma,.opus,.webm,audio/*" style="display:none"
+        <input type="file" id="uploadInput" accept=".wav,.mp3,.mp4,.m4a,.flac,.ogg,.aac,.wma,.opus,.webm,audio/*,video/mp4" style="display:none"
             onchange="handleFileUpload(this.files)">
     </label>
     <button class="play-btn" id="playBtn" title="Play/Pause">&#9654;</button>
-    <button class="play-btn" id="replayBtn" title="Replay from start">&#8634;</button>
+    <button class="play-btn" id="loopBtn" title="Loop">&#8635;</button>
     <span class="time" id="timeDisplay">0:00.000 / 0:00.000</span>
     <span style="display:flex;align-items:center;gap:6px;margin-left:auto;">
         <span style="font-size:14px;cursor:pointer;" id="volIcon" title="Mute/unmute">&#128266;</span>
@@ -3167,17 +3288,23 @@ function togglePlay() {
 
 playBtn.addEventListener('click', togglePlay);
 
-document.getElementById('replayBtn').addEventListener('click', () => {
-    audio.currentTime = 0;
-    if (hasStemAudio()) stemSeek();
-    audio.play();
-    if (hasStemAudio()) stemPlay();
-    playBtn.innerHTML = '&#9646;&#9646;';
+const loopBtn = document.getElementById('loopBtn');
+let loopEnabled = false;
+loopBtn.addEventListener('click', () => {
+    loopEnabled = !loopEnabled;
+    loopBtn.classList.toggle('active', loopEnabled);
 });
 
 audio.addEventListener('ended', () => {
-    playBtn.innerHTML = '&#9654;';
-    if (hasStemAudio()) stemPause();
+    if (loopEnabled) {
+        audio.currentTime = 0;
+        if (hasStemAudio()) stemSeek();
+        audio.play();
+        if (hasStemAudio()) stemPlay();
+    } else {
+        playBtn.innerHTML = '&#9654;';
+        if (hasStemAudio()) stemPause();
+    }
 });
 
 document.addEventListener('keydown', (e) => {
@@ -3253,17 +3380,25 @@ let effectsList = [];
 let effectsRunning = null;  // name of running effect or null
 let effectsPollTimer = null;
 let selectorState = [];  // array of Sets, one per segment depth
+let controllersList = [];  // from /api/controllers
+let selectedController = null;  // controller id or null (no LEDs)
 
 async function loadEffects() {
     const panel = document.getElementById('effectsPanel');
     panel.innerHTML = '<span style="color:#888;">Loading effects...</span>';
 
     try {
-        const resp = await fetch('/api/effects');
+        // Load controllers and effects in parallel
+        const [ctrlResp, resp] = await Promise.all([
+            fetch('/api/controllers'),
+            fetch('/api/effects')
+        ]);
+        if (ctrlResp.ok) controllersList = await ctrlResp.json();
         if (!resp.ok) { panel.innerHTML = '<span style="color:#e94560;">Failed to load effects</span>'; return; }
         const data = await resp.json();
         effectsList = data.effects || [];
         effectsRunning = data.running;
+        if (data.controller !== undefined) selectedController = data.controller;
         if (selectorState.length === 0) {
             const maxSegs = Math.max(...effectsList.map(e => e.name.split('_').length));
             selectorState = Array.from({length: maxSegs}, () => new Set());
@@ -3347,6 +3482,41 @@ function buildSelector(panel) {
     panel.appendChild(container);
 }
 
+function buildControllerBar(panel) {
+    const bar = document.createElement('div');
+    bar.className = 'controller-bar';
+
+    const label = document.createElement('label');
+    label.textContent = 'Output:';
+    bar.appendChild(label);
+
+    const select = document.createElement('select');
+    // Default: no LEDs
+    const noLeds = document.createElement('option');
+    noLeds.value = '';
+    noLeds.textContent = 'No LEDs (terminal only)';
+    select.appendChild(noLeds);
+
+    controllersList.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.id;
+        const status = c.port ? c.port : 'disconnected';
+        opt.textContent = c.name + ' (' + c.leds + ' LEDs) \u2014 ' + status;
+        if (!c.port) opt.disabled = true;
+        if (c.id === selectedController) opt.selected = true;
+        select.appendChild(opt);
+    });
+
+    if (!selectedController) noLeds.selected = true;
+
+    select.addEventListener('change', () => {
+        selectedController = select.value || null;
+    });
+
+    bar.appendChild(select);
+    panel.appendChild(bar);
+}
+
 function renderEffectsCards() {
     const panel = document.getElementById('effectsPanel');
     if (effectsList.length === 0) {
@@ -3354,6 +3524,7 @@ function renderEffectsCards() {
         return;
     }
     panel.innerHTML = '';
+    buildControllerBar(panel);
     buildSelector(panel);
     const filtered = getFilteredEffects();
     filtered.forEach((eff, idx) => {
@@ -3368,15 +3539,17 @@ function renderEffectsCards() {
         drag.textContent = '\u2261';
         card.appendChild(drag);
 
-        // Name
+        // Name (clickable for detail view)
         const nameEl = document.createElement('span');
         nameEl.className = 'effect-name';
         nameEl.textContent = eff.name;
+        if (eff.description) nameEl.title = eff.description;
         if (eff.name === effectsRunning) {
             const dot = document.createElement('span');
             dot.className = 'running-dot';
             nameEl.appendChild(dot);
         }
+        nameEl.addEventListener('click', (e) => { e.stopPropagation(); showEffectDetail(eff.name); });
         card.appendChild(nameEl);
 
         // Stars
@@ -3438,7 +3611,12 @@ function renderEffectsCards() {
 
 async function startEffect(name) {
     try {
-        await fetch('/api/effects/start/' + encodeURIComponent(name), { method: 'POST' });
+        const opts = { method: 'POST' };
+        if (selectedController) {
+            opts.headers = { 'Content-Type': 'application/json' };
+            opts.body = JSON.stringify({ controller: selectedController });
+        }
+        await fetch('/api/effects/start/' + encodeURIComponent(name), opts);
         effectsRunning = name;
         renderEffectsCards();
     } catch (e) { console.error('startEffect:', e); }
@@ -3494,6 +3672,297 @@ function startEffectsPoll() {
 
 function stopEffectsPoll() {
     if (effectsPollTimer) { clearInterval(effectsPollTimer); effectsPollTimer = null; }
+}
+
+// ── Effect Detail View ──────────────────────────────────────────
+
+let effectDetailName = null;
+let effectDetailData = null;
+let effectDetailAnim = null;
+
+const SPARKLINE_COLORS = [
+    '#e94560', '#4ecdc4', '#f7dc6f', '#82e0aa', '#bb8fce',
+    '#f0b27a', '#85c1e9', '#f1948a', '#73c6b6', '#d7bde2',
+];
+
+function showEffectDetail(name) {
+    effectDetailName = name;
+    effectDetailData = null;
+    stopEffectsPoll();
+
+    const panel = document.getElementById('effectsPanel');
+    panel.innerHTML = '';
+
+    // Header
+    const header = document.createElement('div');
+    header.className = 'effect-detail-header';
+    const backBtn = document.createElement('button');
+    backBtn.className = 'effect-detail-back';
+    backBtn.textContent = '\u2190 Back';
+    backBtn.addEventListener('click', showEffectsList);
+    header.appendChild(backBtn);
+    const h2 = document.createElement('h2');
+    h2.textContent = name;
+    header.appendChild(h2);
+    panel.appendChild(header);
+
+    // Description (from effect registry)
+    const effEntry = effectsList.find(e => e.name === name);
+    if (effEntry && effEntry.description) {
+        const desc = document.createElement('div');
+        desc.style.cssText = 'color: #888; font-size: 13px; margin-top: -4px;';
+        desc.textContent = effEntry.description;
+        panel.appendChild(desc);
+    }
+
+    // Controls: file picker + analyze button
+    const controls = document.createElement('div');
+    controls.className = 'effect-detail-controls';
+
+    const fileSel = document.createElement('select');
+    fileSel.id = 'effectDetailFile';
+    files.forEach(f => {
+        const opt = document.createElement('option');
+        opt.value = f.path;
+        opt.textContent = f.name;
+        fileSel.appendChild(opt);
+    });
+    // Pre-select current file if any
+    if (currentFile) fileSel.value = currentFile;
+    controls.appendChild(fileSel);
+
+    const analyzeBtn = document.createElement('button');
+    analyzeBtn.textContent = 'Analyze';
+    analyzeBtn.addEventListener('click', () => runEffectAnalysis(name));
+    controls.appendChild(analyzeBtn);
+    panel.appendChild(controls);
+
+    // Status / loading text
+    const status = document.createElement('div');
+    status.className = 'effect-detail-status';
+    status.id = 'effectDetailStatus';
+    status.textContent = 'Select a file and click Analyze';
+    panel.appendChild(status);
+
+    // Viz container (empty until analysis runs)
+    const viz = document.createElement('div');
+    viz.className = 'effect-detail-viz';
+    viz.id = 'effectDetailViz';
+    panel.appendChild(viz);
+}
+
+function showEffectsList() {
+    effectDetailName = null;
+    effectDetailData = null;
+    if (effectDetailAnim) { cancelAnimationFrame(effectDetailAnim); effectDetailAnim = null; }
+    renderEffectsCards();
+    startEffectsPoll();
+}
+
+async function runEffectAnalysis(name) {
+    const fileSel = document.getElementById('effectDetailFile');
+    const status = document.getElementById('effectDetailStatus');
+    const viz = document.getElementById('effectDetailViz');
+    if (!fileSel || !fileSel.value) return;
+
+    status.textContent = 'Analyzing... (running effect offline)';
+    viz.innerHTML = '';
+
+    try {
+        const resp = await fetch('/api/effects/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ effect: name, file: fileSel.value })
+        });
+        const data = await resp.json();
+        if (data.error) {
+            status.textContent = 'Error: ' + data.error;
+            return;
+        }
+        effectDetailData = data;
+        status.textContent = data.num_frames + ' frames, ' + data.duration.toFixed(1) + 's, ' + data.diag_keys.length + ' diagnostics';
+
+        // Set audio to this file for playback sync
+        audio.src = '/audio/' + encodeURIComponent(fileSel.value);
+        audio.load();
+
+        renderEffectViz(viz, data);
+    } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+    }
+}
+
+function renderEffectViz(container, data) {
+    container.innerHTML = '';
+    const dpr = window.devicePixelRatio || 1;
+    const width = container.clientWidth || 860;
+
+    // Waveform canvas
+    const waveCanvas = document.createElement('canvas');
+    waveCanvas.style.height = '40px';
+    waveCanvas.style.marginBottom = '2px';
+    container.appendChild(waveCanvas);
+    drawWaveformCanvas(waveCanvas, data.waveform_peaks, dpr, width);
+
+    // Sparklines canvas (only if there are diagnostics)
+    let sparkCanvas = null;
+    if (data.diag_keys.length > 0) {
+        sparkCanvas = document.createElement('canvas');
+        const sparkH = Math.min(20 + data.diag_keys.length * 18, 160);
+        sparkCanvas.style.height = sparkH + 'px';
+        sparkCanvas.style.marginBottom = '2px';
+        container.appendChild(sparkCanvas);
+        drawSparklinesCanvas(sparkCanvas, data, dpr, width, sparkH);
+
+        // Legend
+        const legend = document.createElement('div');
+        legend.className = 'effect-detail-diag-legend';
+        data.diag_keys.forEach((key, i) => {
+            const item = document.createElement('span');
+            const swatch = document.createElement('span');
+            swatch.className = 'swatch';
+            swatch.style.background = SPARKLINE_COLORS[i % SPARKLINE_COLORS.length];
+            item.appendChild(swatch);
+            item.appendChild(document.createTextNode(key));
+            legend.appendChild(item);
+        });
+        container.appendChild(legend);
+    }
+
+    // LED-ogram canvas
+    const ledCanvas = document.createElement('canvas');
+    const ledH = Math.min(Math.max(data.num_leds, 60), 300);
+    ledCanvas.style.height = ledH + 'px';
+    ledCanvas.style.marginTop = '6px';
+    container.appendChild(ledCanvas);
+    drawLedogramCanvas(ledCanvas, data, dpr, width, ledH);
+
+    // Cursor overlay
+    const cursor = document.createElement('div');
+    cursor.className = 'effect-detail-cursor';
+    cursor.style.left = '0px';
+    container.appendChild(cursor);
+
+    // Click-to-seek on all canvases
+    [waveCanvas, sparkCanvas, ledCanvas].forEach(c => {
+        if (!c) return;
+        c.addEventListener('click', (e) => {
+            const rect = c.getBoundingClientRect();
+            const frac = (e.clientX - rect.left) / rect.width;
+            audio.currentTime = Math.max(0, Math.min(frac * data.duration, data.duration));
+        });
+    });
+
+    // Cursor animation
+    if (effectDetailAnim) cancelAnimationFrame(effectDetailAnim);
+    function animCursor() {
+        if (!effectDetailData) return;
+        const frac = audio.currentTime / data.duration;
+        cursor.style.left = (frac * 100).toFixed(2) + '%';
+        effectDetailAnim = requestAnimationFrame(animCursor);
+    }
+    effectDetailAnim = requestAnimationFrame(animCursor);
+}
+
+function drawWaveformCanvas(canvas, peaks, dpr, width) {
+    const h = 40;
+    canvas.width = width * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = width + 'px';
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    ctx.fillStyle = '#0a0f1e';
+    ctx.fillRect(0, 0, width, h);
+
+    const n = peaks.length;
+    if (n === 0) return;
+    const barW = width / n;
+    ctx.fillStyle = '#4ecdc4';
+    for (let i = 0; i < n; i++) {
+        const amp = Math.min(peaks[i], 1.0);
+        const barH = amp * (h / 2);
+        const x = i * barW;
+        const mid = h / 2;
+        ctx.fillRect(x, mid - barH, Math.max(barW - 0.5, 0.5), barH * 2);
+    }
+}
+
+function drawSparklinesCanvas(canvas, data, dpr, width, height) {
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    canvas.style.width = width + 'px';
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    ctx.fillStyle = '#0a0f1e';
+    ctx.fillRect(0, 0, width, height);
+
+    const n = data.diagnostics.length;
+    if (n === 0) return;
+
+    data.diag_keys.forEach((key, ki) => {
+        // Extract values and auto-normalize
+        const vals = data.diagnostics.map(d => d[key] || 0);
+        let minV = Infinity, maxV = -Infinity;
+        for (const v of vals) { if (v < minV) minV = v; if (v > maxV) maxV = v; }
+        const range = maxV - minV || 1;
+
+        ctx.strokeStyle = SPARKLINE_COLORS[ki % SPARKLINE_COLORS.length];
+        ctx.lineWidth = 1.2;
+        ctx.globalAlpha = 0.85;
+        ctx.beginPath();
+        for (let i = 0; i < n; i++) {
+            const x = (i / n) * width;
+            const y = height - ((vals[i] - minV) / range) * (height - 4) - 2;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+    });
+    ctx.globalAlpha = 1;
+}
+
+function drawLedogramCanvas(canvas, data, dpr, width, height) {
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    canvas.style.width = width + 'px';
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    ctx.fillStyle = '#0a0f1e';
+    ctx.fillRect(0, 0, width, height);
+
+    if (!data.led_data || data.num_frames === 0) return;
+
+    // Decode base64 → Uint8Array
+    const raw = atob(data.led_data);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+
+    const nf = data.num_frames;
+    const nl = data.num_leds;
+
+    // Create offscreen canvas at native resolution (frames x leds)
+    const offscreen = document.createElement('canvas');
+    offscreen.width = nf;
+    offscreen.height = nl;
+    const octx = offscreen.getContext('2d');
+    const imgData = octx.createImageData(nf, nl);
+    const pixels = imgData.data;
+
+    // Fill: X=time (frame), Y=LED position
+    for (let f = 0; f < nf; f++) {
+        for (let l = 0; l < nl; l++) {
+            const srcIdx = (f * nl + l) * 3;
+            const dstIdx = (l * nf + f) * 4;
+            pixels[dstIdx]     = bytes[srcIdx];     // R
+            pixels[dstIdx + 1] = bytes[srcIdx + 1]; // G
+            pixels[dstIdx + 2] = bytes[srcIdx + 2]; // B
+            pixels[dstIdx + 3] = 255;               // A
+        }
+    }
+    octx.putImageData(imgData, 0, 0);
+
+    // Draw scaled with nearest-neighbor for crisp pixels
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(offscreen, 0, 0, width, height);
 }
 
 // ── File upload ──────────────────────────────────────────────────
@@ -3867,6 +4336,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._handle_effect_rate()
         elif path == '/api/effects/reorder':
             self._handle_effect_reorder()
+        elif path == '/api/effects/analyze':
+            self._handle_effect_analyze()
         elif path.startswith('/api/annotations/'):
             rel_path = path[len('/api/annotations/'):]
             self._save_annotation(rel_path)
@@ -3874,7 +4345,9 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def _handle_effect_start(self, name):
-        _start_effect(name)
+        body = self._read_json_body()
+        controller_id = body.get('controller') if body else None
+        _start_effect(name, controller_id=controller_id)
         self._json_response({'ok': True})
 
     def _handle_effect_stop(self):
@@ -3912,6 +4385,34 @@ class ViewerHandler(BaseHTTPRequestHandler):
             prefs[name]['order'] = i
         _save_effect_prefs(prefs)
         self._json_response({'ok': True})
+
+    def _handle_effect_analyze(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        effect_name = body.get('effect', '')
+        file_path = body.get('file', '')
+        if not effect_name or not file_path:
+            self._json_response({'error': 'Missing effect or file'}, status=400)
+            return
+        wav_path = _resolve_audio_path(file_path)
+        if not wav_path:
+            self._json_response({'error': 'Invalid audio file'}, status=400)
+            return
+        try:
+            result = subprocess.run(
+                [sys.executable, 'runner.py', '--analyze', effect_name, '--wav', wav_path],
+                cwd=EFFECTS_DIR, capture_output=True, text=True, timeout=120
+            )
+            if result.returncode != 0:
+                self._json_response({'error': result.stderr[:500]}, status=500)
+                return
+            data = json.loads(result.stdout)
+            self._json_response(data)
+        except subprocess.TimeoutExpired:
+            self._json_response({'error': 'Analysis timed out'}, status=504)
+        except json.JSONDecodeError:
+            self._json_response({'error': 'Invalid JSON from analyzer'}, status=500)
 
     def _read_json_body(self):
         content_length = int(self.headers.get('Content-Length', 0))
@@ -4263,10 +4764,13 @@ class ViewerHandler(BaseHTTPRequestHandler):
         elif path.startswith('/api/annotations/'):
             rel_path = path[len('/api/annotations/'):]
             self._serve_annotations(rel_path)
+        elif path == '/api/controllers':
+            self._json_response(_controllers)
         elif path == '/api/effects':
             self._json_response({
                 'effects': _get_effects_list(),
                 'running': _get_running_effect_name(),
+                'controller': _active_controller,
             })
         elif path == '/api/record/level':
             data = json.dumps(get_recording_level()).encode('utf-8')

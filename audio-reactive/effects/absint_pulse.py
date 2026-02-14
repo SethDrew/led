@@ -58,6 +58,10 @@ class AbsIntPulseEffect(AudioReactiveEffect):
     def name(self):
         return "AbsInt Pulse"
 
+    @property
+    def description(self):
+        return "Beat detection via absolute-integral of RMS derivative; whole tree pulses warm white on each beat with exponential decay."
+
     def process_audio(self, mono_chunk: np.ndarray):
         """Accumulate audio into RMS frames."""
         n = len(mono_chunk)

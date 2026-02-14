@@ -97,6 +97,10 @@ class WLEDFrequencyReactive(AudioReactiveEffect):
     def name(self):
         return "WLED GEQ"
 
+    @property
+    def description(self):
+        return "WLED's graphic equalizer: 1024-pt FFT, 16 frequency bands with pink noise compensation and asymmetric smoothing; rainbow color bars."
+
     def process_audio(self, mono_chunk: np.ndarray):
         # Fill buffer
         chunk_len = min(len(mono_chunk), self.n_fft)

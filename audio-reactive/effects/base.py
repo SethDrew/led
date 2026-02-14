@@ -31,6 +31,11 @@ class AudioReactiveEffect(ABC):
         """Human-readable name for display."""
         return self.__class__.__name__
 
+    @property
+    def description(self) -> str:
+        """One-sentence description of the algorithm."""
+        return ''
+
     @abstractmethod
     def process_audio(self, mono_chunk: np.ndarray):
         """Process a chunk of mono audio. Called from audio thread.

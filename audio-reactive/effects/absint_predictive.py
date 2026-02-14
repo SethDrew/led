@@ -104,6 +104,10 @@ class AbsIntPredictiveEffect(AudioReactiveEffect):
     def name(self):
         return "AbsInt Predictive"
 
+    @property
+    def description(self):
+        return "Combines abs-integral beat detection with autocorrelation tempo estimation to fire predicted beats on-time; confirmed at 100%, predicted at 80%."
+
     def _sample_palette(self, t):
         """Sample color from palette at position t (0-1)."""
         t = np.clip(t, 0, 1)

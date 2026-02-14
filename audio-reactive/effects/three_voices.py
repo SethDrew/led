@@ -116,6 +116,10 @@ class ThreeVoicesEffect(AudioReactiveEffect):
     def name(self):
         return "Three Voices"
 
+    @property
+    def description(self):
+        return "Three depth-mapped layers via streaming HPSS: bass foundation (bottom), harmonic body (full tree), percussive flash (peaks)."
+
     def process_audio(self, mono_chunk: np.ndarray):
         # Accumulate samples
         n = len(mono_chunk)

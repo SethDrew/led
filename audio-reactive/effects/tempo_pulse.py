@@ -92,6 +92,10 @@ class TempoPulseEffect(AudioReactiveEffect):
     def name(self):
         return "Tempo Pulse"
 
+    @property
+    def description(self):
+        return "Free-running pulse oscillator at autocorrelation-estimated tempo; brightness scaled by current RMS; raised-cosine pulse shape."
+
     def _sample_palette(self, t):
         """Sample color from palette at position t (0-1)."""
         t = np.clip(t, 0, 1)

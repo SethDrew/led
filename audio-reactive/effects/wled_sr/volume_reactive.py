@@ -47,6 +47,10 @@ class WLEDVolumeReactive(AudioReactiveEffect):
     def name(self):
         return "WLED Volume"
 
+    @property
+    def description(self):
+        return "WLED's simplest mode: RMS volume with EMA smoothing, squelch noise gate, AGC gain tracking, and gamma correction."
+
     def process_audio(self, mono_chunk: np.ndarray):
         # RMS volume (WLED computes sample magnitude differently but RMS is equivalent)
         rms = np.sqrt(np.mean(mono_chunk ** 2))

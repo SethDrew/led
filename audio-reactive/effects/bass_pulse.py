@@ -64,6 +64,10 @@ class BassPulseEffect(AudioReactiveEffect):
     def name(self):
         return "Bass Pulse"
 
+    @property
+    def description(self):
+        return "Beat detection via half-wave-rectified spectral flux in bass band (20-250 Hz); kick drums spike, continuous sub-bass stays silent."
+
     def process_audio(self, mono_chunk: np.ndarray):
         n = len(mono_chunk)
         space = self.n_fft - self.audio_buf_pos

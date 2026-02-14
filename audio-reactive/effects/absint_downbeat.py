@@ -64,6 +64,10 @@ class AbsIntDownbeatEffect(AudioReactiveEffect):
     def name(self):
         return "AbsInt Downbeat"
 
+    @property
+    def description(self):
+        return "Pulses only every 4th detected beat (downbeat); sub-beats show as dim ticks; night mode red/magenta palette."
+
     def process_audio(self, mono_chunk: np.ndarray):
         n = len(mono_chunk)
         pos = self.audio_buf_pos

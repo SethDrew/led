@@ -51,7 +51,6 @@ _recording = None       # {'stream': sd.InputStream, 'frames': list} or None
 # ── Effects management ────────────────────────────────────────────────
 
 _effect_process = None   # subprocess.Popen or None
-_effects_cache = None    # list of {name, description} dicts from runner.py --list
 _active_controller = None  # id of the controller the running effect is using, or None
 
 EFFECTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'effects')
@@ -154,10 +153,6 @@ EFFECT_PREFS_PATH = os.path.join(EFFECTS_DIR, 'effect_prefs.json')
 
 def _discover_effects():
     """Run runner.py --list and parse available effect names + descriptions."""
-    global _effects_cache
-    if _effects_cache is not None:
-        return _effects_cache
-
     try:
         result = subprocess.run(
             [sys.executable, 'runner.py', '--list'],
@@ -181,12 +176,10 @@ def _discover_effects():
                 desc = ''
             if name:
                 entries.append({'name': name, 'description': desc})
-        _effects_cache = entries
+        return entries
     except Exception as e:
         print(f"[effects] Discovery failed: {e}")
-        _effects_cache = []
-
-    return _effects_cache
+        return []
 
 
 _EFFECT_RENAME_MAP = {
@@ -254,6 +247,9 @@ def _start_effect(name, controller_id=None):
     global _effect_process, _active_controller
     _stop_effect()
 
+    # Re-resolve ports in case devices were unplugged/replugged
+    _resolve_controller_ports(_controllers)
+
     cmd = [sys.executable, 'runner.py', name]
 
     # Look up controller config; fall back to --no-leds
@@ -269,8 +265,7 @@ def _start_effect(name, controller_id=None):
     try:
         _effect_process = subprocess.Popen(
             cmd,
-            cwd=EFFECTS_DIR,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+            cwd=EFFECTS_DIR
         )
         _active_controller = controller_id if controller else None
         print(f"[effects] Started: {name} (pid {_effect_process.pid}) cmd: {' '.join(cmd)}")
@@ -1542,7 +1537,7 @@ body {
 .file-item button.del:hover { color: #e94560; border-color: #e94560; }
 .effects-panel {
     display: none; flex-direction: column; gap: 8px; padding: 20px;
-    width: 100%; max-width: 600px; overflow-y: auto; max-height: 100%;
+    width: 100%; overflow-y: auto; flex: 1; align-self: stretch;
 }
 .effects-panel.visible { display: flex; }
 .effect-card {
@@ -2911,6 +2906,8 @@ document.addEventListener('click', () => decompDropdown.classList.remove('open')
 // ── Panel loading ────────────────────────────────────────────────
 
 async function loadPanel() {
+    hideOverlay();
+
     // Show/hide annotation bar
     const annBar = document.getElementById('annotationBar');
     annBar.style.display = currentTab === 'annotations' ? 'flex' : 'none';
@@ -4765,6 +4762,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
             rel_path = path[len('/api/annotations/'):]
             self._serve_annotations(rel_path)
         elif path == '/api/controllers':
+            _resolve_controller_ports(_controllers)
             self._json_response(_controllers)
         elif path == '/api/effects':
             self._json_response({

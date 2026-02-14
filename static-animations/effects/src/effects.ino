@@ -21,6 +21,7 @@
  *     - EnhancedCrawlForeground   : Smooth wave with color modes
  *     - FragmentationForeground   : White crawler decomposes to RGB
  *     - DriftingDecayForeground   : White crawlers drift and decay
+ *     - MagmaSparklesForeground  : Red-magenta sparkles drifting slowly
  *
  * MEMORY OPTIMIZATION:
  *   - Only include headers you need
@@ -49,6 +50,7 @@
 #include "EnhancedCrawlForeground.h"
 #include "FragmentationForeground.h"
 #include "DriftingDecayForeground.h"
+#include "MagmaSparklesForeground.h"
 
 // ===== HARDWARE CONFIGURATION =====
 
@@ -213,6 +215,16 @@ void redSparksAnimation() {
   renderLayeredFrame(&bg, &fg);
 }
 
+// Example 10: Black background with red-magenta drifting sparkles
+void magmaSparklesAnimation() {
+  static SolidColorBackground bg(NUM_PIXELS, 0, 0, 0, 0.0);  // Black
+  static MagmaSparklesForeground fg(NUM_PIXELS, 8, 0.15);
+
+  bg.update();
+  fg.update();
+  renderLayeredFrame(&bg, &fg);
+}
+
 // ===== MAIN =====
 
 void setup() {
@@ -239,6 +251,7 @@ void loop() {
   // fragmentationAnimation();      // Fragmentation
   // driftingDecayAnimation();      // Drifting decay
   // rainbowCircleOnlyAnimation();  // Rainbow circle only
+  // magmaSparklesAnimation();      // Red-magenta drifting sparkles
   // fireworksAnimation();          // Fireworks style
 
   // No delay - run as fast as possible for smooth animations!

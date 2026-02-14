@@ -84,3 +84,8 @@
   id: segment_20260211_220457
   recorded: 2026-02-11 22:04
   sample_rate: 44100
+- duration_seconds: 31.2
+  filename: welcome_elect.wav
+  id: welcome_elect
+  recorded: 2026-02-13 21:35
+  sample_rate: 44100

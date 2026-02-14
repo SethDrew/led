@@ -189,6 +189,24 @@ def get_effect_registry():
     except ImportError:
         pass
 
+    try:
+        from basic_sparkles import BasicSparklesEffect
+        effects['basic_sparkles'] = BasicSparklesEffect
+    except ImportError:
+        pass
+
+    try:
+        from band_sparkles import BandSparklesEffect
+        effects['band_sparkles'] = BandSparklesEffect
+    except ImportError:
+        pass
+
+    try:
+        from band_tempo_sparkles import BandTempoSparklesEffect
+        effects['band_tempo_sparkles'] = BandTempoSparklesEffect
+    except ImportError:
+        pass
+
     # All 12 WLED 1D effects side by side
     try:
         from wled_sr.all_effects import WLEDAllEffects

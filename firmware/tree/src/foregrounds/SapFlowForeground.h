@@ -35,8 +35,8 @@ public:
       frameCount(0),
       spawnChance(spawn),
       framesSinceLastSpawn(0),
-      minFramesBetweenSpawn(20),   // Minimum 20 frames (800ms at 25 FPS)
-      maxFramesBetweenSpawn(120),  // Maximum 120 frames (4.8s at 25 FPS)
+      minFramesBetweenSpawn(27),   // Scaled for 0.3 velocity (was 20 at 0.4)
+      maxFramesBetweenSpawn(160),  // Scaled for 0.3 velocity (was 120 at 0.4)
       currentR(200), currentG(255), currentB(100),  // Start at bright lime green
       directionR(-1), directionG(-1), directionB(-1) { // Start moving toward dark green
 
@@ -65,8 +65,8 @@ public:
         if (!particles[i].active) {
           particles[i].active = true;
           particles[i].depth = 0;
-          particles[i].velocity = 0.4;  // Fixed velocity prevents particles from crossing
-          particles[i].brightness = 150 + random(105);
+          particles[i].velocity = 0.3;  // Slower rise
+          particles[i].brightness = 80 + random(70);
           framesSinceLastSpawn = 0;
           break;
         }

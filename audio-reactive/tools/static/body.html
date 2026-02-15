@@ -1,0 +1,240 @@
+<body>
+
+<div class="header">
+    <h1>Audio Explorer</h1>
+    <select id="filePicker"></select>
+    <label class="upload-btn" title="Upload audio file">
+        &#8679; Upload
+        <input type="file" id="uploadInput" accept=".wav,.mp3,.mp4,.m4a,.flac,.ogg,.aac,.wma,.opus,.webm,audio/*,video/mp4" style="display:none"
+            onchange="handleFileUpload(this.files)">
+    </label>
+    <button class="play-btn" id="playBtn" title="Play/Pause">&#9654;</button>
+    <button class="play-btn" id="loopBtn" title="Loop">&#8635;</button>
+    <span class="time" id="timeDisplay">0:00.000 / 0:00.000</span>
+    <span style="display:flex;align-items:center;gap:6px;margin-left:auto;">
+        <span style="font-size:14px;cursor:pointer;" id="volIcon" title="Mute/unmute">&#128266;</span>
+        <input type="range" id="volSlider" min="0" max="1" step="0.01" value="0.8"
+            style="width:80px;accent-color:#e94560;cursor:pointer;">
+    </span>
+    <div class="auth-area" id="authArea">
+        <span class="auth-link" id="authLink" onclick="toggleAuthBox()">Sign In</span>
+        <div class="auth-box" id="authBox">
+            <input type="password" id="passcodeInput" placeholder="Passcode"
+                onkeydown="if(event.key==='Enter')submitPasscode()">
+            <button onclick="submitPasscode()">Go</button>
+            <div class="auth-error" id="authError"></div>
+        </div>
+    </div>
+</div>
+
+<div class="tabs">
+    <div class="tab" data-tab="welcome" id="welcomeTab">Welcome</div>
+    <div class="tab" data-tab="record">Record</div>
+    <div class="tab active" data-tab="analysis">Analysis</div>
+    <div class="tab-dropdown">
+        <div class="tab" id="decompDropdownToggle">Decomposition &#9662;</div>
+        <div class="tab-dropdown-menu" id="decompDropdownMenu">
+            <div class="tab-dropdown-item" data-tab="stems">Demucs</div>
+            <div class="tab-dropdown-item" data-tab="hpss">HPSS</div>
+            <div class="tab-dropdown-item" data-tab="lab-repet">REPET</div>
+            <div class="tab-dropdown-item" data-tab="lab-nmf">NMF</div>
+        </div>
+    </div>
+    <div class="tab" data-tab="lab">Lab</div>
+    <div class="tab" data-tab="effects">Effects</div>
+    <div class="tab" data-tab="reference">Reference</div>
+</div>
+
+<div class="viewer" id="viewer">
+    <div class="img-container" id="imgContainer">
+        <img id="panelImg" draggable="false">
+        <div class="cursor-line" id="cursorLine"></div>
+        <canvas id="tapCanvas"></canvas>
+    </div>
+    <details class="annotation-widget" id="annotationWidget">
+        <summary>Annotations</summary>
+        <div class="annotation-bar" id="annotationBar">
+            <label>Layer: <input type="text" id="layerInput" value="beat" spellcheck="false"></label>
+            <span class="tap-info"><kbd>T</kbd> to tap &middot; <span class="tap-count" id="tapCount">0 taps</span></span>
+            <button class="save" id="saveAnnBtn" disabled onclick="saveAnnotation()">Save (S)</button>
+            <button id="discardAnnBtn" disabled onclick="discardAnnotation()">Discard</button>
+        </div>
+    </details>
+    <div class="info-panel" id="infoPanel">
+        <h2>Analysis</h2>
+        <p style="color:#888;margin-bottom:16px;">Four panels rendered for every audio file. Waveform and spectrogram are industry standard; band energy and RMS derivative are our additions for LED mapping.</p>
+
+        <h3>Waveform + RMS overlay</h3>
+        <p>Raw audio samples (white) with optional RMS energy overlay (yellow, toggle with <kbd style="background:#333;padding:1px 6px;border-radius:3px;font-family:monospace;color:#FFD740;">E</kbd>). RMS is the root-mean-square of the waveform in each frame &mdash; smoothed loudness over time, scaled to match waveform amplitude.</p>
+        <p class="origin">Origin: Waveform display dates to oscilloscopes in the 1940s. RMS as a power measure dates to 19th-century electrical engineering; standard in audio since VU meters in the 1930s. Every DAW has both.</p>
+        <p>Waveform shows transient attacks, silence, macro structure. RMS reveals energy trends the raw waveform hides &mdash; our research found that derivatives of RMS matter more than absolute values (climax brightens 58x faster than build, despite identical static RMS).</p>
+
+        <h3>Mel Spectrogram</h3>
+        <p>Short-time Fourier Transform (STFT) converted to mel scale and displayed as a heatmap. Time on x-axis, frequency on y-axis (low=bottom, high=top), color=loudness.</p>
+        <p class="origin">Origin: The mel scale comes from Stevens, Volkmann &amp; Newman (1937) &mdash; psychoacoustic research showing humans perceive pitch logarithmically (200Hz&rarr;400Hz <em>sounds</em> the same as 400Hz&rarr;800Hz). The spectrogram (STFT) dates to Gabor (1946). Mel spectrograms became standard input for audio ML in the 1980s.</p>
+        <p>You can <em>see</em> bass hits (bright blobs at bottom), vocals (middle bands), hi-hats (top). Harmonic content = horizontal lines. Percussive content = vertical lines &mdash; this is why HPSS works (median filtering by orientation).</p>
+
+        <h3>Band Energy</h3>
+        <p>The mel spectrogram collapsed into 5 bands &mdash; Sub-bass (20&ndash;80Hz), Bass (80&ndash;250Hz), Mids (250&ndash;2kHz), High-mids (2&ndash;6kHz), Treble (6&ndash;8kHz) &mdash; each plotted as a line over time.</p>
+        <p class="origin">Origin: Multi-band meters from mixing engineering. Band boundaries follow critical band theory (Fletcher, 1940s) and PA crossover points. &ldquo;Bass energy over time&rdquo; is the foundation of almost every audio-reactive LED system (WLED-SR&rsquo;s entire beat detection = threshold on the bass bin).</p>
+        <p>Shows which frequency range dominates at each moment. A bass drop = Sub-bass/Bass spike. A cymbal crash = treble spike.</p>
+
+        <h3>RMS Derivative <span class="tag custom">Custom</span></h3>
+        <p>Rate-of-change of loudness (dRMS/dt). Red = getting louder, blue = getting quieter. Our most validated finding: a build and its climax can have identical RMS, but the climax brightens 58x faster.</p>
+        <p class="verdict">The signal that distinguishes builds from drops. Derivatives &gt; absolutes.</p>
+
+        <h2>Annotations</h2>
+        <p style="color:#888;margin-bottom:16px;">Same four analysis panels, plus a swim-lane overlay for your tap annotations.</p>
+
+        <h3>Tap Annotations <span class="tag custom">Custom</span></h3>
+        <p>Your own tap data overlaid on the analysis &mdash; beat taps, section changes, airy moments, flourishes. Whatever layers exist in the <code>.annotations.yaml</code> file. Press <kbd style="background:#333;padding:1px 6px;border-radius:3px;font-family:monospace;">T</kbd> to tap while playing.</p>
+        <p class="origin">Origin: Custom to this project. Our &ldquo;test set&rdquo; for evaluating audio features against human perception.</p>
+        <p>Note: tap annotations exhibit <strong>tactus ambiguity</strong> &mdash; listeners lock onto different metrical layers (kick, snare, off-beat) per song, so taps may be phase-shifted from the &ldquo;metric beat&rdquo; by 100&ndash;250ms (Martens 2011, London 2004). LEDs could exploit this: by flashing a specific layer, we may be able to <em>entrain</em> the audience&rsquo;s tactus rather than follow it.</p>
+
+        <h2>Decomposition</h2>
+        <p style="color:#888;margin-bottom:16px;">Four source separation algorithms, from deep learning to dictionary-based. Each decomposes audio into constituent parts. Use number keys to solo/mute stems where audio playback is available.</p>
+
+        <h3>Decomposition &rsaquo; Demucs <span class="tag common">Common</span></h3>
+        <p><strong>htdemucs</strong> (Meta, 2022): deep learning 4-stem separation into drums, bass, vocals, and other. Mel spectrograms per stem with individual audio playback. ~25 seconds CPU for a 50-second track.</p>
+        <p class="origin">Origin: Hybrid Transformer Demucs (D&eacute;fossez, 2023). State-of-the-art offline source separation. Too slow for real-time on ESP32, but useful as ground truth for evaluating lighter methods.</p>
+        <p class="verdict">Reference-quality separation. Use as ground truth, not for real-time.</p>
+
+        <h3>Decomposition &rsaquo; HPSS</h3>
+        <p><strong>Harmonic-Percussive Source Separation</strong>: median filtering on the spectrogram &mdash; horizontal streaks (harmonic) vs vertical streaks (percussive). No ML, frame-by-frame, trivially real-time on ESP32.</p>
+        <p class="origin">Origin: Fitzgerald (2010). Exploits the visual structure of spectrograms &mdash; harmonic content forms horizontal lines, percussive content forms vertical lines.</p>
+        <p>Two stems with audio playback. A coarse but fast decomposition: drums and transients land in percussive, sustained notes and chords in harmonic.</p>
+        <p class="verdict">The simplest viable real-time decomposition. Already ESP32-feasible.</p>
+
+        <h3>Decomposition &rsaquo; REPET</h3>
+        <p><strong>REPET</strong> (REPeating Pattern Extraction Technique) separates audio into repeating (background) and non-repeating (foreground) layers by detecting cyclic patterns in the spectrogram. No ML &mdash; just autocorrelation + median filtering + soft masking. ESP32-feasible.</p>
+        <p>Panels: beat spectrum (with detected period), soft mask, and spectrograms of each separated layer. Use 1/2 keys to solo/mute layers.</p>
+        <p class="verdict">Based on Rafii &amp; Pardo 2012. Tests whether pattern repetition alone can usefully decompose music for LED mapping.</p>
+
+        <h3>Decomposition &rsaquo; NMF</h3>
+        <p><strong>Online Supervised NMF</strong>: pre-trained spectral dictionaries (10 components per source from 8 demucs-separated tracks) decompose each audio frame into drums/bass/vocals/other activations. 0.07ms/frame &mdash; ESP32-feasible.</p>
+        <p>Top panel: per-source activation curves (normalized). Lower panels: Wiener-masked spectrograms per source. No stem audio toggle (NMF produces energy estimates, not separated audio).</p>
+        <p class="verdict">The most promising approach for real-time LED source attribution on ESP32. Dictionary: 64 mel bins &times; 40 components = 10KB.</p>
+
+        <h2>Lab</h2>
+        <p style="color:#888;margin-bottom:16px;">Experimental features we&rsquo;re evaluating for LED mapping potential. Not yet proven useful on their own, but may become inputs for derived features.</p>
+
+        <h3>Spectral Flatness</h3>
+        <p>How noise-like vs tonal each frame is (0 = pure tone, 1 = white noise). Could indicate texture changes between sections.</p>
+
+        <h3>Chromagram</h3>
+        <p>Pitch class energy over time &mdash; which notes (C, C#, D, &hellip;) are present in each frame. Could detect key changes or harmonic shifts.</p>
+
+        <h3>Spectral Contrast</h3>
+        <p>Peak-to-valley difference per frequency band. High contrast = clear tonal content. Low contrast = noise or dense mix.</p>
+
+        <h3>Zero Crossing Rate</h3>
+        <p>How often the waveform crosses zero per frame. High ZCR = percussive or noisy. Low ZCR = smooth, tonal.</p>
+
+        <h3>Onset Strength <span class="tag experimental">Experimental</span></h3>
+        <p>Spectral flux &mdash; how much the spectrum <em>changes</em> between adjacent frames. Peaks = &ldquo;something new happened.&rdquo;</p>
+        <p>Measures something real (spectral novelty) but raw values don&rsquo;t map to perceived beats &mdash; F1=0.435 on Harmonix, only 48.5% of user taps align. Potential as a derived feature (e.g. deviation from local average could signal section changes).</p>
+        <p class="verdict">Currently only in the local matplotlib viewer, not yet ported to the web.</p>
+
+        <h3>Librosa Beats <span class="tag deprecated">Deprecated</span></h3>
+        <p>Beat tracking via <code>librosa.beat.beat_track</code> &mdash; estimates tempo then snaps onset peaks to a grid.</p>
+        <p>Doubles tempo on syncopated rock (161.5 vs ~83 BPM on Tool&rsquo;s Opiate). Built on top of onset strength, which is itself a weak beat discriminator. Best F1=0.500 on dense rock. Not reliable enough to drive LED effects.</p>
+    </div>
+    <div class="record-panel" id="recordPanel">
+        <div id="recordLocal">
+            <canvas class="record-waveform" id="recordWaveform"></canvas>
+            <div class="record-level">
+                <span style="color:#888;">Level</span>
+                <div class="record-level-bar"><div class="record-level-fill" id="recordLevelFill"></div></div>
+                <span style="color:#888;font-family:monospace;min-width:40px;" id="recordLevelDb">-∞ dB</span>
+            </div>
+            <input type="text" id="recordName" placeholder="segment name (e.g. tool_lateralus_intro)" spellcheck="false">
+            <button class="record-btn" id="recordBtn" onclick="toggleRecord()"><span class="dot"></span></button>
+            <div class="record-elapsed" id="recordElapsed">0:00.0</div>
+            <div class="record-status" id="recordStatus">Click to record from BlackHole</div>
+            <p style="color:#e94560; font-size:12px; margin-top:12px;">Requires <a href="https://existential.audio/blackhole/" target="_blank" style="color:#e94560; text-decoration:underline;">BlackHole 2ch</a> for system audio capture. Recording will not work without it.</p>
+            <details style="color:#aaa; margin-top:8px;">
+                <summary style="color:#ccc; cursor:pointer; font-size:13px;">Setup: BlackHole (macOS)</summary>
+                <ol style="padding-left:20px; margin-top:8px; font-size:12px;">
+                    <li>Install BlackHole 2ch from <a href="https://existential.audio/blackhole/" target="_blank" style="color:#e94560;">existential.audio/blackhole</a></li>
+                    <li>In System Settings &rarr; Sound &rarr; Output, select <strong>BlackHole 2ch</strong></li>
+                    <li>Restart this server &mdash; BlackHole will be auto-detected</li>
+                </ol>
+                <p style="color:#888; font-size:12px; margin-top:8px;"><strong>Tip:</strong> To hear audio while recording, open <strong>Audio MIDI Setup</strong>, click <strong>+</strong> &rarr; <strong>Create Multi-Output Device</strong>, check both your speakers and BlackHole, then set that as your system output.</p>
+            </details>
+            <hr style="border-color:#333; margin:24px 0;">
+            <h3 style="color:#ccc; font-size:14px; margin-bottom:8px;">Your Files</h3>
+            <div id="fileManagerLocal" style="max-height:300px; overflow-y:auto;"></div>
+        </div>
+        <div id="recordPublic" style="display:none; max-width:600px; line-height:1.6;">
+            <h3 style="color:#ccc;">Record Audio</h3>
+            <p style="color:#aaa; margin-bottom:12px;">Record from your microphone or system audio (via <a href="https://existential.audio/blackhole/" target="_blank" style="color:#e94560;">BlackHole</a>).</p>
+            <div style="margin-bottom:12px;">
+                <label style="color:#888; font-size:12px; display:block; margin-bottom:4px;">Audio Input</label>
+                <select id="audioDeviceSelect" style="background:#1a1a2e; color:#ccc; border:1px solid #333; padding:6px 10px; border-radius:4px; width:100%; font-size:13px;"></select>
+            </div>
+            <canvas class="record-waveform" id="browserRecordWaveform"></canvas>
+            <div class="record-level">
+                <span style="color:#888;">Level</span>
+                <div class="record-level-bar"><div class="record-level-fill" id="browserLevelFill"></div></div>
+                <span style="color:#888;font-family:monospace;min-width:40px;" id="browserLevelDb">&minus;&infin; dB</span>
+            </div>
+            <input type="text" id="browserRecordName" placeholder="segment name (optional)" spellcheck="false" style="background:#1a1a2e; color:#ccc; border:1px solid #333; padding:6px 10px; border-radius:4px; width:100%; box-sizing:border-box; margin-bottom:8px;">
+            <button class="record-btn" id="browserRecordBtn" onclick="toggleBrowserRecord()"><span class="dot"></span></button>
+            <div class="record-elapsed" id="browserRecordElapsed">0:00.0</div>
+            <div class="record-status" id="browserRecordStatus">Select an audio input and click to record</div>
+            <hr style="border-color:#333; margin:24px 0;">
+            <details style="color:#aaa;">
+                <summary style="color:#ccc; cursor:pointer;">Setup: Record system audio with BlackHole (macOS)</summary>
+                <ol style="padding-left:20px; margin-top:8px;">
+                    <li>Install BlackHole 2ch from <a href="https://existential.audio/blackhole/" target="_blank" style="color:#e94560;">existential.audio/blackhole</a></li>
+                    <li>In System Settings &rarr; Sound &rarr; Output, select <strong>BlackHole 2ch</strong></li>
+                    <li>Refresh this page &mdash; BlackHole will appear in the input dropdown above</li>
+                </ol>
+                <p style="color:#888; font-size:12px; margin-top:8px;"><strong>Note:</strong> With this setup you won't hear the audio while recording. To hear it too, open <strong>Audio MIDI Setup</strong>, click <strong>+</strong> &rarr; <strong>Create Multi-Output Device</strong>, check both your speakers and BlackHole, then set that as your system output instead.</p>
+            </details>
+            <hr style="border-color:#333; margin:24px 0;">
+            <h3 style="color:#ccc;">Your Files</h3>
+            <p style="color:#aaa; margin-bottom:12px;">Drag and drop an audio file anywhere on the page, or use the <strong>Upload</strong> button. Supports WAV, MP3, MP4, M4A, FLAC, OGG, and more. Non-WAV files are converted automatically.</p>
+            <div id="fileManager" style="max-height:300px; overflow-y:auto;"></div>
+        </div>
+    </div>
+    <div class="effects-panel" id="effectsPanel"></div>
+    <div class="welcome-panel" id="welcomePanel" style="display:none;">
+        <div class="welcome-card">
+            <h1>Audio Explorer</h1>
+            <div class="subtitle">by Seth Drew</div>
+            <p>This is an interactive audio visualization and audio interactivity research testbed. It's configured to require no user accounts. It allows you to upload or record and analyze any audio you would like.</p>
+            <p>This audio is stored on your machine only for copyright reasons, which you can clean up using the <strong>Record</strong> tab or manually via:</p>
+            <div class="storage-note">
+                <code>Settings &rarr; Privacy &rarr; Site Data &rarr; audio.sethdrew.com</code>
+            </div>
+            <p>Glad to have you! If you have any questions feel free to reach out directly to me with questions or improvements &mdash; <span class="contact-link" id="contactLink" onclick="copyContact()">copy my email</span>
+            <span class="contact-copied" id="contactCopied" style="display:none; color:#4caf50; font-size:12px;">Copied!</span></p>
+            <p style="margin-top:20px; color:#888;">Select a file above or go to the <strong>Record</strong> tab to upload or record audio.</p>
+        </div>
+    </div>
+</div>
+
+<div class="progress-bar">
+    <div class="progress-track" id="progressTrack">
+        <div class="progress-fill" id="progressFill"></div>
+        <div class="progress-thumb" id="progressThumb"></div>
+    </div>
+</div>
+
+<div class="stem-status" id="stemStatus"></div>
+
+<div class="controls" id="controlsHint">
+    <kbd>Space</kbd> play/pause &nbsp;
+    <kbd>&larr;</kbd> <kbd>&rarr;</kbd> &plusmn;5s &nbsp;
+    Click panel to seek
+    <span id="buildTime" style="float:right; color:#555; font-size:11px;"></span>
+</div>
+
+<audio id="audio" preload="auto"></audio>
+
+<div class="drop-overlay" id="dropOverlay">
+    <span class="drop-overlay-text">Drop audio file to upload</span>
+</div>
+<div class="upload-progress" id="uploadProgress">Uploading...</div>
+

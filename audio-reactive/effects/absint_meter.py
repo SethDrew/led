@@ -16,6 +16,7 @@ from signals import OverlapFrameAccumulator, AbsIntegral
 class AbsIntMeterEffect(ScalarSignalEffect):
     """Volume meter: lit LED count proportional to abs-integral."""
 
+    registry_name = 'impulse_meter'
     default_palette = 'reds'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):

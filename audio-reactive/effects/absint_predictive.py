@@ -23,6 +23,7 @@ from signals import OverlapFrameAccumulator, AbsIntegral, BeatPredictor
 class AbsIntPredictiveEffect(ScalarSignalEffect):
     """Whole-tree pulse with tempo prediction via autocorrelation of abs-integral."""
 
+    registry_name = 'impulse_predict'
     default_palette = 'reds'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):

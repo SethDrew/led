@@ -22,6 +22,7 @@ from base import ScalarSignalEffect
 class BassPulseEffect(ScalarSignalEffect):
     """Whole-tree pulse on bass transients. Simple and robust."""
 
+    registry_name = 'bass_pulse'
     default_palette = 'amber'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):

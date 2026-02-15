@@ -14,6 +14,7 @@ from signals import OverlapFrameAccumulator, AbsIntegral
 class AbsIntBreatheEffect(ScalarSignalEffect):
     """Symmetric fade-on/fade-off using abs-integral of RMS derivative."""
 
+    registry_name = 'impulse_breathe'
     default_palette = 'reds'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):

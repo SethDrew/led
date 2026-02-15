@@ -18,6 +18,7 @@ from signals import OverlapFrameAccumulator, AbsIntegral
 class AbsIntProportionalEffect(ScalarSignalEffect):
     """Whole-tree brightness directly mapped to abs-integral of RMS derivative."""
 
+    registry_name = 'impulse_glow'
     default_palette = 'amber'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):

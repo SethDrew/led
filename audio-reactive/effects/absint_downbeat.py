@@ -14,6 +14,7 @@ from signals import OverlapFrameAccumulator, AbsIntegral
 class AbsIntDownbeatEffect(ScalarSignalEffect):
     """Pulse every 4th detected beat."""
 
+    registry_name = 'impulse_downbeat'
     default_palette = 'night_dim'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):

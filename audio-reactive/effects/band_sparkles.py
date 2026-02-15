@@ -42,6 +42,8 @@ BAND_COLORS = np.array([
 class BandSparklesEffect(AudioReactiveEffect):
     """Twinkles over a slowly-shifting band-dominant base color."""
 
+    registry_name = 'band_sparkles'
+
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
 

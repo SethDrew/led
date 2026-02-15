@@ -23,6 +23,7 @@ from signals import OverlapFrameAccumulator, AbsIntegral
 class LongIntSectionsEffect(ScalarSignalEffect):
     """Smooth long-horizon brightness + bass-reactive top layer."""
 
+    registry_name = 'longint_sections'
     default_palette = 'fib_orange_purple'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):

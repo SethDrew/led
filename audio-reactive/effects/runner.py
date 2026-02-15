@@ -77,126 +77,56 @@ def find_serial_port():
 
 
 def get_effect_registry():
-    """Discover all available effects.
+    """Auto-discover all available effects by scanning .py files.
+
+    Finds all AudioReactiveEffect/ScalarSignalEffect subclasses that have
+    a `registry_name` class attribute. New effects are auto-registered
+    just by adding a .py file — no need to edit runner.py.
 
     Returns dict with two keys:
         'signals': {name: class} — ScalarSignalEffect subclasses (composable with palette)
         'effects': {name: class} — full AudioReactiveEffect subclasses (own RGB rendering)
     """
+    import importlib.util
+    import inspect
+
     signals = {}
     effects = {}
 
-    # ── Signal effects (ScalarSignalEffect subclasses) ──
+    # Infrastructure files to skip
+    _SKIP = {'base', 'signals', 'composed', 'palette', 'runner', 'feature_computer', '__init__'}
 
-    try:
-        from bass_pulse import BassPulseEffect
-        signals['bass_pulse'] = BassPulseEffect
-    except ImportError:
-        pass
+    effects_dir = os.path.dirname(os.path.abspath(__file__))
 
-    try:
-        from absint_pulse import AbsIntPulseEffect
-        signals['impulse'] = AbsIntPulseEffect
-    except ImportError:
-        pass
+    # Scan top-level .py files and wled_sr/ subdirectory
+    py_files = glob.glob(os.path.join(effects_dir, '*.py'))
+    py_files += glob.glob(os.path.join(effects_dir, 'wled_sr', '*.py'))
 
-    try:
-        from absint_proportional import AbsIntProportionalEffect
-        signals['impulse_glow'] = AbsIntProportionalEffect
-    except ImportError:
-        pass
+    for filepath in py_files:
+        module_name = os.path.splitext(os.path.basename(filepath))[0]
+        if module_name in _SKIP:
+            continue
 
-    try:
-        from absint_predictive import AbsIntPredictiveEffect
-        signals['impulse_predict'] = AbsIntPredictiveEffect
-    except ImportError:
-        pass
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, filepath)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        except Exception:
+            continue
 
-    try:
-        from absint_downbeat import AbsIntDownbeatEffect
-        signals['impulse_downbeat'] = AbsIntDownbeatEffect
-    except ImportError:
-        pass
+        for _, cls in inspect.getmembers(mod, inspect.isclass):
+            name = getattr(cls, 'registry_name', None)
+            if not name:
+                continue
+            if not issubclass(cls, AudioReactiveEffect):
+                continue
+            if cls is AudioReactiveEffect or cls is ScalarSignalEffect:
+                continue
 
-    try:
-        from absint_sections import AbsIntSectionsEffect
-        signals['impulse_sections'] = AbsIntSectionsEffect
-    except ImportError:
-        pass
-
-    try:
-        from longint_sections import LongIntSectionsEffect
-        signals['longint_sections'] = LongIntSectionsEffect
-    except ImportError:
-        pass
-
-    try:
-        from absint_breathe import AbsIntBreatheEffect
-        signals['impulse_breathe'] = AbsIntBreatheEffect
-    except ImportError:
-        pass
-
-    try:
-        from tempo_pulse import TempoPulseEffect
-        signals['tempo_pulse'] = TempoPulseEffect
-    except ImportError:
-        pass
-
-    try:
-        from absint_meter import AbsIntMeterEffect
-        signals['impulse_meter'] = AbsIntMeterEffect
-    except ImportError:
-        pass
-
-    try:
-        from rms_meter import RMSMeterEffect
-        signals['rms_meter'] = RMSMeterEffect
-    except ImportError:
-        pass
-
-    # ── Full effects (own RGB rendering) ──
-
-    try:
-        from three_voices import ThreeVoicesEffect
-        effects['hpss_voices'] = ThreeVoicesEffect
-    except ImportError:
-        pass
-
-    try:
-        from band_prop import BandProportionalEffect
-        effects['band_prop'] = BandProportionalEffect
-    except ImportError:
-        pass
-
-    try:
-        from absint_snake import AbsIntSnakeEffect
-        effects['impulse_snake'] = AbsIntSnakeEffect
-    except ImportError:
-        pass
-
-    try:
-        from absint_band_pulse import AbsIntBandPulseEffect
-        effects['impulse_bands'] = AbsIntBandPulseEffect
-    except ImportError:
-        pass
-
-    try:
-        from basic_sparkles import BasicSparklesEffect
-        effects['basic_sparkles'] = BasicSparklesEffect
-    except ImportError:
-        pass
-
-    try:
-        from band_sparkles import BandSparklesEffect
-        effects['band_sparkles'] = BandSparklesEffect
-    except ImportError:
-        pass
-
-    try:
-        from band_tempo_sparkles import BandTempoSparklesEffect
-        effects['band_tempo_sparkles'] = BandTempoSparklesEffect
-    except ImportError:
-        pass
+            if issubclass(cls, ScalarSignalEffect):
+                signals[name] = cls
+            else:
+                effects[name] = cls
 
     return {'signals': signals, 'effects': effects}
 

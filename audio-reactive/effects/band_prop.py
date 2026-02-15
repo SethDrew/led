@@ -27,6 +27,8 @@ from base import AudioReactiveEffect
 class BandProportionalEffect(AudioReactiveEffect):
     """Three-band abs-integral → RGB color mapping."""
 
+    registry_name = 'band_prop'
+
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
 

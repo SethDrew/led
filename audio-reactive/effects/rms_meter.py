@@ -17,6 +17,7 @@ from signals import OverlapFrameAccumulator
 class RMSMeterEffect(ScalarSignalEffect):
     """Volume meter: lit LED count proportional to RMS amplitude."""
 
+    registry_name = 'rms_meter'
     default_palette = 'reds'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):

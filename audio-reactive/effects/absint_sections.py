@@ -17,6 +17,7 @@ from signals import OverlapFrameAccumulator, AbsIntegral
 class AbsIntSectionsEffect(ScalarSignalEffect):
     """Fibonacci sections, abs-integral brightness."""
 
+    registry_name = 'impulse_sections'
     default_palette = 'fib_orange_purple'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):

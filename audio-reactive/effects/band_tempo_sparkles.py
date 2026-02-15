@@ -42,6 +42,8 @@ MAX_SPARKLES = 30
 class BandTempoSparklesEffect(AudioReactiveEffect):
     """Beat-triggered wide sparkles colored by the dominant frequency band."""
 
+    registry_name = 'band_tempo_sparkles'
+
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
 

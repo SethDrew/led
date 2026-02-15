@@ -19,6 +19,7 @@ to estimate tempo confidently (~5-10 seconds).
 import numpy as np
 import threading
 from base import ScalarSignalEffect
+from signals import OverlapFrameAccumulator, AbsIntegral
 
 
 class TempoPulseEffect(ScalarSignalEffect):
@@ -29,31 +30,17 @@ class TempoPulseEffect(ScalarSignalEffect):
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
 
-        # ── RMS computation ──
-        self.rms_frame_len = 2048
-        self.rms_hop = 512
-        self.audio_buf = np.zeros(self.rms_frame_len, dtype=np.float32)
-        self.audio_buf_pos = 0
-        self.prev_rms = 0.0
-        self.rms_dt = self.rms_hop / sample_rate
-        self.rms_fps = sample_rate / self.rms_hop
-        self.time_acc = 0.0
+        self.accum = OverlapFrameAccumulator()
+        self.absint = AbsIntegral(sample_rate=sample_rate)
 
-        # ── Current RMS (for amplitude scaling) ──
+        # Current RMS (for amplitude scaling)
         self.current_rms = 0.0
         self.rms_peak = 1e-10
-        self.rms_peak_decay = 0.9998  # slow decay for amplitude envelope
+        self.rms_peak_decay = 0.9998
 
-        # ── Abs-integral (for autocorrelation input) ──
-        self.window_sec = 0.15
-        self.window_frames = max(1, int(self.window_sec / (self.rms_frame_len / sample_rate)))
-        self.deriv_buf = np.zeros(self.window_frames, dtype=np.float32)
-        self.deriv_buf_pos = 0
-        self.abs_integral = 0.0
-
-        # ── Autocorrelation tempo estimation (30s window) ──
+        # Autocorrelation tempo estimation (30s window)
         self.ac_window_sec = 30.0
-        self.ac_window_frames = int(self.ac_window_sec * self.rms_fps)
+        self.ac_window_frames = int(self.ac_window_sec * self.absint.rms_fps)
         self.ac_buf = np.zeros(self.ac_window_frames, dtype=np.float32)
         self.ac_buf_pos = 0
         self.ac_buf_filled = 0
@@ -61,8 +48,8 @@ class TempoPulseEffect(ScalarSignalEffect):
         # Period bounds (40-200 BPM)
         self.min_period_sec = 0.300   # 200 BPM
         self.max_period_sec = 1.500   # 40 BPM
-        self.min_period_frames = max(1, int(self.min_period_sec * self.rms_fps))
-        self.max_period_frames = int(self.max_period_sec * self.rms_fps)
+        self.min_period_frames = max(1, int(self.min_period_sec * self.absint.rms_fps))
+        self.max_period_frames = int(self.max_period_sec * self.absint.rms_fps)
 
         # Autocorrelation state
         self.ac_confidence = 0.0
@@ -71,11 +58,11 @@ class TempoPulseEffect(ScalarSignalEffect):
         self.ac_update_interval = 1.0  # recompute every 1 second
         self.last_ac_update = 0.0
 
-        # ── Pulse oscillator ──
+        # Pulse oscillator
         self.phase = 0.0  # 0-1 within current beat period
         self.pulse_width = 0.80  # fraction of period for pulse on-time
 
-        # ── Visual state ──
+        # Visual state
         self.brightness = 0.0
 
         self._lock = threading.Lock()
@@ -88,72 +75,48 @@ class TempoPulseEffect(ScalarSignalEffect):
     def description(self):
         return "Free-running pulse oscillator at autocorrelation-estimated tempo; brightness scaled by current RMS; raised-cosine pulse shape."
 
-    def process_audio(self, mono_chunk: np.ndarray):
-        n = len(mono_chunk)
-        pos = self.audio_buf_pos
-        while n > 0:
-            space = self.rms_frame_len - pos
-            take = min(n, space)
-            self.audio_buf[pos:pos + take] = mono_chunk[:take]
-            mono_chunk = mono_chunk[take:]
-            pos += take
-            n -= take
-            if pos >= self.rms_frame_len:
-                self._process_frame(self.audio_buf.copy())
-                self.audio_buf[:self.rms_frame_len - self.rms_hop] = \
-                    self.audio_buf[self.rms_hop:]
-                pos = self.rms_frame_len - self.rms_hop
-        self.audio_buf_pos = pos
+    def process_audio(self, mono_chunk):
+        for frame in self.accum.feed(mono_chunk):
+            # Current RMS (for amplitude scaling)
+            rms = np.sqrt(np.mean(frame ** 2))
+            self.rms_peak = max(rms, self.rms_peak * self.rms_peak_decay)
+            rms_normalized = rms / self.rms_peak if self.rms_peak > 0 else 0
 
-    def _process_frame(self, frame):
-        dt = self.rms_frame_len / self.sample_rate
+            # Update abs-integral
+            self.absint.update(frame)
 
-        # Current RMS (for amplitude scaling)
-        rms = np.sqrt(np.mean(frame ** 2))
-        self.rms_peak = max(rms, self.rms_peak * self.rms_peak_decay)
-        rms_normalized = rms / self.rms_peak if self.rms_peak > 0 else 0
+            # Store in long buffer for autocorrelation
+            self.ac_buf[self.ac_buf_pos % self.ac_window_frames] = self.absint.raw
+            self.ac_buf_pos += 1
+            self.ac_buf_filled = min(self.ac_buf_filled + 1, self.ac_window_frames)
 
-        # RMS derivative → abs-integral (for autocorrelation input)
-        rms_deriv = (rms - self.prev_rms) / dt
-        self.prev_rms = rms
-        self.deriv_buf[self.deriv_buf_pos % self.window_frames] = abs(rms_deriv)
-        self.deriv_buf_pos += 1
-        self.abs_integral = np.sum(self.deriv_buf) * dt
+            # Periodically update autocorrelation
+            if self.absint.time_acc - self.last_ac_update > self.ac_update_interval:
+                self._update_autocorrelation()
+                self.last_ac_update = self.absint.time_acc
 
-        # Store in long buffer for autocorrelation
-        self.ac_buf[self.ac_buf_pos % self.ac_window_frames] = self.abs_integral
-        self.ac_buf_pos += 1
-        self.ac_buf_filled = min(self.ac_buf_filled + 1, self.ac_window_frames)
+            # Advance pulse phase
+            if self.estimated_period > 0 and self.ac_confidence >= self.ac_min_confidence:
+                self.phase += self.absint.rms_dt / self.estimated_period
+                if self.phase >= 1.0:
+                    self.phase -= 1.0
 
-        self.time_acc += self.rms_dt
+                # Raised cosine pulse shape within pulse_width window
+                if self.phase < self.pulse_width:
+                    t = self.phase / self.pulse_width
+                    pulse_envelope = 0.5 * (1.0 - np.cos(2 * np.pi * t))
+                else:
+                    pulse_envelope = 0.0
 
-        # Periodically update autocorrelation
-        if self.time_acc - self.last_ac_update > self.ac_update_interval:
-            self._update_autocorrelation()
-            self.last_ac_update = self.time_acc
-
-        # Advance pulse phase
-        if self.estimated_period > 0 and self.ac_confidence >= self.ac_min_confidence:
-            self.phase += self.rms_dt / self.estimated_period
-            if self.phase >= 1.0:
-                self.phase -= 1.0
-
-            # Raised cosine pulse shape within pulse_width window
-            if self.phase < self.pulse_width:
-                t = self.phase / self.pulse_width
-                pulse_envelope = 0.5 * (1.0 - np.cos(2 * np.pi * t))
+                # Scale by current amplitude
+                brightness = pulse_envelope * rms_normalized
             else:
-                pulse_envelope = 0.0
+                # No tempo estimate — fall back to proportional
+                brightness = rms_normalized * 0.5
 
-            # Scale by current amplitude
-            brightness = pulse_envelope * rms_normalized
-        else:
-            # No tempo estimate — fall back to proportional
-            brightness = rms_normalized * 0.5
-
-        with self._lock:
-            self.current_rms = rms_normalized
-            self.brightness = brightness
+            with self._lock:
+                self.current_rms = rms_normalized
+                self.brightness = brightness
 
     def _update_autocorrelation(self):
         """Estimate beat period from autocorrelation of abs-integral signal."""
@@ -195,7 +158,7 @@ class TempoPulseEffect(ScalarSignalEffect):
         self.ac_confidence = best_corr
 
         if best_corr > self.ac_min_confidence and best_lag > 0:
-            new_period = best_lag / self.rms_fps
+            new_period = best_lag / self.absint.rms_fps
 
             if self.estimated_period > 0:
                 ratio = new_period / self.estimated_period

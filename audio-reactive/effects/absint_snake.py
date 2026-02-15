@@ -15,6 +15,7 @@ Uses the same late detection + autocorrelation prediction from absint_pred.
 import numpy as np
 import threading
 from base import AudioReactiveEffect
+from signals import OverlapFrameAccumulator, AbsIntegral, BeatPredictor
 
 
 class AbsIntSnakeEffect(AudioReactiveEffect):
@@ -23,52 +24,11 @@ class AbsIntSnakeEffect(AudioReactiveEffect):
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
 
-        # ── RMS / abs-integral (same as absint_pred) ──
-        self.rms_frame_len = 2048
-        self.rms_hop = 512
-        self.audio_buf = np.zeros(self.rms_frame_len, dtype=np.float32)
-        self.audio_buf_pos = 0
-        self.prev_rms = 0.0
-        self.rms_dt = self.rms_hop / sample_rate
-        self.rms_fps = sample_rate / self.rms_hop
+        self.accum = OverlapFrameAccumulator()
+        self.absint = AbsIntegral(sample_rate=sample_rate)
+        self.predictor = BeatPredictor(rms_fps=self.absint.rms_fps)
 
-        self.window_sec = 0.15
-        self.window_frames = max(1, int(self.window_sec / (self.rms_frame_len / sample_rate)))
-        self.deriv_buf = np.zeros(self.window_frames, dtype=np.float32)
-        self.deriv_buf_pos = 0
-
-        self.abs_integral = 0.0
-        self.integral_peak = 1e-10
-        self.peak_decay = 0.997
-        self.threshold = 0.30
-        self.cooldown = 0.25
-        self.last_beat_time = -1.0
-        self.time_acc = 0.0
-        self.beat_count = 0
-
-        # ── Autocorrelation (from absint_pred) ──
-        self.ac_window_sec = 5.0
-        self.ac_window_frames = int(self.ac_window_sec * self.rms_fps)
-        self.ac_buf = np.zeros(self.ac_window_frames, dtype=np.float32)
-        self.ac_buf_pos = 0
-        self.ac_buf_filled = 0
-
-        self.min_period_sec = 0.200
-        self.max_period_sec = 1.500
-        self.min_period_frames = max(1, int(self.min_period_sec * self.rms_fps))
-        self.max_period_frames = int(self.max_period_sec * self.rms_fps)
-
-        self.ac_confidence = 0.0
-        self.ac_min_confidence = 0.3
-        self.estimated_period = 0.0
-        self.next_predicted_beat = 0.0
-        self.prediction_active = False
-        self.last_detection_time = -1.0
-        self.missed_beats = 0
-        self.max_missed_beats = 4
-        self.predicted_beat_count = 0
-
-        # ── Snake parameters ──
+        # Snake parameters
         self.min_length = 1
         self.max_length = 10
         self.min_travel_frac = 0.20   # weakest beat travels 20% of strip
@@ -119,117 +79,17 @@ class AbsIntSnakeEffect(AudioReactiveEffect):
                 self.snakes.pop(0)
             self.base_pulse_brightness = s
 
-    def process_audio(self, mono_chunk: np.ndarray):
-        n = len(mono_chunk)
-        pos = self.audio_buf_pos
-        while n > 0:
-            space = self.rms_frame_len - pos
-            take = min(n, space)
-            self.audio_buf[pos:pos + take] = mono_chunk[:take]
-            mono_chunk = mono_chunk[take:]
-            pos += take
-            n -= take
-            if pos >= self.rms_frame_len:
-                self._process_rms_frame(self.audio_buf.copy())
-                self.audio_buf[:self.rms_frame_len - self.rms_hop] = \
-                    self.audio_buf[self.rms_hop:]
-                pos = self.rms_frame_len - self.rms_hop
-        self.audio_buf_pos = pos
+    def process_audio(self, mono_chunk):
+        for frame in self.accum.feed(mono_chunk):
+            normalized = self.absint.update(frame)
+            beats = self.predictor.feed(self.absint.raw, normalized, self.absint.time_acc)
 
-    def _process_rms_frame(self, frame):
-        rms = np.sqrt(np.mean(frame ** 2))
-        dt = self.rms_frame_len / self.sample_rate
-        rms_deriv = (rms - self.prev_rms) / dt
-        self.prev_rms = rms
-
-        self.deriv_buf[self.deriv_buf_pos % self.window_frames] = abs(rms_deriv)
-        self.deriv_buf_pos += 1
-        self.abs_integral = np.sum(self.deriv_buf) * dt
-
-        self.integral_peak = max(self.abs_integral, self.integral_peak * self.peak_decay)
-        normalized = self.abs_integral / self.integral_peak if self.integral_peak > 0 else 0
-
-        # Store for autocorrelation
-        self.ac_buf[self.ac_buf_pos % self.ac_window_frames] = self.abs_integral
-        self.ac_buf_pos += 1
-        self.ac_buf_filled = min(self.ac_buf_filled + 1, self.ac_window_frames)
-
-        self.time_acc += self.rms_dt
-
-        # Late detection
-        time_since_beat = self.time_acc - self.last_beat_time
-        beat_detected = False
-
-        if normalized > self.threshold and time_since_beat > self.cooldown:
-            beat_detected = True
-            self.last_beat_time = self.time_acc
-            self.last_detection_time = self.time_acc
-            self.beat_count += 1
-            self._update_autocorrelation()
-            self._update_prediction_phase()
-            self._spawn_snake(normalized)
-
-        if not beat_detected:
-            self._check_predicted_beat()
-
-    def _update_autocorrelation(self):
-        if self.ac_buf_filled < self.min_period_frames * 3:
-            return
-        n = self.ac_buf_filled
-        if n >= self.ac_window_frames:
-            start = self.ac_buf_pos % self.ac_window_frames
-            signal = np.concatenate([self.ac_buf[start:], self.ac_buf[:start]])
-        else:
-            signal = self.ac_buf[:n].copy()
-        signal = signal - np.mean(signal)
-        norm = np.dot(signal, signal)
-        if norm < 1e-20:
-            return
-        min_lag = self.min_period_frames
-        max_lag = min(self.max_period_frames, len(signal) // 2)
-        if min_lag >= max_lag:
-            return
-        autocorr = np.zeros(max_lag - min_lag, dtype=np.float64)
-        for i, lag in enumerate(range(min_lag, max_lag)):
-            autocorr[i] = np.dot(signal[:-lag], signal[lag:]) / norm
-        best_lag = -1
-        best_corr = 0.0
-        for i in range(1, len(autocorr) - 1):
-            if autocorr[i] > autocorr[i - 1] and autocorr[i] > autocorr[i + 1]:
-                if autocorr[i] > best_corr:
-                    best_corr = autocorr[i]
-                    best_lag = min_lag + i
-                    if best_corr > self.ac_min_confidence:
-                        break
-        self.ac_confidence = best_corr
-        if best_corr > self.ac_min_confidence and best_lag > 0:
-            self.estimated_period = best_lag / self.rms_fps
-
-    def _update_prediction_phase(self):
-        if self.estimated_period <= 0 or self.ac_confidence < self.ac_min_confidence:
-            self.prediction_active = False
-            return
-        self.next_predicted_beat = self.last_detection_time + self.estimated_period
-        self.prediction_active = True
-        self.missed_beats = 0
-
-    def _check_predicted_beat(self):
-        if not self.prediction_active or self.estimated_period <= 0:
-            return
-        if self.time_acc >= self.next_predicted_beat:
-            time_since_detection = self.time_acc - self.last_detection_time
-            if time_since_detection < self.estimated_period * 0.3:
-                self.next_predicted_beat += self.estimated_period
-                self.missed_beats = 0
-                return
-            # Predicted beat — spawn at 80% strength
-            self._spawn_snake(0.8)
-            self.predicted_beat_count += 1
-            self.next_predicted_beat += self.estimated_period
-            self.missed_beats += 1
-            if self.missed_beats >= self.max_missed_beats:
-                self.prediction_active = False
-                self.missed_beats = 0
+            for beat in beats:
+                if beat['type'] == 'confirmed':
+                    self._spawn_snake(beat['strength'])
+                elif beat['type'] == 'predicted':
+                    # Predicted beat — spawn at 80% strength
+                    self._spawn_snake(beat['strength'])
 
     def render(self, dt: float) -> np.ndarray:
         frame = np.zeros((self.num_leds, 3), dtype=np.float32)
@@ -289,11 +149,10 @@ class AbsIntSnakeEffect(AudioReactiveEffect):
         return frame.clip(0, 255).astype(np.uint8)
 
     def get_diagnostics(self) -> dict:
-        bpm = 60.0 / self.estimated_period if self.estimated_period > 0 else 0
         return {
-            'beats': self.beat_count,
-            'pred': self.predicted_beat_count,
+            'beats': self.predictor.beat_count,
+            'pred': self.predictor.predicted_beat_count,
             'snakes': len(self.snakes),
-            'bpm': f'{bpm:.1f}',
-            'conf': f'{self.ac_confidence:.2f}',
+            'bpm': f'{self.predictor.bpm:.1f}',
+            'conf': f'{self.predictor.confidence:.2f}',
         }

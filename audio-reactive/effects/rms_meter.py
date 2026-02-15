@@ -11,6 +11,7 @@ Color is handled by the reds palette preset.
 import numpy as np
 import threading
 from base import ScalarSignalEffect
+from signals import OverlapFrameAccumulator
 
 
 class RMSMeterEffect(ScalarSignalEffect):
@@ -20,6 +21,8 @@ class RMSMeterEffect(ScalarSignalEffect):
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
+
+        self.accum = OverlapFrameAccumulator()
 
         # Signal state
         self.rms_peak = 1e-10
@@ -41,13 +44,14 @@ class RMSMeterEffect(ScalarSignalEffect):
     def description(self):
         return "Simple volume meter: lit LED count equals current RMS normalized against slow-decay peak; no derivatives or integrals."
 
-    def process_audio(self, mono_chunk: np.ndarray):
-        rms = np.sqrt(np.mean(mono_chunk ** 2))
-        self.rms_peak = max(rms, self.rms_peak * self.peak_decay)
-        normalized = rms / self.rms_peak if self.rms_peak > 0 else 0
+    def process_audio(self, mono_chunk):
+        for frame in self.accum.feed(mono_chunk):
+            rms = np.sqrt(np.mean(frame ** 2))
+            self.rms_peak = max(rms, self.rms_peak * self.peak_decay)
+            normalized = rms / self.rms_peak if self.rms_peak > 0 else 0
 
-        with self._lock:
-            self.target_level = normalized
+            with self._lock:
+                self.target_level = normalized
 
     def get_intensity(self, dt: float) -> float:
         with self._lock:

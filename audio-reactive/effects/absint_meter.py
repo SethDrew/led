@@ -8,9 +8,9 @@ Proportional mapping (no threshold/detection), fast attack, slow decay.
 Color is handled by the reds palette preset.
 """
 
-import numpy as np
 import threading
 from base import ScalarSignalEffect
+from signals import OverlapFrameAccumulator, AbsIntegral
 
 
 class AbsIntMeterEffect(ScalarSignalEffect):
@@ -21,23 +21,8 @@ class AbsIntMeterEffect(ScalarSignalEffect):
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
 
-        # RMS computation
-        self.rms_frame_len = 2048
-        self.rms_hop = 512
-        self.audio_buf = np.zeros(self.rms_frame_len, dtype=np.float32)
-        self.audio_buf_pos = 0
-        self.prev_rms = 0.0
-
-        # Abs-integral ring buffer
-        self.window_sec = 0.15
-        self.window_frames = max(1, int(self.window_sec / (self.rms_frame_len / sample_rate)))
-        self.deriv_buf = np.zeros(self.window_frames, dtype=np.float32)
-        self.deriv_buf_pos = 0
-
-        # Signal state
-        self.abs_integral = 0.0
-        self.integral_peak = 1e-10
-        self.peak_decay = 0.998
+        self.accum = OverlapFrameAccumulator()
+        self.absint = AbsIntegral(sample_rate=sample_rate)
 
         # Visual state
         self.target_level = 0.0
@@ -55,38 +40,11 @@ class AbsIntMeterEffect(ScalarSignalEffect):
     def description(self):
         return "Volume meter where lit LED count is proportional to abs-integral magnitude; red-to-magenta gradient from base to tip."
 
-    def process_audio(self, mono_chunk: np.ndarray):
-        n = len(mono_chunk)
-        pos = self.audio_buf_pos
-        while n > 0:
-            space = self.rms_frame_len - pos
-            take = min(n, space)
-            self.audio_buf[pos:pos + take] = mono_chunk[:take]
-            mono_chunk = mono_chunk[take:]
-            pos += take
-            n -= take
-            if pos >= self.rms_frame_len:
-                self._process_rms_frame(self.audio_buf.copy())
-                self.audio_buf[:self.rms_frame_len - self.rms_hop] = \
-                    self.audio_buf[self.rms_hop:]
-                pos = self.rms_frame_len - self.rms_hop
-        self.audio_buf_pos = pos
-
-    def _process_rms_frame(self, frame):
-        rms = np.sqrt(np.mean(frame ** 2))
-        dt = self.rms_frame_len / self.sample_rate
-        rms_deriv = (rms - self.prev_rms) / dt
-        self.prev_rms = rms
-
-        self.deriv_buf[self.deriv_buf_pos % self.window_frames] = abs(rms_deriv)
-        self.deriv_buf_pos += 1
-        self.abs_integral = np.sum(self.deriv_buf) * dt
-
-        self.integral_peak = max(self.abs_integral, self.integral_peak * self.peak_decay)
-        normalized = self.abs_integral / self.integral_peak if self.integral_peak > 0 else 0
-
-        with self._lock:
-            self.target_level = normalized
+    def process_audio(self, mono_chunk):
+        for frame in self.accum.feed(mono_chunk):
+            normalized = self.absint.update(frame)
+            with self._lock:
+                self.target_level = normalized
 
     def get_intensity(self, dt: float) -> float:
         with self._lock:

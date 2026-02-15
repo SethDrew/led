@@ -6,9 +6,9 @@ beats internally and only fires a visible pulse on every 4th one.
 This creates a slow, hypnotic pulse at the bar/downbeat level.
 """
 
-import numpy as np
 import threading
 from base import ScalarSignalEffect
+from signals import OverlapFrameAccumulator, AbsIntegral
 
 
 class AbsIntDownbeatEffect(ScalarSignalEffect):
@@ -19,29 +19,13 @@ class AbsIntDownbeatEffect(ScalarSignalEffect):
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
 
-        # RMS computation
-        self.rms_frame_len = 2048
-        self.rms_hop = 512
-        self.audio_buf = np.zeros(self.rms_frame_len, dtype=np.float32)
-        self.audio_buf_pos = 0
-        self.prev_rms = 0.0
+        self.accum = OverlapFrameAccumulator()
+        self.absint = AbsIntegral(sample_rate=sample_rate)
 
-        # Abs-integral ring buffer
-        self.window_sec = 0.15
-        self.window_frames = max(1, int(self.window_sec / (self.rms_frame_len / sample_rate)))
-        self.deriv_buf = np.zeros(self.window_frames, dtype=np.float32)
-        self.deriv_buf_pos = 0
-
-        # Signal state
-        self.abs_integral = 0.0
-        self.integral_peak = 1e-10
-        self.peak_decay = 0.997
-
-        # Beat detection (same as absint_pulse)
+        # Beat detection
         self.threshold = 0.30
         self.cooldown = 0.20
         self.last_beat_time = -1.0
-        self.time_acc = 0.0
 
         # Downbeat counter: fire on every 4th beat
         self.beat_counter = 0
@@ -63,55 +47,28 @@ class AbsIntDownbeatEffect(ScalarSignalEffect):
     def description(self):
         return "Pulses only every 4th detected beat (downbeat); sub-beats show as dim ticks."
 
-    def process_audio(self, mono_chunk: np.ndarray):
-        n = len(mono_chunk)
-        pos = self.audio_buf_pos
-        while n > 0:
-            space = self.rms_frame_len - pos
-            take = min(n, space)
-            self.audio_buf[pos:pos + take] = mono_chunk[:take]
-            mono_chunk = mono_chunk[take:]
-            pos += take
-            n -= take
-            if pos >= self.rms_frame_len:
-                self._process_rms_frame(self.audio_buf.copy())
-                self.audio_buf[:self.rms_frame_len - self.rms_hop] = \
-                    self.audio_buf[self.rms_hop:]
-                pos = self.rms_frame_len - self.rms_hop
-        self.audio_buf_pos = pos
+    def process_audio(self, mono_chunk):
+        for frame in self.accum.feed(mono_chunk):
+            normalized = self.absint.update(frame)
 
-    def _process_rms_frame(self, frame):
-        rms = np.sqrt(np.mean(frame ** 2))
-        dt = self.rms_frame_len / self.sample_rate
-        rms_deriv = (rms - self.prev_rms) / dt
-        self.prev_rms = rms
+            # Beat detection
+            time_since_beat = self.absint.time_acc - self.last_beat_time
 
-        self.deriv_buf[self.deriv_buf_pos % self.window_frames] = abs(rms_deriv)
-        self.deriv_buf_pos += 1
-        self.abs_integral = np.sum(self.deriv_buf) * dt
+            if normalized > self.threshold and time_since_beat > self.cooldown:
+                self.last_beat_time = self.absint.time_acc
+                self.total_beats += 1
+                self.beat_counter += 1
 
-        self.integral_peak = max(self.abs_integral, self.integral_peak * self.peak_decay)
-        normalized = self.abs_integral / self.integral_peak if self.integral_peak > 0 else 0
-
-        # Beat detection
-        self.time_acc += dt
-        time_since_beat = self.time_acc - self.last_beat_time
-
-        if normalized > self.threshold and time_since_beat > self.cooldown:
-            self.last_beat_time = self.time_acc
-            self.total_beats += 1
-            self.beat_counter += 1
-
-            if self.beat_counter >= self.beats_per_bar:
-                # Downbeat — full pulse
-                self.beat_counter = 0
-                self.downbeat_count += 1
-                with self._lock:
-                    self.brightness = min(1.0, normalized)
-            else:
-                # Sub-beat — tiny tick (barely visible)
-                with self._lock:
-                    self.brightness = max(self.brightness, 0.08)
+                if self.beat_counter >= self.beats_per_bar:
+                    # Downbeat — full pulse
+                    self.beat_counter = 0
+                    self.downbeat_count += 1
+                    with self._lock:
+                        self.brightness = min(1.0, normalized)
+                else:
+                    # Sub-beat — tiny tick (barely visible)
+                    with self._lock:
+                        self.brightness = max(self.brightness, 0.08)
 
     def get_intensity(self, dt: float) -> float:
         with self._lock:

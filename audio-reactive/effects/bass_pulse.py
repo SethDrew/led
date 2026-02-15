@@ -12,17 +12,17 @@ Fix: half-wave-rectified spectral flux in the bass band (20-250 Hz).
   - Kick drum = big positive flux spike (new energy arrives)
   - Slow-decay peak normalization preserves absolute dynamics
   - Simple adaptive threshold + cooldown
-
-Visual: entire tree pulses warm white on each detected beat, exponential decay.
 """
 
 import numpy as np
 import threading
-from base import AudioReactiveEffect
+from base import ScalarSignalEffect
 
 
-class BassPulseEffect(AudioReactiveEffect):
+class BassPulseEffect(ScalarSignalEffect):
     """Whole-tree pulse on bass transients. Simple and robust."""
+
+    default_palette = 'amber'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
@@ -54,9 +54,6 @@ class BassPulseEffect(AudioReactiveEffect):
         # Visual state
         self.brightness = 0.0
         self.decay_rate = 0.82         # per-frame multiplier at 30 FPS (~150ms decay)
-
-        # Color: warm white (slight amber)
-        self.color = np.array([255, 200, 100], dtype=np.float32)
 
         self._lock = threading.Lock()
 
@@ -109,20 +106,12 @@ class BassPulseEffect(AudioReactiveEffect):
 
         self.prev_bass_spec = bass_spec.copy()
 
-    def render(self, dt: float) -> np.ndarray:
+    def get_intensity(self, dt: float) -> float:
         with self._lock:
             b = self.brightness
 
-        # Apply decay
         self.brightness *= self.decay_rate ** (dt * 30)
-
-        # Gamma correction for visual pop
-        display_b = b ** 0.7
-
-        # All LEDs same color and brightness
-        pixel = (self.color * display_b).clip(0, 255).astype(np.uint8)
-        frame = np.tile(pixel, (self.num_leds, 1))
-        return frame
+        return b
 
     def get_diagnostics(self) -> dict:
         return {

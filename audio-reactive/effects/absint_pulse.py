@@ -6,17 +6,19 @@ Observation: RMS derivative pulses positive (energy arriving) then negative
 captures this "perturbation" — high when a beat just happened, low during
 steady-state. This gives F1 scores 20-50% better than bass-band spectral flux.
 
-Visual: whole tree pulses warm white on each detected beat, exponential decay.
+Visual: whole tree pulses on each detected beat, exponential decay.
 This is the "late detection" version — fires when it confirms a beat happened.
 """
 
 import numpy as np
 import threading
-from base import AudioReactiveEffect
+from base import ScalarSignalEffect
 
 
-class AbsIntPulseEffect(AudioReactiveEffect):
+class AbsIntPulseEffect(ScalarSignalEffect):
     """Whole-tree pulse using abs-integral of RMS derivative."""
+
+    default_palette = 'amber'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
@@ -50,17 +52,16 @@ class AbsIntPulseEffect(AudioReactiveEffect):
         # Visual state
         self.brightness = 0.0
         self.decay_rate = 0.82       # per-frame at 30 FPS
-        self.color = np.array([255, 200, 100], dtype=np.float32)  # warm white
 
         self._lock = threading.Lock()
 
     @property
     def name(self):
-        return "AbsInt Pulse"
+        return "Impulse"
 
     @property
     def description(self):
-        return "Beat detection via absolute-integral of RMS derivative; whole tree pulses warm white on each beat with exponential decay."
+        return "Beat detection via absolute-integral of RMS derivative; whole tree pulses on each beat with exponential decay."
 
     def process_audio(self, mono_chunk: np.ndarray):
         """Accumulate audio into RMS frames."""
@@ -114,18 +115,12 @@ class AbsIntPulseEffect(AudioReactiveEffect):
                 self.last_beat_time = self.time_acc
                 self.beat_count += 1
 
-    def render(self, dt: float) -> np.ndarray:
+    def get_intensity(self, dt: float) -> float:
         with self._lock:
             b = self.brightness
 
         self.brightness *= self.decay_rate ** (dt * 30)
-
-        # Gamma correction
-        display_b = b ** 0.7
-
-        pixel = (self.color * display_b).clip(0, 255).astype(np.uint8)
-        frame = np.tile(pixel, (self.num_leds, 1))
-        return frame
+        return b
 
     def get_diagnostics(self) -> dict:
         return {

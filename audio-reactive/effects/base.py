@@ -66,3 +66,25 @@ class AudioReactiveEffect(ABC):
         Override to provide effect-specific metrics (beat count, energy, etc.)
         """
         return {}
+
+
+class ScalarSignalEffect(AudioReactiveEffect):
+    """Base class for effects that output a single scalar intensity (0-1).
+
+    Subclasses implement get_intensity(dt) instead of render().
+    Can be composed with a PaletteMap via ComposedEffect.
+    Fallback render() produces amber if used standalone.
+    """
+
+    # Default palette preset name (overridden by subclasses)
+    default_palette = 'amber'
+
+    @abstractmethod
+    def get_intensity(self, dt: float) -> float:
+        """Return current intensity 0-1."""
+
+    def render(self, dt: float) -> np.ndarray:
+        """Fallback: amber if no palette composed."""
+        b = self.get_intensity(dt) ** 0.7
+        pixel = np.array([int(255*b), int(200*b), int(100*b)], dtype=np.uint8)
+        return np.tile(pixel, (self.num_leds, 1))

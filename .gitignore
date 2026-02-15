@@ -25,6 +25,9 @@ audio-reactive/research/datasets/harmonix/
 # Effect preferences (user-specific ratings/order, created at runtime)
 audio-reactive/effects/effect_prefs.json
 
+# User palettes (custom color mappings, created at runtime)
+audio-reactive/effects/user_palettes.json
+
 # Generated analysis plots (regenerable from scripts)
 audio-reactive/research/analysis/scripts/*.png
 

@@ -18,11 +18,13 @@ to estimate tempo confidently (~5-10 seconds).
 
 import numpy as np
 import threading
-from base import AudioReactiveEffect
+from base import ScalarSignalEffect
 
 
-class TempoPulseEffect(AudioReactiveEffect):
+class TempoPulseEffect(ScalarSignalEffect):
     """Free-running tempo pulse, brightness scaled by current amplitude."""
+
+    default_palette = 'reds'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
@@ -75,16 +77,6 @@ class TempoPulseEffect(AudioReactiveEffect):
 
         # ── Visual state ──
         self.brightness = 0.0
-        self.max_brightness = 0.80
-
-        # Color palette: deep red → orange → red → magenta → purple
-        self.palette = np.array([
-            [40,  5,  0],     # 0.0 — deep dark red
-            [160, 50, 0],     # 0.25 — orange
-            [200, 20, 0],     # 0.50 — red-orange
-            [180, 0,  60],    # 0.75 — red-magenta
-            [160, 20, 180],   # 1.0 — purple/pink
-        ], dtype=np.float32)
 
         self._lock = threading.Lock()
 
@@ -95,16 +87,6 @@ class TempoPulseEffect(AudioReactiveEffect):
     @property
     def description(self):
         return "Free-running pulse oscillator at autocorrelation-estimated tempo; brightness scaled by current RMS; raised-cosine pulse shape."
-
-    def _sample_palette(self, t):
-        """Sample color from palette at position t (0-1)."""
-        t = np.clip(t, 0, 1)
-        n = len(self.palette) - 1
-        idx = t * n
-        lo = int(idx)
-        hi = min(lo + 1, n)
-        frac = idx - lo
-        return self.palette[lo] * (1 - frac) + self.palette[hi] * frac
 
     def process_audio(self, mono_chunk: np.ndarray):
         n = len(mono_chunk)
@@ -158,7 +140,6 @@ class TempoPulseEffect(AudioReactiveEffect):
 
             # Raised cosine pulse shape within pulse_width window
             if self.phase < self.pulse_width:
-                # Map [0, pulse_width] → [0, pi] for a half-cosine bump
                 t = self.phase / self.pulse_width
                 pulse_envelope = 0.5 * (1.0 - np.cos(2 * np.pi * t))
             else:
@@ -168,7 +149,6 @@ class TempoPulseEffect(AudioReactiveEffect):
             brightness = pulse_envelope * rms_normalized
         else:
             # No tempo estimate — fall back to proportional
-            # (abs-integral normalized, like absint_prop)
             brightness = rms_normalized * 0.5
 
         with self._lock:
@@ -217,34 +197,20 @@ class TempoPulseEffect(AudioReactiveEffect):
         if best_corr > self.ac_min_confidence and best_lag > 0:
             new_period = best_lag / self.rms_fps
 
-            # Smooth period changes to avoid jarring tempo jumps
             if self.estimated_period > 0:
-                # Only update if within 20% of current estimate or first estimate
                 ratio = new_period / self.estimated_period
                 if 0.8 < ratio < 1.2:
-                    # Exponential smoothing
                     self.estimated_period = 0.8 * self.estimated_period + 0.2 * new_period
                 elif 0.45 < ratio < 0.55:
-                    # Detected double-time — use it
                     self.estimated_period = 0.8 * self.estimated_period + 0.2 * (new_period * 2)
                 elif 1.8 < ratio < 2.2:
-                    # Detected half-time — use it
                     self.estimated_period = 0.8 * self.estimated_period + 0.2 * (new_period / 2)
-                # Otherwise ignore the outlier
             else:
                 self.estimated_period = new_period
 
-    def render(self, dt: float) -> np.ndarray:
+    def get_intensity(self, dt: float) -> float:
         with self._lock:
-            b = self.brightness
-
-        b = min(b, 1.0) * self.max_brightness
-        display_b = b ** 0.6
-
-        color = self._sample_palette(b / self.max_brightness if self.max_brightness > 0 else 0)
-        pixel = (color * display_b).clip(0, 255).astype(np.uint8)
-        frame = np.tile(pixel, (self.num_leds, 1))
-        return frame
+            return self.brightness
 
     def get_diagnostics(self) -> dict:
         bpm = 60.0 / self.estimated_period if self.estimated_period > 0 else 0

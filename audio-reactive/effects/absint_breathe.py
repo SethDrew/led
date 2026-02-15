@@ -11,11 +11,13 @@ The result is gentler, more organic — good for ambient and slower music.
 
 import numpy as np
 import threading
-from base import AudioReactiveEffect
+from base import ScalarSignalEffect
 
 
-class AbsIntBreatheEffect(AudioReactiveEffect):
+class AbsIntBreatheEffect(ScalarSignalEffect):
     """Symmetric fade-on/fade-off using abs-integral of RMS derivative."""
+
+    default_palette = 'reds'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
@@ -41,39 +43,17 @@ class AbsIntBreatheEffect(AudioReactiveEffect):
         # Visual state — symmetric smoothing
         self.target_brightness = 0.0
         self.brightness = 0.0
-        # Both attack and decay use the same exponential smoothing rate
-        # 0.85^(30*dt) at 30 FPS ≈ 0.85 per frame → ~150ms time constant
         self.smooth_rate = 0.74
-        self.max_brightness = 0.80
-
-        # Color palette: deep red → orange → red → magenta → purple
-        self.palette = np.array([
-            [40,  5,  0],     # 0.0 — deep dark red
-            [160, 50, 0],     # 0.25 — orange
-            [200, 20, 0],     # 0.50 — red-orange
-            [180, 0,  60],    # 0.75 — red-magenta
-            [160, 20, 180],   # 1.0 — purple/pink
-        ], dtype=np.float32)
 
         self._lock = threading.Lock()
 
     @property
     def name(self):
-        return "AbsInt Breathe"
+        return "Impulse Breathe"
 
     @property
     def description(self):
         return "Symmetric fade-on and fade-off pulse from abs-integral signal; gentler and more organic than snap-on/slow-off effects."
-
-    def _sample_palette(self, t):
-        """Sample color from palette at position t (0-1)."""
-        t = np.clip(t, 0, 1)
-        n = len(self.palette) - 1
-        idx = t * n
-        lo = int(idx)
-        hi = min(lo + 1, n)
-        frac = idx - lo
-        return self.palette[lo] * (1 - frac) + self.palette[hi] * frac
 
     def process_audio(self, mono_chunk: np.ndarray):
         n = len(mono_chunk)
@@ -108,7 +88,7 @@ class AbsIntBreatheEffect(AudioReactiveEffect):
         with self._lock:
             self.target_brightness = normalized
 
-    def render(self, dt: float) -> np.ndarray:
+    def get_intensity(self, dt: float) -> float:
         with self._lock:
             target = self.target_brightness
 
@@ -116,14 +96,7 @@ class AbsIntBreatheEffect(AudioReactiveEffect):
         alpha = 1.0 - self.smooth_rate ** (dt * 30)
         self.brightness += (target - self.brightness) * alpha
 
-        b = min(self.brightness, 1.0) * self.max_brightness
-        display_b = b ** 0.6
-
-        # Sample color from palette based on intensity
-        color = self._sample_palette(self.brightness)
-        pixel = (color * display_b).clip(0, 255).astype(np.uint8)
-        frame = np.tile(pixel, (self.num_leds, 1))
-        return frame
+        return self.brightness
 
     def get_diagnostics(self) -> dict:
         return {

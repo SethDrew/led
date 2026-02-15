@@ -105,6 +105,22 @@ def _resolve_controller_ports(controllers):
 _controllers = _load_controllers()
 _resolve_controller_ports(_controllers)
 
+# ── Live reload (local dev only) ──────────────────────────────────────
+
+def _source_hash():
+    """Hash web_viewer.py + all effect files to detect changes."""
+    h = hashlib.md5()
+    for path in [__file__] + sorted(
+        str(p) for p in Path(EFFECTS_DIR).glob('*.py') if p.is_file()
+    ):
+        try:
+            h.update(Path(path).read_bytes())
+        except OSError:
+            pass
+    return h.hexdigest()[:12]
+
+_startup_hash = _source_hash()
+
 # ── Auth ─────────────────────────────────────────────────────────────
 
 PUBLIC_MODE = os.environ.get('LED_VIEWER_PUBLIC', '') == '1'
@@ -152,44 +168,53 @@ EFFECT_PREFS_PATH = os.path.join(EFFECTS_DIR, 'effect_prefs.json')
 
 
 def _discover_effects():
-    """Run runner.py --list and parse available effect names + descriptions."""
+    """Run runner.py --list-json and parse structured effect data."""
     try:
         result = subprocess.run(
-            [sys.executable, 'runner.py', '--list'],
+            [sys.executable, 'runner.py', '--list-json'],
             cwd=EFFECTS_DIR, capture_output=True, text=True, timeout=10
         )
+        data = json.loads(result.stdout)
         entries = []
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line or line.startswith('=') or line.startswith('Available') or line.startswith('('):
-                continue
-            # Lines like: "wled_volume          — WLED Volume | Description here"
-            if '\u2014' not in line:
-                continue
-            name_part, rest = line.split('\u2014', 1)
-            name = name_part.strip()
-            # Parse description after " | " if present
-            rest = rest.strip()
-            if ' | ' in rest:
-                _, desc = rest.split(' | ', 1)
-            else:
-                desc = ''
-            if name:
-                entries.append({'name': name, 'description': desc})
-        return entries
+        for sig in data.get('signals', []):
+            entries.append({
+                'name': sig['name'],
+                'description': sig.get('description', ''),
+                'is_signal': True,
+                'default_palette': sig.get('default_palette', 'amber'),
+            })
+        for eff in data.get('effects', []):
+            entries.append({
+                'name': eff['name'],
+                'description': eff.get('description', ''),
+                'is_signal': False,
+            })
+        return entries, data.get('palettes', [])
     except Exception as e:
         print(f"[effects] Discovery failed: {e}")
-        return []
+        return [], []
 
 
 _EFFECT_RENAME_MAP = {
-    'absint_pred': 'absint_predict',
-    'absint_down': 'absint_downbeat',
-    'absint_reds': 'absint_red_palette',
-    'absint_sec': 'absint_sections',
-    'absint_band': 'absint_bands',
+    # Legacy short names
+    'absint_pred': 'impulse_predict',
+    'absint_down': 'impulse_downbeat',
+    'absint_reds': 'impulse_glow',
+    'absint_red_palette': 'impulse_glow',
+    'absint_sec': 'impulse_sections',
+    'absint_band': 'impulse_bands',
     'longint_sec': 'longint_sections',
     'three_voices': 'hpss_voices',
+    # absint → impulse rename
+    'absint_pulse': 'impulse',
+    'absint_prop': 'impulse_glow',
+    'absint_predict': 'impulse_predict',
+    'absint_downbeat': 'impulse_downbeat',
+    'absint_breathe': 'impulse_breathe',
+    'absint_sections': 'impulse_sections',
+    'absint_meter': 'impulse_meter',
+    'absint_snake': 'impulse_snake',
+    'absint_bands': 'impulse_bands',
 }
 
 def _load_effect_prefs():
@@ -223,7 +248,7 @@ def _save_effect_prefs(prefs):
 
 def _get_effects_list():
     """Get effects list merged with preferences (ratings, order)."""
-    entries = _discover_effects()
+    entries, palettes = _discover_effects()
     prefs = _load_effect_prefs()
 
     effects = []
@@ -231,18 +256,25 @@ def _get_effects_list():
         name = entry['name'] if isinstance(entry, dict) else entry
         desc = entry.get('description', '') if isinstance(entry, dict) else ''
         p = prefs.get(name, {})
-        effects.append({
+        e = {
             'name': name,
             'description': desc,
             'order': p.get('order', 999),
             'rating': p.get('rating', 0),
-        })
+        }
+        if p.get('display_name'):
+            e['display_name'] = p['display_name']
+        if isinstance(entry, dict):
+            e['is_signal'] = entry.get('is_signal', False)
+            if entry.get('default_palette'):
+                e['default_palette'] = entry['default_palette']
+        effects.append(e)
 
     effects.sort(key=lambda e: e['order'])
-    return effects
+    return effects, palettes
 
 
-def _start_effect(name, controller_id=None):
+def _start_effect(name, controller_id=None, palette_name=None):
     """Start an effect subprocess. Kills any running effect first."""
     global _effect_process, _active_controller
     _stop_effect()
@@ -251,6 +283,9 @@ def _start_effect(name, controller_id=None):
     _resolve_controller_ports(_controllers)
 
     cmd = [sys.executable, 'runner.py', name]
+
+    if palette_name:
+        cmd += ['--chroma', palette_name]
 
     # Look up controller config; fall back to --no-leds
     controller = None
@@ -305,6 +340,35 @@ def _get_running_effect_name():
     if len(args) >= 3:
         return args[2]
     return None
+
+
+# ── User Palettes ────────────────────────────────────────────────────
+
+def _palette_module():
+    """Import palette module from effects directory."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('palette', os.path.join(EFFECTS_DIR, 'palette.py'))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _get_all_palettes_list():
+    """Return list of all palettes (builtin + user) with metadata."""
+    mod = _palette_module()
+    result = []
+    for name, palette in mod.PALETTE_PRESETS.items():
+        d = mod.palette_to_dict(palette)
+        d['name'] = name
+        d['is_builtin'] = True
+        result.append(d)
+    for name, palette in mod.load_user_palettes().items():
+        if name not in mod.PALETTE_PRESETS:
+            d = mod.palette_to_dict(palette)
+            d['name'] = name
+            d['is_builtin'] = False
+            result.append(d)
+    return result
 
 
 # ── File Discovery ────────────────────────────────────────────────────
@@ -431,6 +495,56 @@ def render_analysis(filepath, with_annotations=False, features=None):
     # Get PNG dimensions
     fig_width = viz.fig.get_figwidth() * DPI
     fig_height = viz.fig.get_figheight() * DPI
+
+    buf = io.BytesIO()
+    viz.fig.savefig(buf, format='png', dpi=DPI, facecolor=viz.fig.get_facecolor())
+    matplotlib.pyplot.close(viz.fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(viz.duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
+
+
+ANALYSIS_PANELS = ('waveform', 'spectrogram', 'bands', 'rms-derivative', 'annotations')
+
+
+def render_single_panel(filepath, panel_name):
+    """Render a single focused analysis panel to PNG bytes."""
+    if panel_name not in ANALYSIS_PANELS:
+        raise ValueError(f"Unknown panel: {panel_name}")
+
+    cache_key = (filepath, 'panel', panel_name)
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    from viewer import SyncedVisualizer
+
+    # Annotations panel needs annotations loaded; others suppress them
+    ann_path = None if panel_name == 'annotations' else '/dev/null/none.yaml'
+    viz = SyncedVisualizer(filepath, focus_panel=panel_name,
+                           annotations_path=ann_path)
+
+    if panel_name == 'annotations' and not viz.annotations:
+        raise ValueError("No annotations found for this file")
+
+    for line in viz.cursor_lines:
+        line.remove()
+
+    viz.fig.suptitle('', fontsize=1)
+    viz.fig.set_figheight(4)
+    viz.fig.canvas.draw()
+
+    ax = viz.axes[0]
+    x_left = ax.transData.transform((0, 0))[0]
+    x_right = ax.transData.transform((viz.duration, 0))[0]
+    fig_width = viz.fig.get_figwidth() * DPI
 
     buf = io.BytesIO()
     viz.fig.savefig(buf, format='png', dpi=DPI, facecolor=viz.fig.get_facecolor())
@@ -1459,11 +1573,18 @@ body {
 .info-panel .missing-table th { text-align: left; color: #e94560; border-bottom: 1px solid #333; padding: 6px 8px; }
 .info-panel .missing-table td { padding: 6px 8px; border-bottom: 1px solid #222; vertical-align: top; }
 .info-panel .missing-table td:first-child { color: #e0e0e0; font-weight: 600; white-space: nowrap; }
-.annotation-bar {
-    display: none; padding: 6px 20px; background: #1a1a2e;
-    border-bottom: 1px solid #333; align-items: center; gap: 12px; font-size: 13px;
+.annotation-widget {
+    margin-top: 4px; background: #1a1a2e; border: 1px solid #333; border-radius: 6px;
 }
-.annotation-bar.visible { display: flex; }
+.annotation-widget summary {
+    padding: 6px 14px; cursor: pointer; color: #888; font-size: 13px; user-select: none;
+}
+.annotation-widget summary:hover { color: #ccc; }
+.annotation-widget[open] summary { border-bottom: 1px solid #333; }
+.annotation-bar {
+    display: flex; padding: 8px 14px;
+    align-items: center; gap: 12px; font-size: 13px;
+}
 .annotation-bar label { color: #888; }
 .annotation-bar input {
     background: #0f3460; color: #e0e0e0; border: 1px solid #555; border-radius: 4px;
@@ -1540,10 +1661,12 @@ body {
     width: 100%; overflow-y: auto; flex: 1; align-self: stretch;
 }
 .effects-panel.visible { display: flex; }
+.effects-list { max-width: 640px; margin: 0 auto; }
+.effect-viz-waveform { background: #0a0f1e; border-radius: 4px; overflow: hidden; }
 .effect-card {
     display: flex; align-items: center; gap: 12px; padding: 10px 14px;
     background: #16213e; border: 1px solid #333; border-radius: 6px;
-    cursor: grab; transition: border-color 0.15s, background 0.15s;
+    transition: border-color 0.15s, background 0.15s;
 }
 .effect-card:hover { border-color: #555; }
 .effect-card.dragging { opacity: 0.4; }
@@ -1553,8 +1676,24 @@ body {
     color: #555; font-size: 16px; cursor: grab; user-select: none;
     line-height: 1;
 }
+.effect-name-wrap {
+    flex: 1; display: flex; align-items: center; gap: 4px; min-width: 0;
+}
 .effect-name {
-    flex: 1; font-size: 14px; font-weight: 500; color: #e0e0e0;
+    font-size: 14px; font-weight: 500; color: #e0e0e0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.effect-rename-btn {
+    background: none; border: none; color: #555; cursor: pointer;
+    font-size: 13px; padding: 2px 4px; line-height: 1; opacity: 0;
+    transition: opacity 0.15s;
+}
+.effect-name-wrap:hover .effect-rename-btn { opacity: 1; }
+.effect-rename-btn:hover { color: #e94560; }
+.effect-rename-input {
+    background: #0f1629; border: 1px solid #e94560; border-radius: 3px;
+    color: #e0e0e0; font-size: 14px; padding: 2px 6px; flex: 1;
+    outline: none; min-width: 80px;
 }
 .effect-name .running-dot {
     display: inline-block; width: 6px; height: 6px; border-radius: 50%;
@@ -1577,6 +1716,141 @@ body {
 }
 .effect-toggle:hover { border-color: #e94560; }
 .effect-toggle.stop { background: #b71c1c; border-color: #e94560; }
+/* Popover system (palette + brightness) */
+.popover-anchor { position: relative; display: inline-flex; align-items: center; }
+.popover-btn {
+    background: #1a2a4e; border: 1px solid #444; border-radius: 4px; cursor: pointer;
+    padding: 3px 8px; font-size: 12px; color: #ccc; display: inline-flex; align-items: center; gap: 4px;
+    transition: border-color 0.15s;
+}
+.popover-btn:hover { border-color: #888; }
+.popover-btn-swatch {
+    display: inline-block; width: 32px; height: 10px; border-radius: 2px;
+}
+.brightness-btn { font-size: 13px; }
+.popover-panel {
+    display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 100;
+    background: #16213e; border: 1px solid #555; border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5); min-width: 160px;
+}
+.popover-panel.open { display: block; }
+/* Palette popover */
+.palette-popover { padding: 4px 0; max-height: 400px; overflow-y: auto; }
+.palette-popover-section { padding: 4px 12px 2px; font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; }
+.palette-popover-row {
+    display: flex; align-items: center; gap: 8px; padding: 5px 12px; cursor: pointer;
+    transition: background 0.1s;
+}
+.palette-popover-row:hover { background: #1a2a4e; }
+.palette-popover-row.selected { background: rgba(233,69,96,0.12); }
+.palette-popover-swatch {
+    display: inline-block; width: 48px; height: 14px; border-radius: 3px; flex-shrink: 0;
+}
+.palette-popover-name { font-size: 12px; color: #ccc; flex: 1; }
+.palette-popover-edit {
+    font-size: 11px; color: #666; cursor: pointer; padding: 2px 4px; border-radius: 3px;
+    opacity: 0; transition: opacity 0.15s;
+}
+.palette-popover-row:hover .palette-popover-edit { opacity: 1; }
+.palette-popover-edit:hover { color: #e94560; background: rgba(233,69,96,0.1); }
+.palette-popover-new {
+    display: flex; align-items: center; gap: 6px; padding: 6px 12px; cursor: pointer;
+    color: #e94560; font-size: 12px; border-top: 1px solid #333; margin-top: 2px;
+    transition: background 0.1s;
+}
+.palette-popover-new:hover { background: #1a2a4e; }
+/* Palette editor modal */
+.palette-editor-overlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 200;
+    background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center;
+}
+.palette-editor {
+    background: #16213e; border: 1px solid #555; border-radius: 8px;
+    padding: 20px; min-width: 340px; max-width: 420px; width: 90%;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+.palette-editor h3 { margin: 0 0 14px; font-size: 15px; color: #e0e0e0; font-weight: 500; }
+.palette-editor label { display: block; font-size: 12px; color: #888; margin-bottom: 3px; }
+.palette-editor input[type="text"] {
+    width: 100%; box-sizing: border-box; background: #0f1a2e; color: #e0e0e0;
+    border: 1px solid #444; border-radius: 4px; padding: 6px 8px; font-size: 13px;
+    margin-bottom: 10px;
+}
+.palette-editor input[type="text"]:focus { outline: none; border-color: #e94560; }
+.palette-editor-gradient {
+    height: 20px; border-radius: 4px; margin-bottom: 6px; border: 1px solid #444;
+}
+.palette-editor-stops { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.palette-editor-stop {
+    display: flex; align-items: center; gap: 6px;
+}
+.palette-editor-stop input[type="color"] {
+    width: 32px; height: 24px; border: 1px solid #444; border-radius: 3px;
+    cursor: pointer; background: none; padding: 0;
+}
+.palette-editor-stop .stop-hex { font-size: 11px; color: #888; min-width: 58px; }
+.palette-editor-stop .stop-remove {
+    font-size: 14px; color: #666; cursor: pointer; padding: 0 4px;
+    border-radius: 3px; transition: color 0.1s;
+}
+.palette-editor-stop .stop-remove:hover { color: #e94560; }
+.palette-editor-add-stop {
+    font-size: 11px; color: #e94560; cursor: pointer; padding: 2px 0;
+    margin-bottom: 10px;
+}
+.palette-editor-add-stop:hover { text-decoration: underline; }
+.palette-editor-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.palette-editor-row label { margin-bottom: 0; min-width: 70px; }
+.palette-editor-row input[type="range"] {
+    flex: 1; height: 4px; -webkit-appearance: none; appearance: none;
+    background: #333; border-radius: 2px; outline: none;
+}
+.palette-editor-row input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: #e94560; border: 1.5px solid #fff; cursor: pointer;
+}
+.palette-editor-row .range-val { font-size: 11px; color: #888; min-width: 36px; text-align: right; }
+.palette-editor-radio { display: flex; gap: 10px; margin-bottom: 10px; }
+.palette-editor-radio label {
+    display: flex; align-items: center; gap: 4px; font-size: 12px; color: #aaa;
+    cursor: pointer; margin-bottom: 0;
+}
+.palette-editor-radio input[type="radio"] { accent-color: #e94560; }
+.palette-editor-actions {
+    display: flex; gap: 8px; margin-top: 14px; justify-content: flex-end;
+}
+.palette-editor-actions button {
+    padding: 6px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px;
+}
+.palette-editor-actions .btn-save { background: #e94560; color: #fff; }
+.palette-editor-actions .btn-save:hover { background: #d13550; }
+.palette-editor-actions .btn-cancel { background: #333; color: #aaa; }
+.palette-editor-actions .btn-cancel:hover { background: #444; color: #ddd; }
+.palette-editor-actions .btn-delete { background: none; color: #e94560; border: 1px solid #e94560; margin-right: auto; }
+.palette-editor-actions .btn-delete:hover { background: rgba(233,69,96,0.1); }
+/* Brightness popover */
+.brightness-popover { padding: 10px 14px; min-width: 220px; }
+.brightness-popover-title { font-size: 11px; color: #888; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+.brightness-popover-sliders label {
+    display: flex; align-items: center; gap: 6px; font-size: 12px; color: #aaa; margin-bottom: 6px;
+}
+.brightness-popover-sliders input[type=range] {
+    flex: 1; height: 4px; -webkit-appearance: none; appearance: none;
+    background: #333; border-radius: 2px; outline: none;
+}
+.brightness-popover-sliders input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: #e94560; border: 1.5px solid #fff; cursor: pointer;
+}
+.brightness-popover-sliders span { min-width: 32px; text-align: right; font-size: 11px; color: #888; }
+.brightness-popover-presets { display: flex; gap: 4px; margin-top: 6px; }
+.brightness-popover-presets button {
+    flex: 1; padding: 3px 0; font-size: 10px; background: #0f1a2e; color: #aaa;
+    border: 1px solid #444; border-radius: 3px; cursor: pointer; transition: all 0.1s;
+}
+.brightness-popover-presets button:hover { border-color: #e94560; color: #fff; }
 .effects-selector { display: flex; gap: 1px; margin-bottom: 12px; border: 1px solid #333;
     border-radius: 6px; overflow: hidden; flex-shrink: 0; }
 .selector-col { min-width: 110px; max-height: 180px; overflow-y: auto; background: #0f1a2e;
@@ -1590,6 +1864,58 @@ body {
 .selector-count { color: #555; font-size: 11px; margin-left: auto; }
 .effect-name { cursor: pointer; }
 .effect-name:hover { text-decoration: underline; text-decoration-color: #555; text-underline-offset: 3px; }
+.effect-ref-toggle {
+    background: none; border: 1px solid #333; border-radius: 4px; color: #aaa;
+    padding: 6px 14px; cursor: pointer; font-size: 13px; width: 100%;
+    text-align: left; transition: border-color 0.15s, color 0.15s;
+}
+.effect-ref-toggle:hover { border-color: #e94560; color: #e0e0e0; }
+.effect-ref-toggle .arrow { display: inline-block; transition: transform 0.2s; margin-right: 6px; }
+.effect-ref-toggle.open .arrow { transform: rotate(90deg); }
+.effect-ref-wrap {
+    display: none; overflow-x: auto; margin-top: 8px;
+    border: 1px solid #333; border-radius: 6px; background: #0f1a2e;
+}
+.effect-ref-wrap.open { display: block; }
+.effect-ref-table {
+    width: 100%; border-collapse: collapse; font-size: 12px; white-space: nowrap;
+}
+.effect-ref-table th {
+    position: sticky; top: 0; background: #16213e; color: #aaa;
+    padding: 6px 10px; text-align: left; border-bottom: 1px solid #333;
+    font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+}
+.effect-ref-table td {
+    padding: 5px 10px; border-bottom: 1px solid #1a2a4e; color: #ccc;
+}
+.effect-ref-table tr:hover td { background: #1a2a4e; }
+.effect-ref-table td:first-child { color: #e0e0e0; font-weight: 500; }
+.features-panel {
+    border: 1px solid #333; border-radius: 6px; background: #0f1a2e;
+    padding: 12px; margin-bottom: 8px;
+}
+.features-panel .features-header {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 10px;
+}
+.features-panel .features-header button {
+    background: #16213e; color: #aaa; border: 1px solid #333; border-radius: 4px;
+    padding: 5px 14px; cursor: pointer; font-size: 13px; transition: border-color 0.15s;
+}
+.features-panel .features-header button:hover { border-color: #e94560; color: #e0e0e0; }
+.features-panel .features-header button.active { border-color: #e94560; color: #e94560; }
+.features-panel .features-header span { color: #555; font-size: 12px; }
+.feature-row {
+    display: flex; align-items: center; gap: 8px; height: 28px;
+}
+.feature-row .feature-label {
+    width: 90px; font-size: 12px; color: #888; text-align: right; flex-shrink: 0;
+}
+.feature-row canvas {
+    flex: 1; height: 22px; border-radius: 3px; background: #0a0f1e;
+}
+.feature-row .feature-val {
+    width: 36px; font-size: 11px; color: #666; text-align: right; font-family: monospace;
+}
 .effect-detail { display: flex; flex-direction: column; gap: 12px; max-width: 900px; width: 100%; }
 .effect-detail-header { display: flex; align-items: center; gap: 12px; }
 .effect-detail-header h2 { margin: 0; font-size: 18px; color: #e0e0e0; font-weight: 500; }
@@ -1598,7 +1924,7 @@ body {
     padding: 4px 12px; cursor: pointer; font-size: 13px;
 }
 .effect-detail-back:hover { border-color: #e94560; color: #e0e0e0; }
-.effect-detail-controls { display: flex; align-items: center; gap: 10px; }
+.effect-detail-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .effect-detail-controls select {
     background: #0f1a2e; color: #e0e0e0; border: 1px solid #333; border-radius: 4px;
     padding: 5px 10px; font-size: 13px; flex: 1; min-width: 200px;
@@ -1615,13 +1941,21 @@ body {
     position: absolute; top: 0; bottom: 0; width: 1px;
     background: rgba(255,255,255,0.7); pointer-events: none; z-index: 10;
 }
-.effect-detail-diag-legend {
-    display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12px; color: #aaa;
+.analysis-panel-chips {
+    display: flex; align-items: center; gap: 6px; margin: 8px 0 4px; flex-wrap: wrap;
 }
-.effect-detail-diag-legend span { display: flex; align-items: center; gap: 4px; }
-.effect-detail-diag-legend .swatch {
-    display: inline-block; width: 10px; height: 3px; border-radius: 1px;
+.panel-chips-label { color: #888; font-size: 12px; margin-right: 2px; }
+.panel-chip {
+    display: inline-block; padding: 3px 10px; font-size: 11px; border-radius: 10px;
+    border: 1px solid #444; color: #aaa; cursor: pointer; transition: all 0.15s;
+    user-select: none;
 }
+.panel-chip:hover { border-color: #888; color: #ddd; }
+.panel-chip.active { border-color: #e94560; color: #fff; background: rgba(233,69,96,0.15); }
+.panel-chip.loading { opacity: 0.6; }
+.analysis-panels-container { margin-top: 4px; }
+.analysis-panel-img { margin-bottom: 4px; background: #0a0f1e; border-radius: 4px; overflow: hidden; }
+.panel-loading { display: block; padding: 12px; color: #888; font-size: 12px; font-style: italic; }
 .effect-detail-status { color: #888; font-size: 13px; font-style: italic; }
 .controller-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-shrink: 0; }
 .controller-bar label { color: #888; font-size: 13px; white-space: nowrap; }
@@ -1666,7 +2000,6 @@ body {
     <div class="tab" data-tab="welcome" id="welcomeTab">Welcome</div>
     <div class="tab" data-tab="record">Record</div>
     <div class="tab active" data-tab="analysis">Analysis</div>
-    <div class="tab" data-tab="annotations" id="annTab">Annotations</div>
     <div class="tab-dropdown">
         <div class="tab" id="decompDropdownToggle">Decomposition &#9662;</div>
         <div class="tab-dropdown-menu" id="decompDropdownMenu">
@@ -1681,19 +2014,21 @@ body {
     <div class="tab" data-tab="reference">Reference</div>
 </div>
 
-<div class="annotation-bar" id="annotationBar">
-    <label>Layer: <input type="text" id="layerInput" value="beat" spellcheck="false"></label>
-    <span class="tap-info"><kbd>T</kbd> to tap &middot; <span class="tap-count" id="tapCount">0 taps</span></span>
-    <button class="save" id="saveAnnBtn" disabled onclick="saveAnnotation()">Save (S)</button>
-    <button id="discardAnnBtn" disabled onclick="discardAnnotation()">Discard</button>
-</div>
-
 <div class="viewer" id="viewer">
     <div class="img-container" id="imgContainer">
         <img id="panelImg" draggable="false">
         <div class="cursor-line" id="cursorLine"></div>
         <canvas id="tapCanvas"></canvas>
     </div>
+    <details class="annotation-widget" id="annotationWidget">
+        <summary>Annotations</summary>
+        <div class="annotation-bar" id="annotationBar">
+            <label>Layer: <input type="text" id="layerInput" value="beat" spellcheck="false"></label>
+            <span class="tap-info"><kbd>T</kbd> to tap &middot; <span class="tap-count" id="tapCount">0 taps</span></span>
+            <button class="save" id="saveAnnBtn" disabled onclick="saveAnnotation()">Save (S)</button>
+            <button id="discardAnnBtn" disabled onclick="discardAnnotation()">Discard</button>
+        </div>
+    </details>
     <div class="info-panel" id="infoPanel">
         <h2>Analysis</h2>
         <p style="color:#888;margin-bottom:16px;">Four panels rendered for every audio file. Waveform and spectrogram are industry standard; band energy and RMS derivative are our additions for LED mapping.</p>
@@ -1785,6 +2120,16 @@ body {
             <button class="record-btn" id="recordBtn" onclick="toggleRecord()"><span class="dot"></span></button>
             <div class="record-elapsed" id="recordElapsed">0:00.0</div>
             <div class="record-status" id="recordStatus">Click to record from BlackHole</div>
+            <p style="color:#e94560; font-size:12px; margin-top:12px;">Requires <a href="https://existential.audio/blackhole/" target="_blank" style="color:#e94560; text-decoration:underline;">BlackHole 2ch</a> for system audio capture. Recording will not work without it.</p>
+            <details style="color:#aaa; margin-top:8px;">
+                <summary style="color:#ccc; cursor:pointer; font-size:13px;">Setup: BlackHole (macOS)</summary>
+                <ol style="padding-left:20px; margin-top:8px; font-size:12px;">
+                    <li>Install BlackHole 2ch from <a href="https://existential.audio/blackhole/" target="_blank" style="color:#e94560;">existential.audio/blackhole</a></li>
+                    <li>In System Settings &rarr; Sound &rarr; Output, select <strong>BlackHole 2ch</strong></li>
+                    <li>Restart this server &mdash; BlackHole will be auto-detected</li>
+                </ol>
+                <p style="color:#888; font-size:12px; margin-top:8px;"><strong>Tip:</strong> To hear audio while recording, open <strong>Audio MIDI Setup</strong>, click <strong>+</strong> &rarr; <strong>Create Multi-Output Device</strong>, check both your speakers and BlackHole, then set that as your system output.</p>
+            </details>
             <hr style="border-color:#333; margin:24px 0;">
             <h3 style="color:#ccc; font-size:14px; margin-bottom:8px;">Your Files</h3>
             <div id="fileManagerLocal" style="max-height:300px; overflow-y:auto;"></div>
@@ -2109,7 +2454,6 @@ const playBtn = document.getElementById('playBtn');
 const progressFill = document.getElementById('progressFill');
 const progressThumb = document.getElementById('progressThumb');
 const progressTrack = document.getElementById('progressTrack');
-const annTab = document.getElementById('annTab');
 const viewer = document.getElementById('viewer');
 const infoPanel = document.getElementById('infoPanel');
 const volSlider = document.getElementById('volSlider');
@@ -2262,16 +2606,18 @@ function toggleFeature(name) {
 
 function updateFeatureUI() {
     const status = document.getElementById('stemStatus');
-    if (currentTab !== 'analysis' && currentTab !== 'annotations') return;
+    if (currentTab !== 'analysis') return;
+    const annOpen = document.getElementById('annotationWidget').open;
     status.style.display = 'block';
     status.innerHTML =
         '<span class="stem-chip ' + (featureState.rms ? 'active' : 'muted') + '" ' +
         'onclick="toggleFeature(\'rms\')">E:RMS overlay</span>';
-    document.getElementById('controlsHint').innerHTML =
-        '<kbd>Space</kbd> play/pause &nbsp;' +
+    let hints = '<kbd>Space</kbd> play/pause &nbsp;' +
         '<kbd>&larr;</kbd> <kbd>&rarr;</kbd> &plusmn;5s &nbsp;' +
         'Click to seek &nbsp;' +
         '<kbd>E</kbd> toggle RMS overlay';
+    if (annOpen) hints += ' &nbsp;<kbd>T</kbd> tap &nbsp;<kbd>S</kbd> save';
+    document.getElementById('controlsHint').innerHTML = hints;
 }
 
 // ── Annotation recording ─────────────────────────────────────────
@@ -2380,6 +2726,11 @@ function updateAnnotationUI() {
 
 panelImg.addEventListener('load', resizeTapCanvas);
 window.addEventListener('resize', resizeTapCanvas);
+
+// Re-render when annotations widget is toggled
+document.getElementById('annotationWidget').addEventListener('toggle', () => {
+    if (currentTab === 'analysis' && currentFile) loadPanel();
+});
 
 // ── Recording ────────────────────────────────────────────────────
 
@@ -2807,9 +3158,6 @@ async function selectFile(path) {
     currentFile = path;
     filePicker.value = path;
 
-    // Annotations tab always enabled (user can create new annotations)
-    annTab.classList.remove('disabled');
-
     // Clear pending taps when switching files
     annotationTaps = [];
     updateAnnotationUI();
@@ -2870,6 +3218,7 @@ function switchTab(tabId) {
     if (isPublicMode && !isAuthenticated && LOCKED_TABS.has(tabId)) return;
     const prev = currentTab;
     if ((prev === 'stems' || prev === 'hpss' || prev === 'lab-repet' || prev === 'lab-nmf') && tabId !== prev) cleanupStemAudio();
+    if (prev === 'effects' && tabId !== 'effects') stopFeatureStream();
     currentTab = tabId;
     updateTabUI();
     saveHashState();
@@ -2908,9 +3257,9 @@ document.addEventListener('click', () => decompDropdown.classList.remove('open')
 async function loadPanel() {
     hideOverlay();
 
-    // Show/hide annotation bar
-    const annBar = document.getElementById('annotationBar');
-    annBar.style.display = currentTab === 'annotations' ? 'flex' : 'none';
+    // Annotation widget visibility (only on analysis tab)
+    const annWidget = document.getElementById('annotationWidget');
+    annWidget.style.display = (currentTab === 'analysis') ? '' : 'none';
 
     const recordPanel = document.getElementById('recordPanel');
     const effectsPanel = document.getElementById('effectsPanel');
@@ -2991,20 +3340,13 @@ async function loadPanel() {
         return;
     }
 
-    // Show feature toggle UI for analysis/annotations tabs
+    // Show feature toggle UI for analysis tab
+    const annOpen = document.getElementById('annotationWidget').open;
     updateFeatureUI();
-    if (currentTab === 'annotations') {
-        document.getElementById('controlsHint').innerHTML =
-            '<kbd>Space</kbd> play/pause &nbsp;' +
-            '<kbd>T</kbd> tap annotation &nbsp;' +
-            '<kbd>S</kbd> save &nbsp;' +
-            '<kbd>Esc</kbd> discard &nbsp;' +
-            '<kbd>E</kbd> RMS overlay';
-    }
 
     let url = '/api/render/' + encodeURIComponent(currentFile);
     const params = [];
-    if (currentTab === 'annotations') params.push('annotations=1');
+    if (annOpen) params.push('annotations=1');
     const activeFeatures = Object.entries(featureState)
         .filter(([_, v]) => v).map(([k]) => k);
     if (activeFeatures.length < 4) {
@@ -3320,15 +3662,15 @@ document.addEventListener('keydown', (e) => {
             audio.currentTime = Math.min(pixelMapping.duration, audio.currentTime + 5);
             if (hasStemAudio()) stemSeek();
         }
-    } else if (e.code === 'KeyT' && currentTab === 'annotations' && e.target.tagName !== 'INPUT') {
+    } else if (e.code === 'KeyT' && currentTab === 'analysis' && document.getElementById('annotationWidget').open && e.target.tagName !== 'INPUT') {
         e.preventDefault();
         recordTap();
-    } else if (e.code === 'KeyS' && currentTab === 'annotations' && annotationTaps.length > 0 && e.target.tagName !== 'INPUT') {
+    } else if (e.code === 'KeyS' && currentTab === 'analysis' && document.getElementById('annotationWidget').open && annotationTaps.length > 0 && e.target.tagName !== 'INPUT') {
         e.preventDefault();
         saveAnnotation();
     } else if (e.code === 'Escape' && annotationTaps.length > 0) {
         discardAnnotation();
-    } else if (!hasStemAudio() && (currentTab === 'analysis' || currentTab === 'annotations')) {
+    } else if (!hasStemAudio() && currentTab === 'analysis') {
         if (e.code === 'KeyE') {
             toggleFeature('rms');
         }
@@ -3374,8 +3716,383 @@ function readHashState() {
 // ── Effects ──────────────────────────────────────────────────────
 
 let effectsList = [];
+let palettesList = [];  // available palettes
+let selectedPalette = {};  // {effectName: paletteName} — overrides per effect
+let selectedBrightness = {};  // {effectName: [lo, hi]} — brightness range per effect
 let effectsRunning = null;  // name of running effect or null
 let effectsPollTimer = null;
+
+function paletteGradientCSS(pal) {
+    const p = pal.colors;
+    if (!p || p.length === 0) return '#333';
+    if (p.length === 1) return 'rgb(' + p[0].join(',') + ')';
+    const stops = p.map((c, i) => 'rgb(' + c.join(',') + ') ' + (i / (p.length - 1) * 100).toFixed(0) + '%');
+    return 'linear-gradient(90deg, ' + stops.join(', ') + ')';
+}
+
+function getSelectedPalette(effectName, defaultPalette) {
+    return selectedPalette[effectName] || defaultPalette;
+}
+
+function getBrightnessRange(effectName) {
+    return selectedBrightness[effectName] || [0, 100];
+}
+
+// Close any open popover when clicking outside
+document.addEventListener('click', (e) => {
+    if (!e.target.closest('.popover-anchor')) {
+        document.querySelectorAll('.popover-panel.open').forEach(p => p.classList.remove('open'));
+    }
+});
+
+function buildPaletteRows(panel, effectName, btn, onChange) {
+    panel.innerHTML = '';
+    const cur = getSelectedPalette(effectName, btn._defaultPalette);
+    const userPals = palettesList.filter(c => !c.is_builtin);
+    const builtinPals = palettesList.filter(c => c.is_builtin);
+
+    function selectPalette(c) {
+        selectedPalette[effectName] = c.name;
+        btn.innerHTML = '<span class="popover-btn-swatch" style="background:' + paletteGradientCSS(c) + '"></span>';
+        btn.title = 'Palette: ' + c.name;
+        panel.querySelectorAll('.palette-popover-row').forEach(r => r.classList.remove('selected'));
+        panel.classList.remove('open');
+        if (onChange) onChange(c.name);
+    }
+
+    function addRow(c) {
+        const row = document.createElement('div');
+        row.className = 'palette-popover-row' + (c.name === cur ? ' selected' : '');
+        row.innerHTML = '<span class="palette-popover-swatch" style="background:' + paletteGradientCSS(c) + '"></span>' +
+            '<span class="palette-popover-name">' + c.name + '</span>';
+        if (!c.is_builtin) {
+            const edit = document.createElement('span');
+            edit.className = 'palette-popover-edit';
+            edit.textContent = '\u270E';
+            edit.title = 'Edit';
+            edit.addEventListener('click', (e) => {
+                e.stopPropagation();
+                panel.classList.remove('open');
+                openPaletteEditor(c, false, () => { refreshPalettesList(panel, effectName, btn, onChange); });
+            });
+            row.appendChild(edit);
+        }
+        row.addEventListener('click', (e) => {
+            if (e.target.classList.contains('palette-popover-edit')) return;
+            e.stopPropagation();
+            selectPalette(c);
+        });
+        panel.appendChild(row);
+    }
+
+    if (userPals.length > 0) {
+        const hdr = document.createElement('div');
+        hdr.className = 'palette-popover-section';
+        hdr.textContent = 'Custom';
+        panel.appendChild(hdr);
+        userPals.forEach(addRow);
+    }
+
+    const hdr2 = document.createElement('div');
+    hdr2.className = 'palette-popover-section';
+    hdr2.textContent = 'Built-in';
+    panel.appendChild(hdr2);
+    builtinPals.forEach(addRow);
+
+    // "+ New palette" button
+    const newBtn = document.createElement('div');
+    newBtn.className = 'palette-popover-new';
+    newBtn.innerHTML = '+ New palette';
+    newBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        panel.classList.remove('open');
+        openPaletteEditor(null, true, () => { refreshPalettesList(panel, effectName, btn, onChange); });
+    });
+    panel.appendChild(newBtn);
+}
+
+async function refreshPalettesList(panel, effectName, btn, onChange) {
+    try {
+        const resp = await fetch('/api/palettes');
+        if (resp.ok) palettesList = await resp.json();
+    } catch(e) {}
+    buildPaletteRows(panel, effectName, btn, onChange);
+    // Update button swatch
+    const cur = getSelectedPalette(effectName, btn._defaultPalette);
+    const curPal = palettesList.find(c => c.name === cur) || palettesList[0];
+    if (curPal) {
+        btn.innerHTML = '<span class="popover-btn-swatch" style="background:' + paletteGradientCSS(curPal) + '"></span>';
+        btn.title = 'Palette: ' + cur;
+    }
+}
+
+function createPalettePopover(effectName, defaultPalette, onChange) {
+    const anchor = document.createElement('span');
+    anchor.className = 'popover-anchor';
+
+    const btn = document.createElement('button');
+    btn.className = 'popover-btn palette-btn';
+    btn._defaultPalette = defaultPalette;
+    const cur = getSelectedPalette(effectName, defaultPalette);
+    const curPal = palettesList.find(c => c.name === cur) || palettesList[0];
+    btn.innerHTML = '<span class="popover-btn-swatch" style="background:' + paletteGradientCSS(curPal) + '"></span>';
+    btn.title = 'Palette: ' + cur;
+    anchor.appendChild(btn);
+
+    const panel = document.createElement('div');
+    panel.className = 'popover-panel palette-popover';
+    buildPaletteRows(panel, effectName, btn, onChange);
+    anchor.appendChild(panel);
+
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        document.querySelectorAll('.popover-panel.open').forEach(p => { if (p !== panel) p.classList.remove('open'); });
+        // Rebuild rows each time to pick up any changes
+        buildPaletteRows(panel, effectName, btn, onChange);
+        panel.classList.toggle('open');
+    });
+
+    return anchor;
+}
+
+function rgbToHex(r, g, b) {
+    return '#' + [r, g, b].map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+}
+
+function hexToRgb(hex) {
+    const m = hex.match(/^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+    return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [255, 255, 255];
+}
+
+function openPaletteEditor(palSpec, isNew, onDone) {
+    // palSpec: existing palette object (from palettesList) or null for new
+    const name = isNew ? '' : (palSpec ? palSpec.name : '');
+    const palette = palSpec ? (palSpec.colors || palSpec.palette || [[255,200,100]]).map(c => [...c]) : [[255, 200, 100]];
+    const gamma = palSpec ? palSpec.gamma : 0.7;
+    const brightCap = palSpec ? palSpec.brightness_cap : 1.0;
+    const spatialMode = palSpec ? palSpec.spatial_mode : 'uniform';
+    const overlay = document.createElement('div');
+    overlay.className = 'palette-editor-overlay';
+
+    const editor = document.createElement('div');
+    editor.className = 'palette-editor';
+    editor.addEventListener('click', e => e.stopPropagation());
+
+    editor.innerHTML =
+        '<h3>' + (isNew ? 'New Palette' : 'Edit Palette') + '</h3>' +
+        '<label>Name</label>' +
+        '<input type="text" class="ce-name" value="' + name + '" placeholder="my_palette">' +
+        '<label>Palette</label>' +
+        '<div class="palette-editor-gradient ce-gradient"></div>' +
+        '<div class="palette-editor-stops ce-stops"></div>' +
+        '<div class="palette-editor-add-stop ce-add-stop">+ Add color stop</div>' +
+        '<div class="palette-editor-row">' +
+        '  <label>Mode</label>' +
+        '  <div class="palette-editor-radio ce-mode">' +
+        '    <label><input type="radio" name="ce-mode" value="uniform"' + (spatialMode === 'uniform' ? ' checked' : '') + '> Uniform</label>' +
+        '    <label><input type="radio" name="ce-mode" value="fibonacci"' + (spatialMode === 'fibonacci' ? ' checked' : '') + '> Fibonacci</label>' +
+        '  </div>' +
+        '</div>' +
+        '<div class="palette-editor-row">' +
+        '  <label>Gamma</label>' +
+        '  <input type="range" class="ce-gamma" min="0.1" max="2.0" step="0.05" value="' + gamma + '">' +
+        '  <span class="range-val ce-gamma-val">' + gamma.toFixed(2) + '</span>' +
+        '</div>' +
+        '<div class="palette-editor-row">' +
+        '  <label>Brightness</label>' +
+        '  <input type="range" class="ce-bright" min="0.05" max="1.0" step="0.05" value="' + brightCap + '">' +
+        '  <span class="range-val ce-bright-val">' + Math.round(brightCap * 100) + '%</span>' +
+        '</div>' +
+        '<div class="palette-editor-actions">' +
+        ((!isNew && palSpec && !palSpec.is_builtin) ? '<button class="btn-delete ce-delete">Delete</button>' : '') +
+        '  <button class="btn-cancel ce-cancel">Cancel</button>' +
+        '  <button class="btn-save ce-save">Save</button>' +
+        '</div>';
+
+    overlay.appendChild(editor);
+    document.body.appendChild(overlay);
+
+    // State
+    let stops = palette.map(c => [...c]);
+
+    function updateGradient() {
+        const grad = editor.querySelector('.ce-gradient');
+        if (stops.length === 1) {
+            grad.style.background = 'rgb(' + stops[0].join(',') + ')';
+        } else {
+            const css = stops.map((c, i) => 'rgb(' + c.join(',') + ') ' + (i / (stops.length - 1) * 100).toFixed(0) + '%');
+            grad.style.background = 'linear-gradient(90deg, ' + css.join(', ') + ')';
+        }
+    }
+
+    function renderStops() {
+        const container = editor.querySelector('.ce-stops');
+        container.innerHTML = '';
+        stops.forEach((c, i) => {
+            const row = document.createElement('div');
+            row.className = 'palette-editor-stop';
+            const colorInput = document.createElement('input');
+            colorInput.type = 'color';
+            colorInput.value = rgbToHex(c[0], c[1], c[2]);
+            const hexLabel = document.createElement('span');
+            hexLabel.className = 'stop-hex';
+            hexLabel.textContent = colorInput.value;
+            colorInput.addEventListener('input', () => {
+                stops[i] = hexToRgb(colorInput.value);
+                hexLabel.textContent = colorInput.value;
+                updateGradient();
+            });
+            row.appendChild(colorInput);
+            row.appendChild(hexLabel);
+            if (stops.length > 1) {
+                const rm = document.createElement('span');
+                rm.className = 'stop-remove';
+                rm.textContent = '\u00d7';
+                rm.title = 'Remove';
+                rm.addEventListener('click', () => { stops.splice(i, 1); renderStops(); updateGradient(); });
+                row.appendChild(rm);
+            }
+            container.appendChild(row);
+        });
+    }
+
+    renderStops();
+    updateGradient();
+
+    // Add stop
+    editor.querySelector('.ce-add-stop').addEventListener('click', () => {
+        const last = stops[stops.length - 1];
+        stops.push([...last]);
+        renderStops();
+        updateGradient();
+    });
+
+    // Gamma/brightness sliders
+    const gammaSlider = editor.querySelector('.ce-gamma');
+    const gammaVal = editor.querySelector('.ce-gamma-val');
+    gammaSlider.addEventListener('input', () => { gammaVal.textContent = parseFloat(gammaSlider.value).toFixed(2); });
+    const brightSlider = editor.querySelector('.ce-bright');
+    const brightVal = editor.querySelector('.ce-bright-val');
+    brightSlider.addEventListener('input', () => { brightVal.textContent = Math.round(parseFloat(brightSlider.value) * 100) + '%'; });
+
+    // Cancel
+    editor.querySelector('.ce-cancel').addEventListener('click', () => overlay.remove());
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+    // Delete
+    const delBtn = editor.querySelector('.ce-delete');
+    if (delBtn) {
+        delBtn.addEventListener('click', async () => {
+            if (!confirm('Delete palette "' + name + '"?')) return;
+            try {
+                await fetch('/api/palettes/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name })
+                });
+            } catch(e) {}
+            overlay.remove();
+            if (onDone) onDone();
+        });
+    }
+
+    // Save
+    editor.querySelector('.ce-save').addEventListener('click', async () => {
+        const newName = editor.querySelector('.ce-name').value.trim();
+        if (!newName) { alert('Name is required'); return; }
+        if (/[^a-zA-Z0-9_]/.test(newName)) { alert('Name must be alphanumeric/underscores only'); return; }
+        const mode = editor.querySelector('input[name="ce-mode"]:checked').value;
+        const spec = {
+            name: newName,
+            colors: stops,
+            gamma: parseFloat(gammaSlider.value),
+            brightness_cap: parseFloat(brightSlider.value),
+            spatial_mode: mode,
+        };
+        try {
+            const resp = await fetch('/api/palettes/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(spec)
+            });
+            const data = await resp.json();
+            if (data.error) { alert(data.error); return; }
+        } catch(e) { alert('Save failed: ' + e.message); return; }
+        // If renamed, clear old selection
+        if (!isNew && name !== newName) {
+            Object.keys(selectedPalette).forEach(k => {
+                if (selectedPalette[k] === name) selectedPalette[k] = newName;
+            });
+        }
+        overlay.remove();
+        if (onDone) onDone();
+    });
+}
+
+function createBrightnessPopover(effectName, onChange) {
+    const anchor = document.createElement('span');
+    anchor.className = 'popover-anchor';
+
+    const btn = document.createElement('button');
+    btn.className = 'popover-btn brightness-btn';
+    const range = getBrightnessRange(effectName);
+    btn.textContent = range[0] === 0 && range[1] === 100 ? '\u2600' : '\u2600 ' + range[0] + '-' + range[1] + '%';
+    btn.title = 'Brightness: ' + range[0] + '% - ' + range[1] + '%';
+    anchor.appendChild(btn);
+
+    const panel = document.createElement('div');
+    panel.className = 'popover-panel brightness-popover';
+    panel.innerHTML = '<div class="brightness-popover-title">Brightness range</div>' +
+        '<div class="brightness-popover-sliders">' +
+        '<label>Low <input type="range" class="brt-low" min="0" max="100" value="' + range[0] + '" step="1"><span class="brt-low-val">' + range[0] + '%</span></label>' +
+        '<label>High <input type="range" class="brt-high" min="0" max="100" value="' + range[1] + '" step="1"><span class="brt-high-val">' + range[1] + '%</span></label>' +
+        '</div>' +
+        '<div class="brightness-popover-presets">' +
+        '<button data-lo="0" data-hi="100">Full</button>' +
+        '<button data-lo="0" data-hi="30">Boost dim</button>' +
+        '<button data-lo="50" data-hi="100">Highlights</button>' +
+        '<button data-lo="10" data-hi="90">Contrast</button>' +
+        '</div>';
+    anchor.appendChild(panel);
+
+    const lowSlider = panel.querySelector('.brt-low');
+    const highSlider = panel.querySelector('.brt-high');
+    const lowVal = panel.querySelector('.brt-low-val');
+    const highVal = panel.querySelector('.brt-high-val');
+
+    function update() {
+        let lo = parseInt(lowSlider.value), hi = parseInt(highSlider.value);
+        if (lo > hi) { lo = hi; lowSlider.value = lo; }
+        lowVal.textContent = lo + '%';
+        highVal.textContent = hi + '%';
+        selectedBrightness[effectName] = [lo, hi];
+        btn.textContent = lo === 0 && hi === 100 ? '\u2600' : '\u2600 ' + lo + '-' + hi + '%';
+        btn.title = 'Brightness: ' + lo + '% - ' + hi + '%';
+        if (onChange) onChange([lo, hi]);
+    }
+
+    lowSlider.addEventListener('input', update);
+    highSlider.addEventListener('input', update);
+
+    panel.querySelectorAll('.brightness-popover-presets button').forEach(b => {
+        b.addEventListener('click', (e) => {
+            e.stopPropagation();
+            lowSlider.value = b.dataset.lo;
+            highSlider.value = b.dataset.hi;
+            update();
+        });
+    });
+
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        document.querySelectorAll('.popover-panel.open').forEach(p => { if (p !== panel) p.classList.remove('open'); });
+        panel.classList.toggle('open');
+    });
+
+    panel.addEventListener('click', (e) => e.stopPropagation());
+
+    return anchor;
+}
 let selectorState = [];  // array of Sets, one per segment depth
 let controllersList = [];  // from /api/controllers
 let selectedController = null;  // controller id or null (no LEDs)
@@ -3394,6 +4111,7 @@ async function loadEffects() {
         if (!resp.ok) { panel.innerHTML = '<span style="color:#e94560;">Failed to load effects</span>'; return; }
         const data = await resp.json();
         effectsList = data.effects || [];
+        palettesList = data.palettes || [];
         effectsRunning = data.running;
         if (data.controller !== undefined) selectedController = data.controller;
         if (selectorState.length === 0) {
@@ -3479,6 +4197,208 @@ function buildSelector(panel) {
     panel.appendChild(container);
 }
 
+function buildEffectReference(container) {
+    const EFFECT_REF_DATA = [
+        ['Impulse', 'abs-integral 150ms', '0.30, 250ms cd', 'snap-on, decay 0.85', '\u2014', 'yes'],
+        ['Impulse Glow', 'abs-integral 150ms', 'proportional', 'atk 0.6, decay 0.85', '\u2014', 'yes'],
+        ['Impulse Predict', 'abs-integral 150ms', '0.30, 250ms cd', 'snap-on, decay 0.85', 'autocorr 5s', 'yes'],
+        ['Impulse Downbeat', 'abs-integral 150ms', '0.30, 200ms cd', 'full/30% ticks', '\u2014', 'yes'],
+        ['Impulse Breathe', 'abs-integral 150ms', 'proportional', 'symmetric 0.74', '\u2014', 'yes'],
+        ['Impulse Sections', 'abs-integral 150ms', 'proportional', 'atk 0.6, decay 0.85', '\u2014', 'yes'],
+        ['Impulse Meter', 'abs-integral 150ms', 'proportional', 'atk 0.6, decay 0.85', '\u2014', 'yes'],
+        ['Bass Pulse', 'bass flux 20-250Hz', '0.55, 180ms cd', 'snap-on, decay 0.82', '\u2014', 'yes'],
+        ['Tempo Pulse', 'RMS + autocorr', 'oscillator', 'raised cosine', 'autocorr 30s', 'yes'],
+        ['RMS Meter', 'RMS raw', 'proportional', 'peak decay 0.9998', '\u2014', 'yes'],
+        ['LongInt Sections', '80% long RMS + 20% bass', 'proportional', '10s rolling avg', '\u2014', 'yes'],
+        ['Impulse Snake', 'abs-int + predict', '0.30', 'traveling pulse', 'autocorr 5s', 'no'],
+        ['Impulse Bands', '3-band abs-integral', 'per-band 0.30', 'Gaussian \u03c3=3\u21928', '\u2014', 'no'],
+        ['Band Prop', '3-band abs-integral', 'proportional', 'per-band a/d', '\u2014', 'no'],
+        ['Band Sparkles', '5-band FFT', 'proportional', '5s rolling int', '\u2014', 'no'],
+        ['Band Tempo Sparkles', 'abs-int + 5-band', '0.30', 'sparkle fade', 'autocorr 5s', 'no'],
+        ['Three Voices', 'streaming HPSS', 'proportional', 'per-voice', '\u2014', 'no'],
+        ['Basic Sparkles', 'none (visual)', '\u2014', 'random twinkle', '\u2014', 'no'],
+    ];
+    const COLS = ['Effect', 'Signal Type', 'Threshold', 'Envelope', 'Tempo', 'Palette?'];
+
+    const toggle = document.createElement('button');
+    toggle.className = 'effect-ref-toggle';
+    toggle.innerHTML = '<span class="arrow">\u25b6</span> Effect Reference';
+    container.appendChild(toggle);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'effect-ref-wrap';
+
+    const table = document.createElement('table');
+    table.className = 'effect-ref-table';
+    const thead = document.createElement('thead');
+    const hr = document.createElement('tr');
+    COLS.forEach(c => { const th = document.createElement('th'); th.textContent = c; hr.appendChild(th); });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    EFFECT_REF_DATA.forEach(row => {
+        const tr = document.createElement('tr');
+        row.forEach(cell => { const td = document.createElement('td'); td.textContent = cell; tr.appendChild(td); });
+        tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    container.appendChild(wrap);
+
+    toggle.addEventListener('click', () => {
+        toggle.classList.toggle('open');
+        wrap.classList.toggle('open');
+    });
+}
+
+// ── Feature Sparklines ──────────────────────────────────────────
+
+const FEATURE_COLORS = {
+    abs_integral: '#e94560',
+    rms: '#00e676',
+    centroid: '#00b0ff',
+    autocorr_conf: '#ffea00',
+};
+const FEATURE_LABELS = {
+    abs_integral: 'Abs-Integral',
+    rms: 'RMS',
+    centroid: 'Centroid',
+    autocorr_conf: 'Autocorr',
+};
+const FEATURE_KEYS = ['abs_integral', 'rms', 'centroid', 'autocorr_conf'];
+const SPARKLINE_POINTS = 800;
+
+let featureEventSource = null;
+let featureBufs = {};   // key → Float32Array ring buffer
+let featureBufPos = 0;
+let featureCanvases = {};
+let featureValEls = {};
+let featureAnimId = null;
+
+function initFeatureBufs() {
+    featureBufPos = 0;
+    featureBufs = {};
+    FEATURE_KEYS.forEach(k => { featureBufs[k] = new Float32Array(SPARKLINE_POINTS); });
+}
+
+function pushFeatures(feats) {
+    const idx = featureBufPos % SPARKLINE_POINTS;
+    FEATURE_KEYS.forEach(k => { featureBufs[k][idx] = feats[k] || 0; });
+    featureBufPos++;
+}
+
+function drawSparkline(canvas, buf, pos, color) {
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr;
+        canvas.height = h * dpr;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    const n = Math.min(pos, SPARKLINE_POINTS);
+    if (n < 2) return;
+
+    ctx.beginPath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.2;
+    for (let i = 0; i < n; i++) {
+        const idx = (pos - n + i) % SPARKLINE_POINTS;
+        const x = (i / (SPARKLINE_POINTS - 1)) * w;
+        const y = h - buf[idx < 0 ? idx + SPARKLINE_POINTS : idx] * h;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+}
+
+function drawAllSparklines() {
+    FEATURE_KEYS.forEach(k => {
+        if (featureCanvases[k]) {
+            drawSparkline(featureCanvases[k], featureBufs[k], featureBufPos, FEATURE_COLORS[k]);
+            if (featureValEls[k]) {
+                const idx = (featureBufPos - 1) % SPARKLINE_POINTS;
+                featureValEls[k].textContent = (featureBufs[k][idx < 0 ? 0 : idx] || 0).toFixed(2);
+            }
+        }
+    });
+    featureAnimId = requestAnimationFrame(drawAllSparklines);
+}
+
+function startFeatureStream() {
+    if (featureEventSource) return;
+    initFeatureBufs();
+    featureEventSource = new EventSource('/api/features/stream');
+    featureEventSource.onmessage = (e) => {
+        try { pushFeatures(JSON.parse(e.data)); } catch {}
+    };
+    featureEventSource.onerror = () => { stopFeatureStream(); };
+    if (!featureAnimId) featureAnimId = requestAnimationFrame(drawAllSparklines);
+}
+
+function stopFeatureStream() {
+    if (featureEventSource) { featureEventSource.close(); featureEventSource = null; }
+    if (featureAnimId) { cancelAnimationFrame(featureAnimId); featureAnimId = null; }
+}
+
+function buildFeaturesPanel(container) {
+    const panel = document.createElement('div');
+    panel.className = 'features-panel';
+
+    const header = document.createElement('div');
+    header.className = 'features-header';
+    const toggleBtn = document.createElement('button');
+    toggleBtn.textContent = featureEventSource ? 'Stop Live' : 'Live Features';
+    if (featureEventSource) toggleBtn.classList.add('active');
+    toggleBtn.addEventListener('click', () => {
+        if (featureEventSource) {
+            stopFeatureStream();
+            toggleBtn.textContent = 'Live Features';
+            toggleBtn.classList.remove('active');
+        } else {
+            startFeatureStream();
+            toggleBtn.textContent = 'Stop Live';
+            toggleBtn.classList.add('active');
+        }
+    });
+    header.appendChild(toggleBtn);
+    const hint = document.createElement('span');
+    hint.textContent = 'Real-time audio features via BlackHole';
+    header.appendChild(hint);
+    panel.appendChild(header);
+
+    featureCanvases = {};
+    featureValEls = {};
+    FEATURE_KEYS.forEach(k => {
+        const row = document.createElement('div');
+        row.className = 'feature-row';
+        const label = document.createElement('span');
+        label.className = 'feature-label';
+        label.textContent = FEATURE_LABELS[k];
+        row.appendChild(label);
+        const canvas = document.createElement('canvas');
+        featureCanvases[k] = canvas;
+        row.appendChild(canvas);
+        const val = document.createElement('span');
+        val.className = 'feature-val';
+        val.textContent = '0.00';
+        featureValEls[k] = val;
+        row.appendChild(val);
+        panel.appendChild(row);
+    });
+
+    container.appendChild(panel);
+
+    // If already streaming, restart animation loop with new canvases
+    if (featureEventSource && !featureAnimId) {
+        featureAnimId = requestAnimationFrame(drawAllSparklines);
+    }
+}
+
 function buildControllerBar(panel) {
     const bar = document.createElement('div');
     bar.className = 'controller-bar';
@@ -3521,25 +4441,30 @@ function renderEffectsCards() {
         return;
     }
     panel.innerHTML = '';
-    buildControllerBar(panel);
-    buildSelector(panel);
+    buildFeaturesPanel(panel);
+    const listWrap = document.createElement('div');
+    listWrap.className = 'effects-list';
+    buildControllerBar(listWrap);
+    buildSelector(listWrap);
     const filtered = getFilteredEffects();
     filtered.forEach((eff, idx) => {
         const card = document.createElement('div');
         card.className = 'effect-card' + (eff.name === effectsRunning ? ' running' : '');
-        card.draggable = true;
         card.dataset.name = eff.name;
 
-        // Drag handle
+        // Drag handle — only this element initiates drag
         const drag = document.createElement('span');
         drag.className = 'effect-drag';
         drag.textContent = '\u2261';
+        drag.addEventListener('mousedown', () => { card.draggable = true; });
         card.appendChild(drag);
 
-        // Name (clickable for detail view)
+        // Name (clickable for detail view) + pencil rename
+        const nameWrap = document.createElement('span');
+        nameWrap.className = 'effect-name-wrap';
         const nameEl = document.createElement('span');
         nameEl.className = 'effect-name';
-        nameEl.textContent = eff.name;
+        nameEl.textContent = eff.display_name || eff.name;
         if (eff.description) nameEl.title = eff.description;
         if (eff.name === effectsRunning) {
             const dot = document.createElement('span');
@@ -3547,7 +4472,51 @@ function renderEffectsCards() {
             nameEl.appendChild(dot);
         }
         nameEl.addEventListener('click', (e) => { e.stopPropagation(); showEffectDetail(eff.name); });
-        card.appendChild(nameEl);
+        nameWrap.appendChild(nameEl);
+
+        const pencil = document.createElement('button');
+        pencil.className = 'effect-rename-btn';
+        pencil.title = 'Rename effect';
+        pencil.innerHTML = '&#9998;';
+        pencil.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const cur = eff.display_name || eff.name;
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'effect-rename-input';
+            input.value = cur;
+            input.placeholder = eff.name;
+            nameWrap.replaceChild(input, nameEl);
+            pencil.style.display = 'none';
+            input.focus();
+            input.select();
+            const save = async () => {
+                const val = input.value.trim();
+                const displayName = (val === eff.name) ? '' : val;
+                try {
+                    await fetch('/api/effects/rename', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name: eff.name, display_name: displayName })
+                    });
+                    eff.display_name = displayName || undefined;
+                } catch (err) { console.error('rename:', err); }
+                renderEffectsCards();
+            };
+            input.addEventListener('keydown', (ke) => {
+                if (ke.key === 'Enter') save();
+                if (ke.key === 'Escape') renderEffectsCards();
+            });
+            input.addEventListener('blur', save);
+        });
+        nameWrap.appendChild(pencil);
+        card.appendChild(nameWrap);
+
+        // Palette + Brightness popovers (signal effects only)
+        if (eff.is_signal && palettesList.length > 0) {
+            card.appendChild(createPalettePopover(eff.name, eff.default_palette));
+        }
+        card.appendChild(createBrightnessPopover(eff.name));
 
         // Stars
         const stars = document.createElement('span');
@@ -3578,7 +4547,7 @@ function renderEffectsCards() {
             e.dataTransfer.effectAllowed = 'move';
             e.dataTransfer.setData('text/plain', eff.name);
         });
-        card.addEventListener('dragend', () => card.classList.remove('dragging'));
+        card.addEventListener('dragend', () => { card.classList.remove('dragging'); card.draggable = false; });
         card.addEventListener('dragover', (e) => {
             e.preventDefault();
             e.dataTransfer.dropEffect = 'move';
@@ -3602,17 +4571,25 @@ function renderEffectsCards() {
             }
         });
 
-        panel.appendChild(card);
+        listWrap.appendChild(card);
     });
+    panel.appendChild(listWrap);
+    buildEffectReference(panel);
 }
 
 async function startEffect(name) {
     try {
-        const opts = { method: 'POST' };
-        if (selectedController) {
-            opts.headers = { 'Content-Type': 'application/json' };
-            opts.body = JSON.stringify({ controller: selectedController });
+        const body = {};
+        if (selectedController) body.controller = selectedController;
+        const eff = effectsList.find(e => e.name === name);
+        if (eff && eff.is_signal) {
+            body.palette =getSelectedPalette(name, eff.default_palette);
         }
+        const opts = {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        };
         await fetch('/api/effects/start/' + encodeURIComponent(name), opts);
         effectsRunning = name;
         renderEffectsCards();
@@ -3676,11 +4653,7 @@ function stopEffectsPoll() {
 let effectDetailName = null;
 let effectDetailData = null;
 let effectDetailAnim = null;
-
-const SPARKLINE_COLORS = [
-    '#e94560', '#4ecdc4', '#f7dc6f', '#82e0aa', '#bb8fce',
-    '#f0b27a', '#85c1e9', '#f1948a', '#73c6b6', '#d7bde2',
-];
+let ledogramBytes = null;  // cached decoded LED data for redraw
 
 function showEffectDetail(name) {
     effectDetailName = name;
@@ -3728,6 +4701,22 @@ function showEffectDetail(name) {
     if (currentFile) fileSel.value = currentFile;
     controls.appendChild(fileSel);
 
+    // Palette popover (signal effects only)
+    if (effEntry && effEntry.is_signal && palettesList.length > 0) {
+        controls.appendChild(createPalettePopover(name, effEntry.default_palette));
+    }
+
+    // Brightness popover (live-updates LED-o-gram)
+    controls.appendChild(createBrightnessPopover(name, (range) => {
+        const vizEl = document.getElementById('effectDetailViz');
+        const ledCanvas = vizEl && vizEl.querySelectorAll('canvas')[1];
+        if (ledCanvas && effectDetailData) {
+            const w = vizEl.clientWidth || 860;
+            const lh = Math.min(Math.max(effectDetailData.num_leds, 60), 300);
+            drawLedogramCanvas(ledCanvas, effectDetailData, window.devicePixelRatio || 1, w, lh, ledogramBytes, range);
+        }
+    }));
+
     const analyzeBtn = document.createElement('button');
     analyzeBtn.textContent = 'Analyze';
     analyzeBtn.addEventListener('click', () => runEffectAnalysis(name));
@@ -3766,10 +4755,15 @@ async function runEffectAnalysis(name) {
     viz.innerHTML = '';
 
     try {
+        const analyzeBody = { effect: name, file: fileSel.value };
+        const effEntry = effectsList.find(e => e.name === name);
+        if (effEntry && effEntry.is_signal) {
+            analyzeBody.palette =getSelectedPalette(name, effEntry.default_palette);
+        }
         const resp = await fetch('/api/effects/analyze', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ effect: name, file: fileSel.value })
+            body: JSON.stringify(analyzeBody)
         });
         const data = await resp.json();
         if (data.error) {
@@ -3794,45 +4788,126 @@ function renderEffectViz(container, data) {
     const dpr = window.devicePixelRatio || 1;
     const width = container.clientWidth || 860;
 
-    // Waveform canvas
-    const waveCanvas = document.createElement('canvas');
-    waveCanvas.style.height = '40px';
-    waveCanvas.style.marginBottom = '2px';
-    container.appendChild(waveCanvas);
-    drawWaveformCanvas(waveCanvas, data.waveform_peaks, dpr, width);
+    // Decode LED data once, cache for brightness redraw
+    ledogramBytes = null;
+    if (data.led_data && data.num_frames > 0) {
+        const raw = atob(data.led_data);
+        ledogramBytes = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) ledogramBytes[i] = raw.charCodeAt(i);
+    }
 
-    // Sparklines canvas (only if there are diagnostics)
-    let sparkCanvas = null;
-    if (data.diag_keys.length > 0) {
-        sparkCanvas = document.createElement('canvas');
-        const sparkH = Math.min(20 + data.diag_keys.length * 18, 160);
-        sparkCanvas.style.height = sparkH + 'px';
-        sparkCanvas.style.marginBottom = '2px';
-        container.appendChild(sparkCanvas);
-        drawSparklinesCanvas(sparkCanvas, data, dpr, width, sparkH);
-
-        // Legend
-        const legend = document.createElement('div');
-        legend.className = 'effect-detail-diag-legend';
-        data.diag_keys.forEach((key, i) => {
-            const item = document.createElement('span');
-            const swatch = document.createElement('span');
-            swatch.className = 'swatch';
-            swatch.style.background = SPARKLINE_COLORS[i % SPARKLINE_COLORS.length];
-            item.appendChild(swatch);
-            item.appendChild(document.createTextNode(key));
-            legend.appendChild(item);
-        });
-        container.appendChild(legend);
+    // Waveform panel (fetched from server)
+    const waveWrap = document.createElement('div');
+    waveWrap.className = 'effect-viz-waveform';
+    waveWrap.style.height = '60px';
+    waveWrap.style.marginBottom = '2px';
+    container.appendChild(waveWrap);
+    const fileSel = document.getElementById('effectDetailFile');
+    if (fileSel && fileSel.value) {
+        fetch('/api/render-panel/' + encodeURIComponent(fileSel.value) + '?panel=waveform')
+            .then(resp => {
+                if (!resp.ok) throw new Error();
+                const xL = parseFloat(resp.headers.get('X-Left-Px') || '0');
+                const xR = parseFloat(resp.headers.get('X-Right-Px') || '1');
+                const pW = parseFloat(resp.headers.get('X-Png-Width') || '1');
+                const dur = parseFloat(resp.headers.get('X-Duration') || '1');
+                return resp.blob().then(blob => ({ blob, xL, xR, pW, dur }));
+            })
+            .then(({ blob, xL, xR, pW, dur }) => {
+                const img = document.createElement('img');
+                img.src = URL.createObjectURL(blob);
+                img.style.cssText = 'width:100%; height:100%; object-fit:fill; display:block; cursor:crosshair;';
+                img.addEventListener('click', (e) => {
+                    const rect = img.getBoundingClientRect();
+                    const scale = pW / rect.width;
+                    const px = (e.clientX - rect.left) * scale;
+                    const frac = (px - xL) / (xR - xL);
+                    audio.currentTime = Math.max(0, Math.min(frac * dur, dur));
+                });
+                waveWrap.innerHTML = '';
+                waveWrap.appendChild(img);
+            })
+            .catch(() => {});
     }
 
     // LED-ogram canvas
     const ledCanvas = document.createElement('canvas');
     const ledH = Math.min(Math.max(data.num_leds, 60), 300);
     ledCanvas.style.height = ledH + 'px';
-    ledCanvas.style.marginTop = '6px';
+    ledCanvas.style.marginTop = '2px';
     container.appendChild(ledCanvas);
-    drawLedogramCanvas(ledCanvas, data, dpr, width, ledH);
+    drawLedogramCanvas(ledCanvas, data, dpr, width, ledH, ledogramBytes, getBrightnessRange(effectDetailName));
+
+    // Feature sparklines (from analyze_effect data)
+    if (data.features && data.features.length > 0 && data.feature_keys) {
+        const featWrap = document.createElement('div');
+        featWrap.style.cssText = 'margin-top: 4px;';
+        data.feature_keys.forEach(key => {
+            const row = document.createElement('div');
+            row.className = 'feature-row';
+            const label = document.createElement('span');
+            label.className = 'feature-label';
+            label.textContent = FEATURE_LABELS[key] || key;
+            row.appendChild(label);
+            const canvas = document.createElement('canvas');
+            canvas.style.cssText = 'height: 22px; cursor: crosshair;';
+            row.appendChild(canvas);
+            featWrap.appendChild(row);
+
+            // Draw after append (needs layout)
+            requestAnimationFrame(() => {
+                const ctx = canvas.getContext('2d');
+                const fw = canvas.clientWidth;
+                const fh = canvas.clientHeight;
+                canvas.width = fw * dpr;
+                canvas.height = fh * dpr;
+                ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                ctx.clearRect(0, 0, fw, fh);
+                const n = data.features.length;
+                ctx.beginPath();
+                ctx.strokeStyle = FEATURE_COLORS[key] || '#888';
+                ctx.lineWidth = 1.2;
+                for (let i = 0; i < n; i++) {
+                    const x = (i / (n - 1)) * fw;
+                    const y = fh - (data.features[i][key] || 0) * fh;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            });
+
+            // Click-to-seek
+            canvas.addEventListener('click', (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const frac = (e.clientX - rect.left) / rect.width;
+                audio.currentTime = Math.max(0, Math.min(frac * data.duration, data.duration));
+            });
+        });
+        container.appendChild(featWrap);
+    }
+
+    // Analysis panels selector
+    const panelDefs = [
+        { id: 'spectrogram', label: 'Spectrogram' },
+        { id: 'bands', label: 'Band Energy' },
+        { id: 'rms-derivative', label: 'RMS Derivative' },
+        { id: 'annotations', label: 'Annotations' },
+    ];
+    const panelRow = document.createElement('div');
+    panelRow.className = 'analysis-panel-chips';
+    panelRow.innerHTML = '<span class="panel-chips-label">Analysis</span>';
+    const panelContainer = document.createElement('div');
+    panelContainer.className = 'analysis-panels-container';
+    panelDefs.forEach(pd => {
+        const chip = document.createElement('span');
+        chip.className = 'panel-chip';
+        chip.textContent = pd.label;
+        chip.dataset.panel = pd.id;
+        chip.addEventListener('click', () => toggleAnalysisPanel(chip, pd.id, panelContainer, data));
+        panelRow.appendChild(chip);
+    });
+    container.appendChild(panelRow);
+    container.appendChild(panelContainer);
 
     // Cursor overlay
     const cursor = document.createElement('div');
@@ -3840,14 +4915,11 @@ function renderEffectViz(container, data) {
     cursor.style.left = '0px';
     container.appendChild(cursor);
 
-    // Click-to-seek on all canvases
-    [waveCanvas, sparkCanvas, ledCanvas].forEach(c => {
-        if (!c) return;
-        c.addEventListener('click', (e) => {
-            const rect = c.getBoundingClientRect();
-            const frac = (e.clientX - rect.left) / rect.width;
-            audio.currentTime = Math.max(0, Math.min(frac * data.duration, data.duration));
-        });
+    // Click-to-seek on LED-ogram
+    ledCanvas.addEventListener('click', (e) => {
+        const rect = ledCanvas.getBoundingClientRect();
+        const frac = (e.clientX - rect.left) / rect.width;
+        audio.currentTime = Math.max(0, Math.min(frac * data.duration, data.duration));
     });
 
     // Cursor animation
@@ -3861,30 +4933,62 @@ function renderEffectViz(container, data) {
     effectDetailAnim = requestAnimationFrame(animCursor);
 }
 
-function drawWaveformCanvas(canvas, peaks, dpr, width) {
-    const h = 40;
-    canvas.width = width * dpr;
-    canvas.height = h * dpr;
-    canvas.style.width = width + 'px';
-    const ctx = canvas.getContext('2d');
-    ctx.scale(dpr, dpr);
-    ctx.fillStyle = '#0a0f1e';
-    ctx.fillRect(0, 0, width, h);
-
-    const n = peaks.length;
-    if (n === 0) return;
-    const barW = width / n;
-    ctx.fillStyle = '#4ecdc4';
-    for (let i = 0; i < n; i++) {
-        const amp = Math.min(peaks[i], 1.0);
-        const barH = amp * (h / 2);
-        const x = i * barW;
-        const mid = h / 2;
-        ctx.fillRect(x, mid - barH, Math.max(barW - 0.5, 0.5), barH * 2);
+async function toggleAnalysisPanel(chip, panelId, panelContainer, data) {
+    const existing = panelContainer.querySelector('[data-panel-id="' + panelId + '"]');
+    if (existing) {
+        existing.remove();
+        chip.classList.remove('active');
+        return;
     }
+
+    const fileSel = document.getElementById('effectDetailFile');
+    if (!fileSel || !fileSel.value) return;
+
+    chip.classList.add('active');
+    chip.classList.add('loading');
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'analysis-panel-img';
+    wrapper.dataset.panelId = panelId;
+    wrapper.innerHTML = '<span class="panel-loading">Loading ' + chip.textContent + '...</span>';
+    panelContainer.appendChild(wrapper);
+
+    try {
+        const url = '/api/render-panel/' + encodeURIComponent(fileSel.value) + '?panel=' + panelId;
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error('Render failed');
+
+        const blob = await resp.blob();
+        const xLeft = parseFloat(resp.headers.get('X-Left-Px') || '0');
+        const xRight = parseFloat(resp.headers.get('X-Right-Px') || '1');
+        const pngWidth = parseFloat(resp.headers.get('X-Png-Width') || '1');
+        const duration = parseFloat(resp.headers.get('X-Duration') || '1');
+
+        const img = document.createElement('img');
+        img.src = URL.createObjectURL(blob);
+        img.style.width = '100%';
+        img.style.display = 'block';
+        img.style.cursor = 'crosshair';
+
+        img.addEventListener('click', (e) => {
+            const rect = img.getBoundingClientRect();
+            const scale = pngWidth / rect.width;
+            const px = (e.clientX - rect.left) * scale;
+            const frac = (px - xLeft) / (xRight - xLeft);
+            audio.currentTime = Math.max(0, Math.min(frac * duration, duration));
+        });
+
+        wrapper.innerHTML = '';
+        wrapper.appendChild(img);
+    } catch (e) {
+        wrapper.innerHTML = '<span class="panel-loading" style="color:#e94560;">Error: ' + e.message + '</span>';
+        chip.classList.remove('active');
+    }
+    chip.classList.remove('loading');
 }
 
-function drawSparklinesCanvas(canvas, data, dpr, width, height) {
+
+function drawLedogramCanvas(canvas, data, dpr, width, height, bytes, brightnessRange) {
     canvas.width = width * dpr;
     canvas.height = height * dpr;
     canvas.style.width = width + 'px';
@@ -3893,48 +4997,17 @@ function drawSparklinesCanvas(canvas, data, dpr, width, height) {
     ctx.fillStyle = '#0a0f1e';
     ctx.fillRect(0, 0, width, height);
 
-    const n = data.diagnostics.length;
-    if (n === 0) return;
-
-    data.diag_keys.forEach((key, ki) => {
-        // Extract values and auto-normalize
-        const vals = data.diagnostics.map(d => d[key] || 0);
-        let minV = Infinity, maxV = -Infinity;
-        for (const v of vals) { if (v < minV) minV = v; if (v > maxV) maxV = v; }
-        const range = maxV - minV || 1;
-
-        ctx.strokeStyle = SPARKLINE_COLORS[ki % SPARKLINE_COLORS.length];
-        ctx.lineWidth = 1.2;
-        ctx.globalAlpha = 0.85;
-        ctx.beginPath();
-        for (let i = 0; i < n; i++) {
-            const x = (i / n) * width;
-            const y = height - ((vals[i] - minV) / range) * (height - 4) - 2;
-            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-        }
-        ctx.stroke();
-    });
-    ctx.globalAlpha = 1;
-}
-
-function drawLedogramCanvas(canvas, data, dpr, width, height) {
-    canvas.width = width * dpr;
-    canvas.height = height * dpr;
-    canvas.style.width = width + 'px';
-    const ctx = canvas.getContext('2d');
-    ctx.scale(dpr, dpr);
-    ctx.fillStyle = '#0a0f1e';
-    ctx.fillRect(0, 0, width, height);
-
-    if (!data.led_data || data.num_frames === 0) return;
-
-    // Decode base64 → Uint8Array
-    const raw = atob(data.led_data);
-    const bytes = new Uint8Array(raw.length);
-    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    if (!bytes || data.num_frames === 0) return;
 
     const nf = data.num_frames;
     const nl = data.num_leds;
+
+    // Brightness range as levels: [lo%, hi%] of 255
+    // Pixels below lo → black, above hi → full white, between → stretched
+    const br = brightnessRange || [0, 100];
+    const lo = br[0] / 100 * 255;
+    const hi = br[1] / 100 * 255;
+    const span = hi - lo || 1;
 
     // Create offscreen canvas at native resolution (frames x leds)
     const offscreen = document.createElement('canvas');
@@ -3949,10 +5022,18 @@ function drawLedogramCanvas(canvas, data, dpr, width, height) {
         for (let l = 0; l < nl; l++) {
             const srcIdx = (f * nl + l) * 3;
             const dstIdx = (l * nf + f) * 4;
-            pixels[dstIdx]     = bytes[srcIdx];     // R
-            pixels[dstIdx + 1] = bytes[srcIdx + 1]; // G
-            pixels[dstIdx + 2] = bytes[srcIdx + 2]; // B
-            pixels[dstIdx + 3] = 255;               // A
+            const r = bytes[srcIdx], g = bytes[srcIdx + 1], b = bytes[srcIdx + 2];
+            const bright = Math.max(r, g, b);
+            if (bright < lo) {
+                pixels[dstIdx] = 0; pixels[dstIdx+1] = 0; pixels[dstIdx+2] = 0;
+            } else {
+                // Scale so that lo→0, hi→255 (clamp at 255)
+                const s = Math.min(255 / span * (bright - lo), 255) / (bright || 1);
+                pixels[dstIdx]     = Math.min(255, Math.round(r * s));
+                pixels[dstIdx + 1] = Math.min(255, Math.round(g * s));
+                pixels[dstIdx + 2] = Math.min(255, Math.round(b * s));
+            }
+            pixels[dstIdx + 3] = 255;
         }
     }
     octx.putImageData(imgData, 0, 0);
@@ -4255,6 +5336,21 @@ function copyContact() {
     el.textContent = 'deployed ' + fmt;
 })();
 
+// ── Live reload (local dev) ───────────────────────────────────────
+
+(function() {
+    let lastHash = null;
+    async function poll() {
+        try {
+            const r = await fetch('/api/livereload');
+            const d = await r.json();
+            if (lastHash === null) { lastHash = d.hash; return; }
+            if (d.hash !== lastHash) location.reload();
+        } catch(e) {}
+    }
+    setInterval(poll, 1000);
+})();
+
 // ── Init ─────────────────────────────────────────────────────────
 
 checkAuth().then(() => loadFileList());
@@ -4306,7 +5402,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
 
         # Block record/effects/annotation-save in public mode
         if PUBLIC_MODE and (path.startswith('/api/record') or path.startswith('/api/effects')
-                           or path.startswith('/api/annotations/')):
+                           or path.startswith('/api/annotations/') or path.startswith('/api/palettes/')):
             self._json_response({'error': 'Not available'}, status=403)
             return
 
@@ -4333,8 +5429,14 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._handle_effect_rate()
         elif path == '/api/effects/reorder':
             self._handle_effect_reorder()
+        elif path == '/api/effects/rename':
+            self._handle_effect_rename()
         elif path == '/api/effects/analyze':
             self._handle_effect_analyze()
+        elif path == '/api/palettes/save':
+            self._handle_palette_save()
+        elif path == '/api/palettes/delete':
+            self._handle_palette_delete()
         elif path.startswith('/api/annotations/'):
             rel_path = path[len('/api/annotations/'):]
             self._save_annotation(rel_path)
@@ -4344,7 +5446,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
     def _handle_effect_start(self, name):
         body = self._read_json_body()
         controller_id = body.get('controller') if body else None
-        _start_effect(name, controller_id=controller_id)
+        palette_name = body.get('palette') if body else None
+        _start_effect(name, controller_id=controller_id, palette_name=palette_name)
         self._json_response({'ok': True})
 
     def _handle_effect_stop(self):
@@ -4383,12 +5486,32 @@ class ViewerHandler(BaseHTTPRequestHandler):
         _save_effect_prefs(prefs)
         self._json_response({'ok': True})
 
+    def _handle_effect_rename(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        name = body.get('name', '')
+        display_name = body.get('display_name', '').strip()
+        if not name:
+            self.send_error(400, 'Missing effect name')
+            return
+        prefs = _load_effect_prefs()
+        if name not in prefs:
+            prefs[name] = {}
+        if display_name:
+            prefs[name]['display_name'] = display_name
+        else:
+            prefs[name].pop('display_name', None)
+        _save_effect_prefs(prefs)
+        self._json_response({'ok': True})
+
     def _handle_effect_analyze(self):
         body = self._read_json_body()
         if body is None:
             return
         effect_name = body.get('effect', '')
         file_path = body.get('file', '')
+        palette_name = body.get('palette', '')
         if not effect_name or not file_path:
             self._json_response({'error': 'Missing effect or file'}, status=400)
             return
@@ -4397,8 +5520,11 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._json_response({'error': 'Invalid audio file'}, status=400)
             return
         try:
+            cmd = [sys.executable, 'runner.py', '--analyze', effect_name, '--wav', wav_path]
+            if palette_name:
+                cmd += ['--chroma', palette_name]
             result = subprocess.run(
-                [sys.executable, 'runner.py', '--analyze', effect_name, '--wav', wav_path],
+                cmd,
                 cwd=EFFECTS_DIR, capture_output=True, text=True, timeout=120
             )
             if result.returncode != 0:
@@ -4410,6 +5536,45 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._json_response({'error': 'Analysis timed out'}, status=504)
         except json.JSONDecodeError:
             self._json_response({'error': 'Invalid JSON from analyzer'}, status=500)
+
+    def _handle_palette_save(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        name = body.get('name', '').strip()
+        if not name:
+            self._json_response({'error': 'Name required'}, status=400)
+            return
+        mod = _palette_module()
+        if name in mod.PALETTE_PRESETS:
+            self._json_response({'error': 'Cannot overwrite built-in palette'}, status=400)
+            return
+        spec = {
+            'colors': body.get('colors', body.get('palette', [[255, 255, 255]])),
+            'gamma': float(body.get('gamma', 0.7)),
+            'brightness_cap': float(body.get('brightness_cap', 1.0)),
+            'spatial_mode': body.get('spatial_mode', 'uniform'),
+            'fill_from': body.get('fill_from', 'start'),
+        }
+        mod.save_user_palette(name, spec)
+        self._json_response({'ok': True})
+
+    def _handle_palette_delete(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        name = body.get('name', '').strip()
+        if not name:
+            self._json_response({'error': 'Name required'}, status=400)
+            return
+        mod = _palette_module()
+        if name in mod.PALETTE_PRESETS:
+            self._json_response({'error': 'Cannot delete built-in palette'}, status=400)
+            return
+        if mod.delete_user_palette(name):
+            self._json_response({'ok': True})
+        else:
+            self._json_response({'error': 'Palette not found'}, status=404)
 
     def _read_json_body(self):
         content_length = int(self.headers.get('Content-Length', 0))
@@ -4740,6 +5905,13 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 all_feat = ('rms',)
                 features = {n: (n in active) for n in all_feat}
             self._serve_render(rel_path, with_ann, features)
+        elif path.startswith('/api/render-panel/'):
+            rel_path = path[len('/api/render-panel/'):]
+            panel = query.get('panel', [None])[0]
+            if not panel:
+                self._json_response({'error': 'panel parameter required'}, status=400)
+            else:
+                self._serve_render_panel(rel_path, panel)
         elif path.startswith('/api/stems/status/'):
             rel_path = path[len('/api/stems/status/'):]
             self._serve_stems_status(rel_path)
@@ -4765,11 +5937,20 @@ class ViewerHandler(BaseHTTPRequestHandler):
             _resolve_controller_ports(_controllers)
             self._json_response(_controllers)
         elif path == '/api/effects':
+            effects, palettes = _get_effects_list()
             self._json_response({
-                'effects': _get_effects_list(),
+                'effects': effects,
+                'palettes': palettes,
                 'running': _get_running_effect_name(),
                 'controller': _active_controller,
             })
+        elif path == '/api/features/stream':
+            self._serve_feature_stream()
+        elif path == '/api/palettes':
+            self._json_response(_get_all_palettes_list())
+        elif path == '/api/livereload':
+            current = _source_hash()
+            self._json_response({'hash': current, 'changed': current != _startup_hash})
         elif path == '/api/record/level':
             data = json.dumps(get_recording_level()).encode('utf-8')
             self.send_response(200)
@@ -4782,6 +5963,55 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._serve_audio(rel_path)
         else:
             self.send_error(404)
+
+    def _serve_feature_stream(self):
+        """SSE endpoint: stream live audio features at ~10 Hz."""
+        import numpy as np
+        import sounddevice as sd
+        sys.path.insert(0, EFFECTS_DIR)
+        from feature_computer import FeatureComputer
+
+        # Find BlackHole device
+        device_id = None
+        devices = sd.query_devices()
+        for i, d in enumerate(devices):
+            if 'blackhole' in d['name'].lower() and d['max_input_channels'] >= 2:
+                device_id = i
+                break
+        if device_id is None:
+            self._json_response({'error': 'BlackHole audio device not found'}, status=503)
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Connection', 'keep-alive')
+        self.end_headers()
+
+        fc = FeatureComputer(sample_rate=44100)
+
+        def audio_cb(indata, frames, time_info, status):
+            mono = np.mean(indata, axis=1) if indata.ndim > 1 else indata.flatten()
+            fc.process_audio(mono)
+
+        stream = sd.InputStream(
+            device=device_id, channels=2, samplerate=44100,
+            blocksize=1024, callback=audio_cb
+        )
+
+        try:
+            stream.start()
+            while True:
+                time.sleep(0.1)  # 10 Hz
+                features = fc.get_features()
+                msg = f"data: {json.dumps(features)}\n\n"
+                self.wfile.write(msg.encode('utf-8'))
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            stream.stop()
+            stream.close()
 
     def _serve_html(self):
         html = generate_html().encode('utf-8')
@@ -4843,6 +6073,33 @@ class ViewerHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(png_bytes)))
         self.send_header('Cache-Control', 'max-age=3600')
         # Expose custom headers to JS fetch
+        exposed = ', '.join(headers.keys())
+        self.send_header('Access-Control-Expose-Headers', exposed)
+        for k, v in headers.items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(png_bytes)
+
+    def _serve_render_panel(self, rel_path, panel_name):
+        filepath = _resolve_audio_path(rel_path)
+        if filepath is None:
+            self.send_error(404, 'File not found')
+            return
+
+        try:
+            png_bytes, headers = render_single_panel(filepath, panel_name)
+        except ValueError as e:
+            self._json_response({'error': str(e)}, status=400)
+            return
+        except Exception as e:
+            print(f"[render-panel] Error: {e}")
+            self.send_error(500, str(e))
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/png')
+        self.send_header('Content-Length', str(len(png_bytes)))
+        self.send_header('Cache-Control', 'max-age=3600')
         exposed = ', '.join(headers.keys())
         self.send_header('Access-Control-Expose-Headers', exposed)
         for k, v in headers.items():

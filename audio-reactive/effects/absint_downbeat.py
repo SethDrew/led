@@ -4,17 +4,17 @@ AbsInt Downbeat — pulses only every 4th detected beat.
 Uses the same abs-integral late detection as absint_pulse, but counts
 beats internally and only fires a visible pulse on every 4th one.
 This creates a slow, hypnotic pulse at the bar/downbeat level.
-
-Night mode: 0-20% brightness, red/purple palette.
 """
 
 import numpy as np
 import threading
-from base import AudioReactiveEffect
+from base import ScalarSignalEffect
 
 
-class AbsIntDownbeatEffect(AudioReactiveEffect):
-    """Pulse every 4th detected beat. Night mode reds."""
+class AbsIntDownbeatEffect(ScalarSignalEffect):
+    """Pulse every 4th detected beat."""
+
+    default_palette = 'night_dim'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
@@ -52,21 +52,16 @@ class AbsIntDownbeatEffect(AudioReactiveEffect):
         # Visual state
         self.brightness = 0.0
         self.decay_rate = 0.78  # slower decay for downbeat — more sustained glow
-        self.max_brightness = 0.20  # night mode cap
-
-        # Palette: deep red → magenta on downbeat
-        self.color_downbeat = np.array([180, 0, 100], dtype=np.float32)  # magenta
-        self.color_sub = np.array([30, 0, 5], dtype=np.float32)  # very dim red tick
 
         self._lock = threading.Lock()
 
     @property
     def name(self):
-        return "AbsInt Downbeat"
+        return "Impulse Downbeat"
 
     @property
     def description(self):
-        return "Pulses only every 4th detected beat (downbeat); sub-beats show as dim ticks; night mode red/magenta palette."
+        return "Pulses only every 4th detected beat (downbeat); sub-beats show as dim ticks."
 
     def process_audio(self, mono_chunk: np.ndarray):
         n = len(mono_chunk)
@@ -118,22 +113,12 @@ class AbsIntDownbeatEffect(AudioReactiveEffect):
                 with self._lock:
                     self.brightness = max(self.brightness, 0.08)
 
-    def render(self, dt: float) -> np.ndarray:
+    def get_intensity(self, dt: float) -> float:
         with self._lock:
             b = self.brightness
 
         self.brightness *= self.decay_rate ** (dt * 30)
-
-        # Cap brightness for night mode
-        display_b = min(b ** 0.7, 1.0) * self.max_brightness
-
-        # Color: brighter = more magenta, dimmer = deep red
-        t = min(b, 1.0)
-        color = self.color_sub * (1 - t) + self.color_downbeat * t
-
-        pixel = (color * display_b).clip(0, 255).astype(np.uint8)
-        frame = np.tile(pixel, (self.num_leds, 1))
-        return frame
+        return b
 
     def get_diagnostics(self) -> dict:
         return {

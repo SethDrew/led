@@ -8,18 +8,17 @@ dim flash. Steady-state = dark.
 This sidesteps the false positive problem entirely: a false positive from a
 small energy change produces a proportionally small flash that humans won't
 notice. The brightness IS the signal.
-
-Visual: whole tree pulses warm white, brightness proportional to recent
-absolute energy change.
 """
 
 import numpy as np
 import threading
-from base import AudioReactiveEffect
+from base import ScalarSignalEffect
 
 
-class AbsIntProportionalEffect(AudioReactiveEffect):
+class AbsIntProportionalEffect(ScalarSignalEffect):
     """Whole-tree brightness directly mapped to abs-integral of RMS derivative."""
+
+    default_palette = 'amber'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
@@ -50,14 +49,11 @@ class AbsIntProportionalEffect(AudioReactiveEffect):
         self.attack_rate = 0.6        # how fast brightness rises (0-1, per render)
         self.decay_rate = 0.85        # how fast brightness falls (per frame at 30 FPS)
 
-        # Color: warm white
-        self.color = np.array([255, 200, 100], dtype=np.float32)
-
         self._lock = threading.Lock()
 
     @property
     def name(self):
-        return "AbsInt Proportional"
+        return "Impulse Glow"
 
     @property
     def description(self):
@@ -107,24 +103,17 @@ class AbsIntProportionalEffect(AudioReactiveEffect):
         with self._lock:
             self.target_brightness = normalized
 
-    def render(self, dt: float) -> np.ndarray:
+    def get_intensity(self, dt: float) -> float:
         with self._lock:
             target = self.target_brightness
 
         # Asymmetric smoothing: fast attack, slow decay
         if target > self.brightness:
-            # Rising: jump toward target quickly
             self.brightness += (target - self.brightness) * self.attack_rate
         else:
-            # Falling: exponential decay
             self.brightness *= self.decay_rate ** (dt * 30)
 
-        # Gamma correction for visual pop (lower = more contrast)
-        display_b = self.brightness ** 0.6
-
-        pixel = (self.color * display_b).clip(0, 255).astype(np.uint8)
-        frame = np.tile(pixel, (self.num_leds, 1))
-        return frame
+        return self.brightness
 
     def get_diagnostics(self) -> dict:
         return {

@@ -1,8 +1,6 @@
 """
 LongInt Sections — smooth long-horizon brightness with bass-reactive sparkle.
 
-Fibonacci-sized sections with orange→purple gradient (same as absint_sections).
-
 Brightness is a blend of two signals:
   80% — long integral: rolling RMS average over ~10 seconds. This is the
          overall energy envelope. Changes slowly, follows the song's arc.
@@ -11,39 +9,20 @@ Brightness is a blend of two signals:
 
 The result is a smooth, breathing base that reacts to the song's energy level,
 with bass hits adding a sharp 20% brightness kick on top.
+
+Color is handled by the fib_orange_purple palette preset (Fibonacci sections).
 """
 
 import numpy as np
 import threading
 from scipy.signal import butter, sosfilt
-from base import AudioReactiveEffect
+from base import ScalarSignalEffect
 
 
-def fibonacci_sections(total_leds):
-    """Generate Fibonacci-sized sections that fit in total_leds.
-    Returns list of (start, end, section_index) from start of strip."""
-    fibs = [1, 2]
-    while fibs[-1] + fibs[-2] <= total_leds:
-        fibs.append(fibs[-1] + fibs[-2])
+class LongIntSectionsEffect(ScalarSignalEffect):
+    """Smooth long-horizon brightness + bass-reactive top layer."""
 
-    sections = []
-    pos = total_leds
-    for i, size in enumerate(fibs):
-        if pos <= 0:
-            break
-        start = max(0, pos - size)
-        sections.append((start, pos, i))
-        pos = start
-
-    if pos > 0 and sections:
-        last_start, last_end, last_idx = sections[-1]
-        sections[-1] = (0, last_end, last_idx)
-
-    return sections
-
-
-class LongIntSectionsEffect(AudioReactiveEffect):
-    """Smooth long-horizon brightness + bass-reactive top layer, Fibonacci sections."""
+    default_palette = 'fib_orange_purple'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
@@ -90,41 +69,8 @@ class LongIntSectionsEffect(AudioReactiveEffect):
         self.brightness = 0.0
         self.attack_rate = 0.5
         self.decay_rate = 0.88
-        self.max_brightness = 0.80
-
-        # ── Color: orange (tip) → purple (base), same palette as absint_sections ──
-        self.palette = np.array([
-            [220, 80,  0],     # orange (tip, smallest)
-            [200, 30,  0],     # red-orange
-            [180, 10,  20],    # deep red
-            [170, 0,   80],    # red-magenta
-            [150, 0,  140],    # magenta
-            [120, 10, 200],    # purple (base, largest)
-        ], dtype=np.float32)
-
-        # Build Fibonacci sections and assign colors
-        self.sections = fibonacci_sections(num_leds)
-        self.n_groups = len(self.sections)
-        self.led_groups = np.zeros(num_leds, dtype=np.int32)
-        self.led_colors = np.zeros((num_leds, 3), dtype=np.float32)
-
-        for start, end, idx in self.sections:
-            t = idx / max(self.n_groups - 1, 1)
-            color = self._sample_palette(t)
-            self.led_groups[start:end] = idx
-            self.led_colors[start:end] = color
 
         self._lock = threading.Lock()
-
-    def _sample_palette(self, t):
-        """Interpolate through the palette at position t (0=orange/tip, 1=purple/base)."""
-        t = np.clip(t, 0, 1)
-        n = len(self.palette) - 1
-        idx = t * n
-        lo = int(idx)
-        hi = min(lo + 1, n)
-        frac = idx - lo
-        return self.palette[lo] * (1 - frac) + self.palette[hi] * frac
 
     @property
     def name(self):
@@ -132,7 +78,7 @@ class LongIntSectionsEffect(AudioReactiveEffect):
 
     @property
     def description(self):
-        return "Blends 80% long-horizon RMS (10s energy envelope) with 20% bass abs-integral (kick transients); Fibonacci sections, orange-to-purple."
+        return "Blends 80% long-horizon RMS (10s energy envelope) with 20% bass abs-integral (kick transients)."
 
     def process_audio(self, mono_chunk: np.ndarray):
         n = len(mono_chunk)
@@ -158,11 +104,9 @@ class LongIntSectionsEffect(AudioReactiveEffect):
         rms = np.sqrt(np.mean(frame ** 2))
         self.rms_ring[self.rms_ring_pos % self.long_window_frames] = rms
         self.rms_ring_pos += 1
-        # Average RMS over the filled portion of the ring
         filled = min(self.rms_ring_pos, self.long_window_frames)
         self.long_rms = np.mean(self.rms_ring[:filled])
 
-        # Normalize against slow-decay peak
         self.long_rms_peak = max(self.long_rms, self.long_rms_peak * self.long_peak_decay)
         long_normalized = self.long_rms / self.long_rms_peak if self.long_rms_peak > 0 else 0
 
@@ -192,7 +136,7 @@ class LongIntSectionsEffect(AudioReactiveEffect):
             self._diag_long = long_normalized
             self._diag_bass = bass_normalized
 
-    def render(self, dt: float) -> np.ndarray:
+    def get_intensity(self, dt: float) -> float:
         with self._lock:
             target = self.target_brightness
 
@@ -201,11 +145,7 @@ class LongIntSectionsEffect(AudioReactiveEffect):
         else:
             self.brightness *= self.decay_rate ** (dt * 30)
 
-        b = min(self.brightness, 1.0) * self.max_brightness
-        display_b = b ** 0.6
-
-        frame = (self.led_colors * display_b).clip(0, 255).astype(np.uint8)
-        return frame
+        return self.brightness
 
     def get_diagnostics(self) -> dict:
         long_v = getattr(self, '_diag_long', 0)

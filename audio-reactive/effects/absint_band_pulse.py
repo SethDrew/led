@@ -85,7 +85,7 @@ class AbsIntBandPulseEffect(AudioReactiveEffect):
 
     @property
     def name(self):
-        return "AbsInt Band Pulse"
+        return "Impulse Bands"
 
     @property
     def description(self):

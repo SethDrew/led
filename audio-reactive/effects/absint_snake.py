@@ -94,7 +94,7 @@ class AbsIntSnakeEffect(AudioReactiveEffect):
 
     @property
     def name(self):
-        return "AbsInt Snake"
+        return "Impulse Snake"
 
     @property
     def description(self):

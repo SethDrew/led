@@ -10,18 +10,20 @@ robust for tempo estimation than measuring intervals between noisy threshold cro
 The autocorrelation naturally averages over many beats and handles occasional missed/extra
 detections gracefully.
 
-Visual: whole tree pulses warm white on each predicted beat (80% brightness) and
+Visual: whole tree pulses on each predicted beat (80% brightness) and
 confirmed beat (100% brightness). Exponential decay. Falls back to late-only detection
 if autocorrelation can't find a confident period.
 """
 
 import numpy as np
 import threading
-from base import AudioReactiveEffect
+from base import ScalarSignalEffect
 
 
-class AbsIntPredictiveEffect(AudioReactiveEffect):
+class AbsIntPredictiveEffect(ScalarSignalEffect):
     """Whole-tree pulse with tempo prediction via autocorrelation of abs-integral."""
+
+    default_palette = 'reds'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
@@ -89,34 +91,16 @@ class AbsIntPredictiveEffect(AudioReactiveEffect):
         self.brightness = 0.0
         self.is_predicted = False  # was the current flash from prediction?
         self.decay_rate = 0.82
-        # Color palette: deep red → orange → red → magenta → purple
-        self.palette = np.array([
-            [40,  5,  0],     # 0.0 — deep dark red
-            [160, 50, 0],     # 0.25 — orange
-            [200, 20, 0],     # 0.50 — red-orange
-            [180, 0,  60],    # 0.75 — red-magenta
-            [160, 20, 180],   # 1.0 — purple/pink
-        ], dtype=np.float32)
 
         self._lock = threading.Lock()
 
     @property
     def name(self):
-        return "AbsInt Predictive"
+        return "Impulse Predict"
 
     @property
     def description(self):
         return "Combines abs-integral beat detection with autocorrelation tempo estimation to fire predicted beats on-time; confirmed at 100%, predicted at 80%."
-
-    def _sample_palette(self, t):
-        """Sample color from palette at position t (0-1)."""
-        t = np.clip(t, 0, 1)
-        n = len(self.palette) - 1
-        idx = t * n
-        lo = int(idx)
-        hi = min(lo + 1, n)
-        frac = idx - lo
-        return self.palette[lo] * (1 - frac) + self.palette[hi] * frac
 
     def process_audio(self, mono_chunk: np.ndarray):
         """Accumulate audio into RMS frames."""
@@ -196,13 +180,10 @@ class AbsIntPredictiveEffect(AudioReactiveEffect):
     def _update_autocorrelation(self):
         """Compute autocorrelation of abs-integral signal to estimate beat period."""
         if self.ac_buf_filled < self.min_period_frames * 3:
-            # Need at least 3 beat periods of data
             return
 
-        # Extract the filled portion of the ring buffer in chronological order
         n = self.ac_buf_filled
         if n >= self.ac_window_frames:
-            # Buffer is full — unwrap from current write position
             start = self.ac_buf_pos % self.ac_window_frames
             signal = np.concatenate([
                 self.ac_buf[start:],
@@ -211,15 +192,12 @@ class AbsIntPredictiveEffect(AudioReactiveEffect):
         else:
             signal = self.ac_buf[:n].copy()
 
-        # Remove mean to focus on oscillation
         signal = signal - np.mean(signal)
 
-        # Normalize
         norm = np.dot(signal, signal)
         if norm < 1e-20:
             return
 
-        # Compute autocorrelation for lags in [min_period, max_period]
         min_lag = self.min_period_frames
         max_lag = min(self.max_period_frames, len(signal) // 2)
 
@@ -230,8 +208,6 @@ class AbsIntPredictiveEffect(AudioReactiveEffect):
         for i, lag in enumerate(range(min_lag, max_lag)):
             autocorr[i] = np.dot(signal[:-lag], signal[lag:]) / norm
 
-        # Find the first prominent peak
-        # Look for local maxima
         best_lag = -1
         best_corr = 0.0
 
@@ -240,8 +216,6 @@ class AbsIntPredictiveEffect(AudioReactiveEffect):
                 if autocorr[i] > best_corr:
                     best_corr = autocorr[i]
                     best_lag = min_lag + i
-                    # Take the first prominent peak, not the global max
-                    # (first peak = fundamental period, later peaks = harmonics)
                     if best_corr > self.ac_min_confidence:
                         break
 
@@ -249,17 +223,13 @@ class AbsIntPredictiveEffect(AudioReactiveEffect):
 
         if best_corr > self.ac_min_confidence and best_lag > 0:
             self.estimated_period = best_lag / self.rms_fps
-        # If confidence is low, keep the old period (don't reset to 0)
-        # This provides hysteresis — we only update when we have strong evidence
 
     def _update_prediction_phase(self):
         """Phase-lock prediction to the most recent late detection."""
         if self.estimated_period <= 0 or self.ac_confidence < self.ac_min_confidence:
-            # No confident period — can't predict
             self.prediction_active = False
             return
 
-        # Set next predicted beat from the most recent detection
         self.next_predicted_beat = self.last_detection_time + self.estimated_period
         self.prediction_active = True
         self.missed_beats = 0
@@ -272,45 +242,31 @@ class AbsIntPredictiveEffect(AudioReactiveEffect):
         if self.estimated_period <= 0:
             return
 
-        # Has the predicted beat time arrived?
         if self.time_acc >= self.next_predicted_beat:
-            # Check if a late detection is close enough to this prediction
-            # (if so, the late detection already fired — don't double-fire)
             time_since_detection = self.time_acc - self.last_detection_time
             if time_since_detection < self.estimated_period * 0.3:
-                # Recent detection was close — it already fired, just advance
                 self.next_predicted_beat += self.estimated_period
                 self.missed_beats = 0
                 return
 
-            # No recent detection — fire predicted beat at 80% brightness
             with self._lock:
                 self.brightness = max(self.brightness, 0.8)
                 self.is_predicted = True
             self.predicted_beat_count += 1
 
-            # Advance to next expected beat
             self.next_predicted_beat += self.estimated_period
             self.missed_beats += 1
 
-            # Kill prediction if too many misses
             if self.missed_beats >= self.max_missed_beats:
                 self.prediction_active = False
                 self.missed_beats = 0
 
-    def render(self, dt: float) -> np.ndarray:
+    def get_intensity(self, dt: float) -> float:
         with self._lock:
             b = self.brightness
 
         self.brightness *= self.decay_rate ** (dt * 30)
-
-        # Gamma correction
-        display_b = b ** 0.7
-
-        color = self._sample_palette(b)
-        pixel = (color * display_b).clip(0, 255).astype(np.uint8)
-        frame = np.tile(pixel, (self.num_leds, 1))
-        return frame
+        return b
 
     def get_diagnostics(self) -> dict:
         period_ms = self.estimated_period * 1000 if self.estimated_period > 0 else 0

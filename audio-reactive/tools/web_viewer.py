@@ -104,12 +104,70 @@ def _resolve_controller_ports(controllers):
 _controllers = _load_controllers()
 _resolve_controller_ports(_controllers)
 
+# ── Sculptures ──────────────────────────────────────────────────
+
+def _load_sculptures():
+    """Load sculpture definitions from hardware/sculptures.json."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'hardware', 'sculptures.json')
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"[sculptures] Could not load sculptures.json: {e}")
+        return []
+
+
+def _build_output_targets(sculptures, controllers):
+    """Build merged output list: sculptures first, then controllers without any sculpture.
+
+    Each entry: {id, name, type, controller_id, controller_name, leds, port}
+    """
+    targets = []
+    controllers_with_sculpture = set()
+
+    for s in sculptures:
+        ctrl = next((c for c in controllers if c['id'] == s['controller']), None)
+        logical_leds = sum(b['count'] for b in s['branches'])
+        targets.append({
+            'id': s['id'],
+            'name': s['name'],
+            'type': 'sculpture',
+            'controller_id': s['controller'],
+            'controller_name': ctrl['name'] if ctrl else s['controller'],
+            'leds': logical_leds,
+            'port': ctrl.get('port') if ctrl else None,
+        })
+        controllers_with_sculpture.add(s['controller'])
+
+    for c in controllers:
+        if c['id'] not in controllers_with_sculpture:
+            targets.append({
+                'id': c['id'],
+                'name': c['name'],
+                'type': 'controller',
+                'controller_id': c['id'],
+                'controller_name': c['name'],
+                'leds': c['leds'],
+                'port': c.get('port'),
+            })
+
+    return targets
+
+
+_sculptures = _load_sculptures()
+
 # ── Live reload (local dev only) ──────────────────────────────────────
 
 def _source_hash():
-    """Hash web_viewer.py + all effect files to detect changes."""
+    """Hash web_viewer.py + static files + all effect files to detect changes."""
     h = hashlib.md5()
-    for path in [__file__] + sorted(
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+    static_files = sorted(
+        str(p) for p in Path(static_dir).glob('*') if p.is_file()
+    ) if os.path.isdir(static_dir) else []
+    controllers_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'controllers.json')
+    sculptures_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'hardware', 'sculptures.json')
+    for path in [__file__, controllers_file, sculptures_file] + static_files + sorted(
         str(p) for p in Path(EFFECTS_DIR).glob('*.py') if p.is_file()
     ):
         try:
@@ -273,8 +331,17 @@ def _get_effects_list():
     return effects, palettes
 
 
-def _start_effect(name, controller_id=None, palette_name=None):
-    """Start an effect subprocess. Kills any running effect first."""
+def _start_effect(name, controller_id=None, sculpture_id=None, palette_name=None,
+                  brightness=None):
+    """Start an effect subprocess. Kills any running effect first.
+
+    Args:
+        name: Effect registry name
+        controller_id: Controller ID (direct controller, no topology)
+        sculpture_id: Sculpture ID (topology mapping, overrides controller_id)
+        palette_name: Palette override for signal effects
+        brightness: Brightness cap (0-1)
+    """
     global _effect_process, _active_controller
     _stop_effect()
 
@@ -286,13 +353,30 @@ def _start_effect(name, controller_id=None, palette_name=None):
     if palette_name:
         cmd += ['--chroma', palette_name]
 
-    # Look up controller config; fall back to --no-leds
-    controller = None
-    if controller_id:
-        controller = next((c for c in _controllers if c['id'] == controller_id), None)
+    if brightness is not None:
+        cmd += ['--brightness', str(brightness)]
 
-    if controller and controller.get('port'):
-        cmd += ['--port', controller['port'], '--leds', str(controller['leds'])]
+    # Sculpture mode: --sculpture passes topology to runner.py which resolves
+    # controller port internally. Controller mode: --port/--leds as before.
+    target_id = None
+    if sculpture_id:
+        sculpture = next((s for s in _sculptures if s['id'] == sculpture_id), None)
+        if sculpture:
+            controller = next((c for c in _controllers if c['id'] == sculpture['controller']), None)
+            if controller and controller.get('port'):
+                cmd += ['--sculpture', sculpture_id, '--port', controller['port']]
+                target_id = sculpture_id
+            else:
+                cmd.append('--no-leds')
+        else:
+            cmd.append('--no-leds')
+    elif controller_id:
+        controller = next((c for c in _controllers if c['id'] == controller_id), None)
+        if controller and controller.get('port'):
+            cmd += ['--port', controller['port'], '--leds', str(controller['leds'])]
+            target_id = controller_id
+        else:
+            cmd.append('--no-leds')
     else:
         cmd.append('--no-leds')
 
@@ -301,7 +385,7 @@ def _start_effect(name, controller_id=None, palette_name=None):
             cmd,
             cwd=EFFECTS_DIR
         )
-        _active_controller = controller_id if controller else None
+        _active_controller = target_id
         print(f"[effects] Started: {name} (pid {_effect_process.pid}) cmd: {' '.join(cmd)}")
     except Exception as e:
         print(f"[effects] Start failed: {e}")
@@ -511,7 +595,9 @@ def render_analysis(filepath, with_annotations=False, features=None):
     return png_bytes, headers
 
 
-ANALYSIS_PANELS = ('waveform', 'spectrogram', 'bands', 'rms-derivative', 'annotations')
+ANALYSIS_PANELS = ('waveform', 'spectrogram', 'bands', 'rms-derivative',
+                    'centroid', 'centroid-derivative', 'band-derivative',
+                    'mfcc', 'novelty', 'band-deviation', 'annotations')
 
 
 def render_single_panel(filepath, panel_name):
@@ -1063,9 +1149,16 @@ def render_lab_nmf(filepath):
     return png_bytes, headers
 
 
-def render_lab(filepath):
-    """Render experimental features (spectral flatness, chromagram, spectral contrast, ZCR)."""
-    cache_key = (filepath, 'lab')
+def render_lab(filepath, variant='timbral'):
+    """Lab page dispatcher."""
+    if variant == 'misc':
+        return render_lab_misc(filepath)
+    return render_lab_timbral(filepath)
+
+
+def render_lab_misc(filepath):
+    """Misc lab features (spectral flatness, chromagram, spectral contrast, ZCR)."""
+    cache_key = (filepath, 'lab-misc')
     if cache_key in _render_cache:
         return _render_cache[cache_key]
 
@@ -1086,7 +1179,6 @@ def render_lab(filepath):
         sr=sr, hop_length=hop_length
     )
 
-    # Compute features
     flatness = librosa.feature.spectral_flatness(y=y, n_fft=n_fft, hop_length=hop_length)[0]
     chroma = librosa.feature.chroma_stft(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length)
     contrast = librosa.feature.spectral_contrast(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length)
@@ -1095,7 +1187,6 @@ def render_lab(filepath):
     fig = plt.figure(figsize=(18, 14))
     gs = gridspec.GridSpec(4, 1, height_ratios=[1, 2, 2, 1], hspace=0.3)
 
-    # Panel 1: Spectral Flatness
     ax1 = fig.add_subplot(gs[0])
     ax1.plot(times, flatness, color='#80cbc4', linewidth=0.8)
     ax1.fill_between(times, flatness, alpha=0.3, color='#80cbc4')
@@ -1105,14 +1196,12 @@ def render_lab(filepath):
     ax1.set_title('Spectral Flatness — 0 = pure tone, 1 = white noise', fontsize=11)
     ax1.grid(True, alpha=0.2)
 
-    # Panel 2: Chromagram
     ax2 = fig.add_subplot(gs[1])
     librosa.display.specshow(chroma, y_axis='chroma', x_axis='time',
                              sr=sr, hop_length=hop_length, ax=ax2, cmap='magma')
     ax2.set_xlim([0, duration])
     ax2.set_title('Chromagram — pitch class energy over time', fontsize=11)
 
-    # Panel 3: Spectral Contrast
     ax3 = fig.add_subplot(gs[2])
     librosa.display.specshow(contrast, x_axis='time', sr=sr, hop_length=hop_length,
                              ax=ax3, cmap='inferno')
@@ -1120,7 +1209,6 @@ def render_lab(filepath):
     ax3.set_ylabel('Band')
     ax3.set_title('Spectral Contrast — peak-to-valley difference per frequency band', fontsize=11)
 
-    # Panel 4: Zero Crossing Rate
     zcr_times = librosa.frames_to_time(np.arange(len(zcr)), sr=sr, hop_length=hop_length)
     ax4 = fig.add_subplot(gs[3])
     ax4.plot(zcr_times, zcr, color='#ffab91', linewidth=0.8)
@@ -1131,12 +1219,171 @@ def render_lab(filepath):
     ax4.grid(True, alpha=0.2)
 
     filename = Path(filepath).name
-    fig.suptitle(f'{filename} — Lab', fontsize=14, fontweight='bold', y=0.995)
+    fig.suptitle(f'{filename} — Misc Lab', fontsize=14, fontweight='bold', y=0.995)
     fig.canvas.draw()
 
     ax = ax1
     x_left = ax.transData.transform((0, 0))[0]
     x_right = ax.transData.transform((duration, 0))[0]
+    fig_width = fig.get_figwidth() * DPI
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=DPI, facecolor=fig.get_facecolor())
+    matplotlib.pyplot.close(fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
+
+
+def render_lab_timbral(filepath):
+    """Timbral Shape Lab — MFCC coefficients broken out with explanations."""
+    cache_key = (filepath, 'lab-timbral')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    import numpy as np
+    import librosa
+    import librosa.display
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+    from scipy.ndimage import gaussian_filter1d
+    from scipy.signal import find_peaks
+
+    plt.style.use('dark_background')
+
+    y, sr = librosa.load(filepath, sr=None, mono=True)
+    duration = librosa.get_duration(y=y, sr=sr)
+    n_fft = 2048
+    hop_length = 512
+
+    mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, n_fft=n_fft, hop_length=hop_length)
+    times = librosa.frames_to_time(np.arange(mfccs.shape[1]), sr=sr, hop_length=hop_length)
+
+    # Foote's checkerboard novelty on MFCC similarity
+    fps = sr / hop_length
+    norms = np.linalg.norm(mfccs, axis=0, keepdims=True)
+    norms[norms == 0] = 1
+    mfcc_norm = mfccs / norms
+    S = (mfcc_norm.T @ mfcc_norm).astype(np.float32)
+
+    from viewer import _checkerboard_novelty
+    kernel_seconds = 3
+    kernel_size = max(16, int(kernel_seconds * fps))
+    if kernel_size % 2 != 0:
+        kernel_size += 1
+    novelty = _checkerboard_novelty(S, kernel_size)
+    del S
+
+    # Layout: heatmap + 4 individual coefficients + fine texture heatmap + novelty
+    # Total 7 panels
+    fig = plt.figure(figsize=(18, 28))
+    gs = gridspec.GridSpec(7, 1, height_ratios=[1.5, 1, 1, 1, 1, 1.5, 1.2], hspace=0.35)
+
+    sigma = 5  # smoothing for individual coefficient plots
+
+    # ── Panel 1: Full MFCC heatmap ──
+    ax = fig.add_subplot(gs[0])
+    ax.imshow(mfccs, aspect='auto', origin='lower', cmap='magma',
+              extent=[0, duration, 0, 13])
+    ax.set_xlim([0, duration])
+    ax.set_ylabel('Coefficient')
+    ax.set_yticks(np.arange(13) + 0.5)
+    ax.set_yticklabels([str(i) for i in range(13)])
+    ax.set_title('All 13 MFCC Coefficients — the complete timbral fingerprint', fontsize=12)
+
+    # ── Panel 2: MFCC 0 — Overall Energy ──
+    ax = fig.add_subplot(gs[1])
+    raw = mfccs[0]
+    smoothed = gaussian_filter1d(raw, sigma=sigma)
+    ax.plot(times, raw, color='#FF8A65', linewidth=0.4, alpha=0.3)
+    ax.plot(times, smoothed, color='#FF8A65', linewidth=2)
+    ax.set_xlim([0, duration])
+    ax.set_ylabel('MFCC 0')
+    ax.set_title('MFCC 0: Overall Energy Level — correlates with loudness (like RMS)', fontsize=11)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panel 3: MFCC 1 — Spectral Tilt ──
+    ax = fig.add_subplot(gs[2])
+    raw = mfccs[1]
+    smoothed = gaussian_filter1d(raw, sigma=sigma)
+    ax.plot(times, raw, color='#4DD0E1', linewidth=0.4, alpha=0.3)
+    ax.plot(times, smoothed, color='#4DD0E1', linewidth=2)
+    ax.axhline(y=0, color='#666', linewidth=0.5)
+    ax.set_xlim([0, duration])
+    ax.set_ylabel('MFCC 1')
+    ax.set_title('MFCC 1: Spectral Tilt — positive = dark/bassy, negative = bright/trebly',
+                 fontsize=11)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panel 4: MFCC 2 — Spectral Curvature ──
+    ax = fig.add_subplot(gs[3])
+    raw = mfccs[2]
+    smoothed = gaussian_filter1d(raw, sigma=sigma)
+    ax.plot(times, raw, color='#B388FF', linewidth=0.4, alpha=0.3)
+    ax.plot(times, smoothed, color='#B388FF', linewidth=2)
+    ax.axhline(y=0, color='#666', linewidth=0.5)
+    ax.set_xlim([0, duration])
+    ax.set_ylabel('MFCC 2')
+    ax.set_title('MFCC 2: Spectral Curvature — shape of the energy distribution '
+                 '(single peak vs spread out)', fontsize=11)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panel 5: MFCC 3 — Spectral Detail ──
+    ax = fig.add_subplot(gs[4])
+    raw = mfccs[3]
+    smoothed = gaussian_filter1d(raw, sigma=sigma)
+    ax.plot(times, raw, color='#69F0AE', linewidth=0.4, alpha=0.3)
+    ax.plot(times, smoothed, color='#69F0AE', linewidth=2)
+    ax.axhline(y=0, color='#666', linewidth=0.5)
+    ax.set_xlim([0, duration])
+    ax.set_ylabel('MFCC 3')
+    ax.set_title('MFCC 3: Spectral Asymmetry — where the energy humps and dips are',
+                 fontsize=11)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panel 6: MFCC 4-12 heatmap — Fine Timbral Texture ──
+    ax = fig.add_subplot(gs[5])
+    ax.imshow(mfccs[4:], aspect='auto', origin='lower', cmap='magma',
+              extent=[0, duration, 4, 13])
+    ax.set_xlim([0, duration])
+    ax.set_ylabel('Coefficient')
+    ax.set_yticks(np.arange(4, 13) + 0.5)
+    ax.set_yticklabels([str(i) for i in range(4, 13)])
+    ax.set_title('MFCC 4-12: Fine Timbral Texture — subtle details '
+                 '(buzzy vs smooth, nasal vs hollow, etc.)', fontsize=11)
+
+    # ── Panel 7: Timbral Shift (MFCC Novelty) ──
+    ax = fig.add_subplot(gs[6])
+    n = min(len(times), len(novelty))
+    ax.plot(times[:n], novelty[:n], color='#FF8A65', linewidth=1.5)
+    ax.fill_between(times[:n], novelty[:n], alpha=0.3, color='#FF8A65')
+    peak_dist = max(1, int(fps * 1.5))
+    peaks, _ = find_peaks(novelty[:n], prominence=0.15, distance=peak_dist)
+    ax.scatter(times[peaks], novelty[peaks], color='#FF8A65', s=30, zorder=5, marker='v')
+    ax.set_xlim([0, duration])
+    ax.set_ylim([0, 1.1])
+    ax.set_ylabel('Novelty')
+    ax.set_xlabel('Time (s)')
+    ax.set_title('Timbral Shift — peaks where the overall sound character changes '
+                 '(Foote checkerboard on MFCC similarity)', fontsize=11)
+    ax.grid(True, alpha=0.2)
+
+    filename = Path(filepath).name
+    fig.suptitle(f'{filename} — Timbral Shape (MFCC) Lab', fontsize=14,
+                 fontweight='bold', y=0.995)
+    fig.canvas.draw()
+
+    ax0 = fig.axes[0]
+    x_left = ax0.transData.transform((0, 0))[0]
+    x_right = ax0.transData.transform((duration, 0))[0]
     fig_width = fig.get_figwidth() * DPI
 
     buf = io.BytesIO()
@@ -1441,6 +1688,21 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._handle_effect_rename()
         elif path == '/api/effects/analyze':
             self._handle_effect_analyze()
+        elif path == '/api/effects/controller':
+            body = self._read_json_body()
+            prefs = _load_effect_prefs()
+            # Support both sculpture and controller selection
+            if body and 'sculpture' in body:
+                prefs['__sculpture__'] = body['sculpture']
+                prefs.pop('__controller__', None)
+            elif body and 'controller' in body:
+                prefs['__controller__'] = body['controller']
+                prefs.pop('__sculpture__', None)
+            else:
+                prefs.pop('__controller__', None)
+                prefs.pop('__sculpture__', None)
+            _save_effect_prefs(prefs)
+            self._json_response({'ok': True})
         elif path == '/api/palettes/save':
             self._handle_palette_save()
         elif path == '/api/palettes/delete':
@@ -1454,8 +1716,11 @@ class ViewerHandler(BaseHTTPRequestHandler):
     def _handle_effect_start(self, name):
         body = self._read_json_body()
         controller_id = body.get('controller') if body else None
+        sculpture_id = body.get('sculpture') if body else None
         palette_name = body.get('palette') if body else None
-        _start_effect(name, controller_id=controller_id, palette_name=palette_name)
+        brightness = body.get('brightness') if body else None
+        _start_effect(name, controller_id=controller_id, sculpture_id=sculpture_id,
+                      palette_name=palette_name, brightness=brightness)
         self._json_response({'ok': True})
 
     def _handle_effect_stop(self):
@@ -1937,23 +2202,43 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._serve_lab_repet(rel_path)
         elif path.startswith('/api/lab/'):
             rel_path = path[len('/api/lab/'):]
-            self._serve_lab(rel_path)
+            variant = query.get('variant', ['timbral'])[0]
+            self._serve_lab(rel_path, variant)
         elif path.startswith('/api/annotations/'):
             rel_path = path[len('/api/annotations/'):]
             self._serve_annotations(rel_path)
         elif path == '/api/controllers':
+            global _sculptures
+            _sculptures = _load_sculptures()
             _resolve_controller_ports(_controllers)
-            self._json_response(_controllers)
+            targets = _build_output_targets(_sculptures, _controllers)
+            self._json_response(targets)
         elif path == '/api/effects':
             effects, palettes = _get_effects_list()
+            # Return active target, or fall back to persisted preference
+            prefs = _load_effect_prefs()
+            target = _active_controller
+            target_type = None
+            if target is None:
+                if '__sculpture__' in prefs:
+                    target = prefs['__sculpture__']
+                    target_type = 'sculpture'
+                elif '__controller__' in prefs:
+                    target = prefs['__controller__']
+                    target_type = 'controller'
+            else:
+                # Determine type from active target
+                if any(s['id'] == target for s in _sculptures):
+                    target_type = 'sculpture'
+                else:
+                    target_type = 'controller'
             self._json_response({
                 'effects': effects,
                 'palettes': palettes,
                 'running': _get_running_effect_name(),
-                'controller': _active_controller,
+                'controller': target,
+                'controller_type': target_type,
             })
-        elif path == '/api/features/stream':
-            self._serve_feature_stream()
         elif path == '/api/palettes':
             self._json_response(_get_all_palettes_list())
         elif path == '/api/livereload':
@@ -1971,55 +2256,6 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._serve_audio(rel_path)
         else:
             self.send_error(404)
-
-    def _serve_feature_stream(self):
-        """SSE endpoint: stream live audio features at ~10 Hz."""
-        import numpy as np
-        import sounddevice as sd
-        sys.path.insert(0, EFFECTS_DIR)
-        from feature_computer import FeatureComputer
-
-        # Find BlackHole device
-        device_id = None
-        devices = sd.query_devices()
-        for i, d in enumerate(devices):
-            if 'blackhole' in d['name'].lower() and d['max_input_channels'] >= 2:
-                device_id = i
-                break
-        if device_id is None:
-            self._json_response({'error': 'BlackHole audio device not found'}, status=503)
-            return
-
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/event-stream')
-        self.send_header('Cache-Control', 'no-cache')
-        self.send_header('Connection', 'keep-alive')
-        self.end_headers()
-
-        fc = FeatureComputer(sample_rate=44100)
-
-        def audio_cb(indata, frames, time_info, status):
-            mono = np.mean(indata, axis=1) if indata.ndim > 1 else indata.flatten()
-            fc.process_audio(mono)
-
-        stream = sd.InputStream(
-            device=device_id, channels=2, samplerate=44100,
-            blocksize=1024, callback=audio_cb
-        )
-
-        try:
-            stream.start()
-            while True:
-                time.sleep(0.1)  # 10 Hz
-                features = fc.get_features()
-                msg = f"data: {json.dumps(features)}\n\n"
-                self.wfile.write(msg.encode('utf-8'))
-                self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
-        finally:
-            stream.stop()
-            stream.close()
 
     def _serve_html(self):
         html = generate_html().encode('utf-8')
@@ -2237,14 +2473,14 @@ class ViewerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(png_bytes)
 
-    def _serve_lab(self, rel_path):
+    def _serve_lab(self, rel_path, variant='timbral'):
         filepath = _resolve_audio_path(rel_path)
         if filepath is None:
             self.send_error(404)
             return
 
         try:
-            png_bytes, headers = render_lab(filepath)
+            png_bytes, headers = render_lab(filepath, variant=variant)
         except Exception as e:
             print(f"[lab] Error: {e}")
             self.send_error(500, str(e))

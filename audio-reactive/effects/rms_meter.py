@@ -4,21 +4,27 @@ RMS Meter — volume meter driven by raw waveform amplitude (RMS).
 No derivatives, no integrals — just how loud the music is right now.
 Number of lit LEDs = current RMS normalized against a slow-decay peak.
 
-Fast attack, slow decay.
-Color is handled by the reds palette preset.
+Fast attack, slow decay. Red-to-magenta gradient from base to tip.
 """
 
 import numpy as np
 import threading
-from base import ScalarSignalEffect
+from base import AudioReactiveEffect
 from signals import OverlapFrameAccumulator
 
 
-class RMSMeterEffect(ScalarSignalEffect):
+class RMSMeterEffect(AudioReactiveEffect):
     """Volume meter: lit LED count proportional to RMS amplitude."""
 
     registry_name = 'rms_meter'
-    default_palette = 'reds'
+
+    # Gradient colors from base to tip
+    COLORS = np.array([
+        [40,  5,  0],
+        [160, 50, 0],
+        [200, 20, 0],
+        [180, 0,  60],
+    ], dtype=np.float32)
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
@@ -34,6 +40,15 @@ class RMSMeterEffect(ScalarSignalEffect):
         self.level = 0.0
         self.attack_rate = 0.6
         self.decay_rate = 0.85
+
+        # Precompute per-LED gradient
+        self._led_colors = np.zeros((num_leds, 3), dtype=np.float32)
+        for i in range(num_leds):
+            t = i / max(num_leds - 1, 1)
+            idx = t * (len(self.COLORS) - 1)
+            lo, hi = int(idx), min(int(idx) + 1, len(self.COLORS) - 1)
+            frac = idx - lo
+            self._led_colors[i] = self.COLORS[lo] * (1 - frac) + self.COLORS[hi] * frac
 
         self._lock = threading.Lock()
 
@@ -54,7 +69,7 @@ class RMSMeterEffect(ScalarSignalEffect):
             with self._lock:
                 self.target_level = normalized
 
-    def get_intensity(self, dt: float) -> float:
+    def render(self, dt: float) -> np.ndarray:
         with self._lock:
             target = self.target_level
 
@@ -63,7 +78,11 @@ class RMSMeterEffect(ScalarSignalEffect):
         else:
             self.level *= self.decay_rate ** (dt * 30)
 
-        return self.level
+        lit = int(min(self.level, 1.0) * self.num_leds)
+        frame = np.zeros((self.num_leds, 3), dtype=np.uint8)
+        if lit > 0:
+            frame[:lit] = self._led_colors[:lit].clip(0, 255).astype(np.uint8)
+        return frame
 
     def get_diagnostics(self) -> dict:
         lit = int(min(self.level, 1.0) * self.num_leds)

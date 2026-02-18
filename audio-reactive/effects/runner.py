@@ -76,6 +76,85 @@ def find_serial_port():
     return None
 
 
+def load_sculpture(sculpture_id):
+    """Load a sculpture definition and its controller from JSON files.
+
+    Returns (sculpture_def, controller_def) where:
+        sculpture_def has 'branches', 'logical_leds', 'physical_leds'
+        controller_def has 'port', 'leds', etc from controllers.json
+    """
+    base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
+
+    with open(os.path.join(base_dir, 'hardware', 'sculptures.json')) as f:
+        sculptures = json.load(f)
+    with open(os.path.join(base_dir, 'tools', 'controllers.json')) as f:
+        controllers = json.load(f)
+
+    sculpture = next((s for s in sculptures if s['id'] == sculpture_id), None)
+    if not sculpture:
+        raise ValueError(f"Unknown sculpture: {sculpture_id}")
+
+    controller = next((c for c in controllers if c['id'] == sculpture['controller']), None)
+    if not controller:
+        raise ValueError(f"Unknown controller '{sculpture['controller']}' for sculpture {sculpture_id}")
+
+    mode = sculpture.get('mode', 'branch')
+    if mode == 'height':
+        logical_leds = max(b['count'] for b in sculpture['branches'])
+    else:
+        logical_leds = sum(b['count'] for b in sculpture['branches'])
+    physical_leds = sculpture.get('physical_leds', controller['leds'])
+
+    sculpture['logical_leds'] = logical_leds
+    sculpture['physical_leds'] = physical_leds
+
+    return sculpture, controller
+
+
+def apply_topology(logical_frame, sculpture_def):
+    """Map logical LED frame to physical LED positions.
+
+    Two modes:
+      'branch' (default): Each branch gets its own slice of the logical array.
+      'height': Logical array is a single height axis (0=base, 1=peak).
+                Each branch samples it at its own resolution, rounding to
+                nearest index. All branches share base and peak colors.
+
+    Args:
+        logical_frame: (logical_leds, 3) uint8 array
+        sculpture_def: dict with 'branches', 'physical_leds', optional 'mode'
+
+    Returns:
+        (physical_leds, 3) uint8 array
+    """
+    physical = np.zeros((sculpture_def['physical_leds'], 3), dtype=logical_frame.dtype)
+    mode = sculpture_def.get('mode', 'branch')
+    max_idx = len(logical_frame) - 1
+
+    if mode == 'height':
+        for branch in sculpture_def['branches']:
+            count = branch['count']
+            start = branch['start']
+            for j in range(count):
+                height = j / max(count - 1, 1)  # 0=base, 1=peak
+                logical_idx = round(height * max_idx)
+                phys = start + (count - 1 - j) if branch.get('reverse') else start + j
+                physical[phys] = logical_frame[logical_idx]
+    else:
+        logical_offset = 0
+        for branch in sculpture_def['branches']:
+            count = branch['count']
+            start = branch['start']
+            logical_slice = logical_frame[logical_offset:logical_offset + count]
+            if branch.get('reverse'):
+                physical[start:start + count] = logical_slice[::-1]
+            else:
+                physical[start:start + count] = logical_slice
+            logical_offset += count
+
+    return physical
+
+
 def get_effect_registry():
     """Auto-discover all available effects by scanning .py files.
 
@@ -254,7 +333,8 @@ def print_diagnostics(effect, frame_num):
     sys.stdout.flush()
 
 
-def run_live(effect, led_output, device_id, brightness_cap=BRIGHTNESS_CAP):
+def run_live(effect, led_output, device_id, brightness_cap=BRIGHTNESS_CAP,
+             sculpture_def=None):
     """Run effect on live BlackHole audio.
 
     Architecture (required by WS2812B timing):
@@ -290,6 +370,10 @@ def run_live(effect, led_output, device_id, brightness_cap=BRIGHTNESS_CAP):
             # Apply brightness cap
             frame = (frame.astype(np.float32) * brightness_cap).astype(np.uint8)
 
+            # Apply sculpture topology mapping (logical → physical)
+            if sculpture_def:
+                frame = apply_topology(frame, sculpture_def)
+
             # Send to hardware at fixed rate
             led_output.send_frame(frame)
 
@@ -313,7 +397,8 @@ def run_live(effect, led_output, device_id, brightness_cap=BRIGHTNESS_CAP):
         stream.close()
 
 
-def run_wav(effect, led_output, wav_path, brightness_cap=BRIGHTNESS_CAP):
+def run_wav(effect, led_output, wav_path, brightness_cap=BRIGHTNESS_CAP,
+            sculpture_def=None):
     """Run effect on a WAV file (simulates real-time playback)."""
     import soundfile as sf
 
@@ -361,6 +446,8 @@ def run_wav(effect, led_output, wav_path, brightness_cap=BRIGHTNESS_CAP):
             if now >= next_frame_time:
                 frame = effect.render(frame_interval)
                 frame = (frame.astype(np.float32) * brightness_cap).astype(np.uint8)
+                if sculpture_def:
+                    frame = apply_topology(frame, sculpture_def)
                 led_output.send_frame(frame)
                 print_diagnostics(effect, frame_num)
                 frame_num += 1
@@ -552,6 +639,7 @@ def main():
     parser.add_argument('--no-leds', action='store_true', help='Terminal visualization only')
     parser.add_argument('--port', default=None, help='Serial port (auto-detect if omitted)')
     parser.add_argument('--leds', type=int, default=NUM_LEDS, help='Number of LEDs')
+    parser.add_argument('--sculpture', default=None, help='Sculpture ID (overrides --port/--leds)')
     parser.add_argument('--brightness', type=float, default=BRIGHTNESS_CAP,
                         help='Brightness cap (0-1, default 0.03)')
     args = parser.parse_args()
@@ -615,9 +703,28 @@ def main():
         print(f"  Available: {', '.join(all_effects.keys())}")
         sys.exit(1)
 
+    # Resolve sculpture topology (if specified)
+    sculpture_def = None
+    if args.sculpture:
+        try:
+            sculpture_def, controller = load_sculpture(args.sculpture)
+        except ValueError as e:
+            print(f"  Error: {e}")
+            sys.exit(1)
+        logical_leds = sculpture_def['logical_leds']
+        physical_leds = sculpture_def['physical_leds']
+        # Use controller's port unless explicitly overridden
+        if not args.port:
+            args.port = None  # will be auto-detected below
+        args.leds = physical_leds  # for SerialLEDOutput packet size
+    else:
+        logical_leds = args.leds
+        physical_leds = args.leds
+
     # Create effect (with palette composition if signal)
+    # Effect renders to LOGICAL LED count
     try:
-        effect = create_effect(args.effect, args.leds, SAMPLE_RATE, args.palette)
+        effect = create_effect(args.effect, logical_leds, SAMPLE_RATE, args.palette)
     except ValueError as e:
         print(f"  Error: {e}")
         sys.exit(1)
@@ -627,22 +734,26 @@ def main():
     print(f"  Effect: {effect.name}")
     if args.palette:
         print(f"  Palette: {args.palette}")
-    print(f"  LEDs: {args.leds}")
+    if sculpture_def:
+        print(f"  Sculpture: {args.sculpture} ({logical_leds} logical → {physical_leds} physical LEDs)")
+    else:
+        print(f"  LEDs: {logical_leds}")
     print(f"  Brightness cap: {brightness_cap*100:.0f}%")
 
-    # LED output
+    # LED output — initialized with PHYSICAL LED count
     serial_port = None
     if not args.no_leds:
         serial_port = args.port or find_serial_port()
         if serial_port is None:
             print("  No serial port found — terminal-only mode")
 
-    led_output = SerialLEDOutput(serial_port, args.leds)
+    led_output = SerialLEDOutput(serial_port, physical_leds)
 
     # Run
     try:
         if args.wav:
-            run_wav(effect, led_output, args.wav, brightness_cap)
+            run_wav(effect, led_output, args.wav, brightness_cap,
+                    sculpture_def=sculpture_def)
         else:
             device_id = find_blackhole_device()
             if device_id is None:
@@ -652,7 +763,8 @@ def main():
                 sys.exit(1)
             device_info = sd.query_devices(device_id)
             print(f"  Audio: {device_info['name']} (#{device_id})")
-            run_live(effect, led_output, device_id, brightness_cap)
+            run_live(effect, led_output, device_id, brightness_cap,
+                     sculpture_def=sculpture_def)
     finally:
         led_output.close()
         diag = effect.get_diagnostics()

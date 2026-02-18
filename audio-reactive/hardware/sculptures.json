@@ -1,0 +1,38 @@
+[
+  {
+    "id": "cob_flat",
+    "name": "Flat Strip",
+    "controller": "sculpture",
+    "branches": [
+      {"start": 0, "count": 80, "reverse": false}
+    ]
+  },
+{
+    "id": "cob_diamond",
+    "name": "Diamond Sculpture",
+    "controller": "sculpture",
+    "mode": "height",
+    "branches": [
+      {"name": "up1", "start": 0, "count": 42, "reverse": false},
+      {"name": "down", "start": 42, "count": 20, "reverse": true},
+      {"name": "up2", "start": 62, "count": 11, "reverse": false}
+    ]
+  },
+  {
+    "id": "strip_150",
+    "name": "150 LED Strip",
+    "controller": "sculpture",
+    "physical_leds": 150,
+    "branches": [
+      {"start": 0, "count": 150, "reverse": false}
+    ]
+  },
+  {
+    "id": "tree_flat",
+    "name": "LED Tree",
+    "controller": "tree",
+    "branches": [
+      {"start": 0, "count": 197, "reverse": false}
+    ]
+  }
+]

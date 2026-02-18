@@ -147,14 +147,16 @@ class BandSparklesEffect(AudioReactiveEffect):
         else:
             weights = np.ones(self.n_bands) / self.n_bands
 
-        # Blend band colors by sharpened weights
-        color = np.zeros(3, dtype=np.float32)
-        for i in range(self.n_bands):
-            color += BAND_COLORS[i] * weights[i]
+        # Pick the single dominant band's color (no blending)
+        dominant = int(np.argmax(weights))
+        color = BAND_COLORS[dominant].copy()
 
         with self._lock:
             self.dominant_color_target = color
-            self.dominant_idx = int(np.argmax(weights))
+            self.dominant_idx = dominant
+            self._debug_weights = weights.copy()
+            self._debug_color = color.copy()
+            self._debug_proportions = proportions.copy() if total > 0 else weights.copy()
 
     def _pick_twinkle_color(self):
         """Twinkle color: the current dominant color with slight random variation."""
@@ -219,7 +221,17 @@ class BandSparklesEffect(AudioReactiveEffect):
     def get_diagnostics(self) -> dict:
         with self._lock:
             idx = self.dominant_idx
+            w = getattr(self, '_debug_weights', np.zeros(self.n_bands))
+            c = getattr(self, '_debug_color', np.zeros(3))
+            p = getattr(self, '_debug_proportions', np.zeros(self.n_bands))
+        # Show pre-sharpened proportions, post-sharpened weights, and resulting RGB
+        band_names = ['Sub', 'Bas', 'Mid', 'HiM', 'Tre']
+        prop_str = ' '.join(f'{band_names[i]}={p[i]:.2f}' for i in range(self.n_bands))
+        wt_str = ' '.join(f'{band_names[i]}={w[i]:.2f}' for i in range(self.n_bands))
         return {
             'band': BANDS[idx][0],
+            'props': prop_str,
+            'weights': wt_str,
+            'rgb': f'{int(c[0])},{int(c[1])},{int(c[2])}',
             'twinkles': int(np.sum(self.twinkle_brightness > 0)),
         }

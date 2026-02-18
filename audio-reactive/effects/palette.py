@@ -3,7 +3,7 @@ PaletteMap — separates color mapping from signal effects.
 
 A PaletteMap converts a scalar intensity (0-1) into an RGB LED frame.
 It handles color interpolation, gamma correction, brightness caps,
-and spatial modes (uniform, fibonacci, meter).
+and spatial modes (uniform, fibonacci).
 
 Any ScalarSignalEffect can be composed with any PaletteMap via ComposedEffect.
 """
@@ -57,8 +57,7 @@ class PaletteMap:
         colors: Nx3 array of color stops (float32, 0-255 range).
         gamma: Power curve for perceived brightness (lower = more contrast).
         brightness_cap: Maximum intensity (0-1). 1.0 = full, 0.20 = night mode.
-        spatial_mode: 'uniform' | 'fibonacci' | 'meter'
-        fill_from: 'start' | 'end' (meter mode only)
+        spatial_mode: 'uniform' | 'fibonacci'
     """
 
     def __init__(self, colors, gamma=0.7, brightness_cap=1.0,
@@ -67,11 +66,11 @@ class PaletteMap:
         self.gamma = gamma
         self.brightness_cap = brightness_cap
         self.spatial_mode = spatial_mode
-        self.fill_from = fill_from
+        self.fill_from = fill_from  # kept for serialization compat
 
         # Precomputed in setup()
         self._num_leds = 0
-        self._led_colors = None  # (num_leds, 3) for fibonacci/meter modes
+        self._led_colors = None  # (num_leds, 3) for fibonacci modes
 
     # Backward compat alias
     @property
@@ -91,11 +90,6 @@ class PaletteMap:
                 color = _sample_colors(self.colors, t)
                 self._led_colors[start:end] = color
 
-        elif self.spatial_mode == 'meter':
-            self._led_colors = np.zeros((num_leds, 3), dtype=np.float32)
-            for i in range(num_leds):
-                t = i / max(num_leds - 1, 1)
-                self._led_colors[i] = _sample_colors(self.colors, t)
 
     def colorize(self, intensity, num_leds):
         """Convert scalar intensity (0-1) to RGB frame (num_leds, 3) uint8.
@@ -111,8 +105,6 @@ class PaletteMap:
             return self._colorize_uniform(intensity, num_leds)
         elif self.spatial_mode == 'fibonacci':
             return self._colorize_fibonacci(intensity, num_leds)
-        elif self.spatial_mode == 'meter':
-            return self._colorize_meter(intensity, num_leds)
         else:
             return self._colorize_uniform(intensity, num_leds)
 
@@ -131,20 +123,6 @@ class PaletteMap:
         b = min(intensity, 1.0) * self.brightness_cap
         display_b = b ** self.gamma
         return (self._led_colors * display_b).clip(0, 255).astype(np.uint8)
-
-    def _colorize_meter(self, intensity, num_leds):
-        """Fill N LEDs from start or end, rest dark."""
-        if self._led_colors is None or len(self._led_colors) != num_leds:
-            self.setup(num_leds)
-        lit = int(min(intensity, 1.0) * num_leds)
-        frame = np.zeros((num_leds, 3), dtype=np.uint8)
-        if lit > 0:
-            if self.fill_from == 'start':
-                frame[:lit] = (self._led_colors[:lit] * self.brightness_cap).clip(0, 255).astype(np.uint8)
-            else:
-                start = num_leds - lit
-                frame[start:] = (self._led_colors[start:] * self.brightness_cap).clip(0, 255).astype(np.uint8)
-        return frame
 
 
 # ── Built-in presets ────────────────────────────────────────────────
@@ -245,8 +223,6 @@ PALETTE_PRESETS = {
 _PALETTE_ALIASES = {
     'warm_white': 'amber',
     'night_reds': 'reds',
-    'meter_red_magenta': 'reds',
-    'meter_red_magenta_r': 'reds',
 }
 
 

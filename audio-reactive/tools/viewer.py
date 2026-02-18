@@ -56,6 +56,38 @@ BAND_COLORS = {
 ANNOTATION_COLORS = ['#FF4081', '#40C4FF', '#69F0AE', '#FFD740', '#E040FB', '#FF6E40']
 
 
+def _checkerboard_novelty(S, kernel_size):
+    """Foote's (2000) checkerboard kernel novelty along the diagonal of a similarity matrix.
+
+    Places a Gaussian-tapered checkerboard kernel at each point along the diagonal.
+    High values where the music's character changes (cross-block similarity drops).
+    """
+    from scipy.signal import windows as sig_windows
+
+    w = kernel_size // 2
+    kernel = np.ones((kernel_size, kernel_size))
+    kernel[:w, w:] = -1   # top-right: past vs future
+    kernel[w:, :w] = -1   # bottom-left: future vs past
+    g = sig_windows.gaussian(kernel_size, std=kernel_size / 4)
+    kernel *= np.outer(g, g)
+
+    n = S.shape[0]
+    novelty = np.zeros(n)
+    for i in range(n):
+        r0 = max(0, i - w)
+        r1 = min(n, i + w)
+        k_r0 = w - (i - r0)
+        k_r1 = w + (r1 - i)
+        patch = S[r0:r1, r0:r1]
+        novelty[i] = np.sum(patch * kernel[k_r0:k_r1, k_r0:k_r1])
+
+    novelty = np.maximum(novelty, 0)
+    mx = np.max(novelty)
+    if mx > 0:
+        novelty /= mx
+    return novelty
+
+
 # ── Interactive Visualizer ────────────────────────────────────────────
 
 class SyncedVisualizer:
@@ -184,10 +216,62 @@ class SyncedVisualizer:
         dt = self.hop_length / self.sr
         self.rms_derivative = self.rms_derivative / dt  # units per second
 
+        # Spectral centroid derivative (rate-of-change of brightness)
+        self.centroid_derivative = np.diff(self.spectral_centroid, prepend=self.spectral_centroid[0])
+        self.centroid_derivative = self.centroid_derivative / dt  # Hz per second
+
+        # Per-band energy derivatives
+        self.band_derivatives = {}
+        for band_name, energy in self.band_energies.items():
+            deriv = np.diff(energy, prepend=energy[0]) / dt
+            self.band_derivatives[band_name] = deriv
+
         # Time axis
         self.times = librosa.frames_to_time(
             np.arange(len(self.onset_env)), sr=self.sr, hop_length=self.hop_length
         )
+
+        # ── Foote's checkerboard novelty ──────────────────────────────
+        print("Computing novelty...")
+        fps = self.sr / self.hop_length
+        self.mfccs = librosa.feature.mfcc(
+            y=self.y, sr=self.sr, n_mfcc=13,
+            n_fft=self.n_fft, hop_length=self.hop_length
+        )
+        self.chroma = librosa.feature.chroma_stft(
+            y=self.y, sr=self.sr, n_fft=self.n_fft, hop_length=self.hop_length
+        )
+
+        def _cosine_sim(A):
+            norms = np.linalg.norm(A, axis=0, keepdims=True)
+            norms[norms == 0] = 1
+            An = A / norms
+            return (An.T @ An).astype(np.float32)
+
+        self.novelty_kernel_seconds = 3
+        self.novelty_kernel_size = max(16, int(self.novelty_kernel_seconds * fps))
+        if self.novelty_kernel_size % 2 != 0:
+            self.novelty_kernel_size += 1
+
+        S = _cosine_sim(self.mfccs)
+        self.novelty_mfcc = _checkerboard_novelty(S, self.novelty_kernel_size)
+        del S
+        S = _cosine_sim(self.chroma)
+        self.novelty_chroma = _checkerboard_novelty(S, self.novelty_kernel_size)
+        del S
+
+        # ── Band deviation from long-term context ────────────────────
+        from scipy.ndimage import uniform_filter1d
+        self.band_deviation_context_seconds = 60
+        context_frames = max(3, int(self.band_deviation_context_seconds * fps))
+        self.band_deviations = {}
+        for band_name, energy in self.band_energies.items():
+            running_mean = uniform_filter1d(energy.astype(np.float64), size=context_frames, mode='reflect')
+            running_sq = uniform_filter1d((energy ** 2).astype(np.float64), size=context_frames, mode='reflect')
+            running_std = np.sqrt(np.maximum(running_sq - running_mean ** 2, 0))
+            self.band_deviations[band_name] = np.abs(energy - running_mean) / (running_std + 1e-10)
+        all_z = np.stack([self.band_deviations[b][:len(self.times)] for b in FREQUENCY_BANDS], axis=0)
+        self.composite_deviation = np.max(all_z, axis=0)
 
         print(f"Tempo: {self.tempo:.1f} BPM, {len(self.onset_times)} onsets, {len(self.beat_times)} beats")
 
@@ -205,9 +289,9 @@ class SyncedVisualizer:
         if self.focus_panel is not None:
             self.fig = plt.figure(figsize=(18, 10))
         elif has_annotations:
-            self.fig = plt.figure(figsize=(18, 18))
+            self.fig = plt.figure(figsize=(18, 36))
         else:
-            self.fig = plt.figure(figsize=(18, 14))
+            self.fig = plt.figure(figsize=(18, 32))
 
         # Determine which panels to show
         # Focus panel mode: show one panel maximized
@@ -216,6 +300,12 @@ class SyncedVisualizer:
             'spectrogram': self._build_spectrogram_panel,
             'bands': self._build_band_energy_panel,
             'rms-derivative': self._build_rms_derivative_panel,
+            'centroid': self._build_centroid_panel,
+            'centroid-derivative': self._build_centroid_derivative_panel,
+            'band-derivative': self._build_band_derivative_panel,
+            'mfcc': self._build_mfcc_panel,
+            'novelty': self._build_novelty_panel,
+            'band-deviation': self._build_band_deviation_panel,
         }
         if has_annotations:
             focus_builders['annotations'] = self._build_annotation_panel
@@ -226,18 +316,30 @@ class SyncedVisualizer:
         elif has_annotations:
             n_layers = len(self.annotations) + (1 if self.annotate_layer else 0)
             ann_height = max(0.8, 0.4 * n_layers)
-            gs = gridspec.GridSpec(5, 1, height_ratios=[1, 2, 1, 1, ann_height], hspace=0.3)
+            gs = gridspec.GridSpec(11, 1, height_ratios=[1, 2, 1, 1, 1, 1, 1, 1.5, 1.5, 1.5, ann_height], hspace=0.3)
             self._build_waveform_panel(self.fig.add_subplot(gs[0]))
             self._build_spectrogram_panel(self.fig.add_subplot(gs[1]))
             self._build_band_energy_panel(self.fig.add_subplot(gs[2]))
             self._build_rms_derivative_panel(self.fig.add_subplot(gs[3]))
-            self._build_annotation_panel(self.fig.add_subplot(gs[4]))
+            self._build_centroid_panel(self.fig.add_subplot(gs[4]))
+            self._build_centroid_derivative_panel(self.fig.add_subplot(gs[5]))
+            self._build_band_derivative_panel(self.fig.add_subplot(gs[6]))
+            self._build_mfcc_panel(self.fig.add_subplot(gs[7]))
+            self._build_novelty_panel(self.fig.add_subplot(gs[8]))
+            self._build_band_deviation_panel(self.fig.add_subplot(gs[9]))
+            self._build_annotation_panel(self.fig.add_subplot(gs[10]))
         else:
-            gs = gridspec.GridSpec(4, 1, height_ratios=[1, 2, 1, 1], hspace=0.3)
+            gs = gridspec.GridSpec(10, 1, height_ratios=[1, 2, 1, 1, 1, 1, 1, 1.5, 1.5, 1.5], hspace=0.3)
             self._build_waveform_panel(self.fig.add_subplot(gs[0]))
             self._build_spectrogram_panel(self.fig.add_subplot(gs[1]))
             self._build_band_energy_panel(self.fig.add_subplot(gs[2]))
             self._build_rms_derivative_panel(self.fig.add_subplot(gs[3]))
+            self._build_centroid_panel(self.fig.add_subplot(gs[4]))
+            self._build_centroid_derivative_panel(self.fig.add_subplot(gs[5]))
+            self._build_band_derivative_panel(self.fig.add_subplot(gs[6]))
+            self._build_mfcc_panel(self.fig.add_subplot(gs[7]))
+            self._build_novelty_panel(self.fig.add_subplot(gs[8]))
+            self._build_band_deviation_panel(self.fig.add_subplot(gs[9]))
 
         self._finalize_figure()
 
@@ -313,6 +415,138 @@ class SyncedVisualizer:
         ax.set_xlim([0, self.duration])
         ax.set_ylabel('dRMS/dt')
         ax.set_title('RMS Derivative — red = getting louder, blue = getting quieter', fontsize=11)
+        ax.grid(True, alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_centroid_panel(self, ax):
+        """Spectral centroid: center of mass of the frequency spectrum."""
+        from scipy.ndimage import gaussian_filter1d
+        smoothed = gaussian_filter1d(self.spectral_centroid, sigma=5)
+
+        ax.plot(self.times, self.spectral_centroid, color='#B388FF', linewidth=0.5, alpha=0.3)
+        ax.plot(self.times, smoothed, color='#B388FF', linewidth=2)
+
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('Frequency (Hz)')
+        ax.set_title('Center of Mass of Frequency — how bright the sound is right now', fontsize=11)
+        ax.grid(True, alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_centroid_derivative_panel(self, ax):
+        """Spectral centroid derivative: rising = getting brighter, falling = getting darker."""
+        # Smooth to reduce noise (centroid is noisy frame-to-frame)
+        from scipy.ndimage import gaussian_filter1d
+        smoothed = gaussian_filter1d(self.centroid_derivative, sigma=5)
+
+        pos = np.maximum(smoothed, 0)
+        neg = np.minimum(smoothed, 0)
+
+        ax.fill_between(self.times, pos, color='#B388FF', alpha=0.7, linewidth=0)
+        ax.fill_between(self.times, neg, color='#00BFA5', alpha=0.7, linewidth=0)
+        ax.axhline(y=0, color='#666', linewidth=0.5)
+
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('dCentroid/dt (Hz/s)')
+        ax.set_title('Centroid Derivative — purple = brighter, teal = darker', fontsize=11)
+        ax.grid(True, alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_band_derivative_panel(self, ax):
+        """Per-band energy derivatives: rate-of-change per frequency band."""
+        from scipy.ndimage import gaussian_filter1d
+
+        for band_name, deriv in self.band_derivatives.items():
+            smoothed = gaussian_filter1d(deriv, sigma=5)
+            ax.plot(self.times, smoothed, label=band_name,
+                    color=BAND_COLORS[band_name], linewidth=1.5, alpha=0.85)
+
+        ax.axhline(y=0, color='#666', linewidth=0.5)
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('dEnergy/dt')
+        ax.set_title('Band Energy Derivative — per-band rate of change', fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_mfcc_panel(self, ax):
+        """MFCC heatmap: the timbral fingerprint over time."""
+        ax.imshow(self.mfccs, aspect='auto', origin='lower', cmap='magma',
+                  extent=[0, self.duration, 0, 13])
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('MFCC')
+        ax.set_yticks(np.arange(13) + 0.5)
+        ax.set_yticklabels([str(i) for i in range(13)])
+        ax.set_title('Timbral Shape (MFCC) — vertical color shifts = the sound character changed', fontsize=11)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_novelty_panel(self, ax):
+        """Foote's checkerboard novelty: peaks where the music's character changes.
+        Chroma on left axis, MFCC on right axis (independent scales)."""
+        from scipy.signal import find_peaks
+
+        t = self.times
+        n = len(t)
+        nov_m = self.novelty_mfcc[:n]
+        nov_c = self.novelty_chroma[:n]
+
+        fps = self.sr / self.hop_length
+        peak_dist = max(1, int(fps * 1.5))
+
+        # Chroma on left axis
+        line_c, = ax.plot(t, nov_c, color='#4DD0E1', linewidth=1.2, alpha=0.9, label='Chroma (harmonic)')
+        peaks_c, _ = find_peaks(nov_c, prominence=0.15, distance=peak_dist)
+        ax.scatter(t[peaks_c], nov_c[peaks_c], color='#4DD0E1', s=25, zorder=5, marker='v')
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('Chroma novelty', color='#4DD0E1')
+        ax.tick_params(axis='y', labelcolor='#4DD0E1')
+        ax.grid(True, alpha=0.2)
+
+        # MFCC on right axis (independent scale)
+        ax2 = ax.twinx()
+        line_m, = ax2.plot(t, nov_m, color='#FF8A65', linewidth=1.2, alpha=0.9, label='MFCC (timbral)')
+        peaks_m, _ = find_peaks(nov_m, prominence=0.15, distance=peak_dist)
+        ax2.scatter(t[peaks_m], nov_m[peaks_m], color='#FF8A65', s=25, zorder=5, marker='v')
+        ax2.set_ylabel('MFCC novelty', color='#FF8A65')
+        ax2.tick_params(axis='y', labelcolor='#FF8A65')
+
+        ks = self.novelty_kernel_size
+        ksec = self.novelty_kernel_seconds
+        ax.set_title(
+            f"Foote's Checkerboard Novelty (kernel={ks} frames, {ksec}s) "
+            f"— peaks = section boundaries", fontsize=11)
+        ax.legend([line_c, line_m], ['Chroma (harmonic)', 'MFCC (timbral)'],
+                  loc='upper right', framealpha=0.8, fontsize=8)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_band_deviation_panel(self, ax):
+        """Band deviation from long-term context: per-band z-scores."""
+        t = self.times
+        n = len(t)
+        for band_name in FREQUENCY_BANDS:
+            ax.plot(t, self.band_deviations[band_name][:n], color=BAND_COLORS[band_name],
+                    linewidth=1.0, alpha=0.7, label=band_name)
+        ax.plot(t, self.composite_deviation[:n], color='#FFFFFF',
+                linewidth=1.5, alpha=0.9, label='Max (any band)')
+
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('Z-score')
+        cs = self.band_deviation_context_seconds
+        ax.set_title(
+            f'Band Deviation from {cs}s Running Context '
+            f'— high = spectral balance shifted', fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
         ax.grid(True, alpha=0.2)
         if not hasattr(self, 'axes'):
             self.axes = []

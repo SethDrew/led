@@ -1008,7 +1008,7 @@ function switchTab(tabId) {
     if (isPublicMode && !isAuthenticated && LOCKED_TABS.has(tabId)) return;
     const prev = currentTab;
     if ((prev === 'stems' || prev === 'hpss' || prev === 'lab-repet' || prev === 'lab-nmf') && tabId !== prev) cleanupStemAudio();
-    if (prev === 'effects' && tabId !== 'effects') stopFeatureStream();
+    if (prev === 'effects' && tabId !== 'effects') stopEffectsPoll();
     currentTab = tabId;
     updateTabUI();
     saveHashState();
@@ -1101,7 +1101,17 @@ async function loadPanel() {
         document.getElementById('stemStatus').style.display = 'none';
         document.getElementById('controlsHint').innerHTML =
             'Browse, start/stop, rate, and reorder audio-reactive LED effects';
-        loadEffects();
+        // Only load effects list if panel is empty (first visit or tab switch).
+        // File changes while already on this tab should NOT rebuild the panel —
+        // effects don't depend on the current file, and rebuilding destroys the
+        // detail view and live feature sparklines.
+        if (!effectsPanel.querySelector('.effects-list') && !effectDetailName) {
+            loadEffects();
+        } else if (effectDetailName) {
+            // In detail view: update the file picker to match the new file
+            const fileSel = document.getElementById('effectDetailFile');
+            if (fileSel && currentFile) fileSel.value = currentFile;
+        }
         return;
     }
     imgContainer.style.display = 'inline-block';
@@ -1114,7 +1124,7 @@ async function loadPanel() {
     const COMPUTE_TABS = {
         'stems': { label: 'Compute Stems (Demucs)', desc: 'Deep learning source separation — may take 30+ seconds', fn: loadStems },
         'hpss': { label: 'Compute HPSS', desc: 'Harmonic-percussive separation', fn: loadHPSS },
-        'lab': { label: 'Compute Lab Features', desc: 'Spectral flatness, chromagram, contrast, ZCR', fn: loadLab },
+        'lab': { label: 'Compute Lab', desc: 'Audio feature analysis', fn: loadLab, dropdown: true },
         'lab-repet': { label: 'Compute REPET', desc: 'Repeating pattern extraction', fn: loadLabRepet },
         'lab-nmf': { label: 'Compute NMF', desc: 'Non-negative matrix factorization separation', fn: loadLabNMF },
     };
@@ -1126,7 +1136,7 @@ async function loadPanel() {
             return;
         }
         const info = COMPUTE_TABS[currentTab];
-        showComputePrompt(info.label, info.desc, info.fn);
+        showComputePrompt(info.label, info.desc, info.fn, info.dropdown);
         return;
     }
 
@@ -1226,13 +1236,17 @@ async function loadHPSS() {
 
 async function loadLab() {
     if (!currentFile) return;
-    showOverlay('Computing lab features...');
+    const v = LAB_VARIANTS.find(x => x.value === labVariant);
+    showOverlay('Computing ' + (v ? v.label : 'lab') + '...');
+    const hint = labVariant === 'timbral'
+        ? 'MFCC 0-3 &middot; Fine Texture &middot; Timbral Shift'
+        : 'Spectral Flatness &middot; Chromagram &middot; Spectral Contrast &middot; ZCR';
     document.getElementById('controlsHint').innerHTML =
-        '<kbd>Space</kbd> play/pause &nbsp; Click to seek &nbsp; Spectral Flatness &middot; Chromagram &middot; Spectral Contrast &middot; ZCR';
+        '<kbd>Space</kbd> play/pause &nbsp; Click to seek &nbsp; ' + hint;
     document.getElementById('stemStatus').style.display = 'none';
 
     try {
-        const labUrl = '/api/lab/' + encodeURIComponent(currentFile);
+        const labUrl = '/api/lab/' + encodeURIComponent(currentFile) + '?variant=' + labVariant;
         const result = await cachedFetchPNG(labUrl);
         if (!result) { showOverlay('Lab render failed'); return; }
         pixelMapping = result.pixelMapping;
@@ -1304,19 +1318,46 @@ function hideOverlay() {
     if (overlay) overlay.style.display = 'none';
 }
 
-function showComputePrompt(label, desc, fn) {
+const LAB_VARIANTS = [
+    { value: 'timbral', label: 'Timbral Shape (MFCC)', desc: 'MFCC coefficients broken out — energy, tilt, curvature, texture, and timbral shift' },
+    { value: 'misc', label: 'Misc (Chroma, Flatness, Contrast, ZCR)', desc: 'Spectral flatness, chromagram, spectral contrast, zero crossing rate' },
+];
+let labVariant = 'timbral';
+
+function showComputePrompt(label, desc, fn, dropdown) {
     let overlay = viewer.querySelector('.overlay');
     if (!overlay) {
         overlay = document.createElement('div');
         overlay.className = 'overlay';
         viewer.appendChild(overlay);
     }
+    let dropdownHtml = '';
+    if (dropdown) {
+        const options = LAB_VARIANTS.map(v =>
+            `<option value="${v.value}"${v.value === labVariant ? ' selected' : ''}>${v.label}</option>`
+        ).join('');
+        dropdownHtml = `<select id="labVariantSelect" style="
+            margin-bottom:12px; padding:8px 12px; font-size:14px;
+            background:#222; color:#eee; border:1px solid #555; border-radius:6px;
+            cursor:pointer; width:100%; max-width:400px;
+        ">${options}</select>`;
+        desc = LAB_VARIANTS.find(v => v.value === labVariant).desc;
+    }
     overlay.innerHTML = `
         <div class="compute-prompt">
+            ${dropdownHtml}
             <button class="compute-btn" id="computeBtn">${label}</button>
-            <p class="compute-desc">${desc}</p>
+            <p class="compute-desc" id="computeDesc">${desc}</p>
         </div>`;
     overlay.style.display = 'flex';
+    if (dropdown) {
+        const sel = document.getElementById('labVariantSelect');
+        sel.onchange = () => {
+            labVariant = sel.value;
+            const v = LAB_VARIANTS.find(x => x.value === labVariant);
+            document.getElementById('computeDesc').textContent = v ? v.desc : '';
+        };
+    }
     document.getElementById('computeBtn').onclick = () => {
         overlay.innerHTML = '<span class="overlay-text"></span>';
         fn();
@@ -1884,26 +1925,30 @@ function createBrightnessPopover(effectName, onChange) {
     return anchor;
 }
 let selectorState = [];  // array of Sets, one per segment depth
-let controllersList = [];  // from /api/controllers
-let selectedController = null;  // controller id or null (no LEDs)
+let outputTargets = [];  // from /api/controllers (sculptures + controllers)
+let selectedTarget = null;  // output target id or null (no LEDs)
+let selectedTargetType = null;  // 'sculpture' | 'controller' | null
 
 async function loadEffects() {
     const panel = document.getElementById('effectsPanel');
     panel.innerHTML = '<span style="color:#888;">Loading effects...</span>';
 
     try {
-        // Load controllers and effects in parallel
+        // Load output targets and effects in parallel
         const [ctrlResp, resp] = await Promise.all([
             fetch('/api/controllers'),
             fetch('/api/effects')
         ]);
-        if (ctrlResp.ok) controllersList = await ctrlResp.json();
+        if (ctrlResp.ok) outputTargets = await ctrlResp.json();
         if (!resp.ok) { panel.innerHTML = '<span style="color:#e94560;">Failed to load effects</span>'; return; }
         const data = await resp.json();
         effectsList = data.effects || [];
         palettesList = data.palettes || [];
         effectsRunning = data.running;
-        if (data.controller !== undefined) selectedController = data.controller;
+        if (data.controller !== undefined) {
+            selectedTarget = data.controller;
+            selectedTargetType = data.controller_type || null;
+        }
         if (selectorState.length === 0) {
             const maxSegs = Math.max(...effectsList.map(e => e.name.split('_').length));
             selectorState = Array.from({length: maxSegs}, () => new Set());
@@ -1987,62 +2032,29 @@ function buildSelector(panel) {
     panel.appendChild(container);
 }
 
-function buildEffectReference(container) {
-    const EFFECT_REF_DATA = [
-        ['Impulse', 'abs-integral 150ms', '0.30, 250ms cd', 'snap-on, decay 0.85', '\u2014', 'yes'],
-        ['Impulse Glow', 'abs-integral 150ms', 'proportional', 'atk 0.6, decay 0.85', '\u2014', 'yes'],
-        ['Impulse Predict', 'abs-integral 150ms', '0.30, 250ms cd', 'snap-on, decay 0.85', 'autocorr 5s', 'yes'],
-        ['Impulse Downbeat', 'abs-integral 150ms', '0.30, 200ms cd', 'full/30% ticks', '\u2014', 'yes'],
-        ['Impulse Breathe', 'abs-integral 150ms', 'proportional', 'symmetric 0.74', '\u2014', 'yes'],
-        ['Impulse Sections', 'abs-integral 150ms', 'proportional', 'atk 0.6, decay 0.85', '\u2014', 'yes'],
-        ['Impulse Meter', 'abs-integral 150ms', 'proportional', 'atk 0.6, decay 0.85', '\u2014', 'yes'],
-        ['Bass Pulse', 'bass flux 20-250Hz', '0.55, 180ms cd', 'snap-on, decay 0.82', '\u2014', 'yes'],
-        ['Tempo Pulse', 'RMS + autocorr', 'oscillator', 'raised cosine', 'autocorr 30s', 'yes'],
-        ['RMS Meter', 'RMS raw', 'proportional', 'peak decay 0.9998', '\u2014', 'yes'],
-        ['LongInt Sections', '80% long RMS + 20% bass', 'proportional', '10s rolling avg', '\u2014', 'yes'],
-        ['Impulse Snake', 'abs-int + predict', '0.30', 'traveling pulse', 'autocorr 5s', 'no'],
-        ['Impulse Bands', '3-band abs-integral', 'per-band 0.30', 'Gaussian \u03c3=3\u21928', '\u2014', 'no'],
-        ['Band Prop', '3-band abs-integral', 'proportional', 'per-band a/d', '\u2014', 'no'],
-        ['Band Sparkles', '5-band FFT', 'proportional', '5s rolling int', '\u2014', 'no'],
-        ['Band Tempo Sparkles', 'abs-int + 5-band', '0.30', 'sparkle fade', 'autocorr 5s', 'no'],
-        ['Three Voices', 'streaming HPSS', 'proportional', 'per-voice', '\u2014', 'no'],
-        ['Basic Sparkles', 'none (visual)', '\u2014', 'random twinkle', '\u2014', 'no'],
-    ];
-    const COLS = ['Effect', 'Signal Type', 'Threshold', 'Envelope', 'Tempo', 'Palette?'];
+// Reference data keyed by registry name: [signal, threshold, envelope, tempo]
+const EFFECT_REF = {
+    'impulse':           ['abs-integral 150ms', '0.30, 250ms cd',  'snap-on, decay 0.85', '\u2014'],
+    'impulse_glow':      ['abs-integral 150ms', 'proportional',    'atk 0.6, decay 0.85', '\u2014'],
+    'impulse_predict':   ['abs-integral 150ms', '0.30, 250ms cd',  'snap-on, decay 0.85', 'autocorr 5s'],
+    'impulse_downbeat':  ['abs-integral 150ms', '0.30, 200ms cd',  'full/30% ticks',      '\u2014'],
+    'impulse_breathe':   ['abs-integral 150ms', 'proportional',    'symmetric 0.74',      '\u2014'],
+    'impulse_sections':  ['abs-integral 150ms', 'proportional',    'atk 0.6, decay 0.85', '\u2014'],
+    'impulse_meter':     ['abs-integral 150ms', 'proportional',    'atk 0.6, decay 0.85', '\u2014'],
+    'bass_pulse':        ['bass flux 20-250Hz', '0.55, 180ms cd',  'snap-on, decay 0.82', '\u2014'],
+    'tempo_pulse':       ['RMS + autocorr',     'oscillator',      'raised cosine',       'autocorr 30s'],
+    'rms_meter':         ['RMS raw',            'proportional',    'peak decay 0.9998',   '\u2014'],
+    'longint_sections':  ['80% long RMS + 20% bass', 'proportional', '10s rolling avg',  '\u2014'],
+    'impulse_snake':     ['abs-int + predict',  '0.30',            'traveling pulse',     'autocorr 5s'],
+    'impulse_bands':     ['3-band abs-integral','per-band 0.30',   'Gaussian \u03c3=3\u21928', '\u2014'],
+    'band_prop':         ['3-band abs-integral','proportional',    'per-band a/d',        '\u2014'],
+    'band_sparkles':     ['5-band FFT',         'proportional',    '5s rolling int',      '\u2014'],
+    'band_tempo_sparkles': ['abs-int + 5-band', '0.30',            'sparkle fade',        'autocorr 5s'],
+    'three_voices':      ['streaming HPSS',     'proportional',    'per-voice',           '\u2014'],
+    'basic_sparkles':    ['none (visual)',       '\u2014',          'random twinkle',      '\u2014'],
+};
 
-    const toggle = document.createElement('button');
-    toggle.className = 'effect-ref-toggle';
-    toggle.innerHTML = '<span class="arrow">\u25b6</span> Effect Reference';
-    container.appendChild(toggle);
-
-    const wrap = document.createElement('div');
-    wrap.className = 'effect-ref-wrap';
-
-    const table = document.createElement('table');
-    table.className = 'effect-ref-table';
-    const thead = document.createElement('thead');
-    const hr = document.createElement('tr');
-    COLS.forEach(c => { const th = document.createElement('th'); th.textContent = c; hr.appendChild(th); });
-    thead.appendChild(hr);
-    table.appendChild(thead);
-
-    const tbody = document.createElement('tbody');
-    EFFECT_REF_DATA.forEach(row => {
-        const tr = document.createElement('tr');
-        row.forEach(cell => { const td = document.createElement('td'); td.textContent = cell; tr.appendChild(td); });
-        tbody.appendChild(tr);
-    });
-    table.appendChild(tbody);
-    wrap.appendChild(table);
-    container.appendChild(wrap);
-
-    toggle.addEventListener('click', () => {
-        toggle.classList.toggle('open');
-        wrap.classList.toggle('open');
-    });
-}
-
-// ── Feature Sparklines ──────────────────────────────────────────
+// ── Feature colors/labels (used by analyze sparklines) ──────────
 
 const FEATURE_COLORS = {
     abs_integral: '#e94560',
@@ -2056,139 +2068,6 @@ const FEATURE_LABELS = {
     centroid: 'Centroid',
     autocorr_conf: 'Autocorr',
 };
-const FEATURE_KEYS = ['abs_integral', 'rms', 'centroid', 'autocorr_conf'];
-const SPARKLINE_POINTS = 800;
-
-let featureEventSource = null;
-let featureBufs = {};   // key → Float32Array ring buffer
-let featureBufPos = 0;
-let featureCanvases = {};
-let featureValEls = {};
-let featureAnimId = null;
-
-function initFeatureBufs() {
-    featureBufPos = 0;
-    featureBufs = {};
-    FEATURE_KEYS.forEach(k => { featureBufs[k] = new Float32Array(SPARKLINE_POINTS); });
-}
-
-function pushFeatures(feats) {
-    const idx = featureBufPos % SPARKLINE_POINTS;
-    FEATURE_KEYS.forEach(k => { featureBufs[k][idx] = feats[k] || 0; });
-    featureBufPos++;
-}
-
-function drawSparkline(canvas, buf, pos, color) {
-    const ctx = canvas.getContext('2d');
-    const dpr = window.devicePixelRatio || 1;
-    const w = canvas.clientWidth;
-    const h = canvas.clientHeight;
-    if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
-        canvas.width = w * dpr;
-        canvas.height = h * dpr;
-    }
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-
-    const n = Math.min(pos, SPARKLINE_POINTS);
-    if (n < 2) return;
-
-    ctx.beginPath();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.2;
-    for (let i = 0; i < n; i++) {
-        const idx = (pos - n + i) % SPARKLINE_POINTS;
-        const x = (i / (SPARKLINE_POINTS - 1)) * w;
-        const y = h - buf[idx < 0 ? idx + SPARKLINE_POINTS : idx] * h;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-}
-
-function drawAllSparklines() {
-    FEATURE_KEYS.forEach(k => {
-        if (featureCanvases[k]) {
-            drawSparkline(featureCanvases[k], featureBufs[k], featureBufPos, FEATURE_COLORS[k]);
-            if (featureValEls[k]) {
-                const idx = (featureBufPos - 1) % SPARKLINE_POINTS;
-                featureValEls[k].textContent = (featureBufs[k][idx < 0 ? 0 : idx] || 0).toFixed(2);
-            }
-        }
-    });
-    featureAnimId = requestAnimationFrame(drawAllSparklines);
-}
-
-function startFeatureStream() {
-    if (featureEventSource) return;
-    initFeatureBufs();
-    featureEventSource = new EventSource('/api/features/stream');
-    featureEventSource.onmessage = (e) => {
-        try { pushFeatures(JSON.parse(e.data)); } catch {}
-    };
-    featureEventSource.onerror = () => { stopFeatureStream(); };
-    if (!featureAnimId) featureAnimId = requestAnimationFrame(drawAllSparklines);
-}
-
-function stopFeatureStream() {
-    if (featureEventSource) { featureEventSource.close(); featureEventSource = null; }
-    if (featureAnimId) { cancelAnimationFrame(featureAnimId); featureAnimId = null; }
-}
-
-function buildFeaturesPanel(container) {
-    const panel = document.createElement('div');
-    panel.className = 'features-panel';
-
-    const header = document.createElement('div');
-    header.className = 'features-header';
-    const toggleBtn = document.createElement('button');
-    toggleBtn.textContent = featureEventSource ? 'Stop Live' : 'Live Features';
-    if (featureEventSource) toggleBtn.classList.add('active');
-    toggleBtn.addEventListener('click', () => {
-        if (featureEventSource) {
-            stopFeatureStream();
-            toggleBtn.textContent = 'Live Features';
-            toggleBtn.classList.remove('active');
-        } else {
-            startFeatureStream();
-            toggleBtn.textContent = 'Stop Live';
-            toggleBtn.classList.add('active');
-        }
-    });
-    header.appendChild(toggleBtn);
-    const hint = document.createElement('span');
-    hint.textContent = 'Real-time audio features via BlackHole';
-    header.appendChild(hint);
-    panel.appendChild(header);
-
-    featureCanvases = {};
-    featureValEls = {};
-    FEATURE_KEYS.forEach(k => {
-        const row = document.createElement('div');
-        row.className = 'feature-row';
-        const label = document.createElement('span');
-        label.className = 'feature-label';
-        label.textContent = FEATURE_LABELS[k];
-        row.appendChild(label);
-        const canvas = document.createElement('canvas');
-        featureCanvases[k] = canvas;
-        row.appendChild(canvas);
-        const val = document.createElement('span');
-        val.className = 'feature-val';
-        val.textContent = '0.00';
-        featureValEls[k] = val;
-        row.appendChild(val);
-        panel.appendChild(row);
-    });
-
-    container.appendChild(panel);
-
-    // If already streaming, restart animation loop with new canvases
-    if (featureEventSource && !featureAnimId) {
-        featureAnimId = requestAnimationFrame(drawAllSparklines);
-    }
-}
-
 function buildControllerBar(panel) {
     const bar = document.createElement('div');
     bar.className = 'controller-bar';
@@ -2204,20 +2083,37 @@ function buildControllerBar(panel) {
     noLeds.textContent = 'No LEDs (terminal only)';
     select.appendChild(noLeds);
 
-    controllersList.forEach(c => {
+    outputTargets.forEach(t => {
         const opt = document.createElement('option');
-        opt.value = c.id;
-        const status = c.port ? c.port : 'disconnected';
-        opt.textContent = c.name + ' (' + c.leds + ' LEDs) \u2014 ' + status;
-        if (!c.port) opt.disabled = true;
-        if (c.id === selectedController) opt.selected = true;
+        opt.value = t.id;
+        opt.dataset.type = t.type;
+        const status = t.port ? t.port : 'disconnected';
+        // Show: "Name (N LEDs) — Controller Name" or "Name (N LEDs) — status"
+        const suffix = t.type === 'sculpture' ? ' \u2014 ' + t.controller_name : '';
+        opt.textContent = t.name + ' (' + t.leds + ' LEDs)' + suffix + ' \u2014 ' + status;
+        if (!t.port) opt.disabled = true;
+        if (t.id === selectedTarget) opt.selected = true;
         select.appendChild(opt);
     });
 
-    if (!selectedController) noLeds.selected = true;
+    if (!selectedTarget) noLeds.selected = true;
 
     select.addEventListener('change', () => {
-        selectedController = select.value || null;
+        const opt = select.selectedOptions[0];
+        selectedTarget = select.value || null;
+        selectedTargetType = opt && opt.dataset.type || null;
+        // Persist selection
+        const body = {};
+        if (selectedTargetType === 'sculpture') {
+            body.sculpture = selectedTarget;
+        } else if (selectedTarget) {
+            body.controller = selectedTarget;
+        }
+        fetch('/api/effects/controller', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        }).catch(() => {});
     });
 
     bar.appendChild(select);
@@ -2231,25 +2127,51 @@ function renderEffectsCards() {
         return;
     }
     panel.innerHTML = '';
-    buildFeaturesPanel(panel);
     const listWrap = document.createElement('div');
     listWrap.className = 'effects-list';
     buildControllerBar(listWrap);
     buildSelector(listWrap);
-    const filtered = getFilteredEffects();
-    filtered.forEach((eff, idx) => {
-        const card = document.createElement('div');
-        card.className = 'effect-card' + (eff.name === effectsRunning ? ' running' : '');
-        card.dataset.name = eff.name;
 
-        // Drag handle — only this element initiates drag
+    const REF_COLS = ['Signal', 'Threshold', 'Envelope', 'Tempo'];
+    const wrap = document.createElement('div');
+    wrap.className = 'effect-ref-wrap';
+
+    const table = document.createElement('table');
+    table.className = 'effect-ref-table';
+
+    const thead = document.createElement('thead');
+    const hr = document.createElement('tr');
+    // Controls columns: drag, name, controls | separator | reference data
+    ['', 'Effect', '', '', ...REF_COLS].forEach((c, i) => {
+        const th = document.createElement('th');
+        th.textContent = c;
+        if (i === 3) th.className = 'ref-separator';
+        hr.appendChild(th);
+    });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    const filtered = getFilteredEffects();
+
+    filtered.forEach(eff => {
+        const tr = document.createElement('tr');
+        tr.className = eff.name === effectsRunning ? 'running' : '';
+        tr.dataset.name = eff.name;
+
+        // Drag handle
+        const dragTd = document.createElement('td');
+        dragTd.className = 'effect-drag-cell';
         const drag = document.createElement('span');
         drag.className = 'effect-drag';
         drag.textContent = '\u2261';
-        drag.addEventListener('mousedown', () => { card.draggable = true; });
-        card.appendChild(drag);
+        drag.addEventListener('mousedown', () => { tr.draggable = true; });
+        dragTd.appendChild(drag);
+        tr.appendChild(dragTd);
 
-        // Name (clickable for detail view) + pencil rename
+        // Name cell (clickable + pencil rename)
+        const nameTd = document.createElement('td');
+        nameTd.className = 'effect-name-cell';
         const nameWrap = document.createElement('span');
         nameWrap.className = 'effect-name-wrap';
         const nameEl = document.createElement('span');
@@ -2300,15 +2222,28 @@ function renderEffectsCards() {
             input.addEventListener('blur', save);
         });
         nameWrap.appendChild(pencil);
-        card.appendChild(nameWrap);
+        nameTd.appendChild(nameWrap);
+        tr.appendChild(nameTd);
 
-        // Palette + Brightness popovers (signal effects only)
+        // Controls cell: palette, brightness, stars, start/stop — right next to name
+        const ctrlTd = document.createElement('td');
+        ctrlTd.className = 'effect-controls-cell';
+
+        const btn = document.createElement('button');
+        btn.className = 'effect-toggle' + (eff.name === effectsRunning ? ' stop' : '');
+        btn.textContent = eff.name === effectsRunning ? 'Stop' : 'Start';
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (eff.name === effectsRunning) stopEffect();
+            else startEffect(eff.name);
+        });
+        ctrlTd.appendChild(btn);
+
         if (eff.is_signal && palettesList.length > 0) {
-            card.appendChild(createPalettePopover(eff.name, eff.default_palette));
+            ctrlTd.appendChild(createPalettePopover(eff.name, eff.default_palette));
         }
-        card.appendChild(createBrightnessPopover(eff.name));
+        ctrlTd.appendChild(createBrightnessPopover(eff.name));
 
-        // Stars
         const stars = document.createElement('span');
         stars.className = 'effect-stars';
         for (let s = 1; s <= 5; s++) {
@@ -2318,35 +2253,39 @@ function renderEffectsCards() {
             star.addEventListener('click', (e) => { e.stopPropagation(); rateEffect(eff.name, s); });
             stars.appendChild(star);
         }
-        card.appendChild(stars);
+        ctrlTd.appendChild(stars);
+        tr.appendChild(ctrlTd);
 
-        // Start/Stop button
-        const btn = document.createElement('button');
-        btn.className = 'effect-toggle' + (eff.name === effectsRunning ? ' stop' : '');
-        btn.textContent = eff.name === effectsRunning ? 'Stop' : 'Start';
-        btn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            if (eff.name === effectsRunning) stopEffect();
-            else startEffect(eff.name);
+        // Separator cell
+        const sepTd = document.createElement('td');
+        sepTd.className = 'ref-separator';
+        tr.appendChild(sepTd);
+
+        // Reference data columns
+        const ref = EFFECT_REF[eff.name];
+        REF_COLS.forEach((_, ci) => {
+            const td = document.createElement('td');
+            td.className = 'ref-data';
+            td.textContent = ref ? ref[ci] : '\u2014';
+            tr.appendChild(td);
         });
-        card.appendChild(btn);
 
-        // Drag events (use name not index, since list may be filtered)
-        card.addEventListener('dragstart', (e) => {
-            card.classList.add('dragging');
+        // Drag events on the row
+        tr.addEventListener('dragstart', (e) => {
+            tr.classList.add('dragging');
             e.dataTransfer.effectAllowed = 'move';
             e.dataTransfer.setData('text/plain', eff.name);
         });
-        card.addEventListener('dragend', () => { card.classList.remove('dragging'); card.draggable = false; });
-        card.addEventListener('dragover', (e) => {
+        tr.addEventListener('dragend', () => { tr.classList.remove('dragging'); tr.draggable = false; });
+        tr.addEventListener('dragover', (e) => {
             e.preventDefault();
             e.dataTransfer.dropEffect = 'move';
-            card.classList.add('drag-over');
+            tr.classList.add('drag-over');
         });
-        card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
-        card.addEventListener('drop', (e) => {
+        tr.addEventListener('dragleave', () => tr.classList.remove('drag-over'));
+        tr.addEventListener('drop', (e) => {
             e.preventDefault();
-            card.classList.remove('drag-over');
+            tr.classList.remove('drag-over');
             const fromName = e.dataTransfer.getData('text/plain');
             const toName = eff.name;
             if (fromName !== toName) {
@@ -2361,20 +2300,31 @@ function renderEffectsCards() {
             }
         });
 
-        listWrap.appendChild(card);
+        tbody.appendChild(tr);
     });
+
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    listWrap.appendChild(wrap);
     panel.appendChild(listWrap);
-    buildEffectReference(panel);
 }
 
 async function startEffect(name) {
     try {
         const body = {};
-        if (selectedController) body.controller = selectedController;
+        if (selectedTarget) {
+            if (selectedTargetType === 'sculpture') {
+                body.sculpture = selectedTarget;
+            } else {
+                body.controller = selectedTarget;
+            }
+        }
         const eff = effectsList.find(e => e.name === name);
         if (eff && eff.is_signal) {
-            body.palette =getSelectedPalette(name, eff.default_palette);
+            body.palette = getSelectedPalette(name, eff.default_palette);
         }
+        const range = getBrightnessRange(name);
+        body.brightness = range[1] / 100;
         const opts = {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -2427,8 +2377,23 @@ function startEffectsPoll() {
             const data = await resp.json();
             const newRunning = data.running;
             if (newRunning !== effectsRunning) {
+                const prev = effectsRunning;
                 effectsRunning = newRunning;
-                renderEffectsCards();
+                // Update running indicator on rows without full rebuild
+                const rows = document.querySelectorAll('.effect-ref-table tbody tr[data-name]');
+                if (rows.length > 0) {
+                    rows.forEach(c => {
+                        const n = c.dataset.name;
+                        c.classList.toggle('running', n === newRunning);
+                        const toggle = c.querySelector('.effect-toggle');
+                        if (toggle) {
+                            toggle.classList.toggle('stop', n === newRunning);
+                            toggle.textContent = (n === newRunning) ? 'Stop' : 'Start';
+                        }
+                    });
+                } else {
+                    renderEffectsCards();
+                }
             }
         } catch (e) {}
     }, 2000);
@@ -2586,40 +2551,6 @@ function renderEffectViz(container, data) {
         for (let i = 0; i < raw.length; i++) ledogramBytes[i] = raw.charCodeAt(i);
     }
 
-    // Waveform panel (fetched from server)
-    const waveWrap = document.createElement('div');
-    waveWrap.className = 'effect-viz-waveform';
-    waveWrap.style.height = '60px';
-    waveWrap.style.marginBottom = '2px';
-    container.appendChild(waveWrap);
-    const fileSel = document.getElementById('effectDetailFile');
-    if (fileSel && fileSel.value) {
-        fetch('/api/render-panel/' + encodeURIComponent(fileSel.value) + '?panel=waveform')
-            .then(resp => {
-                if (!resp.ok) throw new Error();
-                const xL = parseFloat(resp.headers.get('X-Left-Px') || '0');
-                const xR = parseFloat(resp.headers.get('X-Right-Px') || '1');
-                const pW = parseFloat(resp.headers.get('X-Png-Width') || '1');
-                const dur = parseFloat(resp.headers.get('X-Duration') || '1');
-                return resp.blob().then(blob => ({ blob, xL, xR, pW, dur }));
-            })
-            .then(({ blob, xL, xR, pW, dur }) => {
-                const img = document.createElement('img');
-                img.src = URL.createObjectURL(blob);
-                img.style.cssText = 'width:100%; height:100%; object-fit:fill; display:block; cursor:crosshair;';
-                img.addEventListener('click', (e) => {
-                    const rect = img.getBoundingClientRect();
-                    const scale = pW / rect.width;
-                    const px = (e.clientX - rect.left) * scale;
-                    const frac = (px - xL) / (xR - xL);
-                    audio.currentTime = Math.max(0, Math.min(frac * dur, dur));
-                });
-                waveWrap.innerHTML = '';
-                waveWrap.appendChild(img);
-            })
-            .catch(() => {});
-    }
-
     // LED-ogram canvas
     const ledCanvas = document.createElement('canvas');
     const ledH = Math.min(Math.max(data.num_leds, 60), 300);
@@ -2681,6 +2612,12 @@ function renderEffectViz(container, data) {
         { id: 'spectrogram', label: 'Spectrogram' },
         { id: 'bands', label: 'Band Energy' },
         { id: 'rms-derivative', label: 'RMS Derivative' },
+        { id: 'centroid', label: 'Center of Mass of Frequency' },
+        { id: 'centroid-derivative', label: 'Centroid Derivative' },
+        { id: 'band-derivative', label: 'Band Derivative' },
+        { id: 'mfcc', label: 'Timbral Shape (MFCC)' },
+        { id: 'novelty', label: 'Novelty' },
+        { id: 'band-deviation', label: 'Band Deviation' },
         { id: 'annotations', label: 'Annotations' },
     ];
     const panelRow = document.createElement('div');
@@ -2754,17 +2691,21 @@ async function toggleAnalysisPanel(chip, panelId, panelContainer, data) {
         const pngWidth = parseFloat(resp.headers.get('X-Png-Width') || '1');
         const duration = parseFloat(resp.headers.get('X-Duration') || '1');
 
+        const dataWidth = xRight - xLeft;
         const img = document.createElement('img');
         img.src = URL.createObjectURL(blob);
-        img.style.width = '100%';
         img.style.display = 'block';
         img.style.cursor = 'crosshair';
+        // Scale image so the data area fills the wrapper width, hide axis margins
+        img.style.width = (pngWidth / dataWidth * 100) + '%';
+        img.style.marginLeft = -(xLeft / dataWidth * 100) + '%';
 
-        img.addEventListener('click', (e) => {
-            const rect = img.getBoundingClientRect();
-            const scale = pngWidth / rect.width;
-            const px = (e.clientX - rect.left) * scale;
-            const frac = (px - xLeft) / (xRight - xLeft);
+        wrapper.style.overflow = 'hidden';
+
+        // Click anywhere in the visible (cropped) area maps directly to time
+        wrapper.addEventListener('click', (e) => {
+            const rect = wrapper.getBoundingClientRect();
+            const frac = (e.clientX - rect.left) / rect.width;
             audio.currentTime = Math.max(0, Math.min(frac * duration, duration));
         });
 

@@ -1,4 +1,4 @@
 [
-  {"id": "tree", "name": "LED Tree", "vid": "10c4", "pid": "ea60", "leds": 197},
-  {"id": "strip", "name": "Strip 150", "vid": "1a86", "pid": "7523", "leds": 150}
+  {"id": "sculpture", "name": "Sculpture COB", "vid": "1a86", "pid": "7523", "leds": 80},
+  {"id": "tree", "name": "LED Tree", "vid": "10c4", "pid": "ea60", "leds": 197}
 ]

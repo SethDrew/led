@@ -89,3 +89,8 @@
   id: welcome_elect
   recorded: 2026-02-13 21:35
   sample_rate: 44100
+- duration_seconds: 139.8
+  filename: fourtet_lostvillage_screech.wav
+  id: fourtet_lostvillage_screech
+  recorded: 2026-02-15 15:58
+  sample_rate: 44100

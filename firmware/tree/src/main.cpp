@@ -24,6 +24,16 @@
 // Global tree instance
 Tree tree;
 
+// Standalone sculpture on pin 12 (not part of tree topology)
+#ifndef SCULPTURE_PIN
+#define SCULPTURE_PIN 13
+#endif
+#ifndef SCULPTURE_LEDS
+#define SCULPTURE_LEDS 120  // 5m FCOB WS2811: 24 ICs/m × 5m = 120 addressable pixels (36 LEDs per IC)
+#endif
+// WS2811 FCOB 12V strip
+Adafruit_NeoPixel sculpture(SCULPTURE_LEDS, SCULPTURE_PIN, NEO_GRB + NEO_KHZ800);
+
 // ===== ANIMATIONS =====
 
 // Animation 1: Classic green wave
@@ -85,6 +95,18 @@ void setup() {
   Serial.println(tree.getNumLEDs());
 
   tree.begin();
+
+  // Sculpture: solid red on pin 12
+  sculpture.begin();
+  sculpture.setBrightness(8);  // Low brightness for testing
+  for (int i = 0; i < SCULPTURE_LEDS; i++) {
+    sculpture.setPixelColor(i, 255, 0, 0);
+  }
+  sculpture.show();
+  Serial.print("Sculpture on pin ");
+  Serial.print(SCULPTURE_PIN);
+  Serial.println(": all red");
+
   Serial.println("Ready!");
 }
 

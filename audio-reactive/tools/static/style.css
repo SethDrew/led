@@ -80,7 +80,7 @@ body {
 
 .viewer {
     flex: 1; display: flex; justify-content: center; align-items: flex-start;
-    overflow: auto; padding: 12px; position: relative;
+    overflow: auto; padding: 12px; position: relative; min-height: 0;
 }
 .img-container {
     position: relative; display: inline-block; max-width: 100%;
@@ -313,23 +313,13 @@ body {
     width: 100%; overflow-y: auto; flex: 1; align-self: stretch;
 }
 .effects-panel.visible { display: flex; }
-.effects-list { max-width: 640px; margin: 0 auto; }
-.effect-viz-waveform { background: #0a0f1e; border-radius: 4px; overflow: hidden; }
-.effect-card {
-    display: flex; align-items: center; gap: 12px; padding: 10px 14px;
-    background: #16213e; border: 1px solid #333; border-radius: 6px;
-    transition: border-color 0.15s, background 0.15s;
-}
-.effect-card:hover { border-color: #555; }
-.effect-card.dragging { opacity: 0.4; }
-.effect-card.drag-over { border-color: #e94560; background: #1a2a4e; }
-.effect-card.running { border-color: #e94560; }
+.effects-list { max-width: 1100px; margin: 0 auto; width: 100%; }
 .effect-drag {
     color: #555; font-size: 16px; cursor: grab; user-select: none;
     line-height: 1;
 }
 .effect-name-wrap {
-    flex: 1; display: flex; align-items: center; gap: 4px; min-width: 0;
+    display: inline-flex; align-items: center; gap: 4px; min-width: 0;
 }
 .effect-name {
     font-size: 14px; font-weight: 500; color: #e0e0e0;
@@ -516,19 +506,9 @@ body {
 .selector-count { color: #555; font-size: 11px; margin-left: auto; }
 .effect-name { cursor: pointer; }
 .effect-name:hover { text-decoration: underline; text-decoration-color: #555; text-underline-offset: 3px; }
-.effect-ref-toggle {
-    background: none; border: 1px solid #333; border-radius: 4px; color: #aaa;
-    padding: 6px 14px; cursor: pointer; font-size: 13px; width: 100%;
-    text-align: left; transition: border-color 0.15s, color 0.15s;
-}
-.effect-ref-toggle:hover { border-color: #e94560; color: #e0e0e0; }
-.effect-ref-toggle .arrow { display: inline-block; transition: transform 0.2s; margin-right: 6px; }
-.effect-ref-toggle.open .arrow { transform: rotate(90deg); }
 .effect-ref-wrap {
-    display: none; overflow-x: auto; margin-top: 8px;
-    border: 1px solid #333; border-radius: 6px; background: #0f1a2e;
+    overflow-x: auto; border: 1px solid #333; border-radius: 6px; background: #0f1a2e;
 }
-.effect-ref-wrap.open { display: block; }
 .effect-ref-table {
     width: 100%; border-collapse: collapse; font-size: 12px; white-space: nowrap;
 }
@@ -541,21 +521,20 @@ body {
     padding: 5px 10px; border-bottom: 1px solid #1a2a4e; color: #ccc;
 }
 .effect-ref-table tr:hover td { background: #1a2a4e; }
-.effect-ref-table td:first-child { color: #e0e0e0; font-weight: 500; }
-.features-panel {
-    border: 1px solid #333; border-radius: 6px; background: #0f1a2e;
-    padding: 12px; margin-bottom: 8px;
+.effect-ref-table tr.running td { background: rgba(233,69,96,0.08); }
+.effect-ref-table tr.running td:nth-child(2) { color: #e94560; }
+.effect-ref-table tr.dragging { opacity: 0.4; }
+.effect-ref-table tr.drag-over td { background: #1a2a4e; border-bottom-color: #e94560; }
+.effect-drag-cell { width: 20px; }
+.effect-name-cell { white-space: nowrap; font-weight: 500; color: #e0e0e0; }
+.effect-controls-cell {
+    display: flex; align-items: center; gap: 6px; white-space: nowrap;
 }
-.features-panel .features-header {
-    display: flex; align-items: center; gap: 10px; margin-bottom: 10px;
+.ref-separator {
+    width: 1px; padding: 0 !important;
+    background: #333;
 }
-.features-panel .features-header button {
-    background: #16213e; color: #aaa; border: 1px solid #333; border-radius: 4px;
-    padding: 5px 14px; cursor: pointer; font-size: 13px; transition: border-color 0.15s;
-}
-.features-panel .features-header button:hover { border-color: #e94560; color: #e0e0e0; }
-.features-panel .features-header button.active { border-color: #e94560; color: #e94560; }
-.features-panel .features-header span { color: #555; font-size: 12px; }
+td.ref-data { color: #777; font-size: 11px; }
 .feature-row {
     display: flex; align-items: center; gap: 8px; height: 28px;
 }

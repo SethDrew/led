@@ -18,7 +18,12 @@
 #define NUM_PIXELS 150
 #endif
 
-Adafruit_NeoPixel strip(NUM_PIXELS, LED_PIN, NEO_GRB + NEO_KHZ800);
+// Color order: set via build flag (-DCOLOR_ORDER=NEO_GRB or NEO_RGB)
+#ifndef COLOR_ORDER
+#define COLOR_ORDER NEO_GRB
+#endif
+
+Adafruit_NeoPixel strip(NUM_PIXELS, LED_PIN, COLOR_ORDER + NEO_KHZ800);
 
 #ifdef WHITE_TEST
 // WHITE TEST MODE - 10% brightness = 26 out of 255

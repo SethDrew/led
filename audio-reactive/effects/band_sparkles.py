@@ -33,7 +33,7 @@ BANDS = [
 BAND_COLORS = np.array([
     [255, 23, 68],     # Sub-bass: #FF1744
     [255, 145, 0],     # Bass:     #FF9100
-    [255, 234, 0],     # Mids:     #FFEA00
+    [255, 150, 0],     # Mids:     warm yellow (tuned for COB)
     [0, 230, 118],     # High-mids:#00E676
     [0, 176, 255],     # Treble:   #00B0FF
 ], dtype=np.float32)

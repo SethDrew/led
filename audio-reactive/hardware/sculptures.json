@@ -15,7 +15,7 @@
     "branches": [
       {"name": "up1", "start": 0, "count": 42, "reverse": false},
       {"name": "down", "start": 42, "count": 20, "reverse": true},
-      {"name": "up2", "start": 62, "count": 11, "reverse": false}
+      {"name": "up2", "start": 62, "count": 11, "reverse": false, "gamma": 0.55}
     ]
   },
   {

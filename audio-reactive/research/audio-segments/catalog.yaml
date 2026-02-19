@@ -94,3 +94,18 @@
   id: fourtet_lostvillage_screech
   recorded: 2026-02-15 15:58
   sample_rate: 44100
+- duration_seconds: 85.8
+  filename: talking_audio_sample_drop.wav
+  id: talking_audio_sample_drop
+  recorded: 2026-02-18 12:20
+  sample_rate: 44100
+- duration_seconds: 17.3
+  filename: fourtet_only_screech.wav
+  id: fourtet_only_screech
+  recorded: 2026-02-18 16:21
+  sample_rate: 44100
+- duration_seconds: 213.8
+  filename: jcole.wav
+  id: jcole
+  recorded: 2026-02-19 14:19
+  sample_rate: 44100

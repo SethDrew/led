@@ -136,7 +136,9 @@ def apply_topology(logical_frame, sculpture_def):
             count = branch['count']
             start = branch['start']
             for j in range(count):
-                height = j / max(count - 1, 1)  # 0=base, 1=peak
+                t = j / max(count - 1, 1)  # 0=base, 1=peak
+                gamma = branch.get('gamma', 1.0)
+                height = t ** gamma  # gamma<1: fast rise at base, slower at top
                 logical_idx = round(height * max_idx)
                 phys = start + (count - 1 - j) if branch.get('reverse') else start + j
                 physical[phys] = logical_frame[logical_idx]

@@ -304,11 +304,16 @@ def _save_effect_prefs(prefs):
 
 
 def _get_effects_list():
-    """Get effects list merged with preferences (ratings, order)."""
+    """Get effects list merged with preferences (ratings, order).
+
+    Returns (active_effects, deprecated_effects, palettes).
+    Deprecated effects are separated from active ones.
+    """
     entries, palettes = _discover_effects()
     prefs = _load_effect_prefs()
 
     effects = []
+    deprecated = []
     for entry in entries:
         name = entry['name'] if isinstance(entry, dict) else entry
         desc = entry.get('description', '') if isinstance(entry, dict) else ''
@@ -321,14 +326,22 @@ def _get_effects_list():
         }
         if p.get('display_name'):
             e['display_name'] = p['display_name']
+        if p.get('notes'):
+            e['notes'] = p['notes']
         if isinstance(entry, dict):
             e['is_signal'] = entry.get('is_signal', False)
             if entry.get('default_palette'):
                 e['default_palette'] = entry['default_palette']
-        effects.append(e)
+        if p.get('deprecated'):
+            e['deprecated'] = True
+            e['deprecated_reason'] = p.get('deprecated_reason', '')
+            deprecated.append(e)
+        else:
+            effects.append(e)
 
     effects.sort(key=lambda e: e['order'])
-    return effects, palettes
+    deprecated.sort(key=lambda e: e['name'])
+    return effects, deprecated, palettes
 
 
 def _start_effect(name, controller_id=None, sculpture_id=None, palette_name=None,
@@ -563,9 +576,10 @@ def render_analysis(filepath, with_annotations=False, features=None):
     for line in viz.cursor_lines:
         line.remove()
 
-    # Replace title
+    # Replace title and tighten top margin (default ~0.88 wastes 12% as blank space)
     filename = Path(filepath).name
     viz.fig.suptitle(filename, fontsize=14, fontweight='bold', y=0.995)
+    viz.fig.subplots_adjust(top=0.975, bottom=0.02)
 
     # Required for Agg transform init
     viz.fig.canvas.draw()
@@ -595,9 +609,100 @@ def render_analysis(filepath, with_annotations=False, features=None):
     return png_bytes, headers
 
 
+def render_annotate(filepath):
+    """Render annotation view: waveform + spectrogram + annotation lanes only."""
+    cache_key = (filepath, 'annotate')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    from viewer import SyncedVisualizer
+
+    viz = SyncedVisualizer(filepath, panels=['waveform', 'spectrogram'])
+
+    for line in viz.cursor_lines:
+        line.remove()
+
+    filename = Path(filepath).name
+    viz.fig.suptitle(filename, fontsize=14, fontweight='bold', y=0.99)
+    viz.fig.subplots_adjust(top=0.97, bottom=0.04)
+
+    viz.fig.canvas.draw()
+
+    ax = viz.axes[0]
+    x_left = ax.transData.transform((0, 0))[0]
+    x_right = ax.transData.transform((viz.duration, 0))[0]
+
+    fig_width = viz.fig.get_figwidth() * DPI
+    fig_height = viz.fig.get_figheight() * DPI
+
+    buf = io.BytesIO()
+    viz.fig.savefig(buf, format='png', dpi=DPI, facecolor=viz.fig.get_facecolor())
+    matplotlib.pyplot.close(viz.fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(viz.duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
+
+
 ANALYSIS_PANELS = ('waveform', 'spectrogram', 'bands', 'rms-derivative',
                     'centroid', 'centroid-derivative', 'band-derivative',
-                    'mfcc', 'novelty', 'band-deviation', 'annotations')
+                    'mfcc', 'novelty', 'band-deviation', 'annotations',
+                    'band-rt', 'band-share', 'band-context-deviation',
+                    'band-rt-derivative', 'band-integral')
+
+BAND_ANALYSIS_PANELS = ('band-rt', 'band-share', 'band-context-deviation',
+                        'band-rt-derivative', 'band-integral')
+
+
+def render_band_analysis(filepath):
+    """Render band analysis view: 5 panels showing band energy through multiple lenses."""
+    cache_key = (filepath, 'band-analysis')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    from viewer import SyncedVisualizer
+
+    viz = SyncedVisualizer(filepath,
+                           panels=list(BAND_ANALYSIS_PANELS),
+                           annotations_path='/dev/null/none.yaml')
+
+    for line in viz.cursor_lines:
+        line.remove()
+
+    filename = Path(filepath).name
+    viz.fig.suptitle(filename, fontsize=14, fontweight='bold', y=0.995)
+    viz.fig.subplots_adjust(top=0.97, bottom=0.04)
+
+    viz.fig.canvas.draw()
+
+    ax = viz.axes[0]
+    x_left = ax.transData.transform((0, 0))[0]
+    x_right = ax.transData.transform((viz.duration, 0))[0]
+
+    fig_width = viz.fig.get_figwidth() * DPI
+    fig_height = viz.fig.get_figheight() * DPI
+
+    buf = io.BytesIO()
+    viz.fig.savefig(buf, format='png', dpi=DPI, facecolor=viz.fig.get_facecolor())
+    matplotlib.pyplot.close(viz.fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(viz.duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
 
 
 def render_single_panel(filepath, panel_name):
@@ -677,6 +782,7 @@ def render_stems(filepath):
 
     filename = Path(filepath).name
     viz.fig.suptitle(f'{filename} — Stems', fontsize=14, fontweight='bold', y=0.995)
+    viz.fig.subplots_adjust(top=0.975, bottom=0.02)
     viz.fig.canvas.draw()
 
     ax = viz.axes[0]
@@ -762,6 +868,7 @@ def render_hpss(filepath):
 
     filename = Path(filepath).name
     viz.fig.suptitle(f'{filename} — HPSS', fontsize=14, fontweight='bold', y=0.995)
+    viz.fig.subplots_adjust(top=0.975, bottom=0.02)
     viz.fig.canvas.draw()
 
     ax = viz.axes[0]
@@ -966,6 +1073,7 @@ def render_lab_repet(filepath):
 
     filename = Path(filepath).name
     fig.suptitle(f'{filename} — lab-REPET', fontsize=14, fontweight='bold', y=0.995)
+    fig.subplots_adjust(top=0.975, bottom=0.02)
     fig.canvas.draw()
 
     # Cursor alignment from spectrogram panels
@@ -1126,6 +1234,7 @@ def render_lab_nmf(filepath):
     filename = Path(filepath).name
     fig.suptitle(f'{filename} — lab-NMF (supervised, 4 sources)',
                  fontsize=14, fontweight='bold', y=0.995)
+    fig.subplots_adjust(top=0.975, bottom=0.02)
     fig.canvas.draw()
 
     x_left = axes[1].transData.transform((0, 0))[0]
@@ -1220,6 +1329,7 @@ def render_lab_misc(filepath):
 
     filename = Path(filepath).name
     fig.suptitle(f'{filename} — Misc Lab', fontsize=14, fontweight='bold', y=0.995)
+    fig.subplots_adjust(top=0.975, bottom=0.02)
     fig.canvas.draw()
 
     ax = ax1
@@ -1379,6 +1489,7 @@ def render_lab_timbral(filepath):
     filename = Path(filepath).name
     fig.suptitle(f'{filename} — Timbral Shape (MFCC) Lab', fontsize=14,
                  fontweight='bold', y=0.995)
+    fig.subplots_adjust(top=0.975, bottom=0.02)
     fig.canvas.draw()
 
     ax0 = fig.axes[0]
@@ -1686,6 +1797,10 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._handle_effect_reorder()
         elif path == '/api/effects/rename':
             self._handle_effect_rename()
+        elif path == '/api/effects/notes':
+            self._handle_effect_notes()
+        elif path == '/api/effects/deprecate':
+            self._handle_effect_deprecate()
         elif path == '/api/effects/analyze':
             self._handle_effect_analyze()
         elif path == '/api/effects/controller':
@@ -1775,6 +1890,48 @@ class ViewerHandler(BaseHTTPRequestHandler):
             prefs[name]['display_name'] = display_name
         else:
             prefs[name].pop('display_name', None)
+        _save_effect_prefs(prefs)
+        self._json_response({'ok': True})
+
+    def _handle_effect_notes(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        name = body.get('name', '')
+        notes = body.get('notes', '').strip()
+        if not name:
+            self.send_error(400, 'Missing effect name')
+            return
+        prefs = _load_effect_prefs()
+        if name not in prefs:
+            prefs[name] = {}
+        if notes:
+            prefs[name]['notes'] = notes
+        else:
+            prefs[name].pop('notes', None)
+        _save_effect_prefs(prefs)
+        self._json_response({'ok': True})
+
+    def _handle_effect_deprecate(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        name = body.get('name', '')
+        deprecated = body.get('deprecated', True)
+        reason = body.get('reason', '').strip()
+        if not name:
+            self.send_error(400, 'Missing effect name')
+            return
+        prefs = _load_effect_prefs()
+        if name not in prefs:
+            prefs[name] = {}
+        if deprecated:
+            prefs[name]['deprecated'] = True
+            if reason:
+                prefs[name]['deprecated_reason'] = reason
+        else:
+            prefs[name].pop('deprecated', None)
+            prefs[name].pop('deprecated_reason', None)
         _save_effect_prefs(prefs)
         self._json_response({'ok': True})
 
@@ -2175,9 +2332,15 @@ class ViewerHandler(BaseHTTPRequestHandler):
             feat_str = query.get('features', [None])[0]
             if feat_str is not None:
                 active = set(feat_str.split(',')) if feat_str else set()
-                all_feat = ('rms',)
+                all_feat = ('rms', 'events')
                 features = {n: (n in active) for n in all_feat}
             self._serve_render(rel_path, with_ann, features)
+        elif path.startswith('/api/render-annotate/'):
+            rel_path = path[len('/api/render-annotate/'):]
+            self._serve_render_annotate(rel_path)
+        elif path.startswith('/api/render-band-analysis/'):
+            rel_path = path[len('/api/render-band-analysis/'):]
+            self._serve_render_band_analysis(rel_path)
         elif path.startswith('/api/render-panel/'):
             rel_path = path[len('/api/render-panel/'):]
             panel = query.get('panel', [None])[0]
@@ -2214,7 +2377,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
             targets = _build_output_targets(_sculptures, _controllers)
             self._json_response(targets)
         elif path == '/api/effects':
-            effects, palettes = _get_effects_list()
+            effects, deprecated, palettes = _get_effects_list()
             # Return active target, or fall back to persisted preference
             prefs = _load_effect_prefs()
             target = _active_controller
@@ -2234,6 +2397,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
                     target_type = 'controller'
             self._json_response({
                 'effects': effects,
+                'deprecated': deprecated,
                 'palettes': palettes,
                 'running': _get_running_effect_name(),
                 'controller': target,
@@ -2317,6 +2481,54 @@ class ViewerHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(png_bytes)))
         self.send_header('Cache-Control', 'max-age=3600')
         # Expose custom headers to JS fetch
+        exposed = ', '.join(headers.keys())
+        self.send_header('Access-Control-Expose-Headers', exposed)
+        for k, v in headers.items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(png_bytes)
+
+    def _serve_render_annotate(self, rel_path):
+        filepath = _resolve_audio_path(rel_path)
+        if filepath is None:
+            self.send_error(404, 'File not found')
+            return
+
+        try:
+            png_bytes, headers = render_annotate(filepath)
+        except Exception as e:
+            print(f"[render-annotate] Error: {e}")
+            self.send_error(500, str(e))
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/png')
+        self.send_header('Content-Length', str(len(png_bytes)))
+        self.send_header('Cache-Control', 'max-age=3600')
+        exposed = ', '.join(headers.keys())
+        self.send_header('Access-Control-Expose-Headers', exposed)
+        for k, v in headers.items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(png_bytes)
+
+    def _serve_render_band_analysis(self, rel_path):
+        filepath = _resolve_audio_path(rel_path)
+        if filepath is None:
+            self.send_error(404, 'File not found')
+            return
+
+        try:
+            png_bytes, headers = render_band_analysis(filepath)
+        except Exception as e:
+            print(f"[render-band-analysis] Error: {e}")
+            self.send_error(500, str(e))
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/png')
+        self.send_header('Content-Length', str(len(png_bytes)))
+        self.send_header('Cache-Control', 'max-age=3600')
         exposed = ', '.join(headers.keys())
         self.send_header('Access-Control-Expose-Headers', exposed)
         for k, v in headers.items():

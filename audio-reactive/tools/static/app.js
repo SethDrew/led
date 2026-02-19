@@ -386,7 +386,7 @@ function hasStemAudio() {
 
 // ── Feature toggles (analysis/annotations tabs) ─────────────────
 
-let featureState = {rms: false};
+let featureState = {rms: false, events: false};
 
 function toggleFeature(name) {
     featureState[name] = !featureState[name];
@@ -397,16 +397,17 @@ function toggleFeature(name) {
 function updateFeatureUI() {
     const status = document.getElementById('stemStatus');
     if (currentTab !== 'analysis') return;
-    const annOpen = document.getElementById('annotationWidget').open;
     status.style.display = 'block';
     status.innerHTML =
         '<span class="stem-chip ' + (featureState.rms ? 'active' : 'muted') + '" ' +
-        'onclick="toggleFeature(\'rms\')">E:RMS overlay</span>';
-    let hints = '<kbd>Space</kbd> play/pause &nbsp;' +
+        'onclick="toggleFeature(\'rms\')">E:RMS overlay</span>' +
+        '<span class="stem-chip ' + (featureState.events ? 'active' : 'muted') + '" ' +
+        'onclick="toggleFeature(\'events\')">V:Events</span>';
+    const hints = '<kbd>Space</kbd> play/pause &nbsp;' +
         '<kbd>&larr;</kbd> <kbd>&rarr;</kbd> &plusmn;5s &nbsp;' +
         'Click to seek &nbsp;' +
-        '<kbd>E</kbd> toggle RMS overlay';
-    if (annOpen) hints += ' &nbsp;<kbd>T</kbd> tap &nbsp;<kbd>S</kbd> save';
+        '<kbd>E</kbd> toggle RMS overlay &nbsp;' +
+        '<kbd>V</kbd> toggle events';
     document.getElementById('controlsHint').innerHTML = hints;
 }
 
@@ -578,10 +579,9 @@ async function stopRecording() {
         document.getElementById('recordElapsed').textContent = '0:00.0';
         document.getElementById('recordName').value = '';
         await loadFileList();
-        selectFile(data.filename);
         currentTab = 'analysis';
         updateTabUI();
-        loadPanel();
+        await selectFile(data.filename);
     } else {
         document.getElementById('recordStatus').textContent = 'Error: ' + (data.error || 'failed');
     }
@@ -1047,9 +1047,10 @@ document.addEventListener('click', () => decompDropdown.classList.remove('open')
 async function loadPanel() {
     hideOverlay();
 
-    // Annotation widget visibility (only on analysis tab)
+    // Annotation widget visibility (only on annotate tab, always expanded)
     const annWidget = document.getElementById('annotationWidget');
-    annWidget.style.display = (currentTab === 'analysis') ? '' : 'none';
+    annWidget.style.display = (currentTab === 'annotate') ? '' : 'none';
+    if (currentTab === 'annotate') annWidget.open = true;
 
     const recordPanel = document.getElementById('recordPanel');
     const effectsPanel = document.getElementById('effectsPanel');
@@ -1129,6 +1130,51 @@ async function loadPanel() {
         'lab-nmf': { label: 'Compute NMF', desc: 'Non-negative matrix factorization separation', fn: loadLabNMF },
     };
 
+    if (currentTab === 'annotate') {
+        // Annotate tab: waveform + spectrogram + annotation overlay only
+        const hints = '<kbd>Space</kbd> play/pause &nbsp;' +
+            '<kbd>&larr;</kbd> <kbd>&rarr;</kbd> &plusmn;5s &nbsp;' +
+            'Click to seek &nbsp;' +
+            '<kbd>T</kbd> tap &nbsp;<kbd>S</kbd> save';
+        document.getElementById('controlsHint').innerHTML = hints;
+        document.getElementById('stemStatus').style.display = 'none';
+
+        const url = '/api/render-annotate/' + encodeURIComponent(currentFile);
+        showOverlay('Rendering...');
+        try {
+            const result = await cachedFetchPNG(url);
+            if (!result) { showOverlay('Render failed'); return; }
+            pixelMapping = result.pixelMapping;
+            panelImg.src = URL.createObjectURL(result.blob);
+            hideOverlay();
+            cursorLine.style.display = 'block';
+        } catch (e) {
+            showOverlay('Error: ' + e.message);
+        }
+        return;
+    }
+
+    if (currentTab === 'band-analysis') {
+        document.getElementById('controlsHint').innerHTML =
+            '<kbd>Space</kbd> play/pause &nbsp; <kbd>&larr;</kbd> <kbd>&rarr;</kbd> &plusmn;5s &nbsp; Click to seek &nbsp; ' +
+            'RT View &middot; Band Share &middot; Context Deviation &middot; RT Derivative &middot; 5s Integral';
+        document.getElementById('stemStatus').style.display = 'none';
+
+        const url = '/api/render-band-analysis/' + encodeURIComponent(currentFile);
+        showOverlay('Rendering band analysis...');
+        try {
+            const result = await cachedFetchPNG(url);
+            if (!result) { showOverlay('Render failed'); return; }
+            pixelMapping = result.pixelMapping;
+            panelImg.src = URL.createObjectURL(result.blob);
+            hideOverlay();
+            cursorLine.style.display = 'block';
+        } catch (e) {
+            showOverlay('Error: ' + e.message);
+        }
+        return;
+    }
+
     if (COMPUTE_TABS[currentTab]) {
         // Demucs requires too much RAM for the public server
         if (currentTab === 'stems' && isPublicMode) {
@@ -1141,12 +1187,10 @@ async function loadPanel() {
     }
 
     // Show feature toggle UI for analysis tab
-    const annOpen = document.getElementById('annotationWidget').open;
     updateFeatureUI();
 
     let url = '/api/render/' + encodeURIComponent(currentFile);
     const params = [];
-    if (annOpen) params.push('annotations=1');
     const activeFeatures = Object.entries(featureState)
         .filter(([_, v]) => v).map(([k]) => k);
     if (activeFeatures.length < 4) {
@@ -1493,10 +1537,10 @@ document.addEventListener('keydown', (e) => {
             audio.currentTime = Math.min(pixelMapping.duration, audio.currentTime + 5);
             if (hasStemAudio()) stemSeek();
         }
-    } else if (e.code === 'KeyT' && currentTab === 'analysis' && document.getElementById('annotationWidget').open && e.target.tagName !== 'INPUT') {
+    } else if (e.code === 'KeyT' && currentTab === 'annotate' && e.target.tagName !== 'INPUT') {
         e.preventDefault();
         recordTap();
-    } else if (e.code === 'KeyS' && currentTab === 'analysis' && document.getElementById('annotationWidget').open && annotationTaps.length > 0 && e.target.tagName !== 'INPUT') {
+    } else if (e.code === 'KeyS' && currentTab === 'annotate' && annotationTaps.length > 0 && e.target.tagName !== 'INPUT') {
         e.preventDefault();
         saveAnnotation();
     } else if (e.code === 'Escape' && annotationTaps.length > 0) {
@@ -1504,6 +1548,8 @@ document.addEventListener('keydown', (e) => {
     } else if (!hasStemAudio() && currentTab === 'analysis') {
         if (e.code === 'KeyE') {
             toggleFeature('rms');
+        } else if (e.code === 'KeyV') {
+            toggleFeature('events');
         }
     } else if (hasStemAudio()) {
         const digitMatch = e.code.match(/^Digit(\d)$/);
@@ -1547,6 +1593,7 @@ function readHashState() {
 // ── Effects ──────────────────────────────────────────────────────
 
 let effectsList = [];
+let deprecatedEffects = [];  // effects marked as deprecated
 let palettesList = [];  // available palettes
 let selectedPalette = {};  // {effectName: paletteName} — overrides per effect
 let selectedBrightness = {};  // {effectName: [lo, hi]} — brightness range per effect
@@ -1943,6 +1990,7 @@ async function loadEffects() {
         if (!resp.ok) { panel.innerHTML = '<span style="color:#e94560;">Failed to load effects</span>'; return; }
         const data = await resp.json();
         effectsList = data.effects || [];
+        deprecatedEffects = data.deprecated || [];
         palettesList = data.palettes || [];
         effectsRunning = data.running;
         if (data.controller !== undefined) {
@@ -2222,6 +2270,28 @@ function renderEffectsCards() {
             input.addEventListener('blur', save);
         });
         nameWrap.appendChild(pencil);
+
+        // Notes indicator (shows icon if notes exist, click opens detail)
+        const noteBtn = document.createElement('button');
+        noteBtn.className = 'effect-rename-btn effect-note-btn' + (eff.notes ? ' has-notes' : '');
+        noteBtn.title = eff.notes ? eff.notes : 'Add notes';
+        noteBtn.innerHTML = '&#128221;';
+        noteBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            showEffectDetail(eff.name, true);
+        });
+        nameWrap.appendChild(noteBtn);
+
+        const archiveBtn = document.createElement('button');
+        archiveBtn.className = 'effect-rename-btn effect-archive-btn';
+        archiveBtn.title = 'Deprecate effect';
+        archiveBtn.innerHTML = '&#128451;';  // archive box icon
+        archiveBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            deprecateEffect(eff.name);
+        });
+        nameWrap.appendChild(archiveBtn);
+
         nameTd.appendChild(nameWrap);
         tr.appendChild(nameTd);
 
@@ -2306,7 +2376,105 @@ function renderEffectsCards() {
     table.appendChild(tbody);
     wrap.appendChild(table);
     listWrap.appendChild(wrap);
+
+    // Deprecated effects section
+    if (deprecatedEffects.length > 0) {
+        const depSection = document.createElement('details');
+        depSection.className = 'deprecated-section';
+
+        const summary = document.createElement('summary');
+        summary.textContent = 'Deprecated (' + deprecatedEffects.length + ')';
+        depSection.appendChild(summary);
+
+        const depWrap = document.createElement('div');
+        depWrap.className = 'effect-ref-wrap deprecated-wrap';
+
+        const depTable = document.createElement('table');
+        depTable.className = 'effect-ref-table deprecated-table';
+
+        const depThead = document.createElement('thead');
+        const depHr = document.createElement('tr');
+        ['Effect', 'Reason', ''].forEach(c => {
+            const th = document.createElement('th');
+            th.textContent = c;
+            depHr.appendChild(th);
+        });
+        depThead.appendChild(depHr);
+        depTable.appendChild(depThead);
+
+        const depTbody = document.createElement('tbody');
+        deprecatedEffects.forEach(eff => {
+            const tr = document.createElement('tr');
+
+            const nameTd = document.createElement('td');
+            nameTd.className = 'effect-name-cell';
+            nameTd.textContent = eff.display_name || eff.name;
+            tr.appendChild(nameTd);
+
+            const reasonTd = document.createElement('td');
+            reasonTd.className = 'deprecated-reason';
+            reasonTd.textContent = eff.deprecated_reason || '';
+            tr.appendChild(reasonTd);
+
+            const actionTd = document.createElement('td');
+            actionTd.style.textAlign = 'right';
+            const restoreBtn = document.createElement('button');
+            restoreBtn.className = 'effect-toggle';
+            restoreBtn.textContent = 'Restore';
+            restoreBtn.title = 'Move back to active effects';
+            restoreBtn.addEventListener('click', () => restoreEffect(eff.name));
+            actionTd.appendChild(restoreBtn);
+            tr.appendChild(actionTd);
+
+            depTbody.appendChild(tr);
+        });
+        depTable.appendChild(depTbody);
+        depWrap.appendChild(depTable);
+        depSection.appendChild(depWrap);
+        listWrap.appendChild(depSection);
+    }
+
     panel.appendChild(listWrap);
+}
+
+async function deprecateEffect(name) {
+    const reason = prompt('Why deprecate "' + name + '"? (optional)');
+    if (reason === null) return;  // cancelled
+    try {
+        await fetch('/api/effects/deprecate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, deprecated: true, reason })
+        });
+        // Move from active to deprecated locally
+        const idx = effectsList.findIndex(e => e.name === name);
+        if (idx >= 0) {
+            const eff = effectsList.splice(idx, 1)[0];
+            eff.deprecated = true;
+            eff.deprecated_reason = reason;
+            deprecatedEffects.push(eff);
+        }
+        renderEffectsCards();
+    } catch (e) { console.error('deprecateEffect:', e); }
+}
+
+async function restoreEffect(name) {
+    try {
+        await fetch('/api/effects/deprecate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, deprecated: false })
+        });
+        // Move from deprecated to active locally
+        const idx = deprecatedEffects.findIndex(e => e.name === name);
+        if (idx >= 0) {
+            const eff = deprecatedEffects.splice(idx, 1)[0];
+            delete eff.deprecated;
+            delete eff.deprecated_reason;
+            effectsList.push(eff);
+        }
+        renderEffectsCards();
+    } catch (e) { console.error('restoreEffect:', e); }
 }
 
 async function startEffect(name) {
@@ -2410,7 +2578,7 @@ let effectDetailData = null;
 let effectDetailAnim = null;
 let ledogramBytes = null;  // cached decoded LED data for redraw
 
-function showEffectDetail(name) {
+function showEffectDetail(name, focusNotes) {
     effectDetailName = name;
     effectDetailData = null;
     stopEffectsPoll();
@@ -2439,6 +2607,37 @@ function showEffectDetail(name) {
         desc.textContent = effEntry.description;
         panel.appendChild(desc);
     }
+
+    // Notes section (editable textarea)
+    const notesWrap = document.createElement('div');
+    notesWrap.className = 'effect-notes-wrap';
+    const notesLabel = document.createElement('label');
+    notesLabel.textContent = 'Notes';
+    notesLabel.className = 'effect-notes-label';
+    notesWrap.appendChild(notesLabel);
+    const notesArea = document.createElement('textarea');
+    notesArea.className = 'effect-notes-area';
+    notesArea.placeholder = 'Add notes for future improvements...';
+    notesArea.value = effEntry && effEntry.notes ? effEntry.notes : '';
+    notesArea.rows = 3;
+    let notesSaveTimer = null;
+    notesArea.addEventListener('input', () => {
+        clearTimeout(notesSaveTimer);
+        notesSaveTimer = setTimeout(async () => {
+            const val = notesArea.value.trim();
+            try {
+                await fetch('/api/effects/notes', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, notes: val })
+                });
+                if (effEntry) effEntry.notes = val || undefined;
+            } catch (err) { console.error('notes save:', err); }
+        }, 600);
+    });
+    notesWrap.appendChild(notesArea);
+    panel.appendChild(notesWrap);
+    if (focusNotes) setTimeout(() => notesArea.focus(), 50);
 
     // Controls: file picker + analyze button
     const controls = document.createElement('div');
@@ -2944,7 +3143,7 @@ async function _renderFileManagerInto(container) {
 
     // Click handlers
     container.querySelectorAll('.file-name').forEach(el => {
-        el.onclick = () => { selectFile(el.dataset.path); currentTab = 'analysis'; updateTabUI(); loadPanel(); };
+        el.onclick = async () => { currentTab = 'analysis'; updateTabUI(); await selectFile(el.dataset.path); };
     });
     container.querySelectorAll('.ren').forEach(el => {
         el.onclick = () => renameUserFile(el.dataset.path, el.dataset.name);

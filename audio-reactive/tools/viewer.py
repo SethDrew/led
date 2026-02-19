@@ -93,9 +93,11 @@ def _checkerboard_novelty(S, kernel_size):
 class SyncedVisualizer:
     def __init__(self, filepath, focus_panel=None, show_beats=False,
                  annotations_path=None, annotate_layer=None,
-                 led_effect=None, led_output=None, led_brightness=1.0):
+                 led_effect=None, led_output=None, led_brightness=1.0,
+                 panels=None):
         self.filepath = filepath
         self.focus_panel = focus_panel
+        self.panels = panels  # optional list of panel names to show
         self.show_beats = show_beats
         self.annotations_path_override = annotations_path
         self.annotate_layer = annotate_layer  # None = normal mode, str = annotation mode
@@ -260,8 +262,49 @@ class SyncedVisualizer:
         self.novelty_chroma = _checkerboard_novelty(S, self.novelty_kernel_size)
         del S
 
-        # ── Band deviation from long-term context ────────────────────
+        # ── Slow-decay peak normalized band energy (real-time sim) ──
         from scipy.ndimage import uniform_filter1d
+
+        decay = 0.9995
+        precompute_frames = int(30 * fps)  # seed from first ~30s
+
+        raw_energies = {}
+        for band_name, (fmin, fmax) in FREQUENCY_BANDS.items():
+            band_mask = (mel_freqs >= fmin) & (mel_freqs <= fmax)
+            raw_energies[band_name] = np.sum(mel_spec_128[band_mask, :], axis=0)
+
+        self.band_energy_rt = {}
+        for band_name, energy in raw_energies.items():
+            peaks = np.empty_like(energy)
+            seed = np.max(energy[:min(precompute_frames, len(energy))]) if len(energy) > 0 else 1e-10
+            peak = max(seed, 1e-10)
+            for i in range(len(energy)):
+                peak = max(energy[i], peak * decay)
+                peaks[i] = peak
+            self.band_energy_rt[band_name] = energy / peaks
+
+        # Total raw energy for dual-axis overlay
+        self.total_raw_energy = sum(raw_energies.values())
+
+        # ── Band share (each band as % of total per frame) ──
+        all_bands = np.stack([raw_energies[b] for b in FREQUENCY_BANDS])
+        totals = np.sum(all_bands, axis=0) + 1e-10
+        self.band_share = {b: raw_energies[b] / totals * 100 for b in FREQUENCY_BANDS}
+
+        # ── Band RT derivatives (rate-of-change of real-time normalized) ──
+        self.band_rt_derivatives = {}
+        for band_name, energy in self.band_energy_rt.items():
+            deriv = np.diff(energy, prepend=energy[0]) / dt
+            self.band_rt_derivatives[band_name] = deriv
+
+        # ── 5s rolling integral of RT-normalized energy ──
+        integral_window = int(5 * fps)
+        self.band_integral_5s = {}
+        for band_name, energy in self.band_energy_rt.items():
+            self.band_integral_5s[band_name] = uniform_filter1d(
+                energy, size=integral_window, mode='reflect') * integral_window
+
+        # ── Band deviation from long-term context ────────────────────
         self.band_deviation_context_seconds = 60
         context_frames = max(3, int(self.band_deviation_context_seconds * fps))
         self.band_deviations = {}
@@ -273,7 +316,74 @@ class SyncedVisualizer:
         all_z = np.stack([self.band_deviations[b][:len(self.times)] for b in FREQUENCY_BANDS], axis=0)
         self.composite_deviation = np.max(all_z, axis=0)
 
+        self._compute_events()
+
         print(f"Tempo: {self.tempo:.1f} BPM, {len(self.onset_times)} onsets, {len(self.beat_times)} beats")
+
+    @staticmethod
+    def _find_spans(mask, times, min_frames):
+        """Find contiguous True runs >= min_frames, return [(start_time, end_time), ...]."""
+        spans = []
+        in_span = False
+        start_idx = 0
+        for i, v in enumerate(mask):
+            if v and not in_span:
+                in_span = True
+                start_idx = i
+            elif not v and in_span:
+                if i - start_idx >= min_frames:
+                    spans.append((times[start_idx], times[min(i, len(times) - 1)]))
+                in_span = False
+        if in_span and len(mask) - start_idx >= min_frames:
+            spans.append((times[start_idx], times[len(mask) - 1]))
+        return spans
+
+    def _compute_events(self):
+        """Detect structural audio events: drops, risers, dropouts, harmonic sections."""
+        from scipy.signal import find_peaks
+        from scipy.ndimage import gaussian_filter1d
+
+        fps = self.sr / self.hop_length
+        t = self.times
+        n = len(t)
+
+        # ── Drops: MFCC novelty peak within ±0.5s of positive RMS derivative peak ──
+        nov_m = self.novelty_mfcc[:n]
+        rms_d = self.rms_derivative[:n]
+        rms_d_norm = rms_d / (np.max(np.abs(rms_d)) + 1e-10)
+
+        nov_peaks, _ = find_peaks(nov_m, prominence=0.2)
+        rms_peaks, _ = find_peaks(rms_d_norm, height=0.3)
+
+        self.event_drops = []
+        for np_idx in nov_peaks:
+            for rp_idx in rms_peaks:
+                if abs(t[np_idx] - t[rp_idx]) <= 0.5:
+                    self.event_drops.append(t[np_idx])
+                    break
+
+        # ── Risers: smoothed centroid derivative sustained positive ──
+        cent_d = gaussian_filter1d(self.centroid_derivative[:n], sigma=10)
+        cent_d_max = np.max(np.abs(cent_d)) + 1e-10
+        riser_mask = cent_d > 0.08 * cent_d_max
+        min_riser_frames = max(1, int(1.0 * fps))
+        self.event_risers = self._find_spans(riser_mask, t, min_riser_frames)
+
+        # ── Dropouts: normalized RMS below threshold ──
+        rms_norm = self.rms_energy[:n] / (np.max(self.rms_energy[:n]) + 1e-10)
+        dropout_mask = rms_norm < 0.05
+        min_dropout_frames = max(1, int(0.1 * fps))
+        self.event_dropouts = self._find_spans(dropout_mask, t, min_dropout_frames)
+
+        # ── Harmonic: smoothed onset strength below threshold ──
+        onset_smooth = gaussian_filter1d(self.onset_env[:n], sigma=0.5 * fps)
+        onset_max = np.max(onset_smooth) + 1e-10
+        harmonic_mask = onset_smooth < 0.10 * onset_max
+        min_harmonic_frames = max(1, int(1.0 * fps))
+        self.event_harmonic = self._find_spans(harmonic_mask, t, min_harmonic_frames)
+
+        print(f"Events: {len(self.event_drops)} drops, {len(self.event_risers)} risers, "
+              f"{len(self.event_dropouts)} dropouts, {len(self.event_harmonic)} harmonic")
 
     def _build_figure(self):
         print("Building visualization...")
@@ -286,7 +396,9 @@ class SyncedVisualizer:
         # Determine if we need annotation panel
         has_annotations = bool(self.annotations) or self.annotate_layer is not None
 
-        if self.focus_panel is not None:
+        if self.panels is not None:
+            pass  # figure created below in panels branch
+        elif self.focus_panel is not None:
             self.fig = plt.figure(figsize=(18, 10))
         elif has_annotations:
             self.fig = plt.figure(figsize=(18, 36))
@@ -303,6 +415,11 @@ class SyncedVisualizer:
             'centroid': self._build_centroid_panel,
             'centroid-derivative': self._build_centroid_derivative_panel,
             'band-derivative': self._build_band_derivative_panel,
+            'band-rt': self._build_band_rt_panel,
+            'band-share': self._build_band_share_panel,
+            'band-context-deviation': self._build_band_context_deviation_panel,
+            'band-rt-derivative': self._build_band_rt_derivative_panel,
+            'band-integral': self._build_band_integral_panel,
             'mfcc': self._build_mfcc_panel,
             'novelty': self._build_novelty_panel,
             'band-deviation': self._build_band_deviation_panel,
@@ -310,7 +427,28 @@ class SyncedVisualizer:
         if has_annotations:
             focus_builders['annotations'] = self._build_annotation_panel
 
-        if self.focus_panel in focus_builders:
+        if self.panels is not None:
+            # Custom panel selection (e.g. annotate tab: waveform + spectrogram only)
+            builders = [(name, focus_builders[name]) for name in self.panels
+                        if name in focus_builders]
+            n_panels = len(builders)
+            height_map = {'waveform': 1, 'spectrogram': 2, 'bands': 1,
+                          'rms-derivative': 1, 'centroid': 1, 'centroid-derivative': 1,
+                          'band-derivative': 1, 'mfcc': 1.5, 'novelty': 1.5,
+                          'band-deviation': 1.5, 'annotations': None}
+            ratios = [height_map.get(name, 1) for name, _ in builders]
+            if has_annotations:
+                n_layers = len(self.annotations) + (1 if self.annotate_layer else 0)
+                ann_height = max(0.8, 0.4 * n_layers)
+                builders.append(('annotations', self._build_annotation_panel))
+                ratios.append(ann_height)
+            total = len(builders)
+            fig_height = sum(ratios) * 2 + 2
+            self.fig = plt.figure(figsize=(18, fig_height))
+            gs = gridspec.GridSpec(total, 1, height_ratios=ratios, hspace=0.3)
+            for i, (name, builder) in enumerate(builders):
+                builder(self.fig.add_subplot(gs[i]))
+        elif self.focus_panel in focus_builders:
             gs = gridspec.GridSpec(1, 1, hspace=0.3)
             focus_builders[self.focus_panel](self.fig.add_subplot(gs[0]))
         elif has_annotations:
@@ -523,9 +661,32 @@ class SyncedVisualizer:
         ksec = self.novelty_kernel_seconds
         ax.set_title(
             f"Foote's Checkerboard Novelty (kernel={ks} frames, {ksec}s) "
-            f"— peaks = section boundaries", fontsize=11)
+            f"— peaks = section boundaries  [V] events", fontsize=11)
         ax.legend([line_c, line_m], ['Chroma (harmonic)', 'MFCC (timbral)'],
                   loc='upper right', framealpha=0.8, fontsize=8)
+
+        # ── Event overlays (hidden by default, toggled with V) ──
+        event_artists = []
+        for drop_t in self.event_drops:
+            a = ax.axvline(x=drop_t, color='#FF1744', linestyle='--',
+                           linewidth=2, alpha=0.8, visible=False)
+            event_artists.append(a)
+        for start, end in self.event_risers:
+            a = ax.axvspan(start, end, color='#76FF03', alpha=0.15, visible=False)
+            event_artists.append(a)
+        for start, end in self.event_dropouts:
+            a = ax.axvspan(start, end, color='#E040FB', alpha=0.15, visible=False)
+            event_artists.append(a)
+        for start, end in self.event_harmonic:
+            a = ax.axvspan(start, end, color='#FFD740', alpha=0.10, visible=False)
+            event_artists.append(a)
+
+        if not hasattr(self, 'feature_toggle'):
+            self.feature_toggle = {}
+            self.feature_keys = {}
+        self.feature_toggle['events'] = {'artists': event_artists, 'visible': False}
+        self.feature_keys['v'] = 'events'
+
         if not hasattr(self, 'axes'):
             self.axes = []
         self.axes.append(ax)
@@ -546,6 +707,107 @@ class SyncedVisualizer:
         ax.set_title(
             f'Band Deviation from {cs}s Running Context '
             f'— high = spectral balance shifted', fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    # ── Band Analysis panels ─────────────────────────────────────────
+
+    def _build_band_rt_panel(self, ax):
+        """Slow-decay peak normalized band energy (simulating real-time effects view)."""
+        t = self.times
+        n = len(t)
+        for band_name in FREQUENCY_BANDS:
+            ax.plot(t, self.band_energy_rt[band_name][:n],
+                    color=BAND_COLORS[band_name], linewidth=1.5, alpha=0.85,
+                    label=band_name)
+        ax.set_xlim([0, self.duration])
+        ax.set_ylim([0, 1.1])
+        ax.set_ylabel('Normalized Energy')
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+
+        # Dual y-axis: total raw energy as thin white line
+        ax2 = ax.twinx()
+        total = self.total_raw_energy[:n]
+        ax2.plot(t, total, color='#FFFFFF', linewidth=0.8, alpha=0.5)
+        ax2.set_ylabel('Total Raw', color='#888')
+        ax2.tick_params(axis='y', labelcolor='#888')
+
+        ax.set_title('Real-Time View (slow-decay peak, 30s precompute)', fontsize=11)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_band_share_panel(self, ax):
+        """Band share: each band as % of total energy per frame."""
+        t = self.times
+        n = len(t)
+        for band_name in FREQUENCY_BANDS:
+            ax.plot(t, self.band_share[band_name][:n],
+                    color=BAND_COLORS[band_name], linewidth=1.5, alpha=0.85,
+                    label=band_name)
+        ax.set_xlim([0, self.duration])
+        ax.set_ylim([0, 100])
+        ax.set_ylabel('% of Total')
+        ax.set_title('Band Share of Total Energy (%)', fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_band_context_deviation_panel(self, ax):
+        """Running context deviation: per-band z-scores from 60s rolling mean."""
+        t = self.times
+        n = len(t)
+        for band_name in FREQUENCY_BANDS:
+            ax.plot(t, self.band_deviations[band_name][:n],
+                    color=BAND_COLORS[band_name], linewidth=1.0, alpha=0.7,
+                    label=band_name)
+        ax.plot(t, self.composite_deviation[:n], color='#FFFFFF',
+                linewidth=1.5, alpha=0.9, label='Max (any band)')
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('Z-score')
+        ax.set_title('Band Deviation from 60s Context (z-score)', fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_band_rt_derivative_panel(self, ax):
+        """Band derivative of real-time normalized energy."""
+        from scipy.ndimage import gaussian_filter1d
+        t = self.times
+        n = len(t)
+        for band_name in FREQUENCY_BANDS:
+            smoothed = gaussian_filter1d(self.band_rt_derivatives[band_name][:n], sigma=5)
+            ax.plot(t, smoothed, color=BAND_COLORS[band_name],
+                    linewidth=1.5, alpha=0.85, label=band_name)
+        ax.axhline(y=0, color='#666', linewidth=0.5)
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('dEnergy/dt')
+        ax.set_title('Band Energy Derivative (real-time normalized)', fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_band_integral_panel(self, ax):
+        """5s rolling integral of real-time normalized energy."""
+        t = self.times
+        n = len(t)
+        for band_name in FREQUENCY_BANDS:
+            ax.plot(t, self.band_integral_5s[band_name][:n],
+                    color=BAND_COLORS[band_name], linewidth=1.5, alpha=0.85,
+                    label=band_name)
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('Integrated Energy')
+        ax.set_title('5s Rolling Integral', fontsize=11)
         ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
         ax.grid(True, alpha=0.2)
         if not hasattr(self, 'axes'):

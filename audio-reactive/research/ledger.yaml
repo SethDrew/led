@@ -1,0 +1,859 @@
+# Research Ledger — Audio-Reactive LED Project
+#
+# Permanent record of all findings, experiments, intuitions, and dead ends.
+# See LEDGER_GUIDE.md for format details and how to add entries.
+#
+# Status: spark | exploring | validated | resonates | integrated | dormant | superseded
+# Warmth: high | medium | low  (artistic pull, separate from confidence)
+# Confidence: high | medium | low  (technical certainty)
+
+entries:
+
+  # ── Feature Extraction ───────────────────────────────────────────
+
+  - id: derivatives-over-absolutes
+    date: 2026-01-15
+    touched: 2026-02-10
+    title: Rate-of-change matters more than absolute values
+    summary: >
+      Build vs climax has identical static features (RMS ±0.5%) but climax
+      brightens 58x faster. The derivative is the signal, not position.
+    status: validated
+    warmth: high
+    confidence: high
+    source: research/analysis/taste/build_vs_climax.md
+    tags: [feature-extraction, derivatives, brightness]
+    relates_to: [build-taxonomy]
+    notes: >
+      First major insight. Changed thinking about all feature extraction.
+      Validated on fa_br_drop1.wav. Needs testing on more songs.
+
+  - id: airiness-context-deviation
+    date: 2026-01-18
+    touched: 2026-02-10
+    title: "Airiness = deviation from local context"
+    summary: >
+      Two acoustically opposite moments both feel "airy" because both deviate
+      from surrounding music's norm. Use deviation-from-running-average,
+      not fixed thresholds.
+    status: validated
+    warmth: high
+    confidence: high
+    source: research/analysis/taste/air_feature_analysis.md
+    tags: [feature-extraction, airiness, context, feelings]
+    relates_to: [feeling-layer-human-loop]
+    notes: >
+      Key principle: feelings are relative to context, not absolute acoustic
+      properties. Generalizes beyond airiness to other subjective qualities.
+
+  - id: taps-track-bass-peaks
+    date: 2026-01-20
+    touched: 2026-02-15
+    title: User taps track bass peaks (19ms median), not library onsets
+    summary: >
+      Only 48.5% of user taps align with librosa onsets. Users switch tracking
+      modes across sections (centroid in intro, flux in groove).
+    status: validated
+    warmth: medium
+    confidence: high
+    source: research/analysis/taste/beat_tap_analysis.md
+    tags: [beat-detection, taps, onsets, bass, user-data]
+    relates_to: [tactus-ambiguity, onset-vs-flux, flourish-ratio]
+    notes: >
+      Implication: library onset detection may be low-value for LED triggering.
+      User perception of "beat" is more complex than any single feature.
+
+  - id: build-taxonomy
+    date: 2026-01-22
+    touched: 2026-02-10
+    title: "Build phases: primer, sustained, bridge, drop"
+    summary: >
+      Four independent build phases. Bridge has HIGHER RMS than drop.
+      Drop is sustained intensity, not peak intensity.
+    status: validated
+    warmth: high
+    confidence: high
+    source: research/analysis/taste/fa_br_drop1_analysis.md
+    tags: [feature-extraction, builds, song-structure, energy]
+    relates_to: [derivatives-over-absolutes]
+    notes: >
+      Primer = cyclic ramps, sustained = upward trajectory, bridge = chaos,
+      drop = sustained plateau. All phases independent, not sequential.
+      Validated on fa_br_drop1.wav.
+
+  # ── Working Theories ─────────────────────────────────────────────
+
+  - id: flourish-ratio
+    date: 2026-01-25
+    touched: 2026-02-10
+    title: Flourish ratio as section-type selector
+    summary: >
+      Off-grid vs on-grid tap ratio correlates with section type:
+      Ambient (>70%), Accent (30-70%), Groove (<30%).
+    status: exploring
+    warmth: medium
+    confidence: medium
+    source: research/analysis/taste/beat_vs_consistent.md
+    tags: [beat-detection, flourish, section-detection, user-data]
+    relates_to: [taps-track-bass-peaks, flourish-audio-properties]
+    notes: >
+      Computed from user taps, never from audio alone. Audio-only version
+      unbuilt. Could be powerful mode selector if audio-derivable.
+
+  - id: flourish-audio-properties
+    date: 2026-01-27
+    touched: 2026-02-10
+    title: Flourishes are quieter than on-beat taps
+    summary: >
+      Percussive energy -24.7%, RMS -20.2% for flourishes vs on-beat.
+      Effect nearly vanishes for high-confidence flourishes (N=19).
+    status: exploring
+    warmth: low
+    confidence: low
+    source: research/analysis/taste/flourish_audio_properties.md
+    tags: [beat-detection, flourish, energy, user-data]
+    relates_to: [flourish-ratio]
+    notes: >
+      Effect size drops from -0.533 to -0.007 for high-confidence flourishes.
+      May not be robust. Small N warning.
+
+  - id: feeling-layer-human-loop
+    date: 2026-01-28
+    touched: 2026-02-10
+    title: Feeling layer needs human-in-the-loop
+    summary: >
+      No library provides detect_airiness(). Features exist (centroid,
+      flatness, RMS, HPSS) but mapping to feelings is subjective.
+    status: resonates
+    warmth: high
+    confidence: medium
+    source: []
+    tags: [feelings, architecture, human-loop, art]
+    relates_to: [airiness-context-deviation, two-quality-axes]
+    notes: >
+      Theory, not directly actionable yet. But this IS the core thesis —
+      capturing feeling, not just volume. The whole point of the project.
+
+  # ── Tactus & Rhythm ──────────────────────────────────────────────
+
+  - id: tactus-ambiguity
+    date: 2026-02-05
+    touched: 2026-02-15
+    title: Users track different metrical layers per song
+    summary: >
+      Across 7 Harmonix tracks, taps match correct tempo but phase-shift
+      100-250ms from metric grid. Phase varies by track (0.28-0.84).
+    status: validated
+    warmth: high
+    confidence: high
+    source: research/analysis/taste/
+    tags: [tactus, beat-detection, rhythm, perception, user-data]
+    relates_to: [headbangs-half-notes, led-interaction-model, taps-track-bass-peaks]
+    notes: >
+      Validated across 7 tracks. Lit: Martens 2011 "The Ambiguous Tactus",
+      London 2004 "Hearing in Time". User locks onto kick, snare, or off-beat
+      depending on the song. Not genre-dependent.
+
+  - id: headbangs-half-notes
+    date: 2026-02-08
+    touched: 2026-02-15
+    title: "Headbangs = half notes (physical constraint)"
+    summary: >
+      Physical constraint forces lower metrical level (~87 BPM on 180 BPM
+      track). Tapped on head-down motion. Every other finger tap.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: research/analysis/taste/
+    tags: [tactus, rhythm, embodiment, perception]
+    relates_to: [tactus-ambiguity]
+    notes: >
+      Interesting for LED interaction — if audience headbangs at half
+      tempo, LEDs pulsing at full tempo might feel "too fast."
+
+  - id: led-interaction-model
+    date: 2026-02-08
+    touched: 2026-02-08
+    title: "LED interaction: Lead vs Follow modes"
+    summary: >
+      Two modes: (a) Lead — LEDs flash chosen layer to entrain audience tactus.
+      (b) Follow — audience taps felt beat, LEDs adapt. Could combine.
+    status: spark
+    warmth: high
+    confidence: low
+    source: []
+    tags: [interaction, tactus, led-control, future]
+    relates_to: [tactus-ambiguity, headbangs-half-notes]
+    notes: >
+      Future direction. Depends on solving real-time beat tracking first.
+      The concept of LEDs as tactus entrainment is exciting.
+
+  # ── Beat Detection ───────────────────────────────────────────────
+
+  - id: beat-trackers-fail-dense-rock
+    date: 2026-01-20
+    touched: 2026-02-10
+    title: All tested beat trackers fail on dense rock
+    summary: >
+      Tested on Opiate (Tool), best F1=0.500. librosa beat_track doubles
+      tempo on syncopated rock (161.5 vs ~83 BPM).
+    status: exploring
+    warmth: low
+    confidence: low
+    source: research/analysis/taste/beat_tap_analysis.md
+    tags: [beat-detection, rock, failure-mode]
+    relates_to: [onset-vs-flux, taps-track-bass-peaks]
+    notes: >
+      Only tested on 1 song. User hasn't personally verified algorithm
+      outputs against the music. May be annotation problem, not algorithm.
+
+  - id: onset-vs-flux
+    date: 2026-01-25
+    touched: 2026-02-10
+    title: "Onset detector ~60% better than bass flux (flawed comparison)"
+    summary: >
+      Measured against DIFFERENT ground truths (user taps vs Harmonix).
+      Not an apples-to-apples comparison.
+    status: dormant
+    warmth: low
+    confidence: low
+    source: research/analysis/taste/beat_tap_analysis.md
+    tags: [beat-detection, onsets, methodology]
+    relates_to: [beat-trackers-fail-dense-rock, bass-flux-electronic-failure]
+    notes: >
+      The comparison itself is flawed. Need to test both methods against
+      the SAME ground truth before drawing conclusions.
+
+  - id: bass-flux-electronic-failure
+    date: 2026-01-20
+    touched: 2026-01-20
+    title: Bass spectral flux fails on continuous sub-bass
+    summary: >
+      Electronic music with sustained sub-bass gives F1=0.06.
+      Self-normalization destroys absolute energy signal.
+    status: dormant
+    warmth: low
+    confidence: high
+    source: research/analysis/taste/beat_tap_analysis.md
+    tags: [beat-detection, bass, electronic, failure-mode]
+    relates_to: [onset-vs-flux, hpss-for-realtime]
+    notes: >
+      Not a dead end — tells us what bass detection SHOULD be. Fix might
+      be HPSS percussive channel. Revisit for real-time pipeline.
+
+  # ── Source Separation ────────────────────────────────────────────
+
+  - id: demucs-offline
+    date: 2026-01-10
+    touched: 2026-02-10
+    title: "Demucs (htdemucs): 4-stem offline separation"
+    summary: >
+      Drums/bass/vocals/other. ~25s CPU for 50s track. Good quality,
+      too slow for real-time.
+    status: integrated
+    warmth: medium
+    confidence: high
+    source: research/audio-segments/separated/htdemucs/
+    tags: [source-separation, demucs, offline]
+    relates_to: [hpss-for-realtime, hs-tasnet-future]
+    notes: >
+      Already integrated into analysis pipeline. Cached separations
+      available for all test tracks.
+
+  - id: hpss-for-realtime
+    date: 2026-01-15
+    touched: 2026-02-15
+    title: "HPSS: 2-stem real-time separation (harmonic/percussive)"
+    summary: >
+      librosa HPSS, no ML, frame-by-frame. Trivially real-time on ESP32.
+      Promising for algorithm work.
+    status: integrated
+    warmth: high
+    confidence: high
+    source: audio-reactive/tools/segment.py
+    tags: [source-separation, hpss, real-time, esp32]
+    relates_to: [demucs-offline, hs-tasnet-future, band-zone-pulse-effect, hpss-vs-flux-empirical]
+    notes: >
+      Used in band_zone_pulse for streaming percussive detection.
+      Compared against spectral flux (see hpss-vs-flux-empirical):
+      temporal median does real work — 30% of events differ, background
+      color diverges 38%. Streaming version is temporal-median-only
+      (missing frequency-axis median) but added complexity is justified.
+
+  - id: hs-tasnet-future
+    date: 2026-02-01
+    touched: 2026-02-10
+    title: "HS-TasNet: potential real-time 4-stem at 23ms latency"
+    summary: >
+      Exactly our latency budget. No pretrained weights publicly available
+      (L-Acoustics proprietary). Would need training on MusDB (~86 tracks).
+    status: dormant
+    warmth: medium
+    confidence: low
+    source: []
+    tags: [source-separation, real-time, ml, future]
+    relates_to: [hpss-for-realtime, demucs-offline]
+    notes: >
+      Future investment if HPSS proves insufficient. pip install hs-tasnet
+      (lucidrains). Training infrastructure not set up.
+
+  - id: separation-dead-ends
+    date: 2026-02-01
+    touched: 2026-02-01
+    title: "Dead ends: DTTNet, RT-STT, Spleeter, GPU Audio SDK"
+    summary: >
+      DTTNet: broken weight links, 4 models, CPU too slow. RT-STT: no code.
+      Spleeter: dated quality. GPU Audio SDK: C++ only.
+    status: superseded
+    warmth: low
+    confidence: high
+    source: []
+    tags: [source-separation, dead-end]
+    relates_to: [demucs-offline, hpss-for-realtime]
+    notes: >
+      Investigated Feb 2026. None viable for our use case. Landscape may
+      change — new models release frequently.
+
+  # ── WLED Sound Reactive ──────────────────────────────────────────
+
+  - id: wled-sr-reimplemented
+    date: 2026-02-01
+    touched: 2026-02-15
+    title: WLED-SR algorithms reimplemented in Python
+    summary: >
+      Key finding: WLED beat detection is a simple bin threshold. No spectral
+      flux, no tempo tracking, no feeling layer. Their magic is in visual
+      effects, not audio analysis.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: audio-reactive/effects/wled_sr/
+    tags: [wled, external, beat-detection, effects, pillar-2]
+    relates_to: [wled-vs-custom-untested, two-quality-axes]
+    notes: >
+      Python reimplementation enables A/B testing framework. WLED effects
+      surprisingly effective despite simple audio analysis. Lesson:
+      visual design matters as much as audio analysis quality.
+
+  - id: wled-vs-custom-untested
+    date: 2026-02-01
+    touched: 2026-02-15
+    title: "Custom vs WLED-SR: untested on actual LEDs"
+    summary: >
+      Need side-by-side LED test to know if our approach is actually
+      better. Theory says yes, but theory isn't proof.
+    status: exploring
+    warmth: medium
+    confidence: low
+    source: []
+    tags: [wled, comparison, validation, pillar-2]
+    relates_to: [wled-sr-reimplemented]
+    notes: >
+      Key validation milestone. Until tested on hardware, "our approach
+      is better" remains an unvalidated claim.
+
+  # ── Effects & Visual Design ──────────────────────────────────────
+
+  - id: band-zone-pulse-effect
+    date: 2026-02-10
+    touched: 2026-02-18
+    title: "Band Zone Pulse: frequency-zoned percussive sparkles"
+    summary: >
+      5 frequency zones mapped to LED strip positions. Streaming HPSS
+      separates percussive hits. Per-band peak detection with cooldowns.
+    status: integrated
+    warmth: high
+    confidence: high
+    source: audio-reactive/effects/band_zone_pulse.py
+    tags: [effects, hpss, frequency-bands, sparkles]
+    relates_to: [hpss-for-realtime, diamond-topology, hue-shift-low-brightness, centroid-position-clustering]
+    notes: >
+      Running on diamond sculpture. Zone colors tuned for COB strip.
+      Background glow disabled for testing. Zone positions drift
+      slowly (~10s) for visual freshness. Key design decisions:
+      (1) Dominant band gate >15% total percussive energy so dominant
+      instrument visually dominates. (2) Same-band re-trigger reuses
+      sparkle position, preventing overlap. (3) Random position within
+      zone over spectral centroid (see centroid-position-clustering).
+      (4) Non-zero color channels clamped to 1.0 during fade to prevent
+      hue shift (see hue-shift-low-brightness).
+
+  - id: diamond-topology
+    date: 2026-02-15
+    touched: 2026-02-18
+    title: "Diamond sculpture: 3-branch height-mapped topology"
+    summary: >
+      73 physical LEDs (42 up + 20 down + 11 up). Height mode maps logical
+      LED array across branches sharing a common height axis.
+    status: integrated
+    warmth: high
+    confidence: high
+    source: audio-reactive/hardware/sculptures.json
+    tags: [hardware, topology, sculpture, mapping]
+    relates_to: [band-zone-pulse-effect, gamma-height-curve]
+    notes: >
+      Branch 3 (up2) uses gamma=0.55 for physical height alignment.
+      Compensates for geometry where branch rises steeply then levels off.
+
+  - id: gamma-height-curve
+    date: 2026-02-18
+    touched: 2026-02-18
+    title: "Gamma curve for non-linear branch height mapping"
+    summary: >
+      Added per-branch gamma parameter to sculpture topology. gamma<1
+      makes branch rise fast at base, slow at top. up2 uses 0.55 to
+      shift zone boundaries down ~2 LEDs for visual alignment.
+    status: integrated
+    warmth: high
+    confidence: high
+    source: audio-reactive/hardware/sculptures.json
+    tags: [hardware, topology, sculpture, mapping]
+    relates_to: [diamond-topology, band-zone-pulse-effect]
+    notes: >
+      Applied in runner.py apply_topology(). Default gamma=1.0 (linear).
+      Adjustable per-branch in sculptures.json.
+
+  - id: three-voices-effect
+    date: 2026-01-28
+    touched: 2026-02-10
+    title: "Three Voices: multi-layer audio decomposition effect"
+    summary: >
+      Early effect exploring harmonic/percussive/transient layering
+      as separate visual voices on the LED strip.
+    status: integrated
+    warmth: medium
+    confidence: medium
+    source: audio-reactive/effects/three_voices.py
+    tags: [effects, hpss, decomposition]
+    relates_to: [hpss-for-realtime]
+    notes: >
+      One of the first effects built. May need revisiting with newer
+      understanding of feature extraction.
+
+  # ── Architecture & Decisions ─────────────────────────────────────
+
+  - id: nebula-pipeline-foundation
+    date: 2026-01-05
+    touched: 2026-02-10
+    title: "Architecture: build on nebula streaming pipeline"
+    summary: >
+      Python audio callback stores state, fixed-rate main loop reads state
+      and does serial flush. Decoupled by WS2812B timing requirement.
+    status: integrated
+    warmth: high
+    confidence: high
+    source: audio-reactive/effects/runner.py
+    tags: [architecture, pipeline, serial, hardware]
+    relates_to: []
+    notes: >
+      Non-negotiable constraint from WS2812B timing. This IS the architecture.
+      All effects must respect this callback/render split.
+
+  - id: two-quality-axes
+    date: 2026-01-15
+    touched: 2026-02-10
+    title: "Two independent quality axes: decomposition AND mapping"
+    summary: >
+      Audio decomposition quality (can we extract features?) is separate
+      from LED mapping quality (do the LEDs look/feel right?). Both matter.
+    status: resonates
+    warmth: high
+    confidence: high
+    source: []
+    tags: [architecture, quality, philosophy]
+    relates_to: [feeling-layer-human-loop, wled-sr-reimplemented]
+    notes: >
+      Perfect audio analysis with bad LED mapping = bad. Crude audio with
+      great LED mapping = might be great. WLED proves this — simple
+      analysis, effective visuals.
+
+  - id: pillar-separation
+    date: 2026-01-15
+    touched: 2026-02-10
+    title: "Keep internal research separate from external (WLED etc)"
+    summary: >
+      Pillar 1 = our own feature extraction research. Pillar 2 = external
+      algorithms (WLED-SR etc). May compose later, keep separate for now.
+    status: integrated
+    warmth: medium
+    confidence: high
+    source: []
+    tags: [architecture, organization, pillar-1, pillar-2]
+    relates_to: [wled-sr-reimplemented]
+    notes: >
+      Prevents premature coupling. Each pillar can evolve independently.
+
+  # ── Data & Methodology ───────────────────────────────────────────
+
+  - id: data-assets
+    date: 2026-01-10
+    touched: 2026-02-15
+    title: Audio test data and annotation inventory
+    summary: >
+      Opiate Intro (40s, 6 annotation layers), fa_br_drop1 (129s, sections),
+      ambient (30s), electronic_beat (50s), 7 Harmonix tracks with tap annotations.
+    status: integrated
+    warmth: medium
+    confidence: high
+    source: research/audio-segments/catalog.yaml
+    tags: [data, annotations, user-data]
+    relates_to: [taps-track-bass-peaks, tactus-ambiguity]
+    notes: >
+      All Harmonix tracks have sethbeat tap annotations. Constant Motion
+      also has headbang layer. See catalog.yaml for full details.
+
+  - id: keyboard-repeat-artifacts
+    date: 2026-01-20
+    touched: 2026-01-20
+    title: 5 keyboard repeat artifacts in Opiate taps
+    summary: >
+      At 29.3-29.6s, 5 taps at 83-85ms intervals = keyboard auto-repeat,
+      not intentional taps. Data quality issue.
+    status: validated
+    warmth: low
+    confidence: high
+    source: research/audio-segments/catalog.yaml
+    tags: [data-quality, taps, artifacts]
+    relates_to: [taps-track-bass-peaks]
+    notes: >
+      Need to filter from analysis. Known positions: 29.3-29.6s in Opiate.
+
+  - id: ml-project-framing
+    date: 2026-01-15
+    touched: 2026-02-10
+    title: "Project framed as ML: training/validation/test split"
+    summary: >
+      Conversations + analysis = training. Decomposition quality = validation.
+      User taps = automated test (cheap, possibly wrong). Looking at LEDs =
+      manual test (ground truth, expensive).
+    status: integrated
+    warmth: medium
+    confidence: high
+    source: []
+    tags: [methodology, philosophy]
+    relates_to: [two-quality-axes]
+    notes: >
+      User tap data is test set, not guaranteed truth. User could be wrong
+      or miscommunicate. Always validate with LED visual test when possible.
+
+  # ── Future Directions ────────────────────────────────────────────
+
+  - id: client-side-web-viewer
+    date: 2026-02-01
+    touched: 2026-02-10
+    title: Pure JS web viewer for GitHub Pages
+    summary: >
+      Rewrite segment.py web as Web Audio API + Canvas. Shareable demo
+      with zero install.
+    status: spark
+    warmth: medium
+    confidence: high
+    source: []
+    tags: [tools, web, sharing, future]
+    relates_to: [repo-discoverability]
+    notes: >
+      Significant project, plan first. Blocked by having something
+      worth showing publicly.
+
+  - id: repo-discoverability
+    date: 2026-02-01
+    touched: 2026-02-10
+    title: "Repo rename + README + community post"
+    summary: >
+      Rename from 'led', set GitHub topics, rewrite README with findings,
+      post to r/FastLED or r/WLED.
+    status: spark
+    warmth: low
+    confidence: high
+    source: []
+    tags: [community, sharing, future]
+    relates_to: [client-side-web-viewer]
+    notes: >
+      Blocked until repo is ready to share. Need polished demo first.
+
+  - id: hetzner-gastown
+    date: 2026-02-10
+    touched: 2026-02-10
+    title: Hetzner cloud server for multi-agent development
+    summary: >
+      CPX11 (4.51 EUR/month). Enables voice-to-code workflow while traveling.
+    status: spark
+    warmth: low
+    confidence: high
+    source: research/docs/HETZNER_SETUP.md
+    tags: [infrastructure, development, future]
+    relates_to: []
+    notes: >
+      Guide and setup script already written. Just needs execution.
+
+  # ── Feb 18 session merges ────────────────────────────────────────
+
+  - id: hpss-vs-flux-empirical
+    date: 2026-02-18
+    touched: 2026-02-18
+    title: "HPSS vs spectral flux: ~30% disagreement, different detectors"
+    summary: >
+      Compared streaming HPSS against per-band spectral flux on 8 tracks.
+      Only 70% of events match. Flux is chattier — triggers on harmonic
+      onsets (chords, vocals) that HPSS suppresses. Background color
+      diverges 38% on average.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: audio-reactive/research/analysis/compare_hpss_vs_flux.py
+    tags: [source-separation, hpss, feature-extraction, experiments]
+    relates_to: [hpss-for-realtime, band-zone-pulse-effect, flux-4frame-avg]
+    notes: >
+      Initial hypothesis was flux would simplify HPSS. Disproven — they're
+      genuinely different detectors. The 847 "extra" flux events are real
+      energy increases the temporal median absorbs. Whether they make better
+      or worse sparkles is a visual question, not a numerical one.
+
+  - id: flux-4frame-avg
+    date: 2026-02-18
+    touched: 2026-02-18
+    title: "4-frame average flux: continuum between naive flux and HPSS"
+    summary: >
+      Comparing against 4-frame running average (~46ms) suppresses gradual
+      harmonic changes. HPSS recall 77% to 83%. Regression on dense
+      percussive material (amen_break 95% to 79%).
+    status: exploring
+    warmth: medium
+    confidence: high
+    source: audio-reactive/effects/band_sparkle_flux.py
+    tags: [source-separation, feature-extraction, experiments]
+    relates_to: [hpss-vs-flux-empirical, hpss-for-realtime]
+    notes: >
+      The continuum: flux(1-frame) → flux(N-frame avg) → HPSS(N-frame median).
+      More context = more selective = fewer harmonic false positives but also
+      fewer "musically interesting non-percussive" triggers. Dense percussive
+      material favors 1-frame. Created band_sparkle_flux effect for visual
+      A/B testing. Awaiting evaluation on LEDs.
+
+  - id: nmf-not-suited-for-sparkles
+    date: 2026-02-18
+    touched: 2026-02-18
+    title: "NMF: overkill for band-level transient detection"
+    summary: >
+      NMF solves source separation (what instrument) but the effect only
+      needs band-level transient detection (did energy spike). More expensive,
+      less stable in streaming, no clear visual benefit.
+    status: dormant
+    warmth: low
+    confidence: high
+    source: []
+    tags: [source-separation, dead-end]
+    relates_to: [hpss-vs-flux-empirical, hpss-for-realtime]
+    notes: >
+      Existing NMF separations in audio-segments/separated/nmf/ useful
+      for offline analysis but not for real-time effects.
+
+  - id: hue-shift-low-brightness
+    date: 2026-02-18
+    touched: 2026-02-18
+    title: WS2812B hue shift at low brightness — smaller channels drop first
+    summary: >
+      Colors with unequal channel ratios (e.g. orange R255 G140 B0) shift
+      hue during fade because the smaller channel rounds to 0 in uint8
+      before the dominant. Orange appears red at tail end of decay.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: audio-reactive/effects/band_zone_pulse.py
+    tags: [hardware, effects, failure-mode]
+    relates_to: [band-zone-pulse-effect]
+    notes: >
+      Fix: clamp non-zero color channels to minimum 1.0 during compositing,
+      use higher brightness cutoff (0.04). General issue affecting any
+      effect using multi-channel colors at low brightness on WS2812B.
+
+  - id: centroid-position-clustering
+    date: 2026-02-18
+    touched: 2026-02-18
+    title: Spectral centroid clusters mid-zone — tree feels underutilized
+    summary: >
+      Mapping sparkle position to spectral centroid within a band results
+      in positions clustering around center. Even with adaptive normalization,
+      observed centroid range is much narrower than the band width.
+    status: dormant
+    warmth: low
+    confidence: high
+    source: audio-reactive/effects/band_zone_pulse.py
+    tags: [effects, feature-extraction, dead-end]
+    relates_to: [band-zone-pulse-effect]
+    notes: >
+      Reverted to random placement. Technically correct but visually
+      unsatisfying — the tree never uses its full height. Random with
+      same-instrument re-trigger gives better spatial coverage. Could
+      revisit with per-instrument tracking (not per-band).
+
+  - id: hpss-redundancy-with-threshold
+    date: 2026-02-18
+    touched: 2026-02-18
+    title: HPSS may be redundant when threshold-based detection is used
+    summary: >
+      The mean+2.5*std threshold already filters transients. HPSS's main
+      value is cleaning percussive signal when sustained tonal content
+      overlaps the same band as a hit. For percussive-only mode, raw
+      spectrum + threshold works ~90% as well.
+    status: exploring
+    warmth: low
+    confidence: medium
+    source: audio-reactive/effects/band_zone_pulse.py
+    tags: [source-separation, architecture]
+    relates_to: [band-zone-pulse-effect, hpss-vs-flux-empirical]
+    notes: >
+      HPSS becomes essential if harmonic background glow is re-enabled
+      (needs clean harmonic-only energy). For percussive-only display,
+      mostly overhead. Kept because cost is modest and it does help
+      in dense mixes.
+
+  - id: rolling-integral-sustained-energy
+    date: 2026-02-18
+    touched: 2026-02-18
+    title: 5s rolling integral as sustained energy detector (untested)
+    summary: >
+      Rolling sum of RT-normalized energy over 5s window per band.
+      Distinguishes sustained elevation from transient spikes.
+    status: exploring
+    warmth: medium
+    confidence: medium
+    source: audio-reactive/tools/viewer.py
+    tags: [feature-extraction, effects]
+    relates_to: [build-taxonomy, derivatives-over-absolutes]
+    notes: >
+      Visualization tool only — untested as LED mapping input. Hypothesis:
+      integral could distinguish drops (sustained high) from builds (rising)
+      from breakdowns (falling). Needs validation against fa_br_drop1.
+
+  - id: hpss-harmonic-filters-vocals
+    date: 2026-02-19
+    touched: 2026-02-19
+    title: HPSS harmonic component strips vocal energy from mids
+    summary: >
+      Rap vocals are heavily percussive (consonants, plosives). HPSS classifies
+      most vocal energy as percussive, leaving harmonic mids empty. Full spectrum
+      matches human perception better for "overall feel" questions.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: audio-reactive/effects/band_zone_pulse.py
+    tags: [source-separation, feature-extraction, effects]
+    relates_to: [hpss-for-realtime, hpss-redundancy-with-threshold]
+    notes: >
+      Design rule: use HPSS only where you specifically need it (percussive
+      hit detection). For "what does the music sound like overall," full
+      spectrum matches perception better.
+
+  - id: vote-counting-bg-color
+    date: 2026-02-19
+    touched: 2026-02-19
+    title: Vote counting beats energy integral for background color selection
+    summary: >
+      Rolling energy integral was dominated by bass (high energy = highest
+      integral). Vote counting: each frame votes for winning group, count
+      over 5s. Bass gets one vote per frame — consistency gives no extra credit.
+    status: integrated
+    warmth: medium
+    confidence: medium
+    source: audio-reactive/effects/band_zone_pulse.py
+    tags: [effects, architecture]
+    relates_to: [band-zone-pulse-effect]
+    notes: >
+      Instantaneous switching blended rapidly changing targets into white
+      via the ~2-3s crossfade. Vote approach is the right middle ground.
+
+  - id: accent-vs-groove-effects
+    date: 2026-02-19
+    touched: 2026-02-19
+    title: "Effect taxonomy: accent effects vs groove effects"
+    summary: >
+      Band zone pulse is an accent effect — highlights individual hits. Works
+      for reggae/electronic (sparse hits) but not rap (dense percussive vocals,
+      groove feel). Rap needs groove effects — tempo-locked pulsing, not per-hit.
+    status: resonates
+    warmth: high
+    confidence: medium
+    source: []
+    tags: [effects, feelings, architecture, future]
+    relates_to: [flourish-ratio, feeling-layer-human-loop, two-quality-axes, band-zone-pulse-effect]
+    notes: >
+      Connects to flourish ratio: groove sections have <30% off-grid taps,
+      meaning locked regular beat. Accent effects fight that feel. The
+      beat predictor in signals.py may be better for groove genres. Also
+      connects to two quality axes — decomposition is fine for rap, it's
+      the visual mapping that doesn't suit the genre.
+
+  - id: pulse-compositing-replace-not-blend
+    date: 2026-02-19
+    touched: 2026-02-19
+    title: "LED compositing: pulses must replace background, not blend"
+    summary: >
+      Additive compositing shifts pulse hue. Per-channel max lets wrong
+      channels win. Correct: pulse replaces background at its pixels,
+      fades to black, then background fades back via per-pixel opacity.
+    status: integrated
+    warmth: medium
+    confidence: high
+    source: audio-reactive/effects/band_zone_pulse.py
+    tags: [effects, architecture, hardware]
+    relates_to: [hue-shift-low-brightness, band-zone-pulse-effect]
+    notes: >
+      Three strategies tried: additive (shifts hue), per-channel max
+      (wrong channels win), replace + fade-in (correct). Fade-in uses
+      per-pixel opacity that drops to 0 on pulse, recovers over ~0.5s.
+
+  - id: openviking-analysis
+    date: 2026-02-19
+    touched: 2026-02-19
+    title: "OpenViking source analysis: prompt techniques worth stealing"
+    summary: >
+      Read OpenViking source code (volcengine/OpenViking). Their memory system
+      is pure prompt engineering, no ML. Novel techniques: L0/L1/L2 layered
+      abstracts, negative extraction examples, CREATE/MERGE/SKIP dedup, and
+      bottom-up category re-summarization. "Self-evolving" claim is marketing.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: []
+    tags: [architecture, methodology, tools, external]
+    relates_to: [research-ledger-system]
+    notes: >
+      Actionable takeaways for our ledger:
+      (1) Add abstract field — one-line grep target per entry.
+      (2) Negative extraction examples — the reason agents logged bug
+      fixes is nobody said "don't log implementation details." Our guide
+      now handles this via "What Belongs in the Ledger" section.
+      (3) CREATE/MERGE/SKIP — make explicit before adding: is this new,
+      should it update existing, or is it a duplicate? Findings/decisions
+      are immutable; theories/entities are mergeable.
+      (4) Bottom-up category summaries — script that regenerates per-tag
+      summaries when entries change. Future nice-to-have.
+      Not worth adopting: vector embeddings, hierarchical retrieval,
+      AGFS filesystem, async queues. Our warmth field is more advanced
+      than anything they implemented. Their active_count is write-only.
+
+  - id: research-ledger-system
+    date: 2026-02-18
+    touched: 2026-02-18
+    title: "Research ledger: structured YAML for tracking findings across sessions"
+    summary: >
+      Created a searchable ledger (this file) to replace the growing MEMORY.md.
+      Entries have status (spark→integrated), warmth (artistic pull), confidence
+      (technical certainty), and relates_to links. Session files enable
+      concurrent multi-agent updates.
+    status: integrated
+    warmth: high
+    confidence: high
+    source: audio-reactive/research/LEDGER_GUIDE.md
+    tags: [architecture, methodology, tools]
+    relates_to: []
+    notes: >
+      Key design choice: warmth and confidence as independent axes.
+      High-confidence low-warmth = technically true but not exciting.
+      Low-confidence high-warmth = unproven but pulls you toward it.
+      Status vocabulary includes "dormant" (hasn't found its place)
+      and "resonates" (feels right, not fully proven) to avoid forcing
+      binary useful/not-useful judgments on an art project. Rule of
+      thumb for what to log: if it changes how we THINK about audio,
+      LEDs, or feelings, log it. Implementation details belong in git.

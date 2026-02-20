@@ -47,15 +47,6 @@ floods:
   source_window: "60-120s"
   sections: "verse → chorus → verse"
 
-cameraeye:
-  file: cameraeye.wav
-  artist: Rush
-  title: The Camera Eye
-  genre: rock
-  bpm: 166
-  source_window: "240-300s"
-  sections: "verse → bridge → chorus"
-
 limelight:
   file: limelight.wav
   artist: Rush

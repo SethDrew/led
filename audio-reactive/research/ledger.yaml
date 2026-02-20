@@ -803,6 +803,82 @@ entries:
       (wrong channels win), replace + fade-in (correct). Fade-in uses
       per-pixel opacity that drops to 0 on pulse, recovers over ~0.5s.
 
+  - id: absint-fails-percussive
+    date: 2026-02-19
+    touched: 2026-02-19
+    title: Abs-integral autocorrelation fails on percussive music
+    summary: >
+      Abs-integral merges onset and offset energy, destroying timing info.
+      Autocorrelation locks to wrong periodicities (0/4 rap tracks, 2/3
+      ratio error on complex beats). Good for beat detection, bad for tempo.
+    status: validated
+    warmth: low
+    confidence: high
+    source: audio-reactive/research/analysis/scripts/rap_tempo_analysis.py
+    tags: [beat-detection, feature-extraction, dead-end]
+    relates_to: [derivatives-over-absolutes, onset-envelope-for-tempo]
+    notes: >
+      Symmetric bump-dip pattern creates spurious periodicities at
+      non-octave ratios. Keep absint for beat detection in rock/metal.
+      Tempo estimation needs a different signal.
+
+  - id: onset-envelope-for-tempo
+    date: 2026-02-19
+    touched: 2026-02-19
+    title: Multi-band onset envelope is the right signal for tempo autocorrelation
+    summary: >
+      FFT → 6 mel bands → log energy → diff → half-wave rectify → mean.
+      Without tempo prior, autocorrelation consistently finds clean power-of-2
+      multiples of true beat. Multi-band matters — single-band misses spectral
+      decomposition.
+    status: integrated
+    warmth: high
+    confidence: high
+    source: audio-reactive/effects/signals.py
+    tags: [beat-detection, feature-extraction, effects]
+    relates_to: [absint-fails-percussive, no-prior-for-leds]
+    notes: >
+      6 mel bands is enough — tested against 128, same autocorrelation
+      peak structure. Implemented as OnsetTempoTracker in signals.py.
+
+  - id: no-prior-for-leds
+    date: 2026-02-19
+    touched: 2026-02-19
+    title: "Tempo prior hurts LEDs — clean octaves beat exact BPM"
+    summary: >
+      Without prior: 0/9 exact BPM but 9/9 clean octave multiples.
+      With prior: some exact but introduces 2/3, 4/3 ratio errors.
+      For LED fades any octave is fine — no prior is the correct default.
+    status: validated
+    warmth: high
+    confidence: high
+    source: audio-reactive/research/analysis/scripts/test_onset_tracker.py
+    tags: [beat-detection, effects, perception]
+    relates_to: [onset-envelope-for-tempo, two-quality-axes]
+    notes: >
+      Case of two-quality-axes: decomposition accuracy ≠ LED quality.
+      Consistent power-of-2 errors strictly better than unpredictable
+      ratio errors for visual effects.
+
+  - id: ac-buffer-must-fill
+    date: 2026-02-19
+    touched: 2026-02-19
+    title: Autocorrelation on partial buffer permanently poisons tempo estimate
+    summary: >
+      Running autocorrelation before ring buffer is full produces garbage.
+      The 80/20 period smoother then rejects correct tempo forever because
+      correct/garbage ratio falls outside correction windows. Must wait for
+      full buffer (~5s) before first estimate.
+    status: integrated
+    warmth: low
+    confidence: high
+    source: audio-reactive/effects/signals.py
+    tags: [beat-detection, failure-mode]
+    relates_to: [onset-envelope-for-tempo]
+    notes: >
+      Non-obvious failure: smoother's rejection window means first-estimate
+      quality is critical. One bad initial value locks out the correct one.
+
   - id: openviking-analysis
     date: 2026-02-19
     touched: 2026-02-19

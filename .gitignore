@@ -41,3 +41,7 @@ audio-reactive/research/audio-segments/separated/
 audio-reactive/research/audio-segments/harmonix/*.wav
 !audio-reactive/research/audio-segments/harmonix/*_5s.wav
 !audio-reactive/research/audio-segments/harmonix/*_10s.wav
+audio-reactive/research/audio-segments/harmonix/full/
+
+# Audio: user uploads (test files, temporary)
+audio-reactive/research/audio-segments/uploads/

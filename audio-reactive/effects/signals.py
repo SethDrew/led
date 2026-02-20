@@ -1,21 +1,26 @@
 """
 Reusable signal processing primitives for audio-reactive effects.
 
-Three building blocks that effects compose via has-a:
+Building blocks that effects compose via has-a:
 
   OverlapFrameAccumulator — feeds audio chunks, yields overlapped frames
   AbsIntegral             — computes normalized abs-integral of RMS derivative
   BeatPredictor           — autocorrelation tempo + predicted/confirmed beats
+  OnsetTempoTracker       — onset-envelope autocorrelation for tempo estimation
 
 Usage:
     accum = OverlapFrameAccumulator()
     absint = AbsIntegral(sample_rate=44100)
     predictor = BeatPredictor(rms_fps=absint.rms_fps)
 
+    # For tempo-only (no individual beat detection):
+    tracker = OnsetTempoTracker(sample_rate=44100)
+
     def process_audio(self, chunk):
         for frame in accum.feed(chunk):
             normalized = absint.update(frame)
             beats = predictor.feed(normalized, absint.time_acc)
+            tracker.feed_frame(frame)
             ...
 """
 
@@ -302,6 +307,245 @@ class BeatPredictor:
                 'strength': self.predicted_strength,
             }
         return None
+
+    @property
+    def bpm(self) -> float:
+        """Current estimated BPM, or 0 if unknown."""
+        return 60.0 / self.estimated_period if self.estimated_period > 0 else 0.0
+
+
+class OnsetTempoTracker:
+    """Tempo estimation via onset-envelope autocorrelation.
+
+    Designed for music where the abs-integral beat detector struggles —
+    dense percussive content like rap, where constant hi-hats and 808s
+    make the abs-integral signal noisy. Instead of detecting individual
+    beats, this estimates the underlying tempo period.
+
+    == How autocorrelation works ==
+
+    Take 5 seconds of the onset signal. Make a copy and slide it forward
+    by some amount ("lag"). Multiply the original and shifted copy
+    point-by-point, sum the products. If the signal repeats at that lag,
+    peaks align with peaks → big positive sum. If the lag is wrong,
+    peaks hit valleys → small or negative sum.
+
+    Try every plausible lag (corresponding to 40-300 BPM). The lag with
+    the biggest sum is the estimated beat period.
+
+    The catch: if the beat repeats every T, there's also correlation at
+    2T, 3T, etc. (sub-harmonics). A kick every 2 beats creates a peak
+    at half-tempo. This "octave ambiguity" is inherent — autocorrelation
+    can't tell which is the "real" beat. We use a Gaussian tempo prior
+    to bias toward plausible tempos.
+
+    == Signal: multi-band onset envelope ==
+
+    Per frame: FFT → group into 6 mel-spaced frequency bands → log
+    energy per band → first-order difference → half-wave rectify
+    (only energy increases = onsets) → mean across bands.
+
+    This is a streaming approximation of librosa.onset.onset_strength.
+    The multi-band decomposition matters: a kick at 80Hz and a hi-hat
+    at 8kHz both register as separate onsets in their bands rather than
+    cancelling out in a single-band RMS. 6 bands is enough — tested
+    against 128 mel bands, same autocorrelation peak structure.
+
+    Why not abs-integral (|d(RMS)/dt| summed over a window)?
+    The abs-integral counts both energy arriving AND leaving. In rap,
+    kick and snare create symmetric bump-dip patterns that the absolute
+    value merges, destroying onset timing. The onset envelope preserves
+    the one-sided onset peaks that autocorrelation needs.
+
+    Tested on 5 tracks (82-146 BPM rap + 129 BPM glue), streaming:
+      - Without prior: always locks to a clean power-of-2 multiple
+        (0.5x or 2x) of the true tempo. Consistent and predictable.
+      - With prior: can get exact tempo but also introduces non-octave
+        errors (2/3, 4/3) when the prior center doesn't match the track.
+        Worse for LED effects where any octave is fine.
+
+    == No prior by default ==
+
+    Without a prior, autocorrelation picks the strongest peak, which
+    is always a sub-harmonic (power-of-2 related to the true beat).
+    For tempo-driven LED effects this is ideal: the estimated period
+    is always a clean multiple of the real beat, so fades stay locked
+    to the music's periodicity regardless of which octave was chosen.
+
+    A prior (prior_sigma < 99999) can be enabled to target exact BPM,
+    but risks non-octave errors when the prior doesn't match the track.
+
+    == Output ==
+
+    estimated_period (seconds), confidence (0-1), bpm.
+    No beat events — this is for effects that need tempo, not timing.
+    """
+
+    def __init__(self, sample_rate: int = 44100, frame_len: int = 2048,
+                 ac_window_sec: float = 5.0, update_interval_sec: float = 0.5,
+                 min_bpm: float = 40, max_bpm: float = 300,
+                 prior_center: float = 100, prior_sigma: float = 99999,
+                 n_bands: int = 6):
+        self.sample_rate = sample_rate
+        self.frame_len = frame_len
+        self.dt = frame_len / sample_rate
+        self.rms_fps = sample_rate / 512  # hop-based rate
+        self.rms_dt = 512 / sample_rate
+
+        # Multi-band onset envelope state.
+        # We split the FFT into n_bands mel-spaced bands and track
+        # spectral flux (positive energy increase) in each band, then
+        # average across bands. This is a streaming approximation of
+        # librosa.onset.onset_strength.
+        self.n_bands = n_bands
+        fft_size = frame_len // 2 + 1
+        freqs = np.linspace(0, sample_rate / 2, fft_size)
+        # Mel-spaced band edges
+        mel_lo = 2595 * np.log10(1 + 20 / 700)
+        mel_hi = 2595 * np.log10(1 + (sample_rate / 2) / 700)
+        mel_edges = np.linspace(mel_lo, mel_hi, n_bands + 1)
+        hz_edges = 700 * (10 ** (mel_edges / 2595) - 1)
+        # Precompute bin ranges for each band
+        self._band_slices = []
+        for b in range(n_bands):
+            lo_bin = np.searchsorted(freqs, hz_edges[b])
+            hi_bin = np.searchsorted(freqs, hz_edges[b + 1])
+            hi_bin = max(hi_bin, lo_bin + 1)  # at least 1 bin
+            self._band_slices.append(slice(lo_bin, hi_bin))
+        self._prev_band_energy = np.zeros(n_bands, dtype=np.float64)
+
+        # Ring buffer of onset values for autocorrelation
+        self.ac_window_frames = int(ac_window_sec * self.rms_fps)
+        self.onset_buf = np.zeros(self.ac_window_frames, dtype=np.float32)
+        self.buf_pos = 0
+        self.buf_filled = 0
+
+        # How often to re-run autocorrelation (in frames)
+        self.update_interval = int(update_interval_sec * self.rms_fps)
+        self.frames_since_update = 0
+
+        # Autocorrelation lag bounds
+        self.min_lag = max(1, int(self.rms_fps * 60.0 / max_bpm))
+        self.max_lag = int(self.rms_fps * 60.0 / min_bpm)
+
+        # Tempo prior: precompute Gaussian weights for each lag
+        self._prior_weights = np.zeros(self.max_lag - self.min_lag)
+        for i, lag in enumerate(range(self.min_lag, self.max_lag)):
+            bpm = 60.0 * self.rms_fps / lag
+            self._prior_weights[i] = np.exp(
+                -0.5 * ((bpm - prior_center) / prior_sigma) ** 2
+            )
+
+        # Result state
+        self.estimated_period = 0.0  # seconds
+        self.confidence = 0.0
+        self.time_acc = 0.0
+
+    def feed_frame(self, frame: np.ndarray):
+        """Feed one audio frame (2048 samples). Call once per frame from
+        OverlapFrameAccumulator."""
+
+        # Multi-band onset envelope:
+        # 1. FFT → magnitude spectrum
+        # 2. Sum energy in each mel-spaced band (log scale)
+        # 3. First-order difference vs previous frame (spectral flux)
+        # 4. Half-wave rectify (only increases = onsets)
+        # 5. Mean across bands
+        spectrum = np.abs(np.fft.rfft(frame))
+        band_energy = np.zeros(self.n_bands, dtype=np.float64)
+        for b, sl in enumerate(self._band_slices):
+            band_energy[b] = np.log1p(np.sum(spectrum[sl] ** 2))
+        flux = band_energy - self._prev_band_energy
+        self._prev_band_energy = band_energy
+        # Half-wave rectify + mean: onset strength this frame
+        onset = np.mean(np.maximum(0, flux))
+
+        # Store in ring buffer
+        self.onset_buf[self.buf_pos % self.ac_window_frames] = onset
+        self.buf_pos += 1
+        self.buf_filled = min(self.buf_filled + 1, self.ac_window_frames)
+        self.time_acc += self.rms_dt
+
+        # Periodically run autocorrelation
+        self.frames_since_update += 1
+        if self.frames_since_update >= self.update_interval:
+            self.frames_since_update = 0
+            self._update_autocorrelation()
+
+    def _update_autocorrelation(self):
+        """Run autocorrelation on the onset buffer, find best period."""
+        # Need enough data for autocorrelation to be meaningful.
+        # min_lag * 3 is the mathematical minimum, but in practice we need
+        # at least a full window for reliable peaks. Without this, the first
+        # estimate from a nearly-empty buffer can be garbage and then the
+        # smoothing logic permanently rejects the correct tempo.
+        if self.buf_filled < self.ac_window_frames:
+            return
+
+        # Unroll ring buffer into contiguous array
+        n = self.buf_filled
+        if n >= self.ac_window_frames:
+            start = self.buf_pos % self.ac_window_frames
+            signal = np.concatenate([self.onset_buf[start:],
+                                     self.onset_buf[:start]])
+        else:
+            signal = self.onset_buf[:n].copy()
+
+        # Subtract mean so autocorrelation measures periodicity, not DC offset
+        signal = signal - np.mean(signal)
+        norm = np.dot(signal, signal)
+        if norm < 1e-20:
+            return
+
+        max_lag = min(self.max_lag, len(signal) // 2)
+        if self.min_lag >= max_lag:
+            return
+
+        n_lags = max_lag - self.min_lag
+
+        # Core autocorrelation: for each candidate lag, compute
+        #   sum(signal[t] * signal[t + lag]) / norm
+        # High value = signal correlates well with itself shifted by that lag.
+        autocorr = np.zeros(n_lags, dtype=np.float64)
+        for i, lag in enumerate(range(self.min_lag, max_lag)):
+            autocorr[i] = np.dot(signal[:-lag], signal[lag:]) / norm
+
+        # Find peaks (local maxima) in the autocorrelation
+        # Weight each peak by the tempo prior
+        best_score = -1.0
+        best_lag = -1
+        best_raw_conf = 0.0
+
+        for i in range(1, n_lags - 1):
+            if autocorr[i] > autocorr[i - 1] and autocorr[i] > autocorr[i + 1]:
+                if autocorr[i] > 0.05:
+                    score = autocorr[i] * self._prior_weights[i]
+                    if score > best_score:
+                        best_score = score
+                        best_lag = self.min_lag + i
+                        best_raw_conf = autocorr[i]
+
+        if best_lag < 0:
+            return
+
+        self.confidence = best_raw_conf
+        new_period = best_lag / self.rms_fps
+
+        # Smooth into existing estimate (80/20 blend),
+        # with octave correction for 2x/0.5x jumps.
+        if self.estimated_period > 0:
+            ratio = new_period / self.estimated_period
+            if 0.8 < ratio < 1.2:
+                self.estimated_period = 0.8 * self.estimated_period + 0.2 * new_period
+            elif 0.45 < ratio < 0.55:
+                self.estimated_period = (0.8 * self.estimated_period
+                                         + 0.2 * (new_period * 2))
+            elif 1.8 < ratio < 2.2:
+                self.estimated_period = (0.8 * self.estimated_period
+                                         + 0.2 * (new_period / 2))
+            # else: too far off, ignore this estimate
+        else:
+            self.estimated_period = new_period
 
     @property
     def bpm(self) -> float:

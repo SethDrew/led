@@ -317,6 +317,7 @@ class SyncedVisualizer:
         self.composite_deviation = np.max(all_z, axis=0)
 
         self._compute_events()
+        self._compute_calculus()
 
         print(f"Tempo: {self.tempo:.1f} BPM, {len(self.onset_times)} onsets, {len(self.beat_times)} beats")
 
@@ -369,11 +370,16 @@ class SyncedVisualizer:
         min_riser_frames = max(1, int(1.0 * fps))
         self.event_risers = self._find_spans(riser_mask, t, min_riser_frames)
 
-        # ── Dropouts: normalized RMS below threshold ──
-        rms_norm = self.rms_energy[:n] / (np.max(self.rms_energy[:n]) + 1e-10)
-        dropout_mask = rms_norm < 0.05
+        # ── Dropouts: per-band energy below threshold ──
         min_dropout_frames = max(1, int(0.1 * fps))
-        self.event_dropouts = self._find_spans(dropout_mask, t, min_dropout_frames)
+        self.event_dropouts = {}
+        for band_name, energy in self.band_energies.items():
+            e = energy[:n]
+            band_norm = e / (np.max(e) + 1e-10)
+            dropout_mask = band_norm < 0.05
+            spans = self._find_spans(dropout_mask, t, min_dropout_frames)
+            if spans:
+                self.event_dropouts[band_name] = spans
 
         # ── Harmonic: smoothed onset strength below threshold ──
         onset_smooth = gaussian_filter1d(self.onset_env[:n], sigma=0.5 * fps)
@@ -382,8 +388,440 @@ class SyncedVisualizer:
         min_harmonic_frames = max(1, int(1.0 * fps))
         self.event_harmonic = self._find_spans(harmonic_mask, t, min_harmonic_frames)
 
+        total_dropouts = sum(len(v) for v in self.event_dropouts.values())
+        dropout_bands = ', '.join(f'{b}:{len(v)}' for b, v in self.event_dropouts.items())
         print(f"Events: {len(self.event_drops)} drops, {len(self.event_risers)} risers, "
-              f"{len(self.event_dropouts)} dropouts, {len(self.event_harmonic)} harmonic")
+              f"{total_dropouts} dropouts ({dropout_bands}), {len(self.event_harmonic)} harmonic")
+
+    def _compute_calculus(self):
+        """Compute second derivatives and time-bounded integrals for calculus tab."""
+        from scipy.ndimage import gaussian_filter1d, uniform_filter1d
+
+        fps = self.sr / self.hop_length
+        dt = 1.0 / fps
+
+        # 10s rolling integral of total RMS
+        int_window_10s = int(10 * fps)
+        self.rms_integral_10s = uniform_filter1d(
+            self.rms_energy, size=int_window_10s, mode='reflect') * int_window_10s
+
+        # Integral slope: d/dt of 10s integral, smoothed
+        raw_slope = np.diff(self.rms_integral_10s, prepend=self.rms_integral_10s[0]) / dt
+        self.integral_slope = gaussian_filter1d(raw_slope, sigma=15)
+
+        # Integral curvature: d²/dt² of 10s integral
+        self.integral_curvature = gaussian_filter1d(
+            np.diff(self.integral_slope, prepend=self.integral_slope[0]) / dt, sigma=10)
+
+        # Slope derivative for zero-crossing peak detection
+        # Heavy smoothing (σ=60 ≈ 0.7s) eliminates phrase-level jitter,
+        # keeping only section-level transitions. RT-feasible via 3 cascaded box filters.
+        slope_smooth = gaussian_filter1d(self.integral_slope, sigma=60)
+        self.slope_derivative = np.diff(slope_smooth, prepend=slope_smooth[0]) / dt
+        self.slope_smooth = slope_smooth
+
+        # Find ALL zero crossings of the smoothed slope derivative
+        sd = self.slope_derivative
+        raw_build_zc = np.where((sd[:-1] > 0) & (sd[1:] <= 0))[0]
+        raw_decay_zc = np.where((sd[:-1] < 0) & (sd[1:] >= 0))[0]
+
+        # Filter: build peaks only when slope is positive and large,
+        # decay troughs only when slope is negative and large
+        slope_max = np.max(np.abs(slope_smooth)) + 1e-10
+        slope_thresh = 0.20 * slope_max
+        raw_build_zc = raw_build_zc[slope_smooth[raw_build_zc] > slope_thresh]
+        raw_decay_zc = raw_decay_zc[slope_smooth[raw_decay_zc] < -slope_thresh]
+
+        # Filter: minimum 8s gap between consecutive same-type markers
+        min_gap_frames = int(8 * fps)
+
+        def _dedupe(indices):
+            if len(indices) == 0:
+                return indices
+            keep = [indices[0]]
+            for idx in indices[1:]:
+                if idx - keep[-1] >= min_gap_frames:
+                    keep.append(idx)
+            return np.array(keep)
+
+        self.slope_peak_build_idx = _dedupe(raw_build_zc)
+        self.slope_peak_decay_idx = _dedupe(raw_decay_zc)
+
+        # Multi-scale integrals (2s, 5s, 15s of RT-normalized total RMS)
+        total_rt = sum(self.band_energy_rt[b] for b in FREQUENCY_BANDS) / len(FREQUENCY_BANDS)
+        self.multi_scale_integrals = {}
+        for window_sec in (2, 5, 15):
+            w = int(window_sec * fps)
+            self.multi_scale_integrals[window_sec] = uniform_filter1d(
+                total_rt, size=w, mode='reflect') * w
+
+        # Onset second derivative (smoothed at multiple scales)
+        self.onset_d2 = {}
+        for sigma in (1, 3, 10, 30):
+            smoothed = gaussian_filter1d(self.onset_env, sigma=sigma)
+            d2 = np.diff(smoothed, n=2, prepend=[smoothed[0], smoothed[0]]) / (dt ** 2)
+            self.onset_d2[sigma] = d2
+
+        # RMS second derivatives at multiple smoothing scales (for jitter panel)
+        self.rms_d2 = {}
+        for sigma in (1, 3, 10, 30):
+            smoothed = gaussian_filter1d(self.rms_energy, sigma=sigma)
+            d2 = np.diff(smoothed, n=2, prepend=[smoothed[0], smoothed[0]]) / (dt ** 2)
+            self.rms_d2[sigma] = d2
+
+        # Build detector spans
+        self._detect_builds()
+
+        print(f"Calculus: integral_slope range [{self.integral_slope.min():.4f}, {self.integral_slope.max():.4f}], "
+              f"{len(self.build_spans)} builds, {len(self.decay_spans)} decays")
+
+    def _detect_builds(self):
+        """Classify spans as building/decaying/steady from integral slope."""
+        fps = self.sr / self.hop_length
+        slope = self.integral_slope
+        t = self.times
+
+        # Threshold: 5% of the max absolute slope
+        threshold = 0.05 * np.max(np.abs(slope))
+
+        min_build_frames = max(1, int(5.0 * fps))  # 5s minimum for builds
+        min_decay_frames = max(1, int(3.0 * fps))   # 3s minimum for decays
+
+        build_mask = slope > threshold
+        decay_mask = slope < -threshold
+
+        self.build_spans = self._find_spans(build_mask, t, min_build_frames)
+        self.decay_spans = self._find_spans(decay_mask, t, min_decay_frames)
+
+    def _overlay_sections(self, ax):
+        """Draw section boundaries from annotations on any panel."""
+        sections = self.annotations.get('sections', self.annotations.get('segments', []))
+        if not sections:
+            return
+        for i, sec in enumerate(sections):
+            t = sec.get('time', sec.get('start', None))
+            if t is None:
+                continue
+            label = sec.get('label', '')
+            color = ANNOTATION_COLORS[i % len(ANNOTATION_COLORS)]
+            ax.axvline(x=t, color=color, linestyle='--', linewidth=1.5, alpha=0.6)
+            ax.text(t + 0.3, 0.97, label, transform=ax.get_xaxis_transform(),
+                    va='top', fontsize=7, color=color, alpha=0.8,
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.5))
+
+    # ── Calculus panels ──────────────────────────────────────────────
+
+    def _build_calc_energy_integral_panel(self, ax):
+        """Panel 1: RMS energy + 10s rolling integral (dual y-axis)."""
+        t = self.times
+        n = len(t)
+        ax.plot(t, self.rms_energy[:n], color='#FFFFFF', linewidth=0.8, alpha=0.4, label='RMS Energy')
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('RMS Energy', color='#FFFFFF')
+        ax.tick_params(axis='y', labelcolor='#FFFFFF')
+
+        ax2 = ax.twinx()
+        ax2.plot(t, self.rms_integral_10s[:n], color='#FFD740', linewidth=2.5, alpha=0.9, label='10s Integral')
+        ax2.set_ylabel('10s Integral', color='#FFD740')
+        ax2.tick_params(axis='y', labelcolor='#FFD740')
+
+        ax.set_title('Energy + 10s Integral — baseline context', fontsize=11)
+        ax.legend(loc='upper left', framealpha=0.8, fontsize=8)
+        ax2.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        self._overlay_sections(ax)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_calc_integral_slope_panel(self, ax):
+        """Panel 2: Integral slope — energy momentum (d/dt of 10s integral)."""
+        t = self.times
+        n = len(t)
+        slope = self.integral_slope[:n]
+        pos = np.maximum(slope, 0)
+        neg = np.minimum(slope, 0)
+
+        ax.fill_between(t, pos, color='#FF5252', alpha=0.7, linewidth=0, label='Rising')
+        ax.fill_between(t, neg, color='#448AFF', alpha=0.7, linewidth=0, label='Falling')
+        ax.axhline(y=0, color='#666', linewidth=0.5)
+
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('d(Integral)/dt')
+        ax.set_title('Integral Slope — red = energy building, blue = energy decaying', fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        self._overlay_sections(ax)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_calc_slope_peaks_panel(self, ax):
+        """Slope peaks: heavily smoothed slope with structural zero-crossing markers."""
+        t = self.times
+        n = len(t)
+        slope_raw = self.integral_slope[:n]
+        slope_smooth = self.slope_smooth[:n]
+
+        # Raw slope as faint context
+        ax.fill_between(t, np.maximum(slope_raw, 0), color='#FF5252', alpha=0.15, linewidth=0)
+        ax.fill_between(t, np.minimum(slope_raw, 0), color='#448AFF', alpha=0.15, linewidth=0)
+
+        # Smoothed slope (σ=60) — the signal we derive
+        ax.plot(t, slope_smooth, color='#FFFFFF', linewidth=2.0, alpha=0.9, label='Slope (σ=60)')
+        ax.axhline(y=0, color='#666', linewidth=0.5)
+
+        # Peak build markers
+        peak_builds = self.slope_peak_build_idx[self.slope_peak_build_idx < n]
+        if len(peak_builds) > 0:
+            ax.scatter(t[peak_builds], slope_smooth[peak_builds],
+                       color='#FF4081', s=100, zorder=6, marker='v',
+                       edgecolors='white', linewidths=0.5, label='Peak build')
+            for idx in peak_builds:
+                ax.annotate(f'{t[idx]:.0f}s', (t[idx], slope_smooth[idx]),
+                            textcoords='offset points', xytext=(0, -16),
+                            fontsize=8, color='#FF4081', ha='center', fontweight='bold')
+
+        # Peak decay markers
+        peak_decays = self.slope_peak_decay_idx[self.slope_peak_decay_idx < n]
+        if len(peak_decays) > 0:
+            ax.scatter(t[peak_decays], slope_smooth[peak_decays],
+                       color='#40C4FF', s=100, zorder=6, marker='^',
+                       edgecolors='white', linewidths=0.5, label='Peak decay')
+            for idx in peak_decays:
+                ax.annotate(f'{t[idx]:.0f}s', (t[idx], slope_smooth[idx]),
+                            textcoords='offset points', xytext=(0, 12),
+                            fontsize=8, color='#40C4FF', ha='center', fontweight='bold')
+
+        n_b = len(peak_builds)
+        n_d = len(peak_decays)
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('Smoothed Slope')
+        ax.set_title(
+            f'Slope Peaks (σ=60, >25% thresh, >8s gap) — '
+            f'{n_b} build peaks, {n_d} decay troughs', fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        self._overlay_sections(ax)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_calc_integral_curvature_panel(self, ax):
+        """Panel 3: Energy acceleration — d²/dt² of 10s integral."""
+        t = self.times
+        n = len(t)
+        curv = self.integral_curvature[:n]
+        pos = np.maximum(curv, 0)
+        neg = np.minimum(curv, 0)
+
+        ax.fill_between(t, pos, color='#FF9100', alpha=0.7, linewidth=0, label='Accelerating')
+        ax.fill_between(t, neg, color='#00E5FF', alpha=0.7, linewidth=0, label='Decelerating')
+        ax.axhline(y=0, color='#666', linewidth=0.5)
+
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('d²(Integral)/dt²')
+        ax.set_title('Energy Acceleration — orange = build accelerating, cyan = plateauing', fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        self._overlay_sections(ax)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_calc_multi_scale_panel(self, ax):
+        """Panel 4: Multi-scale integrals (2s, 5s, 15s)."""
+        t = self.times
+        n = len(t)
+        styles = {2: ('#69F0AE', 1.0), 5: ('#40C4FF', 1.8), 15: ('#E040FB', 2.5)}
+        for window_sec in (2, 5, 15):
+            color, lw = styles[window_sec]
+            ax.plot(t, self.multi_scale_integrals[window_sec][:n],
+                    color=color, linewidth=lw, alpha=0.85,
+                    label=f'{window_sec}s')
+
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('Integrated Energy')
+        ax.set_title('Multi-Scale Integrals — 2s phrase, 5s passage, 15s section arc', fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        self._overlay_sections(ax)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_calc_onset_d2_panel(self, ax):
+        """Panel 5: Onset second derivative — peak detection via zero-crossings."""
+        from scipy.ndimage import gaussian_filter1d
+
+        t = self.times
+        n = len(t)
+
+        # Onset envelope (smoothed σ=3) with zero-crossing peaks
+        onset = gaussian_filter1d(self.onset_env[:n], sigma=3)
+        d2 = self.onset_d2[3][:n]
+
+        ax.plot(t, onset / (np.max(onset) + 1e-10), color='#00E5FF', linewidth=1.5, alpha=0.9, label='Onset (σ=3)')
+
+        # Detect peaks: zero-crossings of d2 from positive to negative
+        zero_crossings = np.where((d2[:-1] > 0) & (d2[1:] <= 0))[0]
+        if len(zero_crossings) > 0:
+            onset_norm = onset / (np.max(onset) + 1e-10)
+            ax.scatter(t[zero_crossings], onset_norm[zero_crossings],
+                       color='#FF4081', s=15, zorder=5, marker='v', label='d² peaks')
+
+        # Beat annotation ticks if available
+        beats = self.annotations.get('beats', self.annotations.get('beat', []))
+        if beats and isinstance(beats, list):
+            beat_times = [b if isinstance(b, (int, float)) else b.get('time', b.get('start', 0)) for b in beats]
+            beat_times = [b for b in beat_times if isinstance(b, (int, float))]
+            if beat_times:
+                for bt in beat_times:
+                    ax.axvline(x=bt, color='#FFD740', alpha=0.3, linewidth=0.8)
+
+                # Compute hit rate at 50ms tolerance
+                hits = 0
+                for zc_t in t[zero_crossings]:
+                    if any(abs(zc_t - bt) < 0.05 for bt in beat_times):
+                        hits += 1
+                precision = hits / max(len(zero_crossings), 1)
+                recall = sum(1 for bt in beat_times
+                             if any(abs(bt - t[zc]) < 0.05 for zc in zero_crossings)) / max(len(beat_times), 1)
+                f1 = 2 * precision * recall / (precision + recall + 1e-10)
+                ax.text(0.02, 0.95, f'P={precision:.2f} R={recall:.2f} F1={f1:.2f} @50ms',
+                        transform=ax.transAxes, va='top', fontsize=8, color='#FFD740',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.6))
+
+        ax.set_xlim([0, self.duration])
+        ax.set_ylim([0, 1.1])
+        ax.set_ylabel('Onset Strength')
+        ax.set_title('Onset Second Derivative — peak detection via d² zero-crossings', fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        self._overlay_sections(ax)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_calc_jitter_panel(self, ax):
+        """Panel 6: RMS second derivative at 4 smoothing levels — jitter vs smoothing tradeoff."""
+        t = self.times
+        n = len(t)
+        fps = self.sr / self.hop_length
+        dt_ms = 1000.0 / fps  # ms per frame
+
+        alphas = {1: 0.3, 3: 0.5, 10: 0.7, 30: 0.9}
+        colors = {1: '#FF8A65', 3: '#FF5722', 10: '#E91E63', 30: '#9C27B0'}
+
+        for sigma in (1, 3, 10, 30):
+            d2 = self.rms_d2[sigma][:n]
+            # Normalize each to its own range for visual comparison
+            mx = np.max(np.abs(d2)) + 1e-10
+            d2_norm = d2 / mx
+            ms = sigma * dt_ms
+            ax.plot(t, d2_norm, color=colors[sigma], linewidth=1.2,
+                    alpha=alphas[sigma], label=f'σ={sigma} ({ms:.0f}ms)')
+
+        ax.axhline(y=0, color='#666', linewidth=0.5)
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('d²RMS/dt² (normalized)')
+        ax.set_title('Jitter vs Smoothing — lighter = jittery (σ=1), darker = smooth (σ=30)', fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        self._overlay_sections(ax)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _sections_to_spans(self):
+        """Convert section boundary annotations to (start, end, label) spans.
+
+        Handles both formats:
+        - Point boundaries: [{time: 0, label: 'intro'}, {time: 30, label: 'build'}]
+          → spans from each time to the next
+        - Segment spans: [{start: 0, end: 30, label: 'intro'}]
+          → used directly
+        """
+        sections = self.annotations.get('sections', self.annotations.get('segments', []))
+        if not sections:
+            return []
+        spans = []
+        if isinstance(sections[0], dict) and 'start' in sections[0]:
+            for sec in sections:
+                spans.append((sec['start'], sec.get('end', sec['start']), sec.get('label', '')))
+        elif isinstance(sections[0], dict) and 'time' in sections[0]:
+            for i, sec in enumerate(sections):
+                start = sec['time']
+                end = sections[i + 1]['time'] if i + 1 < len(sections) else self.duration
+                spans.append((start, end, sec.get('label', '')))
+        return spans
+
+    def _build_calc_build_detector_panel(self, ax):
+        """Panel 7: Build detector — simple classifier from integral slope."""
+        t = self.times
+
+        # Algorithmic detection spans (top row, y=0.7)
+        for start, end in self.build_spans:
+            ax.axvspan(start, end, ymin=0.45, ymax=1.0, color='#69F0AE', alpha=0.4)
+        for start, end in self.decay_spans:
+            ax.axvspan(start, end, ymin=0.45, ymax=1.0, color='#FF5252', alpha=0.4)
+
+        # Section annotation spans (bottom row, y=0.15)
+        section_spans = self._sections_to_spans()
+        for i, (start, end, label) in enumerate(section_spans):
+            color = ANNOTATION_COLORS[i % len(ANNOTATION_COLORS)]
+            ax.barh(0.2, width=end - start, left=start, height=0.3,
+                    color=color, alpha=0.5, edgecolor=color, linewidth=0.5)
+            mid = (start + min(end, self.duration)) / 2
+            ax.text(mid, 0.2, label, ha='center', va='center',
+                    fontsize=6, color='white', fontweight='bold', alpha=0.9)
+
+        # Point-tap event markers from rich annotation layers
+        event_layers = {
+            'drop': ('#FF1744', 'v', 12),
+            'riser': ('#76FF03', '^', 10),
+            'finalbuild': ('#FFD740', 'D', 10),
+            'doubledown': ('#E040FB', 's', 10),
+            'bridge': ('#40C4FF', 'o', 10),
+            'tease_cycles': ('#FF9100', '|', 8),
+        }
+        for layer_name, (color, marker, size) in event_layers.items():
+            taps = self.annotations.get(layer_name, [])
+            if taps and isinstance(taps, list):
+                for tap in taps:
+                    if isinstance(tap, (int, float)):
+                        ax.plot(tap, 0.7, marker, color=color, markersize=size,
+                                markeredgewidth=1.5, alpha=0.9, zorder=6)
+                        ax.text(tap, 0.85, layer_name, ha='center', va='bottom',
+                                fontsize=5, color=color, alpha=0.7, rotation=45)
+
+        ax.set_xlim([0, self.duration])
+        ax.set_ylim([-0.05, 1.05])
+        ax.set_yticks([])
+        ax.text(0.001, 0.72, 'algorithm', transform=ax.transAxes, fontsize=7,
+                color='#aaa', va='center', alpha=0.6)
+        ax.text(0.001, 0.22, 'annotated', transform=ax.transAxes, fontsize=7,
+                color='#aaa', va='center', alpha=0.6)
+
+        # Summary stats
+        n_builds = len(self.build_spans)
+        n_decays = len(self.decay_spans)
+        build_dur = sum(e - s for s, e in self.build_spans)
+        decay_dur = sum(e - s for s, e in self.decay_spans)
+        ax.set_title(
+            f'Build Detector — {n_builds} builds ({build_dur:.1f}s), '
+            f'{n_decays} decays ({decay_dur:.1f}s)', fontsize=11)
+        ax.legend(
+            [plt.Rectangle((0, 0), 1, 1, fc='#69F0AE', alpha=0.4),
+             plt.Rectangle((0, 0), 1, 1, fc='#FF5252', alpha=0.4),
+             plt.Rectangle((0, 0), 1, 1, fc='#666', alpha=0.3)],
+            ['Building (slope > thresh, >5s)', 'Decaying (slope < -thresh, >3s)', 'Steady'],
+            loc='upper right', framealpha=0.8, fontsize=8
+        )
+        ax.grid(True, axis='x', alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
 
     def _build_figure(self):
         print("Building visualization...")
@@ -423,6 +861,18 @@ class SyncedVisualizer:
             'mfcc': self._build_mfcc_panel,
             'novelty': self._build_novelty_panel,
             'band-deviation': self._build_band_deviation_panel,
+            'event-drops': self._build_event_drops_panel,
+            'event-risers': self._build_event_risers_panel,
+            'event-dropouts': self._build_event_dropouts_panel,
+            'event-harmonic': self._build_event_harmonic_panel,
+            'calc-energy-integral': self._build_calc_energy_integral_panel,
+            'calc-integral-slope': self._build_calc_integral_slope_panel,
+            'calc-slope-peaks': self._build_calc_slope_peaks_panel,
+            'calc-integral-curvature': self._build_calc_integral_curvature_panel,
+            'calc-multi-scale': self._build_calc_multi_scale_panel,
+            'calc-onset-d2': self._build_calc_onset_d2_panel,
+            'calc-jitter': self._build_calc_jitter_panel,
+            'calc-build-detector': self._build_calc_build_detector_panel,
         }
         if has_annotations:
             focus_builders['annotations'] = self._build_annotation_panel
@@ -435,7 +885,14 @@ class SyncedVisualizer:
             height_map = {'waveform': 1, 'spectrogram': 2, 'bands': 1,
                           'rms-derivative': 1, 'centroid': 1, 'centroid-derivative': 1,
                           'band-derivative': 1, 'mfcc': 1.5, 'novelty': 1.5,
-                          'band-deviation': 1.5, 'annotations': None}
+                          'band-deviation': 1.5, 'annotations': None,
+                          'event-drops': 0.5, 'event-risers': 0.5,
+                          'event-dropouts': 0.5, 'event-harmonic': 0.5,
+                          'calc-energy-integral': 1, 'calc-integral-slope': 1,
+                          'calc-slope-peaks': 1.2, 'calc-integral-curvature': 1,
+                          'calc-multi-scale': 1,
+                          'calc-onset-d2': 1, 'calc-jitter': 1,
+                          'calc-build-detector': 1.2}
             ratios = [height_map.get(name, 1) for name, _ in builders]
             if has_annotations:
                 n_layers = len(self.annotations) + (1 if self.annotate_layer else 0)
@@ -672,13 +1129,15 @@ class SyncedVisualizer:
                            linewidth=2, alpha=0.8, visible=False)
             event_artists.append(a)
         for start, end in self.event_risers:
-            a = ax.axvspan(start, end, color='#76FF03', alpha=0.15, visible=False)
+            a = ax.axvspan(start, end, color='#76FF03', alpha=0.25, visible=False)
             event_artists.append(a)
-        for start, end in self.event_dropouts:
-            a = ax.axvspan(start, end, color='#E040FB', alpha=0.15, visible=False)
-            event_artists.append(a)
+        for band_name, spans in self.event_dropouts.items():
+            color = BAND_COLORS.get(band_name, '#E040FB')
+            for start, end in spans:
+                a = ax.axvspan(start, end, color=color, alpha=0.25, visible=False)
+                event_artists.append(a)
         for start, end in self.event_harmonic:
-            a = ax.axvspan(start, end, color='#FFD740', alpha=0.10, visible=False)
+            a = ax.axvspan(start, end, color='#FFD740', alpha=0.15, visible=False)
             event_artists.append(a)
 
         if not hasattr(self, 'feature_toggle'):
@@ -687,6 +1146,84 @@ class SyncedVisualizer:
         self.feature_toggle['events'] = {'artists': event_artists, 'visible': False}
         self.feature_keys['v'] = 'events'
 
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    # ── Event timeline panels (one per event type) ─────────────────
+
+    def _build_event_drops_panel(self, ax):
+        """Drops: novelty peak + RMS spike coincidence."""
+        for drop_t in self.event_drops:
+            ax.axvline(x=drop_t, color='#FF1744', linestyle='--',
+                       linewidth=2, alpha=0.9)
+        ax.set_xlim([0, self.duration])
+        ax.set_yticks([])
+        n = len(self.event_drops)
+        ax.set_title(f'Drops — {n} detected  '
+                     f'(novelty peak + RMS spike within 0.5s)', fontsize=11)
+        ax.legend([plt.Line2D([0], [0], color='#FF1744', linestyle='--', linewidth=2)],
+                  ['Drop (structural change + loudness spike)'],
+                  loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, axis='x', alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_event_risers_panel(self, ax):
+        """Risers: sustained upward spectral centroid movement."""
+        for start, end in self.event_risers:
+            ax.axvspan(start, end, color='#76FF03', alpha=0.4)
+        ax.set_xlim([0, self.duration])
+        ax.set_yticks([])
+        n = len(self.event_risers)
+        ax.set_title(f'Risers — {n} detected  '
+                     f'(centroid derivative positive >1s)', fontsize=11)
+        ax.legend([plt.Rectangle((0, 0), 1, 1, fc='#76FF03', alpha=0.4)],
+                  ['Riser (pitch/brightness climbing)'],
+                  loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, axis='x', alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_event_dropouts_panel(self, ax):
+        """Dropouts: per-band energy drops below threshold."""
+        handles = []
+        labels = []
+        for band_name, spans in self.event_dropouts.items():
+            color = BAND_COLORS.get(band_name, '#E040FB')
+            for start, end in spans:
+                ax.axvspan(start, end, color=color, alpha=0.4)
+            if spans:
+                handles.append(plt.Rectangle((0, 0), 1, 1, fc=color, alpha=0.4))
+                labels.append(f'{band_name} ({len(spans)})')
+        ax.set_xlim([0, self.duration])
+        ax.set_yticks([])
+        total = sum(len(v) for v in self.event_dropouts.values())
+        ax.set_title(f'Dropouts — {total} detected  '
+                     f'(per-band energy <5% of max)', fontsize=11)
+        if handles:
+            ax.legend(handles, labels, loc='upper right',
+                      framealpha=0.8, fontsize=8, ncol=min(len(handles), 3))
+        ax.grid(True, axis='x', alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_event_harmonic_panel(self, ax):
+        """Harmonic sections: low onset strength = sustained tonal content."""
+        for start, end in self.event_harmonic:
+            ax.axvspan(start, end, color='#FFD740', alpha=0.35)
+        ax.set_xlim([0, self.duration])
+        ax.set_yticks([])
+        n = len(self.event_harmonic)
+        ax.set_title(f'Harmonic — {n} detected  '
+                     f'(onset strength <10% of max for >1s)', fontsize=11)
+        ax.legend([plt.Rectangle((0, 0), 1, 1, fc='#FFD740', alpha=0.35)],
+                  ['Harmonic (sustained tonal, no percussive attacks)'],
+                  loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, axis='x', alpha=0.2)
         if not hasattr(self, 'axes'):
             self.axes = []
         self.axes.append(ax)

@@ -1154,6 +1154,27 @@ async function loadPanel() {
         return;
     }
 
+    if (currentTab === 'events') {
+        document.getElementById('controlsHint').innerHTML =
+            '<kbd>Space</kbd> play/pause &nbsp; <kbd>&larr;</kbd> <kbd>&rarr;</kbd> &plusmn;5s &nbsp; Click to seek &nbsp; ' +
+            'Drops &middot; Risers &middot; Dropouts &middot; Harmonic';
+        document.getElementById('stemStatus').style.display = 'none';
+
+        const url = '/api/render-events/' + encodeURIComponent(currentFile);
+        showOverlay('Rendering events...');
+        try {
+            const result = await cachedFetchPNG(url);
+            if (!result) { showOverlay('Render failed'); return; }
+            pixelMapping = result.pixelMapping;
+            panelImg.src = URL.createObjectURL(result.blob);
+            hideOverlay();
+            cursorLine.style.display = 'block';
+        } catch (e) {
+            showOverlay('Error: ' + e.message);
+        }
+        return;
+    }
+
     if (currentTab === 'band-analysis') {
         document.getElementById('controlsHint').innerHTML =
             '<kbd>Space</kbd> play/pause &nbsp; <kbd>&larr;</kbd> <kbd>&rarr;</kbd> &plusmn;5s &nbsp; Click to seek &nbsp; ' +
@@ -1162,6 +1183,27 @@ async function loadPanel() {
 
         const url = '/api/render-band-analysis/' + encodeURIComponent(currentFile);
         showOverlay('Rendering band analysis...');
+        try {
+            const result = await cachedFetchPNG(url);
+            if (!result) { showOverlay('Render failed'); return; }
+            pixelMapping = result.pixelMapping;
+            panelImg.src = URL.createObjectURL(result.blob);
+            hideOverlay();
+            cursorLine.style.display = 'block';
+        } catch (e) {
+            showOverlay('Error: ' + e.message);
+        }
+        return;
+    }
+
+    if (currentTab === 'calculus') {
+        document.getElementById('controlsHint').innerHTML =
+            '<kbd>Space</kbd> play/pause &nbsp; <kbd>&larr;</kbd> <kbd>&rarr;</kbd> &plusmn;5s &nbsp; Click to seek &nbsp; ' +
+            'Energy+Integral &middot; Slope &middot; Curvature &middot; Multi-Scale &middot; Onset d² &middot; Jitter &middot; Build Detector';
+        document.getElementById('stemStatus').style.display = 'none';
+
+        const url = '/api/render-calculus/' + encodeURIComponent(currentFile);
+        showOverlay('Rendering calculus...');
         try {
             const result = await cachedFetchPNG(url);
             if (!result) { showOverlay('Render failed'); return; }
@@ -1595,8 +1637,8 @@ function readHashState() {
 let effectsList = [];
 let deprecatedEffects = [];  // effects marked as deprecated
 let palettesList = [];  // available palettes
-let selectedPalette = {};  // {effectName: paletteName} — overrides per effect
-let selectedBrightness = {};  // {effectName: [lo, hi]} — brightness range per effect
+let selectedPalette = JSON.parse(localStorage.getItem('selectedPalette') || '{}');
+let selectedBrightness = JSON.parse(localStorage.getItem('selectedBrightness') || '{}');
 let effectsRunning = null;  // name of running effect or null
 let effectsPollTimer = null;
 
@@ -1631,6 +1673,7 @@ function buildPaletteRows(panel, effectName, btn, onChange) {
 
     function selectPalette(c) {
         selectedPalette[effectName] = c.name;
+        localStorage.setItem('selectedPalette', JSON.stringify(selectedPalette));
         btn.innerHTML = '<span class="popover-btn-swatch" style="background:' + paletteGradientCSS(c) + '"></span>';
         btn.title = 'Palette: ' + c.name;
         panel.querySelectorAll('.palette-popover-row').forEach(r => r.classList.remove('selected'));
@@ -1901,6 +1944,7 @@ function openPaletteEditor(palSpec, isNew, onDone) {
             Object.keys(selectedPalette).forEach(k => {
                 if (selectedPalette[k] === name) selectedPalette[k] = newName;
             });
+            localStorage.setItem('selectedPalette', JSON.stringify(selectedPalette));
         }
         overlay.remove();
         if (onDone) onDone();
@@ -1944,6 +1988,7 @@ function createBrightnessPopover(effectName, onChange) {
         lowVal.textContent = lo + '%';
         highVal.textContent = hi + '%';
         selectedBrightness[effectName] = [lo, hi];
+        localStorage.setItem('selectedBrightness', JSON.stringify(selectedBrightness));
         btn.textContent = lo === 0 && hi === 100 ? '\u2600' : '\u2600 ' + lo + '-' + hi + '%';
         btn.title = 'Brightness: ' + lo + '% - ' + hi + '%';
         if (onChange) onChange([lo, hi]);

@@ -1,22 +1,22 @@
 """
 Rap Pulse — slow background pulse at 1/6th of detected tempo.
 
-Uses BeatPredictor's autocorrelation tempo estimation to lock to the beat,
-then free-runs a 6-beat cycle: 3 beats fade on, 3 beats fade off.
+Uses OnsetTempoTracker (multi-band onset envelope autocorrelation) for
+tempo estimation. Better than BeatPredictor for dense percussive content
+like rap, where constant hi-hats and 808s make the abs-integral noisy.
 
+Free-runs a 6-beat cycle: 3 beats fade on, 3 beats fade off.
 The fade shape is quadratic (t²), so it accelerates toward each turnaround
-point (peak and trough). This creates a natural visual "snap" marker where
-the brightness is changing fastest right as it hits the extreme, then
-instantly reverses direction slowly — like a pendulum at the bottom of
-its swing.
+point (peak and trough) — like a pendulum at the bottom of its swing.
 
-Dev mode: top LED flashes pure blue on each detected beat.
+May lock to half-tempo (sub-harmonic) — that's fine for slow fades,
+it just makes the breathing cycle twice as long.
 """
 
 import numpy as np
 import threading
 from base import AudioReactiveEffect
-from signals import OverlapFrameAccumulator, AbsIntegral, BeatPredictor
+from signals import OverlapFrameAccumulator, OnsetTempoTracker
 
 
 class RapPulseEffect(AudioReactiveEffect):
@@ -28,17 +28,17 @@ class RapPulseEffect(AudioReactiveEffect):
         super().__init__(num_leds, sample_rate)
 
         self.accum = OverlapFrameAccumulator()
-        self.absint = AbsIntegral(sample_rate=sample_rate)
-        self.predictor = BeatPredictor(rms_fps=self.absint.rms_fps)
+        self.tracker = OnsetTempoTracker(sample_rate=sample_rate)
 
-        # One full cycle = 6 beats (3 up + 3 down)
-        self.cycle_beats = 6
+        # One full cycle = 4 beats (2 up + 2 down)
+        self.cycle_beats = 4
         self.phase = 0.0  # 0→1 over one cycle
 
         self.brightness = 0.0
 
-        # Dev: beat flash on top LED (exponential decay)
-        self.beat_flash = 0.0
+        # Dev: beat-rate phase accumulator for debug LED
+        self.beat_phase = 0.0
+        self._beat_phase_snap = 0.0
 
         self._lock = threading.Lock()
 
@@ -53,29 +53,21 @@ class RapPulseEffect(AudioReactiveEffect):
 
     def process_audio(self, mono_chunk):
         for frame in self.accum.feed(mono_chunk):
-            normalized = self.absint.update(frame)
-            beats = self.predictor.feed(
-                self.absint.raw, normalized, self.absint.time_acc
-            )
-
-            # Beat flash trigger
-            beat_flash = self.beat_flash
-            for b in beats:
-                if b['type'] == 'confirmed':
-                    beat_flash = 1.0
-            # Exponential decay (~100ms visible)
-            beat_flash *= 0.92
+            self.tracker.feed_frame(frame)
 
             # Advance phase based on estimated tempo.
-            # Once estimated_period is set, keep using it — the period
-            # itself is already conservatively smoothed (80/20 blend,
-            # only updates on high-confidence beats). Gating on
-            # per-frame confidence causes flicker during complex sections.
-            if self.predictor.estimated_period > 0:
-                cycle_period = self.predictor.estimated_period * self.cycle_beats
-                self.phase += self.absint.rms_dt / cycle_period
+            # The period is conservatively smoothed (80/20 blend).
+            if self.tracker.estimated_period > 0:
+                dt_step = self.tracker.rms_dt
+                cycle_period = self.tracker.estimated_period * self.cycle_beats
+                self.phase += dt_step / cycle_period
                 if self.phase >= 1.0:
                     self.phase -= 1.0
+
+                # Beat-rate phase for debug LED (same accumulator approach)
+                self.beat_phase += dt_step / self.tracker.estimated_period
+                if self.beat_phase >= 1.0:
+                    self.beat_phase -= 1.0
 
                 # Shaped brightness: quadratic ease into each turnaround
                 #   Rise (phase 0→0.5): t²     — slow departure from trough,
@@ -93,12 +85,12 @@ class RapPulseEffect(AudioReactiveEffect):
 
             with self._lock:
                 self.brightness = brightness
-                self.beat_flash = beat_flash
+                self._beat_phase_snap = self.beat_phase
 
     def render(self, dt: float) -> np.ndarray:
         with self._lock:
             brightness = self.brightness
-            beat_flash = self.beat_flash
+            beat_phase = self._beat_phase_snap
 
         # Background: warm amber scaled by pulse brightness
         r = int(255 * brightness)
@@ -106,18 +98,19 @@ class RapPulseEffect(AudioReactiveEffect):
         b = int(60 * brightness)
         frame = np.full((self.num_leds, 3), [r, g, b], dtype=np.uint8)
 
-        # Dev: top LED = pure blue beat indicator
-        frame[-1] = [0, 0, int(255 * beat_flash)]
+        # Dev: top LED flashes blue at beat rate
+        flash = max(0.0, 1.0 - beat_phase * 4)  # sharp decay over first 25%
+        frame[-1] = [0, 0, int(255 * flash)]
 
         return frame
 
     def get_diagnostics(self) -> dict:
-        period = self.predictor.estimated_period
+        period = self.tracker.estimated_period
         cycle_s = period * self.cycle_beats if period > 0 else 0
         return {
             'brightness': f'{self.brightness:.2f}',
-            'bpm': f'{self.predictor.bpm:.1f}',
-            'conf': f'{self.predictor.confidence:.2f}',
+            'bpm': f'{self.tracker.bpm:.1f}',
+            'conf': f'{self.tracker.confidence:.2f}',
             'phase': f'{self.phase:.2f}',
             'cycle': f'{cycle_s:.1f}s' if cycle_s > 0 else '-',
         }

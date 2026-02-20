@@ -651,6 +651,53 @@ def render_annotate(filepath):
     return png_bytes, headers
 
 
+EVENTS_PANELS = ['waveform', 'bands', 'novelty',
+                  'event-drops', 'event-risers', 'event-dropouts', 'event-harmonic']
+
+
+def render_events(filepath):
+    """Render events view: waveform + bands + novelty + per-event-type rows."""
+    cache_key = (filepath, 'events')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    from viewer import SyncedVisualizer
+
+    viz = SyncedVisualizer(filepath, panels=EVENTS_PANELS,
+                           annotations_path='/dev/null/none.yaml')
+
+    for line in viz.cursor_lines:
+        line.remove()
+
+    filename = Path(filepath).name
+    viz.fig.suptitle(f'{filename} — Events', fontsize=14, fontweight='bold', y=0.99)
+    viz.fig.subplots_adjust(top=0.975, bottom=0.02)
+
+    viz.fig.canvas.draw()
+
+    ax = viz.axes[0]
+    x_left = ax.transData.transform((0, 0))[0]
+    x_right = ax.transData.transform((viz.duration, 0))[0]
+
+    fig_width = viz.fig.get_figwidth() * DPI
+    fig_height = viz.fig.get_figheight() * DPI
+
+    buf = io.BytesIO()
+    viz.fig.savefig(buf, format='png', dpi=DPI, facecolor=viz.fig.get_facecolor())
+    matplotlib.pyplot.close(viz.fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(viz.duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
+
+
 ANALYSIS_PANELS = ('waveform', 'spectrogram', 'bands', 'rms-derivative',
                     'centroid', 'centroid-derivative', 'band-derivative',
                     'mfcc', 'novelty', 'band-deviation', 'annotations',
@@ -679,6 +726,54 @@ def render_band_analysis(filepath):
     filename = Path(filepath).name
     viz.fig.suptitle(filename, fontsize=14, fontweight='bold', y=0.995)
     viz.fig.subplots_adjust(top=0.97, bottom=0.04)
+
+    viz.fig.canvas.draw()
+
+    ax = viz.axes[0]
+    x_left = ax.transData.transform((0, 0))[0]
+    x_right = ax.transData.transform((viz.duration, 0))[0]
+
+    fig_width = viz.fig.get_figwidth() * DPI
+    fig_height = viz.fig.get_figheight() * DPI
+
+    buf = io.BytesIO()
+    viz.fig.savefig(buf, format='png', dpi=DPI, facecolor=viz.fig.get_facecolor())
+    matplotlib.pyplot.close(viz.fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(viz.duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
+
+
+CALCULUS_PANELS = ('calc-energy-integral', 'calc-integral-slope',
+                    'calc-slope-peaks', 'calc-integral-curvature',
+                    'calc-multi-scale', 'calc-onset-d2', 'calc-jitter',
+                    'calc-build-detector')
+
+
+def render_calculus(filepath):
+    """Render calculus view: derivatives and integrals exploration."""
+    cache_key = (filepath, 'calculus')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    from viewer import SyncedVisualizer
+
+    viz = SyncedVisualizer(filepath, panels=list(CALCULUS_PANELS))
+
+    for line in viz.cursor_lines:
+        line.remove()
+
+    filename = Path(filepath).name
+    viz.fig.suptitle(f'{filename} — Calculus', fontsize=14, fontweight='bold', y=0.995)
+    viz.fig.subplots_adjust(top=0.97, bottom=0.02)
 
     viz.fig.canvas.draw()
 
@@ -2338,9 +2433,15 @@ class ViewerHandler(BaseHTTPRequestHandler):
         elif path.startswith('/api/render-annotate/'):
             rel_path = path[len('/api/render-annotate/'):]
             self._serve_render_annotate(rel_path)
+        elif path.startswith('/api/render-events/'):
+            rel_path = path[len('/api/render-events/'):]
+            self._serve_render_events(rel_path)
         elif path.startswith('/api/render-band-analysis/'):
             rel_path = path[len('/api/render-band-analysis/'):]
             self._serve_render_band_analysis(rel_path)
+        elif path.startswith('/api/render-calculus/'):
+            rel_path = path[len('/api/render-calculus/'):]
+            self._serve_render_calculus(rel_path)
         elif path.startswith('/api/render-panel/'):
             rel_path = path[len('/api/render-panel/'):]
             panel = query.get('panel', [None])[0]
@@ -2512,6 +2613,30 @@ class ViewerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(png_bytes)
 
+    def _serve_render_events(self, rel_path):
+        filepath = _resolve_audio_path(rel_path)
+        if filepath is None:
+            self.send_error(404, 'File not found')
+            return
+
+        try:
+            png_bytes, headers = render_events(filepath)
+        except Exception as e:
+            print(f"[render-events] Error: {e}")
+            self.send_error(500, str(e))
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/png')
+        self.send_header('Content-Length', str(len(png_bytes)))
+        self.send_header('Cache-Control', 'max-age=3600')
+        exposed = ', '.join(headers.keys())
+        self.send_header('Access-Control-Expose-Headers', exposed)
+        for k, v in headers.items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(png_bytes)
+
     def _serve_render_band_analysis(self, rel_path):
         filepath = _resolve_audio_path(rel_path)
         if filepath is None:
@@ -2522,6 +2647,30 @@ class ViewerHandler(BaseHTTPRequestHandler):
             png_bytes, headers = render_band_analysis(filepath)
         except Exception as e:
             print(f"[render-band-analysis] Error: {e}")
+            self.send_error(500, str(e))
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/png')
+        self.send_header('Content-Length', str(len(png_bytes)))
+        self.send_header('Cache-Control', 'max-age=3600')
+        exposed = ', '.join(headers.keys())
+        self.send_header('Access-Control-Expose-Headers', exposed)
+        for k, v in headers.items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(png_bytes)
+
+    def _serve_render_calculus(self, rel_path):
+        filepath = _resolve_audio_path(rel_path)
+        if filepath is None:
+            self.send_error(404, 'File not found')
+            return
+
+        try:
+            png_bytes, headers = render_calculus(filepath)
+        except Exception as e:
+            print(f"[render-calculus] Error: {e}")
             self.send_error(500, str(e))
             return
 

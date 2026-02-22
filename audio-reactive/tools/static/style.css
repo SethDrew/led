@@ -607,6 +607,10 @@ td.ref-data { color: #777; font-size: 11px; }
 }
 .effect-detail-controls button:disabled { opacity: 0.5; cursor: not-allowed; }
 .effect-detail-controls button:hover:not(:disabled) { background: #d13550; }
+.live-feature-wrap {
+    background: #0f0f1a; border-radius: 6px; overflow: hidden;
+    border: 1px solid #1a2a4e;
+}
 .effect-detail-viz { position: relative; width: 100%; }
 .effect-detail-viz canvas { display: block; width: 100%; cursor: crosshair; }
 .effect-detail-cursor {

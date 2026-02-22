@@ -15,6 +15,7 @@ Architecture:
     audio.currentTime is sample-accurate — zero drift by definition.
 """
 
+import collections
 import hashlib
 import hmac
 import http.cookies
@@ -53,6 +54,13 @@ _recording = None       # {'stream': sd.InputStream, 'frames': list} or None
 
 _effect_process = None   # subprocess.Popen or None
 _active_controller = None  # id of the controller the running effect is using, or None
+
+# ── Live feature streaming ────────────────────────────────────────
+_feature_buffer = collections.deque(maxlen=900)  # 30s @ 30fps
+_feature_seq = 0
+_feature_meta = None  # list of {id, label, color} from runner's _meta line
+_feature_lock = threading.Lock()
+_feature_reader_thread = None
 
 EFFECTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'effects')
 
@@ -395,12 +403,17 @@ def _start_effect(name, controller_id=None, sculpture_id=None, palette_name=None
     else:
         cmd.append('--no-leds')
 
+    cmd.append('--stream-features')
+
     try:
         _effect_process = subprocess.Popen(
             cmd,
-            cwd=EFFECTS_DIR
+            cwd=EFFECTS_DIR,
+            stderr=subprocess.PIPE,
         )
         _active_controller = target_id
+        # Start background thread to read feature stream from stderr
+        _start_feature_reader(_effect_process)
         print(f"[effects] Started: {name} (pid {_effect_process.pid}) cmd: {' '.join(cmd)}")
     except Exception as e:
         print(f"[effects] Start failed: {e}")
@@ -408,9 +421,40 @@ def _start_effect(name, controller_id=None, sculpture_id=None, palette_name=None
         _active_controller = None
 
 
+def _start_feature_reader(process):
+    """Start background thread to read feature JSONL from subprocess stderr."""
+    global _feature_reader_thread, _feature_seq, _feature_meta
+
+    with _feature_lock:
+        _feature_buffer.clear()
+        _feature_seq = 0
+        _feature_meta = None
+
+    def _read_loop():
+        global _feature_seq, _feature_meta
+        for raw_line in process.stderr:
+            line = raw_line.decode('utf-8', errors='replace').strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                if data.get('_meta'):
+                    with _feature_lock:
+                        _feature_meta = data.get('features', [])
+                else:
+                    with _feature_lock:
+                        _feature_seq += 1
+                        _feature_buffer.append((_feature_seq, data))
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+    _feature_reader_thread = threading.Thread(target=_read_loop, daemon=True)
+    _feature_reader_thread.start()
+
+
 def _stop_effect():
     """Stop the running effect subprocess."""
-    global _effect_process, _active_controller
+    global _effect_process, _active_controller, _feature_seq, _feature_meta
     if _effect_process is not None:
         try:
             _effect_process.terminate()
@@ -422,6 +466,10 @@ def _stop_effect():
         print(f"[effects] Stopped (pid {_effect_process.pid})")
         _effect_process = None
         _active_controller = None
+        with _feature_lock:
+            _feature_buffer.clear()
+            _feature_seq = 0
+            _feature_meta = None
 
 
 def _get_running_effect_name():
@@ -3077,6 +3125,18 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 'running': _get_running_effect_name(),
                 'controller': target,
                 'controller_type': target_type,
+            })
+        elif path == '/api/effects/features':
+            since = int(query.get('since', [0])[0])
+            with _feature_lock:
+                entries = [(s, f) for s, f in _feature_buffer if s > since]
+                last_seq = _feature_seq
+                meta = _feature_meta
+            self._json_response({
+                'running': _get_running_effect_name(),
+                'seq': last_seq,
+                'features': [f for _, f in entries],
+                'source_features': meta,
             })
         elif path == '/api/palettes':
             self._json_response(_get_all_palettes_list())

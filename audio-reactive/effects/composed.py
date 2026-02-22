@@ -31,5 +31,12 @@ class ComposedEffect(AudioReactiveEffect):
         intensity = self.signal.get_intensity(dt)
         return self.palette.colorize(intensity, self.num_leds)
 
+    @property
+    def source_features(self):
+        return self.signal.source_features
+
+    def get_source_values(self):
+        return self.signal.get_source_values()
+
     def get_diagnostics(self):
         return self.signal.get_diagnostics()

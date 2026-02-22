@@ -49,7 +49,7 @@ What happens in music that LEDs should respond to. Examples of vocabulary drawn 
 These phases are independent, not sequential. A song can skip phases or reorder them. Other songs may exhibit structural patterns that don't fit this taxonomy at all.
 
 **Some other structural events we've identified:**
-- **Dropout** — band goes silent; reference freezes so reintroduction hits hard (from `per-band-normalization-with-dropout-handling`)
+- **Dropout** — band goes silent then returns; reintroduction is perceptually significant (emphasis strategy TBD in events layer, from `per-band-normalization-with-dropout-handling`)
 - **Crescendo/Climax** — genre-dependent: rock crescendo = gradual swell; EDM drop = sudden sustained intensity. Same word, different audio signatures
 - **Riser** — sweeping frequency buildup, often before drops
 - **Transition** — section boundary, change in texture/rhythm
@@ -158,7 +158,7 @@ The time horizon of both music and effects. Collapsed from "time scales" and "me
 
 **The adaptation time constant IS the temporal scope.** When you compute a feature relative to a 5-second running average, you're operating at phrase scope. When you use a 150ms window, you're at beat scope. The musical event you can detect is bounded by the memory you maintain.
 
-**Per-band normalization with dropout handling** (from `per-band-normalization-with-dropout-handling`) bridges song and phrase scope: asymmetric EMA with instant attack / constant decay, absolute dropout threshold, and reference freeze during dropout — so that EDM drops naturally produce massive normalized values when energy returns after 15-30s of silence.
+**Per-band normalization** (from `per-band-normalization-with-dropout-handling`) operates at song scope: peak-decay with ~1 minute effective memory (decay 0.9995/frame, ~46s half-life). This provides clean 0-1 values per band. Dropout detection and reintroduction emphasis are separate concerns for the events layer — normalization just provides the signal.
 
 **Current gap: no streaming event detection.** All event detection code (dropout, re-entry, crescendo, climax) lives in `viewer.py` as batch-only visualization. No effect can consume it at runtime. Foote's checkerboard novelty requires an O(n^2) similarity matrix — fundamentally non-streaming. A streaming event detector needs a different approach, likely rolling integral slope (rising = build, falling = breakdown) or per-band dropout detection. This is the prerequisite for section-aware effects. (Ledger: `event-detection-viewer-only`)
 
@@ -474,7 +474,7 @@ Quick-reference of what exists and where.
 | `longint_sections` | longint_sections.py | 80% long-horizon RMS + 20% bass absint | fib_orange_purple |
 | `tempo_pulse` | tempo_pulse.py | Free-running pulse at autocorrelation-estimated tempo | reds |
 | `bass_pulse` | bass_pulse.py | Half-wave-rectified spectral flux in bass band | amber |
-| `energy_color` | energy_color.py | Color vibrancy tracks RMS energy; muted mauve → vivid magenta | energy_bloom |
+| `energy_color` | energy_color.py | Color vibrancy tracks 10s rolling integral of RMS; builds glow, breakdowns fade | energy_bloom |
 
 **Full effects** (AudioReactiveEffect — own RGB rendering):
 

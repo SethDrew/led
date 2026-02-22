@@ -988,7 +988,7 @@ filePicker.addEventListener('change', () => {
 
 // ── Tabs ─────────────────────────────────────────────────────────
 
-const analysisTabs = new Set(['analysis', 'band-analysis', 'calculus', 'annotate', 'stems', 'hpss', 'lab-repet', 'lab-nmf', 'lab-timbral', 'lab-misc', 'lab-onset', 'lab-zcr', 'lab-zcr-dataset']);
+const analysisTabs = new Set(['analysis', 'band-analysis', 'calculus', 'annotate', 'stems', 'hpss', 'lab-repet', 'lab-nmf', 'lab-timbral', 'lab-misc', 'lab-onset']);
 const analysisDropdown = document.getElementById('analysisDropdown');
 const analysisToggle = document.getElementById('analysisDropdownToggle');
 
@@ -1046,7 +1046,10 @@ document.addEventListener('click', () => {
 
 // ── Panel loading ────────────────────────────────────────────────
 
+let renderGen = 0;
+
 async function loadPanel() {
+    const gen = ++renderGen;
     hideOverlay();
 
     // Annotation widget visibility (only on annotate tab, always expanded)
@@ -1132,8 +1135,6 @@ async function loadPanel() {
         'lab-timbral': { label: 'Compute Timbral Shape', desc: 'MFCC coefficients — energy, tilt, curvature, texture, timbral shift', fn: () => loadLabVariant('timbral') },
         'lab-misc': { label: 'Compute Misc', desc: 'Spectral flatness, chromagram, spectral contrast, ZCR', fn: () => loadLabVariant('misc') },
         'lab-onset': { label: 'Compute Onset + AbsInt', desc: 'Onset strength vs absolute integral — comparing two beat-detection signals', fn: () => loadLabVariant('onset-absint') },
-        'lab-zcr': { label: 'Compute ZCR Genres', desc: 'Zero crossing rate compared across 4 genres from FMA dataset', fn: () => loadLabVariant('zcr-genres') },
-        'lab-zcr-dataset': { label: 'Compute ZCR Dataset', desc: 'ZCR across all 8000 FMA Small tracks — distributions, correlations, and texture', fn: () => loadLabVariant('zcr-dataset') },
     };
 
     if (currentTab === 'annotate') {
@@ -1149,12 +1150,14 @@ async function loadPanel() {
         showOverlay('Rendering...');
         try {
             const result = await cachedFetchPNG(url);
+            if (gen !== renderGen) return;
             if (!result) { showOverlay('Render failed'); return; }
             pixelMapping = result.pixelMapping;
             panelImg.src = URL.createObjectURL(result.blob);
             hideOverlay();
             cursorLine.style.display = 'block';
         } catch (e) {
+            if (gen !== renderGen) return;
             showOverlay('Error: ' + e.message);
         }
         return;
@@ -1170,12 +1173,14 @@ async function loadPanel() {
         showOverlay('Rendering band analysis...');
         try {
             const result = await cachedFetchPNG(url);
+            if (gen !== renderGen) return;
             if (!result) { showOverlay('Render failed'); return; }
             pixelMapping = result.pixelMapping;
             panelImg.src = URL.createObjectURL(result.blob);
             hideOverlay();
             cursorLine.style.display = 'block';
         } catch (e) {
+            if (gen !== renderGen) return;
             showOverlay('Error: ' + e.message);
         }
         return;
@@ -1191,12 +1196,14 @@ async function loadPanel() {
         showOverlay('Rendering calculus...');
         try {
             const result = await cachedFetchPNG(url);
+            if (gen !== renderGen) return;
             if (!result) { showOverlay('Render failed'); return; }
             pixelMapping = result.pixelMapping;
             panelImg.src = URL.createObjectURL(result.blob);
             hideOverlay();
             cursorLine.style.display = 'block';
         } catch (e) {
+            if (gen !== renderGen) return;
             showOverlay('Error: ' + e.message);
         }
         return;
@@ -1229,21 +1236,25 @@ async function loadPanel() {
 
     try {
         const result = await cachedFetchPNG(url);
+        if (gen !== renderGen) return;
         if (!result) { showOverlay('Render failed'); return; }
         pixelMapping = result.pixelMapping;
         panelImg.src = URL.createObjectURL(result.blob);
         hideOverlay();
         cursorLine.style.display = 'block';
     } catch (e) {
+        if (gen !== renderGen) return;
         showOverlay('Error: ' + e.message);
     }
 }
 
 async function loadStems() {
     if (!currentFile) return;
+    const gen = renderGen;
 
     // Check if stems are ready
     const statusResp = await fetch('/api/stems/status/' + encodeURIComponent(currentFile));
+    if (gen !== renderGen) return;
     const status = await statusResp.json();
 
     if (!status.ready) {
@@ -1259,6 +1270,7 @@ async function loadStems() {
     try {
         const stemUrl = '/api/stems/' + encodeURIComponent(currentFile);
         const result = await cachedFetchPNG(stemUrl);
+        if (gen !== renderGen) return;
         if (!result) { showOverlay('Stems render failed'); return; }
         pixelMapping = result.pixelMapping;
         panelImg.src = URL.createObjectURL(result.blob);
@@ -1268,6 +1280,7 @@ async function loadStems() {
         setupStemAudio(['drums', 'bass', 'vocals', 'other'],
                        '/audio/separated/htdemucs/' + stemName + '/');
     } catch (e) {
+        if (gen !== renderGen) return;
         showOverlay('Error: ' + e.message);
     }
 }
@@ -1287,11 +1300,13 @@ function pollStemsReady() {
 
 async function loadHPSS() {
     if (!currentFile) return;
+    const gen = renderGen;
     showOverlay('Computing HPSS...');
 
     try {
         const hpssUrl = '/api/hpss/' + encodeURIComponent(currentFile);
         const result = await cachedFetchPNG(hpssUrl);
+        if (gen !== renderGen) return;
         if (!result) { showOverlay('HPSS render failed'); return; }
         pixelMapping = result.pixelMapping;
         panelImg.src = URL.createObjectURL(result.blob);
@@ -1301,18 +1316,18 @@ async function loadHPSS() {
         setupStemAudio(['harmonic', 'percussive'],
                        '/audio/separated/hpss/' + stemName + '/');
     } catch (e) {
+        if (gen !== renderGen) return;
         showOverlay('Error: ' + e.message);
     }
 }
 
 async function loadLabVariant(variant) {
     if (!currentFile) return;
+    const gen = renderGen;
     const hintMap = {
         'timbral': 'MFCC 0-3 &middot; Fine Texture &middot; Timbral Shift',
         'misc': 'Spectral Flatness &middot; Chromagram &middot; Spectral Contrast &middot; ZCR',
         'onset-absint': 'Onset Strength &middot; AbsIntegral &middot; Overlay &middot; Difference',
-        'zcr-genres': 'ZCR across Electronic &middot; Rock &middot; Hip-Hop &middot; Folk (FMA)',
-        'zcr-dataset': 'ZCR distributions &middot; 8000 tracks &middot; Correlations &middot; All genres',
     };
     showOverlay('Computing lab...');
     const hint = hintMap[variant] || '';
@@ -1323,24 +1338,28 @@ async function loadLabVariant(variant) {
     try {
         const labUrl = '/api/lab/' + encodeURIComponent(currentFile) + '?variant=' + variant;
         const result = await cachedFetchPNG(labUrl);
+        if (gen !== renderGen) return;
         if (!result) { showOverlay('Lab render failed'); return; }
         pixelMapping = result.pixelMapping;
         panelImg.src = URL.createObjectURL(result.blob);
         hideOverlay();
         cursorLine.style.display = 'block';
     } catch (e) {
+        if (gen !== renderGen) return;
         showOverlay('Error: ' + e.message);
     }
 }
 
 async function loadLabNMF() {
     if (!currentFile) return;
+    const gen = renderGen;
     showOverlay('Running NMF decomposition...');
     document.getElementById('stemStatus').style.display = 'none';
 
     try {
         const nmfUrl = '/api/lab-nmf/' + encodeURIComponent(currentFile);
         const result = await cachedFetchPNG(nmfUrl);
+        if (gen !== renderGen) return;
         if (!result) { showOverlay('NMF render failed'); return; }
         pixelMapping = result.pixelMapping;
         panelImg.src = URL.createObjectURL(result.blob);
@@ -1350,17 +1369,20 @@ async function loadLabNMF() {
         setupStemAudio(['drums', 'bass', 'vocals', 'other'],
                        '/audio/separated/nmf/' + stemName + '/');
     } catch (e) {
+        if (gen !== renderGen) return;
         showOverlay('Error: ' + e.message);
     }
 }
 
 async function loadLabRepet() {
     if (!currentFile) return;
+    const gen = renderGen;
     showOverlay('Computing REPET separation...');
 
     try {
         const repetUrl = '/api/lab-repet/' + encodeURIComponent(currentFile);
         const result = await cachedFetchPNG(repetUrl);
+        if (gen !== renderGen) return;
         if (!result) { showOverlay('REPET render failed'); return; }
         pixelMapping = result.pixelMapping;
         panelImg.src = URL.createObjectURL(result.blob);
@@ -1370,6 +1392,7 @@ async function loadLabRepet() {
         setupStemAudio(['repeating', 'non-repeating'],
                        '/audio/separated/repet/' + stemName + '/');
     } catch (e) {
+        if (gen !== renderGen) return;
         showOverlay('Error: ' + e.message);
     }
 }
@@ -2554,6 +2577,11 @@ function startEffectsPoll() {
             if (newRunning !== effectsRunning) {
                 const prev = effectsRunning;
                 effectsRunning = newRunning;
+                // Start/stop live feature poll if in detail view
+                if (effectDetailName) {
+                    if (newRunning === effectDetailName) startLiveFeaturePoll();
+                    else stopLiveFeaturePoll();
+                }
                 // Update running indicator on rows without full rebuild
                 const rows = document.querySelectorAll('.effect-ref-table tbody tr[data-name]');
                 if (rows.length > 0) {
@@ -2584,6 +2612,15 @@ let effectDetailName = null;
 let effectDetailData = null;
 let effectDetailAnim = null;
 let ledogramBytes = null;  // cached decoded LED data for redraw
+
+// ── Live Feature Visualization ──────────────────────────────────
+let liveFeaturePollTimer = null;
+let liveFeatureSeq = 0;
+let liveFeatureCanvas = null;
+let liveFeatureCtx = null;
+let liveFeatureData = {};  // key → float[]
+let liveFeatureMeta = null;  // [{id, label, color}] from API
+const LIVE_FEATURE_WINDOW = 450;  // 15s visible @ 30fps
 
 function showEffectDetail(name, focusNotes) {
     effectDetailName = name;
@@ -2646,21 +2683,9 @@ function showEffectDetail(name, focusNotes) {
     panel.appendChild(notesWrap);
     if (focusNotes) setTimeout(() => notesArea.focus(), 50);
 
-    // Controls: file picker + analyze button
+    // Controls: palette, brightness, analyze
     const controls = document.createElement('div');
     controls.className = 'effect-detail-controls';
-
-    const fileSel = document.createElement('select');
-    fileSel.id = 'effectDetailFile';
-    files.forEach(f => {
-        const opt = document.createElement('option');
-        opt.value = f.path;
-        opt.textContent = f.name;
-        fileSel.appendChild(opt);
-    });
-    // Pre-select current file if any
-    if (currentFile) fileSel.value = currentFile;
-    controls.appendChild(fileSel);
 
     // Palette popover (signal effects only)
     if (effEntry && effEntry.is_signal && palettesList.length > 0) {
@@ -2670,7 +2695,7 @@ function showEffectDetail(name, focusNotes) {
     // Brightness popover (live-updates LED-o-gram)
     controls.appendChild(createBrightnessPopover(name, (range) => {
         const vizEl = document.getElementById('effectDetailViz');
-        const ledCanvas = vizEl && vizEl.querySelectorAll('canvas')[1];
+        const ledCanvas = vizEl && vizEl.querySelectorAll('canvas')[0];
         if (ledCanvas && effectDetailData) {
             const w = vizEl.clientWidth || 860;
             const lh = Math.min(Math.max(effectDetailData.num_leds, 60), 300);
@@ -2688,8 +2713,23 @@ function showEffectDetail(name, focusNotes) {
     const status = document.createElement('div');
     status.className = 'effect-detail-status';
     status.id = 'effectDetailStatus';
-    status.textContent = 'Select a file and click Analyze';
     panel.appendChild(status);
+
+    // Live feature canvas (shown when effect is running)
+    const liveWrap = document.createElement('div');
+    liveWrap.className = 'live-feature-wrap';
+    liveWrap.id = 'liveFeatureWrap';
+    liveWrap.style.display = 'none';
+    const liveCanvas = document.createElement('canvas');
+    liveCanvas.id = 'liveFeatureCanvas';
+    liveCanvas.style.cssText = 'width: 100%; height: 197px; display: block;';
+    liveWrap.appendChild(liveCanvas);
+    panel.appendChild(liveWrap);
+
+    // Start live feature poll if effect is running
+    if (effectsRunning === name) {
+        startLiveFeaturePoll();
+    }
 
     // Viz container (empty until analysis runs)
     const viz = document.createElement('div');
@@ -2702,24 +2742,154 @@ function showEffectsList() {
     effectDetailName = null;
     effectDetailData = null;
     if (effectDetailAnim) { cancelAnimationFrame(effectDetailAnim); effectDetailAnim = null; }
+    stopLiveFeaturePoll();
     renderEffectsCards();
     startEffectsPoll();
 }
 
+// ── Feature Canvas Drawing ──────────────────────────────────────
+
+function drawStaticFeatureCanvas(ctx, w, h, features, sourceMeta) {
+    ctx.fillStyle = '#0f0f1a';
+    ctx.fillRect(0, 0, w, h);
+
+    const n = features.length;
+    if (n < 2) return;
+
+    sourceMeta.forEach(f => {
+        ctx.beginPath();
+        ctx.strokeStyle = f.color || '#888';
+        ctx.lineWidth = 1.5;
+        for (let i = 0; i < n; i++) {
+            const x = (i / (n - 1)) * w;
+            const y = h - (features[i][f.id] || 0) * h;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+    });
+
+    // Legend
+    ctx.font = '11px -apple-system, system-ui, sans-serif';
+    let lx = 8;
+    sourceMeta.forEach(f => {
+        ctx.fillStyle = f.color || '#888';
+        ctx.fillRect(lx, 8, 14, 4);
+        ctx.fillStyle = '#888';
+        ctx.fillText(f.label, lx + 18, 14);
+        lx += ctx.measureText(f.label).width + 32;
+    });
+}
+
+// ── Live Feature Poll / Canvas ──────────────────────────────────
+
+function startLiveFeaturePoll() {
+    stopLiveFeaturePoll();
+    liveFeatureSeq = 0;
+    liveFeatureData = {};
+    liveFeatureMeta = null;
+
+    const wrap = document.getElementById('liveFeatureWrap');
+    const canvas = document.getElementById('liveFeatureCanvas');
+    if (!wrap || !canvas) return;
+    wrap.style.display = 'block';
+    liveFeatureCanvas = canvas;
+    liveFeatureCtx = canvas.getContext('2d');
+
+    // Size canvas to container
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    liveFeatureCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    liveFeaturePollTimer = setInterval(async () => {
+        try {
+            const resp = await fetch('/api/effects/features?since=' + liveFeatureSeq);
+            if (!resp.ok) return;
+            const data = await resp.json();
+            if (!data.running) { stopLiveFeaturePoll(); return; }
+            // Pick up metadata when it arrives
+            if (data.source_features && !liveFeatureMeta) {
+                liveFeatureMeta = data.source_features;
+                liveFeatureMeta.forEach(f => { liveFeatureData[f.id] = []; });
+            }
+            if (!liveFeatureMeta) return;
+            liveFeatureSeq = data.seq;
+            for (const frame of data.features) {
+                liveFeatureMeta.forEach(f => {
+                    liveFeatureData[f.id].push(frame[f.id] || 0);
+                    if (liveFeatureData[f.id].length > LIVE_FEATURE_WINDOW) {
+                        liveFeatureData[f.id].shift();
+                    }
+                });
+            }
+            drawLiveFeatures();
+        } catch (e) {}
+    }, 150);
+}
+
+function stopLiveFeaturePoll() {
+    if (liveFeaturePollTimer) {
+        clearInterval(liveFeaturePollTimer);
+        liveFeaturePollTimer = null;
+    }
+}
+
+function drawLiveFeatures() {
+    if (!liveFeatureCanvas || !liveFeatureCtx || !liveFeatureMeta) return;
+    const ctx = liveFeatureCtx;
+    const w = liveFeatureCanvas.clientWidth;
+    const h = liveFeatureCanvas.clientHeight;
+
+    ctx.fillStyle = '#0f0f1a';
+    ctx.fillRect(0, 0, w, h);
+
+    liveFeatureMeta.forEach(f => {
+        const arr = liveFeatureData[f.id];
+        if (!arr || arr.length < 2) return;
+        ctx.beginPath();
+        ctx.strokeStyle = f.color || '#888';
+        ctx.lineWidth = 1.5;
+        const n = arr.length;
+        for (let i = 0; i < n; i++) {
+            const x = (i / (LIVE_FEATURE_WINDOW - 1)) * w;
+            const y = h - arr[i] * h;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+    });
+
+    // Legend
+    ctx.font = '11px -apple-system, system-ui, sans-serif';
+    let lx = 8;
+    liveFeatureMeta.forEach(f => {
+        ctx.fillStyle = f.color || '#888';
+        ctx.fillRect(lx, 8, 14, 4);
+        ctx.fillStyle = '#888';
+        ctx.fillText(f.label, lx + 18, 14);
+        lx += ctx.measureText(f.label).width + 32;
+    });
+}
+
 async function runEffectAnalysis(name) {
-    const fileSel = document.getElementById('effectDetailFile');
     const status = document.getElementById('effectDetailStatus');
     const viz = document.getElementById('effectDetailViz');
-    if (!fileSel || !fileSel.value) return;
+    if (!currentFile) {
+        if (status) status.textContent = 'Select an audio file in the header first';
+        return;
+    }
 
     status.textContent = 'Analyzing... (running effect offline)';
     viz.innerHTML = '';
 
     try {
-        const analyzeBody = { effect: name, file: fileSel.value };
+        const analyzeBody = { effect: name, file: currentFile };
         const effEntry = effectsList.find(e => e.name === name);
         if (effEntry && effEntry.is_signal) {
-            analyzeBody.palette =getSelectedPalette(name, effEntry.default_palette);
+            analyzeBody.palette = getSelectedPalette(name, effEntry.default_palette);
         }
         const resp = await fetch('/api/effects/analyze', {
             method: 'POST',
@@ -2732,10 +2902,10 @@ async function runEffectAnalysis(name) {
             return;
         }
         effectDetailData = data;
-        status.textContent = data.num_frames + ' frames, ' + data.duration.toFixed(1) + 's, ' + data.diag_keys.length + ' diagnostics';
+        status.textContent = data.num_frames + ' frames, ' + data.duration.toFixed(1) + 's';
 
         // Set audio to this file for playback sync
-        audio.src = '/audio/' + encodeURIComponent(fileSel.value);
+        audio.src = '/audio/' + encodeURIComponent(currentFile);
         audio.load();
 
         renderEffectViz(viz, data);
@@ -2765,82 +2935,30 @@ function renderEffectViz(container, data) {
     container.appendChild(ledCanvas);
     drawLedogramCanvas(ledCanvas, data, dpr, width, ledH, ledogramBytes, getBrightnessRange(effectDetailName));
 
-    // Feature sparklines (from analyze_effect data)
-    if (data.features && data.features.length > 0 && data.feature_keys) {
-        const featWrap = document.createElement('div');
-        featWrap.style.cssText = 'margin-top: 4px;';
-        data.feature_keys.forEach(key => {
-            const row = document.createElement('div');
-            row.className = 'feature-row';
-            const label = document.createElement('span');
-            label.className = 'feature-label';
-            label.textContent = FEATURE_LABELS[key] || key;
-            row.appendChild(label);
-            const canvas = document.createElement('canvas');
-            canvas.style.cssText = 'height: 22px; cursor: crosshair;';
-            row.appendChild(canvas);
-            featWrap.appendChild(row);
+    // Feature canvas (same width/height as LED-ogram, source features overlaid)
+    if (data.features && data.features.length > 0 && data.source_features) {
+        const featCanvas = document.createElement('canvas');
+        featCanvas.style.height = ledH + 'px';
+        featCanvas.style.marginTop = '4px';
+        featCanvas.style.cursor = 'crosshair';
+        container.appendChild(featCanvas);
 
-            // Draw after append (needs layout)
-            requestAnimationFrame(() => {
-                const ctx = canvas.getContext('2d');
-                const fw = canvas.clientWidth;
-                const fh = canvas.clientHeight;
-                canvas.width = fw * dpr;
-                canvas.height = fh * dpr;
-                ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-                ctx.clearRect(0, 0, fw, fh);
-                const n = data.features.length;
-                ctx.beginPath();
-                ctx.strokeStyle = FEATURE_COLORS[key] || '#888';
-                ctx.lineWidth = 1.2;
-                for (let i = 0; i < n; i++) {
-                    const x = (i / (n - 1)) * fw;
-                    const y = fh - (data.features[i][key] || 0) * fh;
-                    if (i === 0) ctx.moveTo(x, y);
-                    else ctx.lineTo(x, y);
-                }
-                ctx.stroke();
-            });
-
-            // Click-to-seek
-            canvas.addEventListener('click', (e) => {
-                const rect = canvas.getBoundingClientRect();
-                const frac = (e.clientX - rect.left) / rect.width;
-                audio.currentTime = Math.max(0, Math.min(frac * data.duration, data.duration));
-            });
+        requestAnimationFrame(() => {
+            const fw = featCanvas.clientWidth;
+            const fh = featCanvas.clientHeight;
+            featCanvas.width = fw * dpr;
+            featCanvas.height = fh * dpr;
+            const ctx = featCanvas.getContext('2d');
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            drawStaticFeatureCanvas(ctx, fw, fh, data.features, data.source_features);
         });
-        container.appendChild(featWrap);
-    }
 
-    // Analysis panels selector
-    const panelDefs = [
-        { id: 'spectrogram', label: 'Spectrogram' },
-        { id: 'bands', label: 'Band Energy' },
-        { id: 'rms-derivative', label: 'RMS Derivative' },
-        { id: 'centroid', label: 'Center of Mass of Frequency' },
-        { id: 'centroid-derivative', label: 'Centroid Derivative' },
-        { id: 'band-derivative', label: 'Band Derivative' },
-        { id: 'mfcc', label: 'Timbral Shape (MFCC)' },
-        { id: 'novelty', label: 'Novelty' },
-        { id: 'band-deviation', label: 'Band Deviation' },
-        { id: 'annotations', label: 'Annotations' },
-    ];
-    const panelRow = document.createElement('div');
-    panelRow.className = 'analysis-panel-chips';
-    panelRow.innerHTML = '<span class="panel-chips-label">Analysis</span>';
-    const panelContainer = document.createElement('div');
-    panelContainer.className = 'analysis-panels-container';
-    panelDefs.forEach(pd => {
-        const chip = document.createElement('span');
-        chip.className = 'panel-chip';
-        chip.textContent = pd.label;
-        chip.dataset.panel = pd.id;
-        chip.addEventListener('click', () => toggleAnalysisPanel(chip, pd.id, panelContainer, data));
-        panelRow.appendChild(chip);
-    });
-    container.appendChild(panelRow);
-    container.appendChild(panelContainer);
+        featCanvas.addEventListener('click', (e) => {
+            const rect = featCanvas.getBoundingClientRect();
+            const frac = (e.clientX - rect.left) / rect.width;
+            audio.currentTime = Math.max(0, Math.min(frac * data.duration, data.duration));
+        });
+    }
 
     // Cursor overlay
     const cursor = document.createElement('div');
@@ -2865,65 +2983,6 @@ function renderEffectViz(container, data) {
     }
     effectDetailAnim = requestAnimationFrame(animCursor);
 }
-
-async function toggleAnalysisPanel(chip, panelId, panelContainer, data) {
-    const existing = panelContainer.querySelector('[data-panel-id="' + panelId + '"]');
-    if (existing) {
-        existing.remove();
-        chip.classList.remove('active');
-        return;
-    }
-
-    const fileSel = document.getElementById('effectDetailFile');
-    if (!fileSel || !fileSel.value) return;
-
-    chip.classList.add('active');
-    chip.classList.add('loading');
-
-    const wrapper = document.createElement('div');
-    wrapper.className = 'analysis-panel-img';
-    wrapper.dataset.panelId = panelId;
-    wrapper.innerHTML = '<span class="panel-loading">Loading ' + chip.textContent + '...</span>';
-    panelContainer.appendChild(wrapper);
-
-    try {
-        const url = '/api/render-panel/' + encodeURIComponent(fileSel.value) + '?panel=' + panelId;
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error('Render failed');
-
-        const blob = await resp.blob();
-        const xLeft = parseFloat(resp.headers.get('X-Left-Px') || '0');
-        const xRight = parseFloat(resp.headers.get('X-Right-Px') || '1');
-        const pngWidth = parseFloat(resp.headers.get('X-Png-Width') || '1');
-        const duration = parseFloat(resp.headers.get('X-Duration') || '1');
-
-        const dataWidth = xRight - xLeft;
-        const img = document.createElement('img');
-        img.src = URL.createObjectURL(blob);
-        img.style.display = 'block';
-        img.style.cursor = 'crosshair';
-        // Scale image so the data area fills the wrapper width, hide axis margins
-        img.style.width = (pngWidth / dataWidth * 100) + '%';
-        img.style.marginLeft = -(xLeft / dataWidth * 100) + '%';
-
-        wrapper.style.overflow = 'hidden';
-
-        // Click anywhere in the visible (cropped) area maps directly to time
-        wrapper.addEventListener('click', (e) => {
-            const rect = wrapper.getBoundingClientRect();
-            const frac = (e.clientX - rect.left) / rect.width;
-            audio.currentTime = Math.max(0, Math.min(frac * duration, duration));
-        });
-
-        wrapper.innerHTML = '';
-        wrapper.appendChild(img);
-    } catch (e) {
-        wrapper.innerHTML = '<span class="panel-loading" style="color:#e94560;">Error: ' + e.message + '</span>';
-        chip.classList.remove('active');
-    }
-    chip.classList.remove('loading');
-}
-
 
 function drawLedogramCanvas(canvas, data, dpr, width, height, bytes, brightnessRange) {
     canvas.width = width * dpr;

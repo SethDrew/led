@@ -336,18 +336,44 @@ def print_diagnostics(effect, frame_num):
 
 
 def run_live(effect, led_output, device_id, brightness_cap=BRIGHTNESS_CAP,
-             sculpture_def=None):
+             sculpture_def=None, stream_features=False):
     """Run effect on live BlackHole audio.
 
     Architecture (required by WS2812B timing):
       Audio callback thread: process_audio() — stores analysis results
       Main loop: render() + send_frame() at FIXED rate — no FFT here
     """
+    # Determine what to stream: effect's own source features or generic FeatureComputer
+    has_source_features = stream_features and hasattr(effect, 'source_features') and effect.source_features
+    feat_computer = None
+    if stream_features and not has_source_features:
+        from feature_computer import FeatureComputer
+        feat_computer = FeatureComputer(sample_rate=SAMPLE_RATE)
+    # Peak-decay normalization per source feature for live display
+    # Standard algorithm: instant attack, ~46s half-life at 30fps
+    DISPLAY_PEAK_DECAY = 0.9995
+    source_peak = {} if has_source_features else None
+
+    # Write metadata line so consumer knows what features to expect
+    if stream_features:
+        if has_source_features:
+            meta = {'_meta': True, 'features': effect.source_features}
+        else:
+            meta = {'_meta': True, 'features': [
+                {'id': k, 'label': k, 'color': c} for k, c in [
+                    ('abs_integral', '#e94560'), ('rms', '#ffd740'),
+                    ('centroid', '#4ca5ff'), ('autocorr_conf', '#9c27b0'),
+                ]
+            ]}
+        sys.stderr.write(json.dumps(meta) + '\n')
+        sys.stderr.flush()
 
     def audio_callback(indata, frames, time_info, status):
         mono = np.mean(indata, axis=1) if indata.ndim > 1 else indata.flatten()
         # Process audio in callback thread — effect handles its own locking
         effect.process_audio(mono)
+        if feat_computer:
+            feat_computer.process_audio(mono)
 
     stream = sd.InputStream(
         device=device_id,
@@ -381,6 +407,22 @@ def run_live(effect, led_output, device_id, brightness_cap=BRIGHTNESS_CAP,
 
             # Terminal display
             print_diagnostics(effect, frame_num)
+
+            # Stream source features as JSONL to stderr
+            if has_source_features:
+                raw = effect.get_source_values()
+                # Peak-decay normalization (standard algorithm)
+                for k, v in raw.items():
+                    prev = source_peak.get(k, 1e-10)
+                    source_peak[k] = max(v, prev * DISPLAY_PEAK_DECAY)
+                    raw[k] = v / source_peak[k] if source_peak[k] > 1e-10 else 0.0
+                sys.stderr.write(json.dumps(raw) + '\n')
+                sys.stderr.flush()
+            elif feat_computer:
+                features = feat_computer.get_features()
+                sys.stderr.write(json.dumps(features) + '\n')
+                sys.stderr.flush()
+
             frame_num += 1
 
             # Fixed-rate timing (absolute time targets to prevent drift)
@@ -491,9 +533,12 @@ def analyze_effect(effect_name, wav_path, num_leds=NUM_LEDS, sample_rate=SAMPLE_
     duration = len(audio) / sr
     frame_interval = 1.0 / LED_FPS
 
-    # Feature computer (runs alongside effect)
-    from feature_computer import FeatureComputer
-    feat_computer = FeatureComputer(sample_rate=sr)
+    # Determine feature source: effect's own source_features or generic FeatureComputer
+    has_source = hasattr(effect, 'source_features') and effect.source_features
+    feat_computer = None
+    if not has_source:
+        from feature_computer import FeatureComputer
+        feat_computer = FeatureComputer(sample_rate=sr)
 
     # Collect results
     led_frames = []
@@ -510,7 +555,8 @@ def analyze_effect(effect_name, wav_path, num_leds=NUM_LEDS, sample_rate=SAMPLE_
         chunk_end = min(chunk_idx + CHUNK_SIZE, len(audio))
         chunk = audio[chunk_idx:chunk_end]
         effect.process_audio(chunk)
-        feat_computer.process_audio(chunk)
+        if feat_computer:
+            feat_computer.process_audio(chunk)
 
         # Waveform peak for this chunk
         waveform_peaks.append(float(np.max(np.abs(chunk))))
@@ -540,7 +586,10 @@ def analyze_effect(effect_name, wav_path, num_leds=NUM_LEDS, sample_rate=SAMPLE_
             diag_list.append(normalized)
 
             # Collect features at same rate as LED frames
-            feat_list.append(feat_computer.get_features())
+            if has_source:
+                feat_list.append(effect.get_source_values())
+            else:
+                feat_list.append(feat_computer.get_features())
 
             next_render_sample += samples_per_frame
 
@@ -561,8 +610,24 @@ def analyze_effect(effect_name, wav_path, num_leds=NUM_LEDS, sample_rate=SAMPLE_
                 all_keys.append(k)
                 seen.add(k)
 
-    # Feature keys
-    feature_keys = ['abs_integral', 'rms', 'centroid', 'autocorr_conf']
+    # Feature metadata
+    if has_source:
+        source_meta = list(effect.source_features)
+        feature_keys = [f['id'] for f in source_meta]
+        # Normalize raw source values to 0-1 by global max per feature
+        for key in feature_keys:
+            global_max = max((f[key] for f in feat_list), default=0.0)
+            if global_max > 1e-10:
+                for f in feat_list:
+                    f[key] = f[key] / global_max
+    else:
+        source_meta = [
+            {'id': 'abs_integral', 'label': 'Abs-Integral', 'color': '#e94560'},
+            {'id': 'rms', 'label': 'RMS', 'color': '#ffd740'},
+            {'id': 'centroid', 'label': 'Centroid', 'color': '#4ca5ff'},
+            {'id': 'autocorr_conf', 'label': 'Autocorr', 'color': '#9c27b0'},
+        ]
+        feature_keys = [f['id'] for f in source_meta]
 
     return {
         'num_frames': len(led_frames),
@@ -575,6 +640,7 @@ def analyze_effect(effect_name, wav_path, num_leds=NUM_LEDS, sample_rate=SAMPLE_
         'waveform_peaks': waveform_peaks,
         'features': feat_list,
         'feature_keys': feature_keys,
+        'source_features': source_meta,
     }
 
 
@@ -642,6 +708,8 @@ def main():
     parser.add_argument('--port', default=None, help='Serial port (auto-detect if omitted)')
     parser.add_argument('--leds', type=int, default=NUM_LEDS, help='Number of LEDs')
     parser.add_argument('--sculpture', default=None, help='Sculpture ID (overrides --port/--leds)')
+    parser.add_argument('--stream-features', action='store_true',
+                        help='Stream FeatureComputer output as JSONL to stderr')
     parser.add_argument('--brightness', type=float, default=BRIGHTNESS_CAP,
                         help='Brightness cap (0-1, default 0.03)')
     args = parser.parse_args()
@@ -766,7 +834,8 @@ def main():
             device_info = sd.query_devices(device_id)
             print(f"  Audio: {device_info['name']} (#{device_id})")
             run_live(effect, led_output, device_id, brightness_cap,
-                     sculpture_def=sculpture_def)
+                     sculpture_def=sculpture_def,
+                     stream_features=args.stream_features)
     finally:
         led_output.close()
         diag = effect.get_diagnostics()

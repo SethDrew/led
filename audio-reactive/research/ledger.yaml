@@ -1456,46 +1456,33 @@ entries:
 
   - id: per-band-normalization-with-dropout-handling
     date: 2026-02-21
-    touched: 2026-02-21
-    title: "Per-band normalization with asymmetric EMA and dropout detection for real-time LEDs"
+    touched: 2026-02-22
+    title: "Per-band peak-decay normalization (standard); dropout emphasis deferred to events layer"
     summary: >
-      Normalize each band's energy against a sliding-window mean (not max) of its own
-      history. Asymmetric EMA: instant attack (new max immediately adopted), constant
-      decay (reference slowly drops so monotonic beats always register). Absolute
-      threshold per band detects dropout; reference freezes during dropout so
-      reintroduction after 15-30s produces massive normalized values — capturing the
-      musical intention of EDM drops.
+      Per-band normalization is standard peak-decay: peak = max(energy, peak * 0.9995).
+      Instant attack, ~46s half-life (~1 minute effective memory). Matches industry
+      practice (scottlawsonbc, WLED concept, PCEN). Produces clean 0-1 values per band.
+      Dropout detection and reintroduction emphasis are separate concerns that belong in
+      the events/temporal layer, not in normalization.
     status: exploring
     warmth: high
-    confidence: medium
+    confidence: high
     source: audio-reactive/synchronicity-led/algorithms/per_band_normalization.md
     tags: [feature-extraction, effects, architecture, perception]
-    relates_to: [equal-loudness-weighting-dead-end, rolling-integral-sustained-energy, airiness-context-deviation, accent-vs-groove-effects]
+    relates_to: [equal-loudness-weighting-dead-end, rolling-integral-sustained-energy, airiness-context-deviation, accent-vs-groove-effects, normalization-prior-art-audit]
     notes: >
-      Emerged from the equal-loudness dead end: the right approach isn't weighting
-      the spectrum to match perception, it's normalizing each band against its own
-      recent context. This mirrors the airiness finding — feelings are deviations
-      from context, not absolute levels.
+      Evolved through three design phases:
+      (1) Original: asymmetric EMA + constant decay + dropout freeze + reintroduction
+      boost. Conflated normalization with event emphasis.
+      (2) Prior art audit (normalization-prior-art-audit) confirmed the freeze and
+      constant decay were novel but also showed they were solving two different problems.
+      (3) Split: normalization is now standard peak-decay (industry practice). Dropout
+      emphasis (making reintroductions visually dramatic) is deferred to the events
+      layer on the temporal axis. The normalization layer's job is clean 0-1 values.
 
-      Key design decisions (untested):
-      (1) Sliding-window MEAN not max — tracks sustained energy level, not peak
-      spikes. A single loud hit shouldn't reset the reference for minutes.
-      (2) Asymmetric EMA — attack instant so new peaks are immediately visible,
-      decay constant (not exponential) so the reference drifts down slowly. This
-      means a steady kick drum always shows full brightness on every hit.
-      (3) Absolute dropout threshold (not relative to current reference) — prevents
-      false dropout detection in genres with sustained low-energy bands (e.g. techno
-      kick patterns that are monotonic but not silent).
-      (4) Reference freeze during dropout — when a band drops below absolute threshold,
-      stop updating the reference. When energy returns after 15-30s, the frozen
-      reference is much lower than the returning energy, so the entire reintroduction
-      section "crashes hard" with huge normalized values until the reference catches up.
-      This naturally captures the feel of EDM drops without explicit structure detection.
-
-      Unresolved: exact absolute threshold values per band, decay rate, window size
-      for the sliding mean. May need per-genre tuning or user-adjustable parameters.
-      Could connect to the DAW concepts entry — the decay rate is essentially an
-      ADSR release parameter.
+      Key insight: the decay factor IS the reference window. At 0.9995/frame (30fps),
+      half-life is ~46 seconds — roughly one minute of effective memory. No ring
+      buffer needed. A peak from 1 minute ago has decayed to ~25%.
 
   # ── Architecture Document (Feb 21) ─────────────────────────────────
 
@@ -1692,3 +1679,84 @@ entries:
       build-taxonomy, beat-trackers-fail-dense-rock, bass-flux-electronic-failure,
       harmonix-set-audit. Three reference docs preserved in synchronicity-led/library/:
       LIBRARY_RESEARCH_SUMMARY.md, LED_MAPPING_GUIDE.md, HARMONIX_QUICKSTART.md.
+
+  - id: normalization-prior-art-audit
+    date: 2026-02-21
+    touched: 2026-02-22
+    title: "Per-band peak-decay normalization matches industry standard; dropout emphasis is a separate problem"
+    summary: >
+      Audit of normalization approaches against AGC, broadcast leveling, VJ
+      software (WLED, Resolume, TouchDesigner, scottlawsonbc), PCEN, and EBU R128.
+      Per-band peak-decay (instant attack, slow exponential decay) is the standard
+      approach across LED visualization systems. No VJ system does per-band adaptive
+      recovery for band dropout/reintroduction — multi-band compressors handle it
+      but aim to hide the recovery, not emphasize it.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: web research (WLED wiki, scottlawsonbc, EBU R128, PCEN papers, AGC docs, FabFilter/iZotope docs)
+    tags: [architecture, feature-extraction, prior-art]
+    relates_to: [per-band-normalization-with-dropout-handling, normalization-events-separation, vj-conventions-reuse-question, wled-sr-reimplemented]
+    notes: >
+      Two rounds of research. First round audited our original conflated design
+      (asymmetric EMA + freeze + constant decay) against general normalization.
+      Second round focused on per-band dropout handling specifically.
+
+      Key findings: (1) scottlawsonbc is closest — per-filterbank asymmetric EMA
+      (α=0.99/0.001). (2) WLED uses global PI-controller AGC with squelch.
+      (3) Multi-band compressors (FabFilter Pro-MB, iZotope Ozone) handle per-band
+      recovery but with 50-500ms release aimed at transparency. (4) Multi-band
+      upward expansion can boost on threshold crossing but isn't duration-dependent.
+      (5) PCEN is per-channel adaptive normalization for ML, same principle.
+
+      Original design had two novel mechanisms (reference freeze, constant decay)
+      but these conflated normalization with event emphasis. After splitting,
+      normalization is standard peak-decay. The novel dropout emphasis ideas are
+      deferred to the events layer.
+
+  - id: normalization-events-separation
+    date: 2026-02-22
+    touched: 2026-02-22
+    title: "Normalization and event emphasis are separate layers — don't conflate them"
+    summary: >
+      Normalization produces clean 0-1 values per band (peak-decay, industry
+      standard). What to do with dramatic transitions in those values — dropout
+      reintroduction boost, build detection, section emphasis — belongs in the
+      events/temporal layer downstream. Conflating them makes normalization
+      harder to reason about and harder to match against prior art.
+    status: resonates
+    warmth: high
+    confidence: high
+    source: design conversation
+    tags: [architecture, philosophy]
+    relates_to: [per-band-normalization-with-dropout-handling, normalization-prior-art-audit, adaptation-time-constant-is-temporal-scope, event-detection-viewer-only]
+    notes: >
+      Emerged from trying to build dropout emphasis into the normalization
+      algorithm (reference freeze, constant decay, recovery attack rates).
+      Each addition made the algorithm harder to understand and test. The
+      split clarified both sides: normalization is a solved problem (peak-decay),
+      and dropout emphasis is a creative problem that needs its own design
+      space in the events layer on the temporal axis.
+
+      However, these could be recombined into a single algorithm if dropout
+      detection and reintroduction emphasis is the primary focus. Baking
+      level-tracking and event detection into one pass simplifies the system
+      when you don't need the clean normalized signal for other consumers.
+      Worth considering for a dedicated "dropout reactor" effect that owns
+      the whole pipeline from raw band energy to LED output.
+
+  - id: peak-decay-demand-charge-analogy
+    date: 2026-02-22
+    touched: 2026-02-22
+    title: "Peak-decay normalization is a demand charge management problem"
+    summary: >
+      The peak-decay reference behaves like a utility demand charge ratchet:
+      a billing peak that decays monthly, normalizing real-time load against it.
+      Same math — respond proportionally to current signal without flattening
+      everything or missing the big moments.
+    status: resonates
+    warmth: low
+    confidence: high
+    source: design conversation
+    tags: [architecture, analogy]
+    relates_to: [per-band-normalization-with-dropout-handling]

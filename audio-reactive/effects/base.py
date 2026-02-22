@@ -22,6 +22,11 @@ from abc import ABC, abstractmethod
 class AudioReactiveEffect(ABC):
     """Base class for all audio-reactive LED effects."""
 
+    # Source features this effect uses, per ARCHITECTURE.md feature catalog.
+    # List of dicts: {'id': str, 'label': str, 'color': str (hex)}
+    # Override in subclass to declare what drives the effect.
+    source_features = []
+
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         self.num_leds = num_leds
         self.sample_rate = sample_rate
@@ -64,6 +69,14 @@ class AudioReactiveEffect(ABC):
         """Optional: return diagnostic info for terminal display.
 
         Override to provide effect-specific metrics (beat count, energy, etc.)
+        """
+        return {}
+
+    def get_source_values(self) -> dict:
+        """Return current source feature values as {id: float (0-1)}.
+
+        Keys must match ids declared in source_features.
+        Called from main loop (same thread as render).
         """
         return {}
 

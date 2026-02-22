@@ -982,7 +982,12 @@ entries:
       parameter through a common protocol. GitHub repos (treeoftenere/*) are
       private or empty as of 2026-02. External sources (designboom, dezeen,
       lx.studio spotlight) confirm the architecture but implementation details
-      are unverifiable.
+      are unverifiable. The Interactivity repo (treeoftenere/Interactivity) is
+      real code — Muse EEG signal processing, OSC bridges, sensor integration —
+      but domain-specific to BCI/biometrics, not providing novel techniques for
+      audio-reactive LED work. The signal processing pattern (decompose → extract
+      features → normalize → OSC → visuals) is structurally identical to ours
+      but the implementation details are EEG-specific and not transferable.
 
   - id: osc-as-sensor-glue
     date: 2026-02-20
@@ -1463,7 +1468,7 @@ entries:
     status: exploring
     warmth: high
     confidence: medium
-    source: design conversation (equal-loudness weighting dead-end session)
+    source: synchronicity-led/algorithms/per_band_normalization.md
     tags: [feature-extraction, effects, architecture, perception]
     relates_to: [equal-loudness-weighting-dead-end, rolling-integral-sustained-energy, airiness-context-deviation, accent-vs-groove-effects]
     notes: >
@@ -1506,7 +1511,7 @@ entries:
     status: validated
     warmth: medium
     confidence: high
-    source: audio-reactive/research/ARCHITECTURE.md
+    source: audio-reactive/synchronicity-led/ARCHITECTURE.md
     tags: [architecture, feature-extraction, philosophy]
     relates_to: [accent-vs-groove-effects, flourish-ratio, two-quality-axes]
     notes: >
@@ -1531,7 +1536,7 @@ entries:
     status: exploring
     warmth: medium
     confidence: medium
-    source: audio-reactive/research/ARCHITECTURE.md
+    source: audio-reactive/synchronicity-led/ARCHITECTURE.md
     tags: [feature-extraction, architecture, future]
     relates_to: [band-zone-pulse-effect, onset-vs-absint-comparison, signal-processing-tree]
     notes: >
@@ -1550,11 +1555,11 @@ entries:
       viewer.py as batch-only visualization. No effect consumes it. Foote's
       checkerboard novelty requires an O(n^2) similarity matrix — fundamentally
       non-streaming. A streaming event detector needs a different approach.
-    status: exploring
+    status: dead-end
     warmth: high
     confidence: high
     source: audio-reactive/tools/viewer.py
-    tags: [architecture, effects, feature-extraction, future]
+    tags: [architecture, effects, feature-extraction, future, dead-end]
     relates_to: [build-taxonomy, accent-vs-groove-effects, rolling-integral-sustained-energy]
     notes: >
       Architectural gap: the effects pipeline has no way to know about section-level
@@ -1563,6 +1568,10 @@ entries:
       (absolute threshold + reference freeze) is already designed but unimplemented
       (see per-band-normalization-with-dropout-handling). Fixing this is prerequisite
       for section-aware effects.
+      UPDATE 2026-02-21: Removed Events A/B tabs from viewer — the computed event
+      overlays (drops, risers, dropouts, harmonic spans) were too difficult to
+      interpret and didn't effectively capture the event signals. The V:events
+      toggle on the novelty panel remains as a placeholder for future work.
 
   - id: adaptation-time-constant-is-temporal-scope
     date: 2026-02-21
@@ -1576,7 +1585,7 @@ entries:
     status: resonates
     warmth: high
     confidence: high
-    source: audio-reactive/research/ARCHITECTURE.md
+    source: audio-reactive/synchronicity-led/ARCHITECTURE.md
     tags: [architecture, feature-extraction, philosophy]
     relates_to: [airiness-context-deviation, per-band-normalization-with-dropout-handling, rolling-integral-sustained-energy]
     notes: >
@@ -1631,3 +1640,26 @@ entries:
       quality is crude. Our calculus features may provide decomposition quality
       that VJ tools lack. The question is whether that decomposition advantage
       produces visibly better LEDs. Unresolved — needs A/B testing on hardware.
+
+  - id: analysis-scripts-removed
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "Removed analysis/scripts/ and output reports — consolidated to ledger + library"
+    summary: >
+      Deleted analysis/scripts/ (32 scripts, ~12K LOC), analysis/taste/ (13 reports),
+      analysis/algorithms/ (11 reports), analysis/harmonix/ (9 reports). All conclusions
+      already captured in ledger entries. Three reference docs moved to
+      audio-reactive/synchronous-led/library/ (see INDEX.md there).
+    status: integrated
+    warmth: low
+    confidence: high
+    source: git history (commit before deletion: b374d0b)
+    tags: [repo-hygiene, tools]
+    relates_to: [repo-discoverability]
+    notes: >
+      Everything recoverable from git history. Output report conclusions were
+      redundant with ledger entries: taps-track-bass-peaks, airiness-context-deviation,
+      flourish-ratio, flourish-audio-properties, derivatives-over-absolutes,
+      build-taxonomy, beat-trackers-fail-dense-rock, bass-flux-electronic-failure,
+      harmonix-set-audit. Three reference docs preserved in synchronous-led/library/:
+      LIBRARY_RESEARCH_SUMMARY.md, LED_MAPPING_GUIDE.md, HARMONIX_QUICKSTART.md.

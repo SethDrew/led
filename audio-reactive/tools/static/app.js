@@ -989,11 +989,8 @@ filePicker.addEventListener('change', () => {
 // ── Tabs ─────────────────────────────────────────────────────────
 
 const decompTabs = new Set(['stems', 'hpss', 'lab-repet', 'lab-nmf']);
-const eventsTabs = new Set(['events-a', 'events-b']);
 const decompDropdown = document.getElementById('decompDropdownToggle').parentElement;
 const decompToggle = document.getElementById('decompDropdownToggle');
-const eventsDropdown = document.getElementById('eventsDropdownToggle').parentElement;
-const eventsToggle = document.getElementById('eventsDropdownToggle');
 
 function updateTabUI() {
     document.querySelectorAll('.tabs > .tab').forEach(t => {
@@ -1001,8 +998,6 @@ function updateTabUI() {
     });
     // Decomposition dropdown: highlight toggle if a decomp sub-tab is active
     decompToggle.classList.toggle('active', decompTabs.has(currentTab));
-    // Events dropdown: highlight toggle if an events sub-tab is active
-    eventsToggle.classList.toggle('active', eventsTabs.has(currentTab));
     document.querySelectorAll('.tab-dropdown-item').forEach(t => {
         t.classList.toggle('active', t.dataset.tab === currentTab);
     });
@@ -1024,7 +1019,7 @@ function switchTab(tabId) {
 document.querySelectorAll('.tabs > .tab').forEach(tab => {
     tab.addEventListener('click', () => {
         if (tab.classList.contains('disabled')) return;
-        if (tab.id === 'decompDropdownToggle' || tab.id === 'eventsDropdownToggle') return; // handled separately
+        if (tab.id === 'decompDropdownToggle') return; // handled separately
         switchTab(tab.dataset.tab);
     });
 });
@@ -1032,23 +1027,14 @@ document.querySelectorAll('.tabs > .tab').forEach(tab => {
 // Decomposition dropdown toggle
 decompToggle.addEventListener('click', (e) => {
     e.stopPropagation();
-    eventsDropdown.classList.remove('open');
     decompDropdown.classList.toggle('open');
 });
 
-// Events dropdown toggle
-eventsToggle.addEventListener('click', (e) => {
-    e.stopPropagation();
-    decompDropdown.classList.remove('open');
-    eventsDropdown.classList.toggle('open');
-});
-
-// Dropdown item clicks (both decomp and events)
+// Dropdown item clicks
 document.querySelectorAll('.tab-dropdown-item').forEach(item => {
     item.addEventListener('click', (e) => {
         e.stopPropagation();
         decompDropdown.classList.remove('open');
-        eventsDropdown.classList.remove('open');
         switchTab(item.dataset.tab);
     });
 });
@@ -1056,7 +1042,6 @@ document.querySelectorAll('.tab-dropdown-item').forEach(item => {
 // Close dropdowns on outside click
 document.addEventListener('click', () => {
     decompDropdown.classList.remove('open');
-    eventsDropdown.classList.remove('open');
 });
 
 // ── Panel loading ────────────────────────────────────────────────
@@ -1145,7 +1130,6 @@ async function loadPanel() {
         'lab': { label: 'Compute Lab', desc: 'Audio feature analysis', fn: loadLab, dropdown: true },
         'lab-repet': { label: 'Compute REPET', desc: 'Repeating pattern extraction', fn: loadLabRepet },
         'lab-nmf': { label: 'Compute NMF', desc: 'Non-negative matrix factorization separation', fn: loadLabNMF },
-        'freq-perception': { label: 'Compute Freq Perception', desc: 'Equal-loudness weighting at different listening levels', fn: loadFreqPerception },
     };
 
     if (currentTab === 'annotate') {
@@ -1172,33 +1156,10 @@ async function loadPanel() {
         return;
     }
 
-    if (currentTab === 'events-a' || currentTab === 'events-b') {
-        const algo = currentTab === 'events-a' ? 'A (additive/strict)' : 'B (multiplicative/lenient)';
-        document.getElementById('controlsHint').innerHTML =
-            '<kbd>Space</kbd> play/pause &nbsp; <kbd>&larr;</kbd> <kbd>&rarr;</kbd> &plusmn;5s &nbsp; Click to seek &nbsp; ' +
-            'Events ' + algo + ' &middot; Drops &middot; Risers &middot; Dropouts &middot; Harmonic';
-        document.getElementById('stemStatus').style.display = 'none';
-
-        const suffix = currentTab === 'events-a' ? 'events-a' : 'events-b';
-        const url = '/api/render-' + suffix + '/' + encodeURIComponent(currentFile);
-        showOverlay('Rendering events ' + algo + '...');
-        try {
-            const result = await cachedFetchPNG(url);
-            if (!result) { showOverlay('Render failed'); return; }
-            pixelMapping = result.pixelMapping;
-            panelImg.src = URL.createObjectURL(result.blob);
-            hideOverlay();
-            cursorLine.style.display = 'block';
-        } catch (e) {
-            showOverlay('Error: ' + e.message);
-        }
-        return;
-    }
-
     if (currentTab === 'band-analysis') {
         document.getElementById('controlsHint').innerHTML =
             '<kbd>Space</kbd> play/pause &nbsp; <kbd>&larr;</kbd> <kbd>&rarr;</kbd> &plusmn;5s &nbsp; Click to seek &nbsp; ' +
-            'RT View &middot; Band Share &middot; Context Deviation &middot; RT Derivative &middot; 5s Integral';
+            'RT Normalized &middot; 5s Integral';
         document.getElementById('stemStatus').style.display = 'none';
 
         const url = '/api/render-band-analysis/' + encodeURIComponent(currentFile);
@@ -1407,18 +1368,6 @@ async function loadLabRepet() {
     } catch (e) {
         showOverlay('Error: ' + e.message);
     }
-}
-
-async function loadFreqPerception() {
-    if (!currentFile) return;
-    showOverlay('Computing frequency perception...');
-    const url = '/api/render-freq-perception/' + encodeURIComponent(currentFile);
-    const result = await cachedFetchPNG(url);
-    if (!result) { showOverlay('Render failed'); return; }
-    pixelMapping = result.pixelMapping;
-    panelImg.src = URL.createObjectURL(result.blob);
-    hideOverlay();
-    cursorLine.style.display = 'block';
 }
 
 // ── Overlay ──────────────────────────────────────────────────────

@@ -35,13 +35,6 @@
     <div class="tab" data-tab="calculus">Calculus</div>
     <div class="tab" data-tab="annotate">Annotate</div>
     <div class="tab-dropdown">
-        <div class="tab" id="eventsDropdownToggle">Events &#9662;</div>
-        <div class="tab-dropdown-menu" id="eventsDropdownMenu">
-            <div class="tab-dropdown-item" data-tab="events-a">A: Additive/Strict</div>
-            <div class="tab-dropdown-item" data-tab="events-b">B: Multiplicative/Lenient</div>
-        </div>
-    </div>
-    <div class="tab-dropdown">
         <div class="tab" id="decompDropdownToggle">Decomposition &#9662;</div>
         <div class="tab-dropdown-menu" id="decompDropdownMenu">
             <div class="tab-dropdown-item" data-tab="stems">Demucs</div>
@@ -51,7 +44,6 @@
         </div>
     </div>
     <div class="tab" data-tab="lab">Lab</div>
-    <div class="tab" data-tab="freq-perception">Freq Perception</div>
     <div class="tab" data-tab="effects">Effects</div>
     <div class="tab" data-tab="reference">Reference</div>
 </div>
@@ -99,11 +91,6 @@
         <p><strong>MFCC novelty</strong> (coral) detects <em>timbral</em> changes &mdash; when the texture, instrument mix, or sonic character shifts. <strong>Chroma novelty</strong> (teal) detects <em>harmonic</em> changes &mdash; key changes, chord progressions, new melodic content.</p>
         <p class="origin">Origin: Foote, &ldquo;Automatic Audio Segmentation Using a Measure of Audio Novelty&rdquo; (2000). Computes a self-similarity matrix from feature vectors, then slides a Gaussian-tapered checkerboard kernel along the diagonal. When past frames are similar to each other but dissimilar to future frames, the kernel produces a peak.</p>
         <p class="verdict">The most general section-boundary detector. Doesn&rsquo;t label <em>what</em> changed &mdash; just that something did. Two feature sets let you see if the change is timbral, harmonic, or both.</p>
-
-        <h3>Band Deviation from Long-Term Context <span class="tag custom">Custom</span></h3>
-        <p>Per-band z-scores showing when each frequency band&rsquo;s energy deviates from its own 60-second running average. The white &ldquo;Max&rdquo; curve shows the most dramatic deviation in <em>any</em> band at each moment.</p>
-        <p>Applies our finding #2 (airiness = deviation from local context) at the section level. A bass drop, a high-frequency screech, or any sudden spectral shift will spike the relevant band&rsquo;s z-score &mdash; without needing to know <em>what kind</em> of change it is.</p>
-        <p class="verdict">Complements Foote&rsquo;s novelty: Foote detects that a boundary occurred, band deviation shows <em>which frequency range</em> changed and by how much.</p>
 
         <h2>Annotations</h2>
         <p style="color:#888;margin-bottom:16px;">Same four analysis panels, plus a swim-lane overlay for your tap annotations.</p>

@@ -6,15 +6,17 @@ This is a shared mental model, not a spec. No function signatures, no refactorin
 
 **Why this document exists:** Context management is the expensive resource, not code. AI can write one-off effects cheaply. Effects can all be one-offs and likely will need to be for ESP32 performance tuning. No unified transformation framework needed. Investment goes into shared mental models (this document, the ledger) not code abstractions. (Ledger: `context-expensive-code-cheap`)
 
+**Everything below is illustrative, not exhaustive.** The seven axes are the framework; the specific items listed under each are examples drawn from current research. All lists can be extended, revised, or reorganized as understanding deepens. When this document says "behaviors include sparkle, pulse, flash" it means "here are some behaviors we've identified" — not "these are the only behaviors."
+
 ---
 
 ## 1. The Design Space
 
-Seven independent axes define the full space of possible effects. Any effect is a point in this space — a specific combination of choices along each axis. The axes are independent: you can change the topology without changing the temporal scope, or change the audio features without changing the LED behavior.
+Seven axes we've identified so far for thinking about the design space. Any effect is a point (or region) in this space — a combination of choices along each axis. The axes are largely independent: you can change the topology without changing the temporal scope, or change the audio features without changing the LED behavior. Additional axes may emerge; these seven capture the dimensions we've found useful.
 
 ### Axis 1: Topologies
 
-Sculpture shapes and their spatial properties. Defined in `hardware/sculptures.json`, mapped in `runner.py:apply_topology()`.
+Sculpture shapes and their spatial properties. Defined in `hardware/sculptures.json`, mapped in `runner.py:apply_topology()`. These are just represenative examples, not an exhaustive list.
 
 | Topology | Physical LEDs | Spatial Properties | Modes |
 |---|---|---|---|
@@ -30,30 +32,30 @@ Sculpture shapes and their spatial properties. Defined in `hardware/sculptures.j
 - **Branch independence** — different effects on different branches (diamond only, currently unused)
 - **Gamma curves** — non-linear height mapping per branch (`gamma` parameter in sculptures.json). Diamond's `up2` uses gamma=0.55 to compensate for physical geometry where the branch rises steeply then levels off
 
-**Two mapping modes:**
+**Two mapping modes (so far!!):**
 - `branch` (default): each branch gets its own slice of the logical LED array
 - `height`: logical array is a single height axis (0=base, 1=peak); all branches sample from it at their own resolution
 
 ### Axis 2: Musical Events
 
-What happens in music that LEDs should respond to. Precise vocabulary drawn from validated ledger entries.
+What happens in music that LEDs should respond to. Examples of vocabulary drawn from validated ledger entries so far — this list grows as we encounter new musical structures.
 
-**Build phases** (from `build-taxonomy`):
+**Build phases** (from `build-taxonomy`) — one example of structural decomposition:
 - **Primer** — cyclic ramps, anticipation without commitment
 - **Sustained** — upward trajectory, building energy
 - **Bridge** — chaos, highest RMS (higher than drop), transition turbulence
 - **Drop** — sustained plateau, NOT peak intensity — sustained intensity
 
-These phases are independent, not sequential. A song can skip phases or reorder them.
+These phases are independent, not sequential. A song can skip phases or reorder them. Other songs may exhibit structural patterns that don't fit this taxonomy at all.
 
-**Other structural events:**
+**Some other structural events we've identified:**
 - **Dropout** — band goes silent; reference freezes so reintroduction hits hard (from `per-band-normalization-with-dropout-handling`)
 - **Crescendo/Climax** — genre-dependent: rock crescendo = gradual swell; EDM drop = sudden sustained intensity. Same word, different audio signatures
 - **Riser** — sweeping frequency buildup, often before drops
 - **Transition** — section boundary, change in texture/rhythm
 - **Harmonic section** — sustained chords/pads, low onset density
 
-**Behavioral modes** (from `accent-vs-groove-effects`):
+**Behavioral modes identified so far** (from `accent-vs-groove-effects`):
 - **Accent** — music characterized by individual hits; sparse percussion, prominent transients. Band zone pulse works here. Low flourish ratio (<30% off-grid taps)
 - **Groove** — music characterized by continuous rhythmic feel; dense percussion, locked beat. Needs tempo-locked pulsing, not per-hit reactions. High flourish ratio (>70% off-grid taps) for ambient sections
 
@@ -61,7 +63,7 @@ These phases are independent, not sequential. A song can skip phases or reorder 
 
 ### Axis 3: Audio Features
 
-What we can compute. Three categories, plus per-band expansion.
+What we can compute. Organized into three categories so far, plus per-band expansion. New features and categories will emerge as the project evolves.
 
 #### Standard features (librosa / numpy)
 
@@ -109,9 +111,9 @@ All features are relative to a running baseline. The adaptation time constant IS
 
 ### Axis 4: LED Behaviors
 
-The visual vocabulary, independent of what triggers them.
+Examples of the visual vocabulary, independent of what triggers them. These are behaviors we've built or identified — not a closed set.
 
-#### Foreground behaviors (transient, additive)
+#### Foreground behaviors (transient, additive) — e.g.
 
 | Behavior | Description | Natural drivers | Topology fit |
 |---|---|---|---|
@@ -121,7 +123,7 @@ The visual vocabulary, independent of what triggers them.
 | Flash | Instant full-brightness, snap off | Strong onset, downbeat | All |
 | Collision | Two pulses meet and explode | Beat pairs, stereo onsets | Linear |
 
-#### Background behaviors (persistent, base layer)
+#### Background behaviors (persistent, base layer) — e.g.
 
 | Behavior | Description | Natural drivers | Topology fit |
 |---|---|---|---|
@@ -131,7 +133,7 @@ The visual vocabulary, independent of what triggers them.
 | Volume meter | Lit LED count proportional to energy | RMS, absint | Linear |
 | Gradient shift | Color temperature drifts with spectral content | Centroid (warm→cool) | All |
 
-#### Standalone behaviors
+#### Standalone behaviors — e.g.
 
 | Behavior | Description | Natural drivers | Topology fit |
 |---|---|---|---|
@@ -145,9 +147,9 @@ The C++ static-animations system (`Effect.h`) formalizes this: `BackgroundEffect
 
 ### Axis 5: Temporal Scope
 
-The time horizon of both music and effects. Collapsed from "time scales" and "memory" because to detect a phrase-level musical event, you need phrase-level memory in the effect.
+The time horizon of both music and effects. Collapsed from "time scales" and "memory" because to detect a phrase-level musical event, you need phrase-level memory in the effect. The scopes below are rough bins, not hard boundaries — real music bleeds across them.
 
-| Scope | Duration | Musical events | Features needed | Effect memory | Example effects |
+| Scope | Duration | Musical events (examples) | Features needed | Effect memory | Example effects |
 |---|---|---|---|---|---|
 | **Frame** | ~11ms (2048 samples @ 44.1kHz) | Individual transients, onset timing | Onset strength, spectral flux, ZCR | None (stateless) | Sparkle trigger, percussive flash |
 | **Beat** | 300-600ms | Rhythmic pulse, individual hits | Absint (150ms window), beat predictor | ~1s (cooldown, last beat time) | `impulse`, `bass_pulse`, `band_zone_pulse` |
@@ -162,9 +164,9 @@ The time horizon of both music and effects. Collapsed from "time scales" and "me
 
 ### Axis 6: Composition
 
-How effects combine. This is where the system becomes more than the sum of its parts.
+How effects combine. This is where the system becomes more than the sum of its parts. The modes and patterns below are what we've implemented or borrowed from DAW concepts — other composition strategies exist.
 
-#### Blend modes
+#### Blend modes (implemented so far)
 
 From `Effect.h` (C++) and `band_zone_pulse.py` (Python):
 
@@ -221,9 +223,9 @@ Python runner uses a simpler model: single effect renders full frame, topology m
 
 ### Axis 7: Perceptual Mapping
 
-The bridge between audio features and visual parameters. How human perception creates cross-modal correspondences.
+The bridge between audio features and visual parameters. How human perception creates cross-modal correspondences. These mappings are starting points from VJ prior art and our own experiments — novel correspondences are likely waiting to be discovered.
 
-#### Core correspondences
+#### Some established correspondences
 
 | Audio | Visual | Direction | Notes |
 |---|---|---|---|
@@ -275,7 +277,7 @@ From `research/landscape/RESEARCH_AUDIO_VISUAL_MAPPING.md`:
 
 ## 2. Shared Vocabulary
 
-Precise definitions for terms used throughout the project. Prevents re-deriving definitions each session.
+Precise definitions for terms used throughout the project so far. Prevents re-deriving definitions each session. New terms get added as the vocabulary evolves.
 
 **Build phases:** Primer, sustained, bridge, drop — four independent phases of energy evolution in music. Bridge has HIGHER RMS than drop. Drop is sustained intensity, not peak intensity. (from `build-taxonomy`)
 
@@ -340,7 +342,7 @@ This is the project's guiding principle, formalized as a compass for investment 
 
 ## 4. Feature Catalog
 
-Every computable feature in the current system.
+Features currently implemented or identified. This table is a snapshot — new features will be added as research progresses.
 
 | Feature | Category | Measures | Real-time? | Temporal Scope | Events it detects | Behaviors it drives |
 |---|---|---|---|---|---|---|
@@ -374,7 +376,7 @@ Every computable feature in the current system.
 
 ## 5. Effect Design Patterns
 
-Not implementations, but recurring patterns that effects follow.
+Not implementations, but recurring patterns we've observed across our effects. Other patterns will emerge — these are the ones identified so far.
 
 ### Pattern: Accent Effect
 
@@ -533,7 +535,9 @@ In `effects/feature_computer.py`:
 |---|---|---|
 | Research ledger | `research/ledger.yaml` | All findings, 100+ entries |
 | Ledger guide | `research/LEDGER_GUIDE.md` | Format and conventions |
-| This document | `research/ARCHITECTURE.md` | Design space framework |
+| This document | `synchronicity-led/ARCHITECTURE.md` | Design space framework |
+| Algorithm specs | `synchronicity-led/algorithms/` | Formal algorithm specifications |
+| Reference library | `synchronicity-led/library/` | Research summaries, guides (see INDEX.md) |
 | Audio-visual mapping | `research/landscape/RESEARCH_AUDIO_VISUAL_MAPPING.md` | VJ prior art, constants, code snippets |
 | Audio analysis landscape | `research/landscape/RESEARCH_AUDIO_ANALYSIS.md` | MIR techniques survey |
 | ESP32 audio DSP | `research/landscape/ESP32_AUDIO_DSP.md` | Hardware constraints |

@@ -308,11 +308,15 @@ class SyncedVisualizer:
         self.novelty_chroma = _checkerboard_novelty(S, self.chroma_kernel_size)
         del S
 
-        # ── Slow-decay peak normalized band energy (real-time sim) ──
+        # ── Per-band normalization: asymmetric EMA + dropout detection ──
+        # (ledger: per-band-normalization-with-dropout-handling)
+        # Reference tracks sliding mean via instant attack / constant decay.
+        # Dropout freezes the reference so reintroduction produces large values.
         from scipy.ndimage import uniform_filter1d
 
-        decay = 0.9995
         precompute_frames = int(30 * fps)  # seed from first ~30s
+        decay_time_sec = 30  # reference decays from mean to ~0 in this many seconds
+        dropout_percentile = 5  # frames below this percentile = dropout
 
         raw_energies = {}
         for band_name, (fmin, fmax) in FREQUENCY_BANDS.items():
@@ -321,27 +325,36 @@ class SyncedVisualizer:
 
         self.band_energy_rt = {}
         for band_name, energy in raw_energies.items():
-            peaks = np.empty_like(energy)
-            seed = np.max(energy[:min(precompute_frames, len(energy))]) if len(energy) > 0 else 1e-10
-            peak = max(seed, 1e-10)
-            for i in range(len(energy)):
-                peak = max(energy[i], peak * decay)
-                peaks[i] = peak
-            self.band_energy_rt[band_name] = energy / peaks
+            n_frames = len(energy)
+
+            # Absolute dropout threshold: low percentile of non-zero energy
+            nonzero = energy[energy > 0]
+            dropout_thresh = np.percentile(nonzero, dropout_percentile) if len(nonzero) > 0 else 0
+
+            # Seed reference from mean of first ~30s (not max)
+            seed = np.mean(energy[:min(precompute_frames, n_frames)]) if n_frames > 0 else 1e-10
+            seed = max(seed, 1e-10)
+
+            # Constant decay: reference drops by this much per frame
+            constant_decay = seed / (decay_time_sec * fps)
+            constant_decay = max(constant_decay, 1e-12)
+
+            ref = seed
+            normalized = np.empty(n_frames)
+            for i in range(n_frames):
+                e = energy[i]
+                if e < dropout_thresh:
+                    pass  # dropout: freeze reference
+                elif e > ref:
+                    ref = e  # instant attack
+                else:
+                    ref = max(ref - constant_decay, 1e-10)  # constant (linear) decay
+                normalized[i] = e / ref
+
+            self.band_energy_rt[band_name] = normalized
 
         # Total raw energy for dual-axis overlay
         self.total_raw_energy = sum(raw_energies.values())
-
-        # ── Band share (each band as % of total per frame) ──
-        all_bands = np.stack([raw_energies[b] for b in FREQUENCY_BANDS])
-        totals = np.sum(all_bands, axis=0) + 1e-10
-        self.band_share = {b: raw_energies[b] / totals * 100 for b in FREQUENCY_BANDS}
-
-        # ── Band RT derivatives (rate-of-change of real-time normalized) ──
-        self.band_rt_derivatives = {}
-        for band_name, energy in self.band_energy_rt.items():
-            deriv = np.diff(energy, prepend=energy[0]) / dt
-            self.band_rt_derivatives[band_name] = deriv
 
         # ── 5s rolling integral of RT-normalized energy ──
         integral_window = int(5 * fps)
@@ -1078,9 +1091,6 @@ class SyncedVisualizer:
             'centroid-derivative': self._build_centroid_derivative_panel,
             'band-derivative': self._build_band_derivative_panel,
             'band-rt': self._build_band_rt_panel,
-            'band-share': self._build_band_share_panel,
-            'band-context-deviation': self._build_band_context_deviation_panel,
-            'band-rt-derivative': self._build_band_rt_derivative_panel,
             'band-integral': self._build_band_integral_panel,
             'mfcc': self._build_mfcc_panel,
             'novelty': self._build_novelty_panel,
@@ -1365,32 +1375,15 @@ class SyncedVisualizer:
             f"Foote's Checkerboard Novelty "
             f"(MFCC {self.novelty_kernel_size}f/{self.novelty_kernel_seconds}s, "
             f"Chroma {self.chroma_kernel_size}f/{self.chroma_kernel_seconds}s) "
-            f"— peaks = section boundaries  [V] events", fontsize=11)
+            f"— peaks = section boundaries  [V] events (todo)", fontsize=11)
         ax.legend([line_c, line_m], ['Chroma (harmonic)', 'MFCC (timbral)'],
                   loc='upper right', framealpha=0.8, fontsize=8)
 
-        # ── Event overlays (hidden by default, toggled with V) ──
-        event_artists = []
-        for drop_t in self.event_drops:
-            a = ax.axvline(x=drop_t, color='#FF1744', linestyle='--',
-                           linewidth=2, alpha=0.8, visible=False)
-            event_artists.append(a)
-        for start, end in self.event_risers:
-            a = ax.axvspan(start, end, color='#76FF03', alpha=0.25, visible=False)
-            event_artists.append(a)
-        for band_name, spans in self.event_dropouts.items():
-            color = BAND_COLORS.get(band_name, '#E040FB')
-            for start, end in spans:
-                a = ax.axvspan(start, end, color=color, alpha=0.25, visible=False)
-                event_artists.append(a)
-        for start, end in self.event_harmonic:
-            a = ax.axvspan(start, end, color='#FFD740', alpha=0.15, visible=False)
-            event_artists.append(a)
-
+        # V:events — placeholder for future real-time event overlay (todo)
         if not hasattr(self, 'feature_toggle'):
             self.feature_toggle = {}
             self.feature_keys = {}
-        self.feature_toggle['events'] = {'artists': event_artists, 'visible': False}
+        self.feature_toggle['events'] = {'artists': [], 'visible': False}
         self.feature_keys['v'] = 'events'
 
         if not hasattr(self, 'axes'):
@@ -1584,7 +1577,7 @@ class SyncedVisualizer:
     # ── Band Analysis panels ─────────────────────────────────────────
 
     def _build_band_rt_panel(self, ax):
-        """Slow-decay peak normalized band energy (simulating real-time effects view)."""
+        """Per-band normalized energy: asymmetric EMA + dropout detection."""
         t = self.times
         n = len(t)
         for band_name in FREQUENCY_BANDS:
@@ -1592,7 +1585,10 @@ class SyncedVisualizer:
                     color=BAND_COLORS[band_name], linewidth=1.5, alpha=0.85,
                     label=band_name)
         ax.set_xlim([0, self.duration])
-        ax.set_ylim([0, 1.1])
+        # Auto-scale y: values can exceed 1.0 after dropout reintroduction
+        all_vals = np.concatenate([self.band_energy_rt[b][:n] for b in FREQUENCY_BANDS])
+        y_max = min(np.percentile(all_vals, 99.5) * 1.1, 5.0)
+        ax.set_ylim([0, max(y_max, 1.1)])
         ax.set_ylabel('Normalized Energy')
         ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
         ax.grid(True, alpha=0.2)
@@ -1604,63 +1600,7 @@ class SyncedVisualizer:
         ax2.set_ylabel('Total Raw', color='#888')
         ax2.tick_params(axis='y', labelcolor='#888')
 
-        ax.set_title('Real-Time View (slow-decay peak, 30s precompute)', fontsize=11)
-        if not hasattr(self, 'axes'):
-            self.axes = []
-        self.axes.append(ax)
-
-    def _build_band_share_panel(self, ax):
-        """Band share: each band as % of total energy per frame."""
-        t = self.times
-        n = len(t)
-        for band_name in FREQUENCY_BANDS:
-            ax.plot(t, self.band_share[band_name][:n],
-                    color=BAND_COLORS[band_name], linewidth=1.5, alpha=0.85,
-                    label=band_name)
-        ax.set_xlim([0, self.duration])
-        ax.set_ylim([0, 100])
-        ax.set_ylabel('% of Total')
-        ax.set_title('Band Share of Total Energy (%)', fontsize=11)
-        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
-        ax.grid(True, alpha=0.2)
-        if not hasattr(self, 'axes'):
-            self.axes = []
-        self.axes.append(ax)
-
-    def _build_band_context_deviation_panel(self, ax):
-        """Running context deviation: per-band z-scores from 60s rolling mean."""
-        t = self.times
-        n = len(t)
-        for band_name in FREQUENCY_BANDS:
-            ax.plot(t, self.band_deviations[band_name][:n],
-                    color=BAND_COLORS[band_name], linewidth=1.0, alpha=0.7,
-                    label=band_name)
-        ax.plot(t, self.composite_deviation[:n], color='#FFFFFF',
-                linewidth=1.5, alpha=0.9, label='Max (any band)')
-        ax.set_xlim([0, self.duration])
-        ax.set_ylabel('Z-score')
-        ax.set_title('Band Deviation from 60s Context (z-score)', fontsize=11)
-        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
-        ax.grid(True, alpha=0.2)
-        if not hasattr(self, 'axes'):
-            self.axes = []
-        self.axes.append(ax)
-
-    def _build_band_rt_derivative_panel(self, ax):
-        """Band derivative of real-time normalized energy."""
-        from scipy.ndimage import gaussian_filter1d
-        t = self.times
-        n = len(t)
-        for band_name in FREQUENCY_BANDS:
-            smoothed = gaussian_filter1d(self.band_rt_derivatives[band_name][:n], sigma=5)
-            ax.plot(t, smoothed, color=BAND_COLORS[band_name],
-                    linewidth=1.5, alpha=0.85, label=band_name)
-        ax.axhline(y=0, color='#666', linewidth=0.5)
-        ax.set_xlim([0, self.duration])
-        ax.set_ylabel('dEnergy/dt')
-        ax.set_title('Band Energy Derivative (real-time normalized)', fontsize=11)
-        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
-        ax.grid(True, alpha=0.2)
+        ax.set_title('RT Normalized (asymmetric EMA, dropout detection)', fontsize=11)
         if not hasattr(self, 'axes'):
             self.axes = []
         self.axes.append(ax)

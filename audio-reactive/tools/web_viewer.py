@@ -704,7 +704,6 @@ def render_annotate(filepath):
 
 ANALYSIS_PANELS = ('waveform', 'spectrogram', 'bands', 'rms-derivative',
                     'centroid', 'novelty', 'annotations')
-# TODO: Replace Foote's checkerboard novelty with a valid real-time alternative
 
 BAND_ANALYSIS_PANELS = ('band-rt', 'band-integral')
 
@@ -2097,20 +2096,11 @@ def render_lab_timbral(filepath):
     mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, n_fft=n_fft, hop_length=hop_length)
     times = librosa.frames_to_time(np.arange(mfccs.shape[1]), sr=sr, hop_length=hop_length)
 
-    # Foote's checkerboard novelty on MFCC similarity
+    # Causal novelty: flux + EMA deviation (O(n), no similarity matrix)
     fps = sr / hop_length
-    norms = np.linalg.norm(mfccs, axis=0, keepdims=True)
-    norms[norms == 0] = 1
-    mfcc_norm = mfccs / norms
-    S = (mfcc_norm.T @ mfcc_norm).astype(np.float32)
-
-    from viewer import _checkerboard_novelty
-    kernel_seconds = 3
-    kernel_size = max(16, int(kernel_seconds * fps))
-    if kernel_size % 2 != 0:
-        kernel_size += 1
-    novelty = _checkerboard_novelty(S, kernel_size)
-    del S
+    from viewer import _feature_flux, _ema_deviation
+    novelty = _feature_flux(mfccs)
+    ema_nov = _ema_deviation(mfccs, alpha=0.02)
 
     # Layout: heatmap + 4 individual coefficients + fine texture heatmap + novelty
     # Total 7 panels
@@ -2193,8 +2183,10 @@ def render_lab_timbral(filepath):
     # ── Panel 7: Timbral Shift (MFCC Novelty) ──
     ax = fig.add_subplot(gs[6])
     n = min(len(times), len(novelty))
-    ax.plot(times[:n], novelty[:n], color='#FF8A65', linewidth=1.5)
-    ax.fill_between(times[:n], novelty[:n], alpha=0.3, color='#FF8A65')
+    ax.plot(times[:n], novelty[:n], color='#FF8A65', linewidth=1.5, label='Flux (sharp edges)')
+    ax.fill_between(times[:n], novelty[:n], alpha=0.2, color='#FF8A65')
+    ax.plot(times[:n], ema_nov[:n], color='#FFD54F', linewidth=1.2, alpha=0.7,
+            linestyle='--', label='EMA deviation (drift)')
     peak_dist = max(1, int(fps * 1.5))
     peaks, _ = find_peaks(novelty[:n], prominence=0.15, distance=peak_dist)
     ax.scatter(times[peaks], novelty[peaks], color='#FF8A65', s=30, zorder=5, marker='v')
@@ -2202,8 +2194,9 @@ def render_lab_timbral(filepath):
     ax.set_ylim([0, 1.1])
     ax.set_ylabel('Novelty')
     ax.set_xlabel('Time (s)')
-    ax.set_title('Timbral Shift — peaks where the overall sound character changes '
-                 '(Foote checkerboard on MFCC similarity)', fontsize=11)
+    ax.set_title('Timbral Shift — flux detects sharp edges, '
+                 'EMA deviation detects gradual drift (causal, O(n))', fontsize=11)
+    ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
     ax.grid(True, alpha=0.2)
 
     filename = Path(filepath).name

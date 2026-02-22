@@ -56,36 +56,39 @@ BAND_COLORS = {
 ANNOTATION_COLORS = ['#FF4081', '#40C4FF', '#69F0AE', '#FFD740', '#E040FB', '#FF6E40']
 
 
-def _checkerboard_novelty(S, kernel_size):
-    """Foote's (2000) checkerboard kernel novelty along the diagonal of a similarity matrix.
+def _feature_flux(features):
+    """Half-wave rectified feature flux — peaks at abrupt timbral/harmonic changes.
 
-    Places a Gaussian-tapered checkerboard kernel at each point along the diagonal.
-    High values where the music's character changes (cross-block similarity drops).
+    O(n) causal alternative to Foote's O(n²) checkerboard novelty.
     """
-    from scipy.signal import windows as sig_windows
-
-    w = kernel_size // 2
-    kernel = np.ones((kernel_size, kernel_size))
-    kernel[:w, w:] = -1   # top-right: past vs future
-    kernel[w:, :w] = -1   # bottom-left: future vs past
-    g = sig_windows.gaussian(kernel_size, std=kernel_size / 4)
-    kernel *= np.outer(g, g)
-
-    n = S.shape[0]
-    novelty = np.zeros(n)
-    for i in range(n):
-        r0 = max(0, i - w)
-        r1 = min(n, i + w)
-        k_r0 = w - (i - r0)
-        k_r1 = w + (r1 - i)
-        patch = S[r0:r1, r0:r1]
-        novelty[i] = np.sum(patch * kernel[k_r0:k_r1, k_r0:k_r1])
-
-    novelty = np.maximum(novelty, 0)
-    mx = np.max(novelty)
+    norms = np.linalg.norm(features, axis=0, keepdims=True)
+    norms[norms == 0] = 1
+    normed = features / norms
+    diff = np.diff(normed, axis=1)
+    flux = np.mean(np.maximum(0, diff), axis=0)
+    flux = np.concatenate([[0], flux])
+    mx = np.max(flux)
     if mx > 0:
-        novelty /= mx
-    return novelty
+        flux /= mx
+    return flux
+
+
+def _ema_deviation(features, alpha=0.02):
+    """EMA deviation — peaks during gradual drift from recent context.
+
+    O(n) causal complement to feature flux.  Catches buildups and texture
+    shifts that flux misses.
+    """
+    n_frames = features.shape[1]
+    ema = features[:, 0].copy().astype(np.float64)
+    deviation = np.zeros(n_frames)
+    for t in range(1, n_frames):
+        deviation[t] = np.linalg.norm(features[:, t] - ema)
+        ema = alpha * features[:, t] + (1 - alpha) * ema
+    mx = np.max(deviation)
+    if mx > 0:
+        deviation /= mx
+    return deviation
 
 
 # ── Interactive Visualizer ────────────────────────────────────────────
@@ -269,7 +272,7 @@ class SyncedVisualizer:
             np.arange(len(self.onset_env)), sr=self.sr, hop_length=self.hop_length
         )
 
-        # ── Foote's checkerboard novelty ──────────────────────────────
+        # ── Novelty: feature flux + EMA deviation (causal, O(n)) ─────
         print("Computing novelty...")
         fps = self.sr / self.hop_length
         self.mfccs = librosa.feature.mfcc(
@@ -285,28 +288,10 @@ class SyncedVisualizer:
             y=self.y, n_fft=self.n_fft, hop_length=self.hop_length
         )[0]
 
-        def _cosine_sim(A):
-            norms = np.linalg.norm(A, axis=0, keepdims=True)
-            norms[norms == 0] = 1
-            An = A / norms
-            return (An.T @ An).astype(np.float32)
-
-        self.novelty_kernel_seconds = 3
-        self.novelty_kernel_size = max(16, int(self.novelty_kernel_seconds * fps))
-        if self.novelty_kernel_size % 2 != 0:
-            self.novelty_kernel_size += 1
-
-        self.chroma_kernel_seconds = 6
-        self.chroma_kernel_size = max(16, int(self.chroma_kernel_seconds * fps))
-        if self.chroma_kernel_size % 2 != 0:
-            self.chroma_kernel_size += 1
-
-        S = _cosine_sim(self.mfccs)
-        self.novelty_mfcc = _checkerboard_novelty(S, self.novelty_kernel_size)
-        del S
-        S = _cosine_sim(self.chroma)
-        self.novelty_chroma = _checkerboard_novelty(S, self.chroma_kernel_size)
-        del S
+        self.novelty_mfcc = _feature_flux(self.mfccs)
+        self.novelty_chroma = _feature_flux(self.chroma)
+        self.ema_mfcc = _ema_deviation(self.mfccs, alpha=0.02)
+        self.ema_chroma = _ema_deviation(self.chroma, alpha=0.02)
 
         # ── Per-band normalization: asymmetric EMA + dropout detection ──
         # (ledger: per-band-normalization-with-dropout-handling)
@@ -1342,7 +1327,7 @@ class SyncedVisualizer:
         self.axes.append(ax)
 
     def _build_novelty_panel(self, ax):
-        """Foote's checkerboard novelty: peaks where the music's character changes.
+        """Causal novelty: flux (sharp edges) + EMA deviation (gradual drift).
         Chroma on left axis, MFCC on right axis (independent scales)."""
         from scipy.signal import find_peaks
 
@@ -1350,12 +1335,15 @@ class SyncedVisualizer:
         n = len(t)
         nov_m = self.novelty_mfcc[:n]
         nov_c = self.novelty_chroma[:n]
+        ema_m = self.ema_mfcc[:n]
+        ema_c = self.ema_chroma[:n]
 
         fps = self.sr / self.hop_length
         peak_dist = max(1, int(fps * 1.5))
 
         # Chroma on left axis
-        line_c, = ax.plot(t, nov_c, color='#4DD0E1', linewidth=1.2, alpha=0.9, label='Chroma (harmonic)')
+        line_c, = ax.plot(t, nov_c, color='#4DD0E1', linewidth=1.2, alpha=0.9, label='Chroma flux')
+        ax.plot(t, ema_c, color='#4DD0E1', linewidth=1.0, alpha=0.4, linestyle='--', label='Chroma EMA')
         peaks_c, _ = find_peaks(nov_c, prominence=0.15, distance=peak_dist)
         ax.scatter(t[peaks_c], nov_c[peaks_c], color='#4DD0E1', s=25, zorder=5, marker='v')
         ax.set_xlim([0, self.duration])
@@ -1365,18 +1353,18 @@ class SyncedVisualizer:
 
         # MFCC on right axis (independent scale)
         ax2 = ax.twinx()
-        line_m, = ax2.plot(t, nov_m, color='#FF8A65', linewidth=1.2, alpha=0.9, label='MFCC (timbral)')
+        line_m, = ax2.plot(t, nov_m, color='#FF8A65', linewidth=1.2, alpha=0.9, label='MFCC flux')
+        ax2.plot(t, ema_m, color='#FF8A65', linewidth=1.0, alpha=0.4, linestyle='--', label='MFCC EMA')
         peaks_m, _ = find_peaks(nov_m, prominence=0.15, distance=peak_dist)
         ax2.scatter(t[peaks_m], nov_m[peaks_m], color='#FF8A65', s=25, zorder=5, marker='v')
         ax2.set_ylabel('MFCC novelty', color='#FF8A65')
         ax2.tick_params(axis='y', labelcolor='#FF8A65')
 
         ax.set_title(
-            f"Foote's Checkerboard Novelty "
-            f"(MFCC {self.novelty_kernel_size}f/{self.novelty_kernel_seconds}s, "
-            f"Chroma {self.chroma_kernel_size}f/{self.chroma_kernel_seconds}s) "
-            f"— peaks = section boundaries  [V] events (todo)", fontsize=11)
-        ax.legend([line_c, line_m], ['Chroma (harmonic)', 'MFCC (timbral)'],
+            "Causal Novelty — flux (solid) detects sharp edges, "
+            "EMA deviation (dashed) detects gradual drift  "
+            "[V] events (todo)", fontsize=11)
+        ax.legend([line_c, line_m], ['Chroma flux (harmonic)', 'MFCC flux (timbral)'],
                   loc='upper right', framealpha=0.8, fontsize=8)
 
         # V:events — placeholder for future real-time event overlay (todo)

@@ -34,7 +34,13 @@
     <div class="tab" data-tab="band-analysis">Band Analysis</div>
     <div class="tab" data-tab="calculus">Calculus</div>
     <div class="tab" data-tab="annotate">Annotate</div>
-    <div class="tab" data-tab="events">Events</div>
+    <div class="tab-dropdown">
+        <div class="tab" id="eventsDropdownToggle">Events &#9662;</div>
+        <div class="tab-dropdown-menu" id="eventsDropdownMenu">
+            <div class="tab-dropdown-item" data-tab="events-a">A: Additive/Strict</div>
+            <div class="tab-dropdown-item" data-tab="events-b">B: Multiplicative/Lenient</div>
+        </div>
+    </div>
     <div class="tab-dropdown">
         <div class="tab" id="decompDropdownToggle">Decomposition &#9662;</div>
         <div class="tab-dropdown-menu" id="decompDropdownMenu">
@@ -45,6 +51,7 @@
         </div>
     </div>
     <div class="tab" data-tab="lab">Lab</div>
+    <div class="tab" data-tab="freq-perception">Freq Perception</div>
     <div class="tab" data-tab="effects">Effects</div>
     <div class="tab" data-tab="reference">Reference</div>
 </div>

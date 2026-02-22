@@ -933,3 +933,701 @@ entries:
       binary useful/not-useful judgments on an art project. Rule of
       thumb for what to log: if it changes how we THINK about audio,
       LEDs, or feelings, log it. Implementation details belong in git.
+
+  # ── Prior Art & Hardware Landscape (Feb 20) ─────────────────────
+
+  - id: stm32-vs-esp32
+    date: 2026-02-20
+    touched: 2026-02-20
+    title: "STM32 vs ESP32: industrial workhorse vs IoT all-in-one"
+    summary: >
+      STM32 = no WiFi/BT, better real-time (DMA+timer flush WS2812 without CPU),
+      huge variant family, $2 Blue Pill. ESP32 = WiFi+BT built in, dual-core 240MHz,
+      good-enough real-time, $4-8. Ténéré used 208 STM32 Blue Pills + W5500 Ethernet
+      because they needed cheap distributed controllers doing one job. ESP32 is right
+      for standalone audio-reactive at our scale (197 LEDs, needs WiFi for web viewer).
+    status: validated
+    warmth: low
+    confidence: high
+    source: []
+    tags: [hardware, architecture, external]
+    relates_to: [nebula-pipeline-foundation]
+    notes: >
+      STM32's DMA can flush WS2812 data without CPU involvement — processor sets up
+      transfer and walks away. ESP32's WiFi stack can steal CPU cycles, making real-time
+      slightly less deterministic, but irrelevant at 197 LEDs. STM32 becomes relevant
+      if scaling beyond ~500 LEDs (distributed branch controllers like Ténéré).
+
+  - id: tenere-architecture
+    date: 2026-02-20
+    touched: 2026-02-20
+    title: "Tree of Ténéré: distributed LED architecture at 175K scale"
+    summary: >
+      175,000 LEDs, 25,000 leaves, 208 STM32 branch controllers. Laptop runs LX Studio
+      (animation engine), sends pixel data over wired Ethernet (OPC/UDP) to branch
+      controllers, each flushes its local LEDs via FastLED. Sensors (Muse EEG, pulse,
+      mic) on Raspberry Pis send OSC over WiFi to LX Studio. All open source but
+      repos now private/empty — only READMEs and external references remain.
+    status: validated
+    warmth: medium
+    confidence: medium
+    source: []
+    tags: [hardware, architecture, external, prior-art]
+    relates_to: [nebula-pipeline-foundation, stm32-vs-esp32, osc-as-sensor-glue]
+    notes: >
+      Key lesson: at scale, you separate animation computation (laptop) from LED
+      flush (microcontrollers). Our architecture does both on one ESP32, which is
+      fine at 197 LEDs but wouldn't scale. Sensor integration via OSC is the
+      pattern worth stealing — any sensor on any device can drive any visual
+      parameter through a common protocol. GitHub repos (treeoftenere/*) are
+      private or empty as of 2026-02. External sources (designboom, dezeen,
+      lx.studio spotlight) confirm the architecture but implementation details
+      are unverifiable.
+
+  - id: osc-as-sensor-glue
+    date: 2026-02-20
+    touched: 2026-02-20
+    title: "OSC protocol: universal sensor-to-animation glue"
+    summary: >
+      Open Sound Control = structured UDP messages with path + values
+      (e.g. /muse/calm 0.73). Ténéré used it to connect Muse EEG, pulse sensors,
+      and audio to LX Studio. Any sensor that can emit OSC plugs into any
+      animation engine that receives it. Lightweight, real-time, well-supported
+      in Python (pyliblo).
+    status: spark
+    warmth: medium
+    confidence: high
+    source: []
+    tags: [architecture, hardware, future]
+    relates_to: [tenere-architecture, feeling-layer-human-loop]
+    notes: >
+      Not needed now (single ESP32, audio only), but if we add sensors
+      (MIDI controller for live parameter tweaking, accelerometer for
+      movement detection), OSC is the right integration protocol.
+      Python mido library also reads MIDI in ~5 lines.
+
+  - id: fluora-pixelair-prior-art
+    date: 2026-02-20
+    touched: 2026-02-20
+    title: "Fluora/PixelAir: polished consumer LED product with no real audio analysis"
+    summary: >
+      Color+Light (ex-Symmetry Labs, SF) sells Fluora LED houseplants ($250-$500).
+      300 LEDs in 3D-mapped polycarbonate leaves, 60 FPS on-device rendering via
+      proprietary Photon/PixelAir engine. "Music sync" is basic amplitude/rhythm via
+      phone mic over WiFi. No spectral decomposition, no feeling detection. $221K
+      Indiegogo validates consumer market for 3D LED art.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: []
+    tags: [external, prior-art, art]
+    relates_to: [two-quality-axes, wled-sr-reimplemented]
+    notes: >
+      Same lesson as WLED: visual polish > audio sophistication in the market.
+      Their attack/decay parameters in the app are worth noting — intuitive UX
+      for envelope control. Audio-reactive is a massive gap in their product,
+      validating both that it's hard and that it's underserved.
+      Open source: OpenPixelControl (github.com/SymmetryLabs/openpixelcontrol)
+      uses JSON 3D layout files similar to our sculptures.json.
+
+  - id: daw-concepts-for-leds
+    date: 2026-02-20
+    touched: 2026-02-20
+    title: "DAW concepts worth stealing: sidechain, sends, ADSR, wet/dry"
+    summary: >
+      Sidechain compression (one audio feature suppresses another visual element)
+      creates push-pull tension. Sends (one signal to multiple destinations at
+      different amounts) enables rich parameter mapping. ADSR envelopes make
+      temporal response tunable per-effect. Wet/dry mix blends audio-reactive
+      with ambient baseline, preventing dead LEDs during silence.
+    status: spark
+    warmth: high
+    confidence: high
+    source: []
+    tags: [architecture, effects, feelings, future]
+    relates_to: [two-quality-axes, feeling-layer-human-loop, accent-vs-groove-effects]
+    notes: >
+      The meta-insight: best DAW engineers create relationships between elements,
+      not independent mappings. Audio features should modulate each other's
+      influence on visuals. Bass energy modulates how strongly transients affect
+      brightness. Spectral flux modulates color propagation speed. Visual elements
+      breathe together because they're coupled through audio, not because each
+      independently reacts to it. Sidechain is highest priority to prototype.
+
+  - id: edm-drop-detection-paper
+    date: 2026-02-20
+    touched: 2026-02-21
+    title: "Yadati et al. 2014: EDM drop detection via SoundCloud timed comments"
+    summary: >
+      Only paper specifically targeting EDM structural events (drop/build/break).
+      Two-stage approach: model sound during drops, incorporate temporal structure.
+      Features: spectrograms, MFCCs, rhythm. F1=0.96 at 15s tolerance. Used
+      SoundCloud timed comments as noisy labels. Expanded dataset: 402 CC-licensed
+      tracks on OSF (osf.io/eydxk) with ground truth for drops, builds, breaks.
+    status: validated
+    warmth: medium
+    confidence: high
+    source:
+      - https://archives.ismir.net/ismir2014/paper/000297.pdf
+      - https://ieeexplore.ieee.org/document/8279544/
+    tags: [external, prior-art, beat-detection, feature-extraction]
+    relates_to: [build-taxonomy, rolling-integral-sustained-energy, yadati-edm-drops-audit]
+    notes: >
+      15s tolerance is very coarse for real-time LED response. Their social-comment
+      labeling is clever but won't help for live audio. The 402-track dataset
+      (CC BY 4.0) is the only public EDM structure dataset with drop/build/break
+      annotations. SoundCloud API no longer accepting new registrations as of
+      ~2022, but timed comments still exist and can be scraped unofficially.
+      See yadati-edm-drops-audit for full dataset quality analysis.
+
+  - id: yadati-edm-drops-audit
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "Yadati EDM dataset (402 tracks): independent audit"
+    summary: >
+      402 CC-licensed EDM tracks with drop/build/break annotations. Labels derived
+      from SoundCloud timed comments (inherently noisy) plus manual expert ground truth.
+      The novel social-media-as-weak-labels approach is genuinely interesting, but expert
+      annotation methodology is under-documented and CC SoundCloud tracks skew amateur.
+    status: validated
+    warmth: medium
+    confidence: high
+    source:
+      - https://osf.io/eydxk/
+      - https://archives.ismir.net/ismir2014/paper/000297.pdf
+      - https://ieeexplore.ieee.org/document/8279544/
+    tags: [dataset, external, audit, edm, structure]
+    relates_to: [edm-drop-detection-paper]
+    notes: >
+      ANNOTATION METHODOLOGY: Two-layer. (1) Weak labels: SoundCloud timed comments
+      containing "drop"/"build"/"break" keywords — ~600 comments per event type.
+      (2) Expert ground truth: manual annotations, but who the experts were, how many,
+      what training, what inter-annotator agreement is never documented. The 2018 IEEE
+      TMM paper expanded from 100 to 402 tracks but expansion documentation is sparse.
+      Event counts: 435 drops (1.08/track), 596 builds (1.48/track), 372 breaks (0.92/track).
+
+      REPRODUCIBILITY: Easy. Audio and annotations bundled on OSF, direct download,
+      CC-licensed. Download and go — no matching, no external sources, no link rot risk.
+
+      STRENGTHS: CC audio (rare — actually redistributable), addresses under-studied
+      EDM events, noisy-label methodology is itself a contribution, three event types,
+      ground truth + weak labels useful for studying label noise.
+
+      WEAKNESSES: Expert annotation protocol under-documented. SoundCloud bias toward
+      tracks generating social engagement — quiet/experimental EDM underrepresented.
+      Selection bias: only tracks WITH drop comments included. CC-licensed SoundCloud
+      skews amateur/semi-pro, not mainstream commercial EDM. 402 tracks modest for deep
+      learning. Event boundaries inherently fuzzy (15s tolerance in original eval).
+      Original paper used only 100 tracks (60/20/20); 402-track expansion poorly documented.
+
+  - id: harmonix-set-audit
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "Harmonix Set (912 tracks): independent audit"
+    summary: >
+      Largest beat+downbeat+segment dataset for Western popular music, from the
+      Rock Band / Dance Central company. Professional annotators using DAW workflows.
+      Major strength is scale and joint beat+segment annotations. Major weakness:
+      single annotator per track, zero inter-annotator agreement data, and functional
+      segment labels are inconsistent enough to require post-processing.
+    status: validated
+    warmth: medium
+    confidence: high
+    source:
+      - https://github.com/urinieto/harmonixset
+      - https://archives.ismir.net/ismir2019/paper/000068.pdf
+    tags: [dataset, external, audit, beats, segments, pop]
+    relates_to: [edm-drop-detection-paper, tactus-ambiguity]
+    notes: >
+      ANNOTATION METHODOLOGY: Musical experts at Harmonix Music Systems using DAW
+      software. Process: (1) tempo track, (2) beats/downbeats, (3) segment boundaries
+      + functional labels. Constraint: segment boundaries always fall on an annotated
+      beat (by design, not observation). Single annotator per track. No inter-annotator
+      agreement reported. Unclear if repurposed game assets or purpose-built research
+      annotations. 912 tracks: hip hop, dance, rock, metal, Western pop.
+
+      REPRODUCIBILITY: Fragile. Audio not distributed — must fetch via YouTube URLs
+      and verify with provided DTW alignment scores. Link rot degrades availability
+      year over year. Pre-computed mel spectrograms available as a partial workaround.
+      Legality of YouTube downloading is a gray area: violates YouTube ToS (contract,
+      not law), but MIR community leans on fair use (non-commercial, short excerpts,
+      transformative). The dataset deliberately distributes URLs not audio, shifting
+      the legal burden to each researcher. No MIR researcher has been sued for this,
+      but that's precedent-by-absence, not clearance.
+
+      STRENGTHS: Largest beat+segment dataset (912 tracks). Joint annotations enable
+      multi-task research. Beat-aligned segments useful constraint. Professional
+      annotators. Rich metadata (MusicBrainz, genre). MIT license. Pre-computed mel
+      spectrograms available.
+
+      WEAKNESSES: Single annotator, no agreement data — significant gap for subjective
+      tasks like structure analysis. Functional labels inconsistent: "prechorus",
+      "postchorus" exist but no controlled vocabulary documented. Downstream users
+      must improvise label merging (see mir-aidj/all-in-one#8), reducing reproducibility.
+      Audio not distributed — YouTube URLs rot over time. Genre coverage Western
+      pop-centric; EDM, jazz, classical absent.
+
+  - id: salami-dataset-audit
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "SALAMI (1300+ tracks, 2200+ annotations): independent audit"
+    summary: >
+      Methodological gold standard for music structure annotation. Two trained
+      annotators per track, hierarchical (coarse+fine+functional) annotations,
+      published annotator guide, 9 named annotators, broadest genre diversity.
+      Critical practical obstacles: no audio distribution, known formatting errors
+      in pre-v2.0 versions (many papers trained on corrupt data), and inherent
+      subjectivity that dual-annotator design exposes but cannot resolve.
+    status: validated
+    warmth: medium
+    confidence: high
+    source:
+      - https://github.com/DDMAL/salami-data-public
+      - https://ismir2011.ismir.net/papers/PS4-14.pdf
+      - https://github.com/bmcfee/salami-data-public/tree/hierarchy-corrections
+    tags: [dataset, external, audit, structure, segmentation]
+    relates_to: [edm-drop-detection-paper]
+    notes: >
+      ANNOTATION METHODOLOGY: Nine trained annotators (named in CLIR report) following
+      published annotator guide (Peeters & Deruty). Two independent annotators per track.
+      Three parsed layers: (1) coarse/uppercase letters (A, B, C), (2) fine/lowercase
+      (a, b, a'), (3) functional vocabulary (verse, chorus, bridge). Music from Codaich,
+      Internet Archive, RWC, Isophonics — genre-diverse: classical, jazz, pop, world, live.
+
+      REPRODUCIBILITY: Hard. No audio distribution. Must independently source from
+      RWC (separate license/payment), Internet Archive (links may break), Codaich,
+      and Isophonics. ~75% of non-public tracks matched to YouTube (matching-salami
+      project) but this degrades over time. Multiple sources with different access
+      methods make full reproduction a significant effort.
+
+      STRENGTHS: Published methodology, trained annotators, dual annotation, hierarchical
+      labels, broadest genre coverage, CC0 license, well-maintained with version history,
+      standard benchmark for structure algorithms.
+
+      WEAKNESSES: No audio distribution (the perennial SALAMI problem — must source
+      independently, YouTube matching degrades). Pre-v2.0 formatting errors meant many
+      papers trained on corrupt data; McFee's hierarchy-corrections fork needed for clean
+      data but isn't the official repo. Internet Archive subset is live music (structurally
+      different from studio). Low inter-annotator agreement is a property of the task but
+      means single-annotator "ground truth" is unreliable.
+
+  - id: giantsteps-tempo-key-audit
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "GiantSteps Tempo + Key (664/604 tracks): independent audit"
+    summary: >
+      Two companion EDM datasets for tempo (664 tracks) and key (604 tracks) from
+      Beatport previews. Annotations harvested from user forum corrections — crowdsourced,
+      not expert-annotated. v1 tempo had ~8.9% error rate, substantially improved by
+      Schreiber & Mueller's v2 (2018). Key dataset improved by Faraldo (GiantSteps+)
+      with expert revision and confidence levels. 84.8% minor-key skew.
+    status: validated
+    warmth: medium
+    confidence: high
+    source:
+      - https://github.com/GiantSteps/giantsteps-tempo-dataset
+      - https://github.com/GiantSteps/giantsteps-key-dataset
+      - https://ismir2018.ircam.fr/doc/pdfs/220_Paper.pdf
+    tags: [dataset, external, audit, tempo, key, edm]
+    relates_to: [edm-drop-detection-paper]
+    notes: >
+      ANNOTATION METHODOLOGY — TEMPO: v1 extracted from Beatport forum user corrections
+      (crowdsourced, no formal protocol, no inter-annotator agreement). Schreiber &
+      Mueller 2018 found v1 had ~8.9% incorrect annotations ignoring octave errors,
+      2.5% "No Beat" segments. v2 used controlled crowdsourced experiment — considerably
+      more reliable. 3 tracks still lack valid tempo in v2.
+
+      ANNOTATION METHODOLOGY — KEY: Same Beatport forum provenance. GiantSteps+ revision
+      (Faraldo 2017) substantially improved: 600 tracks with confidence levels, 500 with
+      deep modal analysis. 84.8% minor-key skew (Fm, Cm, Gm most frequent) — reflects
+      EDM conventions but creates class imbalance.
+
+      REPRODUCIBILITY: Easy for now. Beatport 2-min MP3 previews downloadable via
+      provided scripts (~1GB tempo, ~850MB key). Filenames match annotations directly.
+      Risk: depends on Beatport URL patterns remaining stable long-term.
+
+      STRENGTHS: EDM-specific (fills genuine gap). Audio downloadable (Beatport previews).
+      Multiple formats. v2 tempo and GiantSteps+ key are meaningfully improved over v1.
+      Genre annotations included.
+
+      WEAKNESSES: v1 annotations unreliable — many older papers evaluated on these.
+      Crowdsourced corrections have no formal protocol. 84.8% minor-key imbalance.
+      2-min previews from high-energy sections (sampling bias). Octave errors fundamental
+      issue in EDM tempo. Beatport URL stability not guaranteed long-term.
+
+  - id: mir-dataset-landscape-gap
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "No MIR dataset has both redistributable audio AND rigorous multi-annotator methodology"
+    summary: >
+      Cross-cutting finding from auditing 4 major MIR datasets: SALAMI has the best
+      methodology but no audio. Harmonix has scale but single-annotator. GiantSteps has
+      downloadable audio but crowdsourced provenance. Yadati has CC audio but under-documented
+      expert labels. Every dataset requires understanding its specific failure modes before
+      treating it as ground truth.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: []
+    tags: [dataset, external, audit, meta]
+    relates_to: [yadati-edm-drops-audit, harmonix-set-audit, salami-dataset-audit, giantsteps-tempo-key-audit]
+    notes: >
+      This is the fundamental tradeoff in MIR dataset design: audio redistribution
+      requires permissive licensing (CC), which limits the music pool. Rigorous annotation
+      requires trained experts and multiple passes, which limits scale. No existing dataset
+      solves both simultaneously. Researchers must either accept annotation quality
+      limitations (Yadati, GiantSteps) or accept audio access friction (SALAMI, Harmonix).
+
+      Reproduction ease ranks: Yadati (bundled on OSF, download and go) > GiantSteps
+      (Beatport scripts, easy but URL-dependent) > Harmonix (YouTube fetch + DTW verify,
+      degrades with link rot) > SALAMI (multiple external sources, some paywalled, major
+      effort to assemble).
+
+  - id: perceptual-spectrum-preprocessing
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "Perceptual spectrum: equal-loudness weighting + frequency warping as early preprocessing"
+    summary: >
+      Apply two cheap transforms to raw FFT bins before any downstream analysis:
+      (1) equal-loudness weighting (A/K-weight curve — per-bin multiply), (2) mel/Bark
+      frequency warping. Everything downstream (band energies, MFCCs, contrast, derivatives)
+      inherits perceptual grounding. No established name exists for this combined step.
+    status: superseded
+    warmth: high
+    confidence: medium
+    source: []
+    tags: [feature-extraction, perception, architecture, feelings]
+    relates_to: [continuous-perceptual-remap, excitation-pattern-future, signal-processing-tree, equal-loudness-weighting-dead-end]
+    notes: >
+      Two layers of human hearing that our pipeline currently handles unevenly:
+      (1) Mel scale handles "pitch differences feel uneven" but (2) nothing handles
+      "loudness feels uneven across frequencies" — bass needs more energy to sound
+      equally loud as mids. A-weighting (ISO 226, 40-phon approximation) is the
+      simplest correction. Currently our band energies over-represent bass relative
+      to what the listener actually perceives. For LED mapping this means bass LEDs
+      light up more than the music "feels" like they should.
+
+  - id: continuous-perceptual-remap
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "Continuous perceptual remapping vs discrete binning"
+    summary: >
+      Rather than binning FFT into mel/Bark bands then weighting, apply a single
+      continuous remapping function directly to raw FFT bins. The mel scale and
+      equal-loudness curves are both continuous functions — discretizing into bands
+      early throws away resolution unnecessarily. Bin only at the final step
+      (e.g. 5 LED zones), not at the analysis step.
+    status: superseded
+    warmth: high
+    confidence: high
+    source: []
+    tags: [feature-extraction, perception, architecture]
+    relates_to: [perceptual-spectrum-preprocessing, excitation-pattern-future]
+    notes: >
+      The literature bins first for historical reasons (Bark bands designed 1960s
+      to match cochlear filter widths). With modern FFTs giving 512+ bins, there's
+      no reason to throw away resolution early. The transform is just:
+      perceived(f) = fft_energy(f) * loudness_weight(f), plotted on a mel-warped
+      frequency axis. Defer binning to the last possible moment (LED zone mapping).
+      This is the preferred direction for exploration.
+
+  - id: excitation-pattern-future
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "Excitation patterns (Zwicker/Moore) as future simplification via masking"
+    summary: >
+      Full psychoacoustic excitation patterns add masking (cross-frequency suppression)
+      on top of loudness weighting + frequency warping. Masking removes sounds that
+      are perceptually hidden by louder neighbors. This could further simplify the
+      signal by removing content that isn't "top of mind" for the listener.
+    status: spark
+    warmth: medium
+    confidence: medium
+    source: []
+    tags: [feature-extraction, perception, future]
+    relates_to: [perceptual-spectrum-preprocessing, continuous-perceptual-remap]
+    notes: >
+      MP3/AAC use excitation patterns internally for compression — deciding what
+      to throw away. The same logic applies to LEDs: if a sound is masked, the
+      listener isn't tracking it, so maybe the LEDs shouldn't either. However,
+      masking might suppress signals we DO want LEDs to react to (e.g. a quiet
+      bass note under a loud kick). Worth revisiting after the simpler continuous
+      remap is validated. Real-time feasible — MP3 encoders do it in real-time.
+      Key terms: Zwicker model, Moore-Glasberg model, specific loudness, spreading
+      function, Bark scale, excitation pattern.
+
+  - id: signal-processing-tree
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "Signal processing tree: data lineage of all computed features"
+    summary: >
+      All features derive from raw audio through a tree of transformations:
+      decomposition (band split, MFCC, chroma), normalization (global, peak-decay, share),
+      derivative (d/dt), second derivative (d²/dt²), integral (rolling sum),
+      context statistics (z-score, ratio to median), similarity (Foote's matrix),
+      peak/span detection. Most leaf nodes are 2-4 layers deep. Many combinations
+      remain unexplored.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: []
+    tags: [architecture, feature-extraction, tools]
+    relates_to: [derivatives-over-absolutes, perceptual-spectrum-preprocessing, continuous-perceptual-remap]
+    notes: >
+      Documented during session as a tree from raw waveform y through FFT/STFT,
+      mel spectrogram, band energies, MFCCs, chroma, and all their derivatives/
+      integrals/context-stats. Key insight: the tree is deep vertically (up to 4
+      layers) but narrow horizontally (few source signals). Missing source branches
+      include spectral flux (exists in effects code but not viewer) and crest factor.
+      The perceptual spectrum preprocessing would add a new root transform that
+      all branches inherit from.
+
+  - id: onset-vs-absint-comparison
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: Onset strength is per-frame percussion; absint is stickier from 150ms window
+    summary: >
+      Side-by-side comparison (onset-absint lab variant) reveals: onset strength
+      is sharper on attacks but blind to decay shape. AbsInt's 150ms integration
+      window (~13 frames) smears transients into bumps but captures energy leaving.
+      Harmonic vs percussive sounds have different "energy leaving" envelopes —
+      absint sees this, onset doesn't.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: web viewer onset-absint lab variant
+    tags: [feature-extraction, beat-detection, comparison]
+    relates_to: [absint-fails-percussive, onset-envelope-for-tempo, derivatives-over-absolutes]
+    notes: >
+      Onset strength = instantaneous spectral flux (good per-frame percussion detector).
+      AbsInt = |d(RMS)/dt| summed over 150ms window (registers more activity, stickier).
+      The difference signal |onset - absint| highlights where they disagree — mainly
+      on sustained energy changes where absint sees the tail and onset doesn't.
+      Practical implication: use onset strength for tight percussion triggering,
+      absint for broader energy-change detection (builds, drops, swells).
+      Hypothesis (untested): absint isolates percussion better when vocals are
+      present — vocal spectral flux muddies onset strength, but absint's
+      energy-leaving sensitivity sees through sustained vocal energy to the
+      percussive transients underneath. Our calculus primitives (absint,
+      derivatives, integrals) should be treated as custom features alongside
+      standard librosa features in analysis tools, not just internal effect signals.
+
+  - id: equal-loudness-weighting-dead-end
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "Equal-loudness weighting on mastered music is counterproductive (dead end)"
+    summary: >
+      A/C/ISO 226 weighting applied to mixed music double-corrects — mix engineers
+      already compensate for human hearing sensitivity. A-weighting (40 phon) eliminates
+      sub-bass entirely. C-weighting is nearly flat (useless). ISO 226 at 100-115 phon
+      over-attenuates bass. No phon level produces balanced band energy from mastered music.
+    status: validated
+    warmth: low
+    confidence: high
+    source: audio-reactive/tools/web_viewer.py
+    tags: [feature-extraction, perception, dead-end]
+    relates_to: [perceptual-spectrum-preprocessing, continuous-perceptual-remap, excitation-pattern-future]
+    notes: >
+      Three sub-findings from the implementation and debugging process:
+
+      (1) ISO 226:2003 requires parametric computation (Eq 1 with alpha_f, L_U, T_f
+      parameter tables) — lookup tables are error-prone. Our first attempt used hearing
+      threshold T_f values as SPL curves, producing 8-20 dB errors at 1kHz where N phon
+      must equal N dB SPL by definition.
+
+      (2) Slaney mel filterbank normalization suppresses treble by 6.5x vs direct FFT
+      bin summation because it divides each filter by bandwidth — designed for MFCCs,
+      distorts energy ratios. For band energy computation in Hz-defined bands, direct
+      FFT bin summation is more faithful.
+
+      (3) The MFCC/mel pipeline handles pitch resolution (mel scale) and intensity
+      compression (log) but NOT frequency-dependent loudness sensitivity — these are
+      orthogonal perceptual axes. PLP (Hermansky 1990) includes equal-loudness
+      pre-emphasis but is not standard in music analysis.
+
+      Supersedes perceptual-spectrum-preprocessing and continuous-perceptual-remap.
+      The real solution for balanced band display is per-band normalization against
+      running history, not perceptual weighting of the spectrum.
+
+  - id: per-band-normalization-with-dropout-handling
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "Per-band normalization with asymmetric EMA and dropout detection for real-time LEDs"
+    summary: >
+      Normalize each band's energy against a sliding-window mean (not max) of its own
+      history. Asymmetric EMA: instant attack (new max immediately adopted), constant
+      decay (reference slowly drops so monotonic beats always register). Absolute
+      threshold per band detects dropout; reference freezes during dropout so
+      reintroduction after 15-30s produces massive normalized values — capturing the
+      musical intention of EDM drops.
+    status: exploring
+    warmth: high
+    confidence: medium
+    source: design conversation (equal-loudness weighting dead-end session)
+    tags: [feature-extraction, effects, architecture, perception]
+    relates_to: [equal-loudness-weighting-dead-end, rolling-integral-sustained-energy, airiness-context-deviation, accent-vs-groove-effects]
+    notes: >
+      Emerged from the equal-loudness dead end: the right approach isn't weighting
+      the spectrum to match perception, it's normalizing each band against its own
+      recent context. This mirrors the airiness finding — feelings are deviations
+      from context, not absolute levels.
+
+      Key design decisions (untested):
+      (1) Sliding-window MEAN not max — tracks sustained energy level, not peak
+      spikes. A single loud hit shouldn't reset the reference for minutes.
+      (2) Asymmetric EMA — attack instant so new peaks are immediately visible,
+      decay constant (not exponential) so the reference drifts down slowly. This
+      means a steady kick drum always shows full brightness on every hit.
+      (3) Absolute dropout threshold (not relative to current reference) — prevents
+      false dropout detection in genres with sustained low-energy bands (e.g. techno
+      kick patterns that are monotonic but not silent).
+      (4) Reference freeze during dropout — when a band drops below absolute threshold,
+      stop updating the reference. When energy returns after 15-30s, the frozen
+      reference is much lower than the returning energy, so the entire reintroduction
+      section "crashes hard" with huge normalized values until the reference catches up.
+      This naturally captures the feel of EDM drops without explicit structure detection.
+
+      Unresolved: exact absolute threshold values per band, decay rate, window size
+      for the sliding mean. May need per-genre tuning or user-adjustable parameters.
+      Could connect to the DAW concepts entry — the decay rate is essentially an
+      ADSR release parameter.
+
+  # ── Architecture Document (Feb 21) ─────────────────────────────────
+
+  - id: genre-awareness-is-derivative
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "Genre awareness is derivative of observable feature properties"
+    summary: >
+      Whether music is "accent" or "groove" comes from onset density, spectral
+      continuity, and flourish ratio — not from a genre label. Genre is an emergent
+      label on top of these properties, not a separate input axis. Excluded from the
+      design space as an independent axis.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: audio-reactive/research/ARCHITECTURE.md
+    tags: [architecture, feature-extraction, philosophy]
+    relates_to: [accent-vs-groove-effects, flourish-ratio, two-quality-axes]
+    notes: >
+      Reasoning: "rock" vs "electronic" tells you something about likely onset density
+      and spectral profile, but you can measure those directly. A rock song with sparse
+      percussion behaves like an electronic track for LED purposes. A rap track with
+      heavy syncopation behaves like groove-oriented electronic. The features that matter
+      (onset density, spectral continuity, flourish ratio) are directly observable without
+      knowing the genre. Genre adds no information that the features don't already provide.
+      Documented in ARCHITECTURE.md as the rationale for excluding genre from the 7-axis
+      design space.
+
+  - id: per-band-feature-expansion
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "Per-band feature expansion multiplies useful feature space ~5x"
+    summary: >
+      Computing existing scalar features (absint, onset strength, RMS, spectral flux)
+      independently per frequency band expands the feature space roughly 5-fold. Not
+      all features benefit equally — chroma and MFCCs already decompose by frequency
+      and gain nothing. Scalar energy/transient features gain the most.
+    status: exploring
+    warmth: medium
+    confidence: medium
+    source: audio-reactive/research/ARCHITECTURE.md
+    tags: [feature-extraction, architecture, future]
+    relates_to: [band-zone-pulse-effect, onset-vs-absint-comparison, signal-processing-tree]
+    notes: >
+      Already implemented for band_zone_pulse (per-band percussive peak detection)
+      but not systematically explored. The question is whether per-band absint,
+      per-band onset envelope, or per-band rolling integral reveal discriminative
+      features that whole-signal versions miss. Standard bands: sub-bass (20-80Hz),
+      bass (80-250Hz), low-mid (250-1kHz), high-mid (1-4kHz), treble (4-16kHz).
+
+  - id: event-detection-viewer-only
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "Event detection exists only in viewer.py (batch, non-streaming, disconnected)"
+    summary: >
+      All event detection code (dropout, re-entry, crescendo, climax) lives in
+      viewer.py as batch-only visualization. No effect consumes it. Foote's
+      checkerboard novelty requires an O(n^2) similarity matrix — fundamentally
+      non-streaming. A streaming event detector needs a different approach.
+    status: exploring
+    warmth: high
+    confidence: high
+    source: audio-reactive/tools/viewer.py
+    tags: [architecture, effects, feature-extraction, future]
+    relates_to: [build-taxonomy, accent-vs-groove-effects, rolling-integral-sustained-energy]
+    notes: >
+      Architectural gap: the effects pipeline has no way to know about section-level
+      events. Rolling integral slope (rising=build, falling=breakdown) is the most
+      promising streaming substitute for Foote novelty. Per-band dropout detection
+      (absolute threshold + reference freeze) is already designed but unimplemented
+      (see per-band-normalization-with-dropout-handling). Fixing this is prerequisite
+      for section-aware effects.
+
+  - id: adaptation-time-constant-is-temporal-scope
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "The adaptation time constant IS the temporal scope"
+    summary: >
+      To detect a phrase-level musical event, you need phrase-level memory.
+      The adaptation time constant of a feature's running baseline determines
+      what temporal scope of events it can detect. 150ms window → beat events.
+      5s window → phrase events. Slow-decay peak → song-level adaptation.
+    status: resonates
+    warmth: high
+    confidence: high
+    source: audio-reactive/research/ARCHITECTURE.md
+    tags: [architecture, feature-extraction, philosophy]
+    relates_to: [airiness-context-deviation, per-band-normalization-with-dropout-handling, rolling-integral-sustained-energy]
+    notes: >
+      Unifies several findings: airiness-as-context-deviation (feelings are relative
+      to running baseline), per-band normalization (adaptation rate shapes what events
+      register), rolling integral (5s window for phrase-level detection). The insight
+      is that these aren't separate design choices — they're all instances of the same
+      principle: memory horizon defines detection capability.
+
+  - id: context-expensive-code-cheap
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "Context management is the expensive resource, not code"
+    summary: >
+      AI can write one-off effects cheaply. The expensive resource is context
+      window — both the user's brain and Claude's tokens. Effects can all be
+      one-offs and likely will need to be for ESP32 performance. No unified
+      transformation framework needed. Investment goes into shared mental models
+      (architecture docs, ledger) not code abstractions.
+    status: resonates
+    warmth: high
+    confidence: high
+    source: []
+    tags: [architecture, methodology, philosophy]
+    relates_to: [two-quality-axes, research-ledger-system]
+    notes: >
+      Two implications: (1) Don't invest in effect code reuse frameworks — each
+      effect is cheap to write from scratch with the right context. (2) DO invest
+      in context compression tools (this ledger, the architecture doc, MEMORY.md).
+      The architecture document exists because of this insight — it's a context
+      compression artifact, not a code design document.
+
+  - id: vj-conventions-reuse-question
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "Unresolved: adopt VJ conventions wholesale vs build custom features"
+    summary: >
+      Strategic fork: (a) adopt established VJ mapping conventions (Resolume,
+      TouchDesigner, WLED) and focus effort on custom topology mapping, or
+      (b) build custom audio features (calculus primitives, per-band expansion)
+      that go beyond what VJ tools provide. Not mutually exclusive but affects
+      where to invest effort.
+    status: spark
+    warmth: medium
+    confidence: low
+    source: audio-reactive/research/landscape/RESEARCH_AUDIO_VISUAL_MAPPING.md
+    tags: [architecture, philosophy, future]
+    relates_to: [two-quality-axes, wled-sr-reimplemented, fluora-pixelair-prior-art]
+    notes: >
+      The two-quality-axes principle suggests this matters: VJ conventions are
+      strong on mapping quality (proven visual patterns) even if decomposition
+      quality is crude. Our calculus features may provide decomposition quality
+      that VJ tools lack. The question is whether that decomposition advantage
+      produces visibly better LEDs. Unresolved — needs A/B testing on hardware.

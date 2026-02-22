@@ -32,6 +32,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
+import numpy as np
+
 # Force Agg backend BEFORE any viewer imports (which import pyplot at module level)
 import matplotlib
 matplotlib.use('Agg')
@@ -557,9 +559,10 @@ def render_analysis(filepath, with_annotations=False, features=None):
     from viewer import SyncedVisualizer
 
     if with_annotations:
-        viz = SyncedVisualizer(filepath)
+        viz = SyncedVisualizer(filepath, panels=list(ANALYSIS_PANELS))
     else:
-        viz = SyncedVisualizer(filepath, annotations_path='/dev/null/none.yaml')
+        viz = SyncedVisualizer(filepath, panels=list(ANALYSIS_PANELS),
+                               annotations_path='/dev/null/none.yaml')
 
     # Apply feature visibility overrides
     if features is not None and hasattr(viz, 'feature_toggle'):
@@ -698,7 +701,95 @@ def render_events(filepath):
     return png_bytes, headers
 
 
-ANALYSIS_PANELS = ('waveform', 'spectrogram', 'bands', 'rms-derivative',
+def render_events_a(filepath):
+    """Render events view with algorithm A: additive/strict."""
+    cache_key = (filepath, 'events-a')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    from viewer import SyncedVisualizer
+
+    viz = SyncedVisualizer(filepath, panels=EVENTS_PANELS,
+                           annotations_path='/dev/null/none.yaml',
+                           event_algorithm='a')
+
+    for line in viz.cursor_lines:
+        line.remove()
+
+    filename = Path(filepath).name
+    viz.fig.suptitle(f'{filename} — Events A (additive/strict)', fontsize=14, fontweight='bold', y=0.99)
+    viz.fig.subplots_adjust(top=0.975, bottom=0.02)
+
+    viz.fig.canvas.draw()
+
+    ax = viz.axes[0]
+    x_left = ax.transData.transform((0, 0))[0]
+    x_right = ax.transData.transform((viz.duration, 0))[0]
+
+    fig_width = viz.fig.get_figwidth() * DPI
+    fig_height = viz.fig.get_figheight() * DPI
+
+    buf = io.BytesIO()
+    viz.fig.savefig(buf, format='png', dpi=DPI, facecolor=viz.fig.get_facecolor())
+    matplotlib.pyplot.close(viz.fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(viz.duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
+
+
+def render_events_b(filepath):
+    """Render events view with algorithm B: multiplicative/lenient."""
+    cache_key = (filepath, 'events-b')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    from viewer import SyncedVisualizer
+
+    viz = SyncedVisualizer(filepath, panels=EVENTS_PANELS,
+                           annotations_path='/dev/null/none.yaml',
+                           event_algorithm='b')
+
+    for line in viz.cursor_lines:
+        line.remove()
+
+    filename = Path(filepath).name
+    viz.fig.suptitle(f'{filename} — Events B (multiplicative/lenient)', fontsize=14, fontweight='bold', y=0.99)
+    viz.fig.subplots_adjust(top=0.975, bottom=0.02)
+
+    viz.fig.canvas.draw()
+
+    ax = viz.axes[0]
+    x_left = ax.transData.transform((0, 0))[0]
+    x_right = ax.transData.transform((viz.duration, 0))[0]
+
+    fig_width = viz.fig.get_figwidth() * DPI
+    fig_height = viz.fig.get_figheight() * DPI
+
+    buf = io.BytesIO()
+    viz.fig.savefig(buf, format='png', dpi=DPI, facecolor=viz.fig.get_facecolor())
+    matplotlib.pyplot.close(viz.fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(viz.duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
+
+
+ANALYSIS_PANELS = ('waveform', 'spectrogram', 'bands', 'bands-aw', 'rms-derivative',
                     'centroid', 'centroid-derivative', 'band-derivative',
                     'mfcc', 'novelty', 'band-deviation', 'annotations',
                     'band-rt', 'band-share', 'band-context-deviation',
@@ -1357,11 +1448,15 @@ def render_lab(filepath, variant='timbral'):
     """Lab page dispatcher."""
     if variant == 'misc':
         return render_lab_misc(filepath)
+    if variant == 'onset-absint':
+        return render_lab_onset_absint(filepath)
+    if variant == 'zcr-genres':
+        return render_lab_zcr_genres(filepath)
     return render_lab_timbral(filepath)
 
 
 def render_lab_misc(filepath):
-    """Misc lab features (spectral flatness, chromagram, spectral contrast, ZCR)."""
+    """Misc lab features (chromagram variants, spectral contrast)."""
     cache_key = (filepath, 'lab-misc')
     if cache_key in _render_cache:
         return _render_cache[cache_key]
@@ -1371,6 +1466,7 @@ def render_lab_misc(filepath):
     import librosa.display
     import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
+    from scipy.ndimage import uniform_filter1d
 
     plt.style.use('dark_background')
 
@@ -1378,52 +1474,120 @@ def render_lab_misc(filepath):
     duration = librosa.get_duration(y=y, sr=sr)
     n_fft = 2048
     hop_length = 512
-    times = librosa.frames_to_time(
-        np.arange(librosa.feature.spectral_flatness(y=y, n_fft=n_fft, hop_length=hop_length).shape[1]),
-        sr=sr, hop_length=hop_length
+    fps = sr / hop_length
+
+    chroma_stft = librosa.feature.chroma_stft(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length)
+    chroma_cqt = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length)
+
+    # A-weighted mel spectrogram: weight FFT bins by equal-loudness curve before mel grouping
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+    # A-weighting curve (IEC 61672)
+    f2 = freqs ** 2
+    a_weight_db = (
+        20 * np.log10(
+            (12194**2 * f2**2) /
+            ((f2 + 20.6**2) * np.sqrt((f2 + 107.7**2) * (f2 + 737.9**2)) * (f2 + 12194**2))
+            + 1e-20
+        )
+        + 2.0  # offset to 0dB at 1kHz
     )
+    a_weight_linear = 10 ** (a_weight_db / 20.0)
+    a_weight_linear[0] = 0  # DC bin
 
-    flatness = librosa.feature.spectral_flatness(y=y, n_fft=n_fft, hop_length=hop_length)[0]
-    chroma = librosa.feature.chroma_stft(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length)
-    contrast = librosa.feature.spectral_contrast(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length)
-    zcr = librosa.feature.zero_crossing_rate(y=y, hop_length=hop_length)[0]
+    # Compute STFT, apply weighting, then mel filterbank
+    S = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop_length)) ** 2
+    S_weighted = S * (a_weight_linear[:, np.newaxis] ** 2)  # power domain
+    mel_basis = librosa.filters.mel(sr=sr, n_fft=n_fft, n_mels=128, fmin=20)
+    mel_weighted = mel_basis @ S_weighted
+    mel_weighted_db = librosa.power_to_db(mel_weighted, ref=np.max)
 
-    fig = plt.figure(figsize=(18, 14))
-    gs = gridspec.GridSpec(4, 1, height_ratios=[1, 2, 2, 1], hspace=0.3)
+    # Standard mel for comparison
+    mel_standard = librosa.feature.melspectrogram(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length, n_mels=128, fmin=20)
+    mel_standard_db = librosa.power_to_db(mel_standard, ref=np.max)
+
+    contrast = librosa.feature.spectral_contrast(S=S_weighted, sr=sr, n_fft=n_fft, hop_length=hop_length)
+
+    # Rolling mean of spectral contrast (5s window)
+    window_5s = max(3, int(5.0 * fps))
+    contrast_5s = uniform_filter1d(contrast, size=window_5s, axis=1, mode='reflect')
+
+    # Per-band normalization: each row scaled to its own 0-1 range
+    def _per_band_norm(data):
+        normed = np.empty_like(data)
+        for i in range(data.shape[0]):
+            row = data[i]
+            lo, hi = np.min(row), np.max(row)
+            if hi - lo > 1e-10:
+                normed[i] = (row - lo) / (hi - lo)
+            else:
+                normed[i] = np.zeros_like(row)
+        return normed
+
+    contrast_5s_norm = _per_band_norm(contrast_5s)
+
+    fig = plt.figure(figsize=(18, 28))
+    gs = gridspec.GridSpec(7, 1, height_ratios=[2, 2, 2, 2, 2, 2, 2], hspace=0.3)
 
     ax1 = fig.add_subplot(gs[0])
-    ax1.plot(times, flatness, color='#80cbc4', linewidth=0.8)
-    ax1.fill_between(times, flatness, alpha=0.3, color='#80cbc4')
+    librosa.display.specshow(mel_standard_db, sr=sr, hop_length=hop_length,
+                             x_axis='time', y_axis='mel', fmin=20, ax=ax1, cmap='magma')
     ax1.set_xlim([0, duration])
-    ax1.set_ylim([0, max(0.01, np.max(flatness) * 1.1)])
-    ax1.set_ylabel('Flatness')
-    ax1.set_title('Spectral Flatness — 0 = pure tone, 1 = white noise', fontsize=11)
-    ax1.grid(True, alpha=0.2)
+    ax1.set_title('Mel Spectrogram — raw energy, no perceptual weighting', fontsize=11)
 
     ax2 = fig.add_subplot(gs[1])
-    librosa.display.specshow(chroma, y_axis='chroma', x_axis='time',
-                             sr=sr, hop_length=hop_length, ax=ax2, cmap='magma')
+    librosa.display.specshow(mel_weighted_db, sr=sr, hop_length=hop_length,
+                             x_axis='time', y_axis='mel', fmin=20, ax=ax2, cmap='magma')
     ax2.set_xlim([0, duration])
-    ax2.set_title('Chromagram — pitch class energy over time', fontsize=11)
+    ax2.set_title(
+        'Mel Spectrogram (A-weighted) — equal-loudness weighted before mel grouping. '
+        'Bass attenuated, 2-4kHz boosted to match human hearing',
+        fontsize=11)
 
     ax3 = fig.add_subplot(gs[2])
-    librosa.display.specshow(contrast, x_axis='time', sr=sr, hop_length=hop_length,
-                             ax=ax3, cmap='inferno')
+    librosa.display.specshow(chroma_stft, y_axis='chroma', x_axis='time',
+                             sr=sr, hop_length=hop_length, ax=ax3, cmap='magma')
     ax3.set_xlim([0, duration])
-    ax3.set_ylabel('Band')
-    ax3.set_title('Spectral Contrast — peak-to-valley difference per frequency band', fontsize=11)
+    ax3.set_title(
+        'Chroma (STFT) — FFT bins summed into 12 pitch classes. '
+        'Fast, constant time resolution, but bass notes bleed across bins',
+        fontsize=11)
 
-    zcr_times = librosa.frames_to_time(np.arange(len(zcr)), sr=sr, hop_length=hop_length)
     ax4 = fig.add_subplot(gs[3])
-    ax4.plot(zcr_times, zcr, color='#ffab91', linewidth=0.8)
-    ax4.fill_between(zcr_times, zcr, alpha=0.3, color='#ffab91')
+    librosa.display.specshow(chroma_cqt, y_axis='chroma', x_axis='time',
+                             sr=sr, hop_length=hop_length, ax=ax4, cmap='magma')
     ax4.set_xlim([0, duration])
-    ax4.set_ylabel('ZCR')
-    ax4.set_title('Zero Crossing Rate — high = percussive/noisy, low = tonal', fontsize=11)
-    ax4.grid(True, alpha=0.2)
+    ax4.set_title(
+        'Chroma (CQT) — Constant-Q transform: bins spaced by semitones, '
+        'so each bin = one note. Cleaner bass separation, harder to reimplement',
+        fontsize=11)
+
+    ax5 = fig.add_subplot(gs[4])
+    librosa.display.specshow(contrast, x_axis='time', sr=sr, hop_length=hop_length,
+                             ax=ax5, cmap='inferno')
+    ax5.set_xlim([0, duration])
+    ax5.set_ylabel('Band')
+    ax5.set_title('Spectral Contrast (A-weighted, raw) — per-band peak-to-valley: '
+                  'bright = clear note, dark = noise. Treble dominates the color scale', fontsize=11)
+
+    ax6 = fig.add_subplot(gs[5])
+    librosa.display.specshow(contrast_5s, x_axis='time', sr=sr, hop_length=hop_length,
+                             ax=ax6, cmap='inferno')
+    ax6.set_xlim([0, duration])
+    ax6.set_ylabel('Band')
+    ax6.set_title('Spectral Contrast (A-weighted, 5s rolling mean) — '
+                  'smoothed but still cross-band scale (treble dominates)', fontsize=11)
+
+    ax7 = fig.add_subplot(gs[6])
+    ax7.imshow(contrast_5s_norm, aspect='auto', origin='lower', cmap='inferno',
+               extent=[0, duration, 0, contrast_5s_norm.shape[0]])
+    ax7.set_xlim([0, duration])
+    ax7.set_ylabel('Band')
+    ax7.set_title('Spectral Contrast (A-weighted, 5s, per-band normalized) — '
+                  'each band scaled 0-1 independently: when does each band\'s clarity change?',
+                  fontsize=11)
 
     filename = Path(filepath).name
-    fig.suptitle(f'{filename} — Misc Lab', fontsize=14, fontweight='bold', y=0.995)
+    fig.suptitle(f'{filename} — Perceptual Spectrograms, Chroma & Spectral Contrast Lab', fontsize=14, fontweight='bold', y=0.995)
     fig.subplots_adjust(top=0.975, bottom=0.02)
     fig.canvas.draw()
 
@@ -1442,6 +1606,618 @@ def render_lab_misc(filepath):
         'X-Right-Px': str(x_right),
         'X-Png-Width': str(fig_width),
         'X-Duration': str(duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
+
+
+# ── ISO 226:2003 equal-loudness contours (parametric formula) ──────────
+# Equation (1) from the standard, with frequency-dependent parameters
+# from Table 1. Verified against Jeff Tackett's MATLAB implementation
+# (File Exchange #7028) and IoSR-Surrey MatlabToolbox.
+# Valid range: 0-90 phon (extrapolates reasonably to ~115).
+# At 1 kHz, N phon = N dB SPL (error < 0.02 dB from table rounding).
+
+_ISO226_FREQS = np.array([
+    20, 25, 31.5, 40, 50, 63, 80, 100, 125, 160, 200, 250, 315, 400,
+    500, 630, 800, 1000, 1250, 1600, 2000, 2500, 3150, 4000, 5000,
+    6300, 8000, 10000, 12500
+], dtype=np.float64)
+
+_ISO226_ALPHA_F = np.array([
+    0.532, 0.506, 0.480, 0.455, 0.432, 0.409, 0.387, 0.367, 0.349, 0.330,
+    0.315, 0.301, 0.288, 0.276, 0.267, 0.259, 0.253, 0.250, 0.246, 0.244,
+    0.243, 0.243, 0.243, 0.242, 0.242, 0.245, 0.254, 0.271, 0.301
+], dtype=np.float64)
+
+_ISO226_L_U = np.array([
+    -31.6, -27.2, -23.0, -19.1, -15.9, -13.0, -10.3, -8.1, -6.2, -4.5,
+     -3.1,  -2.0,  -1.1,  -0.4,   0.0,   0.3,   0.5,  0.0, -2.7, -4.1,
+     -1.0,   1.7,   2.5,   1.2,  -2.1,  -7.1, -11.2, -10.7, -3.1
+], dtype=np.float64)
+
+_ISO226_T_F = np.array([
+    78.5, 68.7, 59.5, 51.1, 44.0, 37.5, 31.5, 26.5, 22.1, 17.9,
+    14.4, 11.4,  8.6,  6.2,  4.4,  3.0,  2.2,  2.4,  3.5,  1.7,
+    -1.3, -4.2, -6.0, -5.4, -1.5,  6.0, 12.6, 13.9, 12.3
+], dtype=np.float64)
+
+
+def _iso226_spl(phon):
+    """Compute ISO 226:2003 equal-loudness contour at given phon level.
+    Returns (freqs, spl_array) — 29 standard frequencies and their SPL values."""
+    Ln = float(phon)
+    Af = (4.47e-3 * (10.0 ** (0.025 * Ln) - 1.15)
+          + (0.4 * 10.0 ** ((_ISO226_T_F + _ISO226_L_U) / 10.0 - 9.0)) ** _ISO226_ALPHA_F)
+    Lp = (10.0 / _ISO226_ALPHA_F) * np.log10(Af) - _ISO226_L_U + 94.0
+    return _ISO226_FREQS.copy(), Lp
+
+
+def _iso226_weight_curve(phon_level, fft_freqs):
+    """Compute perceptual weighting curve from ISO 226 equal-loudness contour.
+
+    Returns linear power multipliers for each FFT bin frequency.
+    weight_db(f) = SPL(1kHz) - SPL(f) at the given phon level.
+    Negative = ear less sensitive (attenuate), positive = ear more sensitive (boost).
+    """
+    freqs_std, spl = _iso226_spl(phon_level)
+    idx_1k = np.argmin(np.abs(freqs_std - 1000))
+    spl_1k = spl[idx_1k]
+
+    weight_db = spl_1k - spl  # negative for freqs that need more energy
+
+    # Interpolate to FFT bin frequencies (log-freq domain)
+    weight_db_interp = np.interp(
+        np.log10(np.clip(fft_freqs, 20, 12500)),
+        np.log10(freqs_std),
+        weight_db
+    )
+    # Clamp DC
+    weight_db_interp[0] = weight_db_interp[1] if len(weight_db_interp) > 1 else 0
+
+    # Convert to linear power multiplier
+    weight_linear = 10 ** (weight_db_interp / 10.0)
+    return weight_db_interp, weight_linear
+
+
+def render_freq_perception(filepath):
+    """Frequency perception research: ISO 226 contours + band energy under different weightings."""
+    cache_key = (filepath, 'freq-perception')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    import numpy as np
+    import librosa
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+
+    plt.style.use('dark_background')
+
+    y, sr = librosa.load(filepath, sr=None, mono=True)
+    duration = librosa.get_duration(y=y, sr=sr)
+    n_fft = 2048
+    hop_length = 512
+
+    times = librosa.frames_to_time(
+        np.arange(int(1 + len(y) // hop_length)), sr=sr, hop_length=hop_length
+    )
+
+    # ── Shared STFT setup ──
+    S_power = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop_length)) ** 2
+    fft_freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+
+    FREQUENCY_BANDS = {
+        'Sub-bass': (20, 80),
+        'Bass': (80, 250),
+        'Mids': (250, 2000),
+        'High-mids': (2000, 6000),
+        'Treble': (6000, 8000),
+    }
+    BAND_COLORS = {
+        'Sub-bass': '#FF1744',
+        'Bass': '#FF9100',
+        'Mids': '#FFEA00',
+        'High-mids': '#00E676',
+        'Treble': '#00B0FF',
+    }
+
+    def _compute_band_energies(S_pow, weighting_linear=None):
+        """Sum FFT power directly per band (no mel filterbank — avoids Slaney distortion).
+        Returns (band_energies_normalized, band_ratios) with shared normalization."""
+        if weighting_linear is not None:
+            S_w = S_pow * (weighting_linear[:, np.newaxis])
+        else:
+            S_w = S_pow
+        raw = {}
+        ratios = {}
+        for band_name, (fmin, fmax) in FREQUENCY_BANDS.items():
+            mask = (fft_freqs >= fmin) & (fft_freqs <= fmax)
+            energy = np.sum(S_w[mask, :], axis=0)
+            raw[band_name] = energy
+            ratios[band_name] = np.mean(energy)
+        global_max = max(np.max(e) for e in raw.values()) + 1e-10
+        normed = {name: energy / global_max for name, energy in raw.items()}
+        return normed, ratios
+
+    def _compute_band_energies_selfnorm(S_pow):
+        """Self-normalized: each band scaled to its own max. Direct FFT bin summation."""
+        normed = {}
+        ratios = {}
+        for band_name, (fmin, fmax) in FREQUENCY_BANDS.items():
+            mask = (fft_freqs >= fmin) & (fft_freqs <= fmax)
+            energy = np.sum(S_pow[mask, :], axis=0)
+            ratios[band_name] = np.mean(energy)
+            mx = np.max(energy)
+            normed[band_name] = energy / mx if mx > 0 else energy
+        return normed, ratios
+
+    # ── C-weighting curve ──
+    f2 = fft_freqs ** 2
+    c_num = 12194**2 * f2
+    c_den = (f2 + 20.6**2) * (f2 + 12194**2) + 1e-20
+    c_weight_db = 20 * np.log10(c_num / c_den + 1e-20) + 0.06
+    c_weight_linear = 10 ** (c_weight_db / 10.0)
+    c_weight_linear[0] = 0
+
+    # ── A-weighting curve (for Panel 1 overlay) ──
+    a_weight_db_vals = (
+        20 * np.log10(
+            (12194**2 * f2**2) /
+            ((f2 + 20.6**2) * np.sqrt((f2 + 107.7**2) * (f2 + 737.9**2)) * (f2 + 12194**2))
+            + 1e-20
+        ) + 2.0
+    )
+
+    # ── ISO 226 weightings ──
+    _, iso100_linear = _iso226_weight_curve(100, fft_freqs)
+    _, iso115_linear = _iso226_weight_curve(115, fft_freqs)
+
+    # ── Compute all band energy variants ──
+    selfnorm_energies, selfnorm_ratios = _compute_band_energies_selfnorm(S_power)
+    c_energies, c_ratios = _compute_band_energies(S_power, c_weight_linear)
+    iso100_energies, iso100_ratios = _compute_band_energies(S_power, iso100_linear)
+    iso115_energies, iso115_ratios = _compute_band_energies(S_power, iso115_linear)
+
+    # ── Figure: 5 panels ──
+    fig = plt.figure(figsize=(18, 24))
+    gs = gridspec.GridSpec(5, 1, height_ratios=[2.5, 1.5, 1.5, 1.5, 1.5], hspace=0.3)
+
+    # ── Panel 1: ISO 226 Equal-Loudness Contours (static reference) ──
+    ax1 = fig.add_subplot(gs[0])
+    plot_freqs = np.logspace(np.log10(20), np.log10(20000), 500)
+
+    phon_levels = [20, 40, 60, 80, 100, 115]
+    phon_colors = {20: '#4488ff', 40: '#44aaff', 60: '#44ccaa', 80: '#aacc44', 100: '#ffaa44', 115: '#ff4444'}
+    for phon in phon_levels:
+        freqs_std, spl = _iso226_spl(phon)
+        color = phon_colors[phon]
+        ax1.semilogx(freqs_std, spl, '-', color=color, linewidth=2, label=f'{phon} phon')
+
+    # A-weighting and C-weighting overlays (invert and shift to overlay on SPL chart)
+    a_overlay = np.interp(np.log10(plot_freqs), np.log10(fft_freqs[1:]), a_weight_db_vals[1:])
+    c_overlay = np.interp(np.log10(plot_freqs), np.log10(fft_freqs[1:]), c_weight_db[1:])
+    # Invert weighting curves and shift to 60 dB SPL at 1kHz (N phon = N dB at 1kHz)
+    a_spl_equiv = 60.0 - a_overlay
+    c_spl_equiv = 60.0 - c_overlay
+    ax1.semilogx(plot_freqs, a_spl_equiv, '--', color='#ff6699', linewidth=1.5, alpha=0.8, label='A-weighting (≈40 phon)')
+    ax1.semilogx(plot_freqs, c_spl_equiv, '--', color='#66ccff', linewidth=1.5, alpha=0.8, label='C-weighting (≈80-100 phon)')
+
+    # Band boundaries
+    for band_name, (fmin, fmax) in FREQUENCY_BANDS.items():
+        ax1.axvline(fmin, color='#ffffff', alpha=0.15, linewidth=0.8)
+        mid_f = np.sqrt(fmin * fmax)
+        ax1.text(mid_f, 148, band_name, ha='center', fontsize=8, color=BAND_COLORS[band_name], fontweight='bold')
+    ax1.axvline(8000, color='#ffffff', alpha=0.15, linewidth=0.8)
+
+    # Annotations — position near the correct curves (SPL at ~6kHz for each phon)
+    ax1.annotate('80 phon ≈ home listening', xy=(6000, 84), fontsize=8, color='#aacc44', alpha=0.9)
+    ax1.annotate('100 phon ≈ rock concert', xy=(6000, 102), fontsize=8, color='#ffaa44', alpha=0.9)
+    ax1.annotate('115 phon ≈ EDM festival', xy=(6000, 117), fontsize=8, color='#ff4444', alpha=0.9)
+
+    ax1.set_xlim([20, 20000])
+    ax1.set_ylim([-10, 150])
+    ax1.set_xlabel('Frequency (Hz)')
+    ax1.set_ylabel('SPL (dB)')
+    ax1.set_title('ISO 226 Equal-Loudness Contours — SPL required at each frequency to sound equally loud', fontsize=11)
+    ax1.legend(loc='lower right', fontsize=8, framealpha=0.7, ncol=4)
+    ax1.grid(True, which='both', alpha=0.15)
+
+    def _plot_band_panel(ax, energies, ratios, title, is_selfnorm=False):
+        """Plot 5 band energy traces on an axis."""
+        t = times[:energies['Sub-bass'].shape[0]]
+        for band_name in FREQUENCY_BANDS:
+            ax.plot(t, energies[band_name][:len(t)], label=band_name,
+                    color=BAND_COLORS[band_name], linewidth=1.5, alpha=0.9)
+        ax.set_xlim([0, duration])
+        if is_selfnorm:
+            ax.set_ylim([0, 1.1])
+            ax.set_ylabel('Energy (per-band max)')
+        else:
+            ax.set_ylabel('Energy (shared scale)')
+        ax.set_title(title, fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.7, fontsize=7)
+        ax.grid(True, alpha=0.15)
+
+        max_ratio = max(ratios.values()) + 1e-10
+        ratio_text = "Band ratios:\n"
+        for name, ratio in ratios.items():
+            ratio_text += f"  {name}: {ratio / max_ratio:.2f}\n"
+        ax.text(0.02, 0.98, ratio_text, transform=ax.transAxes,
+                va='top', fontsize=7, family='monospace',
+                bbox=dict(boxstyle='round', facecolor='black', alpha=0.5))
+
+    # ── Panel 2: Self-normalized band energy ──
+    ax2 = fig.add_subplot(gs[1])
+    _plot_band_panel(ax2, selfnorm_energies, selfnorm_ratios,
+                     'Band Energy (self-normalized) — each band scaled to its own max',
+                     is_selfnorm=True)
+
+    # ── Panel 3: C-weighted band energy ──
+    ax3 = fig.add_subplot(gs[2])
+    _plot_band_panel(ax3, c_energies, c_ratios,
+                     'Band Energy (C-weighted, ≈80-100 dB SPL) — mild bass rolloff, flat above 100 Hz')
+
+    # ── Panel 4: ISO 226 @ 100 phon ──
+    ax4 = fig.add_subplot(gs[3])
+    _plot_band_panel(ax4, iso100_energies, iso100_ratios,
+                     'Band Energy (ISO 226 @ 100 phon, rock concert) — nearly flat, bass almost equal to mids')
+
+    # ── Panel 5: ISO 226 @ 115 phon ──
+    ax5 = fig.add_subplot(gs[4])
+    _plot_band_panel(ax5, iso115_energies, iso115_ratios,
+                     'Band Energy (ISO 226 @ 115 phon, EDM festival) — curves converge at high SPL')
+
+    filename = Path(filepath).name
+    fig.suptitle(f'{filename} — Frequency Perception: Equal-Loudness Weighting Comparison',
+                 fontsize=14, fontweight='bold', y=0.995)
+    fig.subplots_adjust(top=0.975, bottom=0.02)
+    fig.canvas.draw()
+
+    ax = ax2  # use first audio panel for pixel mapping
+    x_left = ax.transData.transform((0, 0))[0]
+    x_right = ax.transData.transform((duration, 0))[0]
+    fig_width = fig.get_figwidth() * DPI
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=DPI, facecolor=fig.get_facecolor())
+    matplotlib.pyplot.close(fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
+
+
+def render_lab_onset_absint(filepath):
+    """Onset + AbsInt Lab — compare onset strength vs absolute integral side-by-side."""
+    cache_key = (filepath, 'lab-onset-absint')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    import numpy as np
+    import librosa
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+    from scipy.ndimage import gaussian_filter1d
+
+    plt.style.use('dark_background')
+
+    y, sr = librosa.load(filepath, sr=None, mono=True)
+    duration = librosa.get_duration(y=y, sr=sr)
+    n_fft = 2048
+    hop_length = 512
+    times = librosa.frames_to_time(np.arange(len(y) // hop_length), sr=sr, hop_length=hop_length)
+
+    # ── Onset Strength (multi-band spectral flux via librosa) ──
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length)
+    onset_times = librosa.frames_to_time(np.arange(len(onset_env)), sr=sr, hop_length=hop_length)
+    onset_smooth = gaussian_filter1d(onset_env, sigma=5)
+
+    # ── AbsIntegral (offline simulation matching signals.py) ──
+    frame_len = n_fft
+    dt = frame_len / sr
+    window_sec = 0.15
+    peak_decay = 0.998
+    window_frames = max(1, int(window_sec / dt))
+
+    # Compute RMS per hop
+    rms = librosa.feature.rms(y=y, frame_length=frame_len, hop_length=hop_length)[0]
+
+    # RMS derivative → abs → ring buffer integral → peak normalize
+    prev_rms = 0.0
+    deriv_buf = np.zeros(window_frames, dtype=np.float32)
+    deriv_pos = 0
+    peak = 1e-10
+    absint_raw = np.zeros(len(rms), dtype=np.float32)
+    absint_norm = np.zeros(len(rms), dtype=np.float32)
+
+    for i in range(len(rms)):
+        rms_deriv = (rms[i] - prev_rms) / dt
+        prev_rms = rms[i]
+        deriv_buf[deriv_pos % window_frames] = abs(rms_deriv)
+        deriv_pos += 1
+        raw = np.sum(deriv_buf) * dt
+        absint_raw[i] = raw
+        peak = max(raw, peak * peak_decay)
+        absint_norm[i] = raw / peak if peak > 0 else 0.0
+
+    absint_times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop_length)
+
+    # Interpolate to common time base (use onset times as reference)
+    common_times = onset_times
+    absint_interp = np.interp(common_times, absint_times, absint_norm)
+
+    # Smoothed signals for overlay
+    absint_smooth = gaussian_filter1d(absint_interp, sigma=5)
+
+    # ── Normalize on smoothed values for overlay (raw spikes don't squish the curves) ──
+    onset_smooth_max = onset_smooth.max() if onset_smooth.max() > 0 else 1.0
+    onset_smooth_01 = onset_smooth / onset_smooth_max
+    absint_smooth_max = absint_smooth.max() if absint_smooth.max() > 0 else 1.0
+    absint_smooth_01 = absint_smooth / absint_smooth_max
+
+    # ── Waveform ──
+    waveform_times = np.linspace(0, duration, len(y))
+
+    # ── Layout: 5 panels ──
+    fig = plt.figure(figsize=(18, 22))
+    gs = gridspec.GridSpec(5, 1, height_ratios=[0.8, 1, 1, 1.2, 1], hspace=0.35)
+
+    # Panel 1: Waveform
+    ax = fig.add_subplot(gs[0])
+    ax.plot(waveform_times, y, color='#607D8B', linewidth=0.3, alpha=0.7)
+    ax.set_xlim([0, duration])
+    ax.set_ylabel('Amplitude')
+    ax.set_title('Waveform — context reference', fontsize=11)
+    ax.grid(True, alpha=0.15)
+
+    # Panel 2: Onset Strength
+    ax = fig.add_subplot(gs[1])
+    ax.plot(onset_times, onset_env, color='#FF8A65', linewidth=0.5, alpha=0.3, label='Raw')
+    ax.plot(onset_times, onset_smooth, color='#FF8A65', linewidth=2, label='Smoothed')
+    ax.set_xlim([0, duration])
+    ax.set_ylabel('Onset Strength')
+    ax.set_title('Onset Strength — multi-band spectral flux (librosa)', fontsize=11)
+    ax.legend(loc='upper right', fontsize=9)
+    ax.grid(True, alpha=0.2)
+
+    # Panel 3: AbsIntegral
+    ax = fig.add_subplot(gs[2])
+    ax.plot(absint_times, absint_raw / (absint_raw.max() if absint_raw.max() > 0 else 1),
+            color='#4DD0E1', linewidth=0.5, alpha=0.3, label='Raw (scaled)')
+    ax.plot(absint_times, absint_norm, color='#4DD0E1', linewidth=2, label='Normalized')
+    ax.set_xlim([0, duration])
+    ax.set_ylabel('AbsIntegral')
+    ax.set_title('AbsIntegral — |d(RMS)/dt| integrated over 150ms window, peak-normalized',
+                 fontsize=11)
+    ax.legend(loc='upper right', fontsize=9)
+    ax.grid(True, alpha=0.2)
+
+    # Panel 4: Overlay (both normalized 0-1 based on smoothed peaks)
+    ax = fig.add_subplot(gs[3])
+    ax.plot(common_times, onset_smooth_01, color='#FF8A65', linewidth=2, label='Onset (norm)')
+    ax.plot(common_times, absint_smooth_01, color='#4DD0E1', linewidth=2, label='AbsInt (norm)')
+    ax.set_xlim([0, duration])
+    ax.set_ylim([-0.05, 1.1])
+    ax.set_ylabel('Normalized')
+    ax.set_title('Overlay — both smoothed signals normalized 0-1 for direct comparison', fontsize=11)
+    ax.legend(loc='upper right', fontsize=9)
+    ax.grid(True, alpha=0.2)
+
+    # Panel 5: Difference
+    ax = fig.add_subplot(gs[4])
+    diff = np.abs(onset_smooth_01 - absint_smooth_01)
+    ax.fill_between(common_times, diff, alpha=0.4, color='#B388FF')
+    ax.plot(common_times, diff, color='#B388FF', linewidth=1.5)
+    ax.set_xlim([0, duration])
+    ax.set_ylim([0, 1.1])
+    ax.set_ylabel('|Difference|')
+    ax.set_xlabel('Time (s)')
+    ax.set_title('|Onset - AbsInt| — where they disagree '
+                 '(e.g. absint catches energy leaving, onset doesn\'t)', fontsize=11)
+    ax.grid(True, alpha=0.2)
+
+    filename = Path(filepath).name
+    fig.suptitle(f'{filename} — Onset + AbsInt Lab', fontsize=14,
+                 fontweight='bold', y=0.995)
+    fig.subplots_adjust(top=0.975, bottom=0.02)
+    fig.canvas.draw()
+
+    ax0 = fig.axes[0]
+    x_left = ax0.transData.transform((0, 0))[0]
+    x_right = ax0.transData.transform((duration, 0))[0]
+    fig_width = fig.get_figwidth() * DPI
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=DPI, facecolor=fig.get_facecolor())
+    matplotlib.pyplot.close(fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
+
+
+# ── FMA helpers ───────────────────────────────────────────────────────
+
+_fma_genre_tracks = None  # cached: [(genre, track_id, filepath), ...]
+
+def _pick_fma_genre_tracks():
+    """Pick one representative track per genre from 4 diverse FMA genres.
+
+    Reads tracks.csv once and caches the result. Returns list of
+    (genre_name, track_id, filepath) tuples.
+    """
+    global _fma_genre_tracks
+    if _fma_genre_tracks is not None:
+        return _fma_genre_tracks
+
+    import pandas as pd
+
+    fma_base = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            '..', 'research', 'datasets', 'fma')
+    tracks_csv = os.path.join(fma_base, 'fma_metadata', 'tracks.csv')
+    fma_small = os.path.join(fma_base, 'fma_small')
+
+    tracks = pd.read_csv(tracks_csv, index_col=0, header=[0, 1])
+    small = tracks[tracks[('set', 'subset')] == 'small']
+
+    # Pick 4 diverse genres
+    target_genres = ['Electronic', 'Rock', 'Hip-Hop', 'Folk']
+    result = []
+    for genre in target_genres:
+        genre_tracks = small[small[('track', 'genre_top')] == genre]
+        if genre_tracks.empty:
+            continue
+        # Try tracks until we find one that exists on disk
+        for track_id in genre_tracks.index:
+            tid = f'{track_id:06d}'
+            mp3_path = os.path.join(fma_small, tid[:3], f'{tid}.mp3')
+            if os.path.exists(mp3_path):
+                result.append((genre, track_id, mp3_path))
+                break
+
+    _fma_genre_tracks = result
+    return result
+
+
+def render_lab_zcr_genres(filepath):
+    """ZCR Genre Comparison Lab — zero crossing rate across 4 FMA genres."""
+    cache_key = ('zcr-genres', 'lab-zcr-genres')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    import numpy as np
+    import librosa
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+    from scipy.ndimage import gaussian_filter1d
+
+    plt.style.use('dark_background')
+
+    genre_tracks = _pick_fma_genre_tracks()
+    if not genre_tracks:
+        raise RuntimeError("No FMA tracks found — check datasets/fma/fma_small/ exists")
+
+    colors = ['#FF8A65', '#4DD0E1', '#B388FF', '#69F0AE']
+    genre_data = []  # (genre, zcr, times, y, sr)
+    max_duration = 0
+
+    for i, (genre, track_id, mp3_path) in enumerate(genre_tracks):
+        print(f"[zcr-genres] Loading {genre}: track {track_id}...")
+        y, sr = librosa.load(mp3_path, sr=22050, mono=True, duration=30)
+        zcr = librosa.feature.zero_crossing_rate(y, frame_length=2048, hop_length=512)[0]
+        times = librosa.frames_to_time(np.arange(len(zcr)), sr=sr, hop_length=512)
+        dur = librosa.get_duration(y=y, sr=sr)
+        max_duration = max(max_duration, dur)
+        genre_data.append((genre, zcr, times, y, sr, dur, colors[i % len(colors)]))
+
+    n_genres = len(genre_data)
+    # Layout: overlay + distribution + per-genre subplots + stats
+    fig = plt.figure(figsize=(18, 8 + n_genres * 4))
+    gs = gridspec.GridSpec(3 + n_genres, 1,
+                           height_ratios=[1.5, 1.2] + [1.2] * n_genres + [0.6],
+                           hspace=0.4)
+
+    sigma = 10  # smoothing
+
+    # ── Panel 1: ZCR overlay (all genres, smoothed) ──
+    ax = fig.add_subplot(gs[0])
+    for genre, zcr, times, y, sr, dur, color in genre_data:
+        smoothed = gaussian_filter1d(zcr, sigma=sigma)
+        ax.plot(times, smoothed, color=color, linewidth=2, label=genre, alpha=0.9)
+    ax.set_xlim([0, max_duration])
+    ax.set_ylabel('ZCR')
+    ax.set_title('Zero Crossing Rate — all genres overlaid (smoothed)', fontsize=12)
+    ax.legend(loc='upper right', fontsize=10)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panel 2: ZCR distribution (histogram/KDE per genre) ──
+    ax = fig.add_subplot(gs[1])
+    for genre, zcr, times, y, sr, dur, color in genre_data:
+        ax.hist(zcr, bins=60, alpha=0.35, color=color, label=genre, density=True)
+        # KDE approximation via smoothed histogram
+        from scipy.stats import gaussian_kde
+        if len(zcr) > 10:
+            kde = gaussian_kde(zcr)
+            x_kde = np.linspace(zcr.min(), zcr.max(), 200)
+            ax.plot(x_kde, kde(x_kde), color=color, linewidth=2)
+    ax.set_xlabel('ZCR value')
+    ax.set_ylabel('Density')
+    ax.set_title('ZCR Distribution — how genres separate (or don\'t)', fontsize=12)
+    ax.legend(loc='upper right', fontsize=10)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panels 3-6: Per-genre ZCR with spectrogram context ──
+    for i, (genre, zcr, times, y, sr, dur, color) in enumerate(genre_data):
+        ax = fig.add_subplot(gs[2 + i])
+
+        # Mini spectrogram as background
+        S = librosa.feature.melspectrogram(y=y, sr=sr, n_fft=2048, hop_length=512, n_mels=64)
+        S_db = librosa.power_to_db(S, ref=np.max)
+        ax.imshow(S_db, aspect='auto', origin='lower', cmap='magma', alpha=0.4,
+                  extent=[0, dur, 0, 1])
+
+        # ZCR overlay (scaled to 0-1 range for the shared axis)
+        zcr_max = zcr.max() if zcr.max() > 0 else 1
+        ax.plot(times, zcr / zcr_max, color=color, linewidth=0.5, alpha=0.3, label='Raw')
+        smoothed = gaussian_filter1d(zcr / zcr_max, sigma=sigma)
+        ax.plot(times, smoothed, color=color, linewidth=2, label='Smoothed')
+        ax.set_xlim([0, dur])
+        ax.set_ylim([0, 1.1])
+        ax.set_ylabel('ZCR (scaled)')
+        tid = [t[1] for t in genre_tracks if t[0] == genre][0]
+        ax.set_title(f'{genre} (track {tid}) — ZCR over mel spectrogram', fontsize=11)
+        ax.legend(loc='upper right', fontsize=9)
+
+    # ── Panel: Statistics summary ──
+    ax = fig.add_subplot(gs[2 + n_genres])
+    ax.axis('off')
+    stats_lines = []
+    for genre, zcr, times, y, sr, dur, color in genre_data:
+        stats_lines.append(
+            f'{genre:15s}  mean={zcr.mean():.4f}  std={zcr.std():.4f}  '
+            f'range=[{zcr.min():.4f}, {zcr.max():.4f}]'
+        )
+    stats_text = '\n'.join(stats_lines)
+    ax.text(0.05, 0.5, stats_text, transform=ax.transAxes, fontsize=12,
+            fontfamily='monospace', verticalalignment='center', color='#eee')
+    ax.set_title('Statistics Summary', fontsize=11)
+
+    fig.suptitle('ZCR Genre Comparison — FMA Small Dataset', fontsize=14,
+                 fontweight='bold', y=0.995)
+    fig.subplots_adjust(top=0.975, bottom=0.02)
+    fig.canvas.draw()
+
+    # Pixel mapping: use 0-30s (FMA tracks are 30s clips)
+    ax0 = fig.axes[0]
+    x_left = ax0.transData.transform((0, 0))[0]
+    x_right = ax0.transData.transform((max_duration, 0))[0]
+    fig_width = fig.get_figwidth() * DPI
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=DPI, facecolor=fig.get_facecolor())
+    matplotlib.pyplot.close(fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(max_duration),
     }
 
     _render_cache[cache_key] = (png_bytes, headers)
@@ -2433,12 +3209,21 @@ class ViewerHandler(BaseHTTPRequestHandler):
         elif path.startswith('/api/render-annotate/'):
             rel_path = path[len('/api/render-annotate/'):]
             self._serve_render_annotate(rel_path)
+        elif path.startswith('/api/render-events-a/'):
+            rel_path = path[len('/api/render-events-a/'):]
+            self._serve_render_events_ab(rel_path, 'a')
+        elif path.startswith('/api/render-events-b/'):
+            rel_path = path[len('/api/render-events-b/'):]
+            self._serve_render_events_ab(rel_path, 'b')
         elif path.startswith('/api/render-events/'):
             rel_path = path[len('/api/render-events/'):]
             self._serve_render_events(rel_path)
         elif path.startswith('/api/render-band-analysis/'):
             rel_path = path[len('/api/render-band-analysis/'):]
             self._serve_render_band_analysis(rel_path)
+        elif path.startswith('/api/render-freq-perception/'):
+            rel_path = path[len('/api/render-freq-perception/'):]
+            self._serve_render_freq_perception(rel_path)
         elif path.startswith('/api/render-calculus/'):
             rel_path = path[len('/api/render-calculus/'):]
             self._serve_render_calculus(rel_path)
@@ -2637,6 +3422,31 @@ class ViewerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(png_bytes)
 
+    def _serve_render_events_ab(self, rel_path, algorithm):
+        filepath = _resolve_audio_path(rel_path)
+        if filepath is None:
+            self.send_error(404, 'File not found')
+            return
+
+        try:
+            render_fn = render_events_a if algorithm == 'a' else render_events_b
+            png_bytes, headers = render_fn(filepath)
+        except Exception as e:
+            print(f"[render-events-{algorithm}] Error: {e}")
+            self.send_error(500, str(e))
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/png')
+        self.send_header('Content-Length', str(len(png_bytes)))
+        self.send_header('Cache-Control', 'max-age=3600')
+        exposed = ', '.join(headers.keys())
+        self.send_header('Access-Control-Expose-Headers', exposed)
+        for k, v in headers.items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(png_bytes)
+
     def _serve_render_band_analysis(self, rel_path):
         filepath = _resolve_audio_path(rel_path)
         if filepath is None:
@@ -2647,6 +3457,30 @@ class ViewerHandler(BaseHTTPRequestHandler):
             png_bytes, headers = render_band_analysis(filepath)
         except Exception as e:
             print(f"[render-band-analysis] Error: {e}")
+            self.send_error(500, str(e))
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/png')
+        self.send_header('Content-Length', str(len(png_bytes)))
+        self.send_header('Cache-Control', 'max-age=3600')
+        exposed = ', '.join(headers.keys())
+        self.send_header('Access-Control-Expose-Headers', exposed)
+        for k, v in headers.items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(png_bytes)
+
+    def _serve_render_freq_perception(self, rel_path):
+        filepath = _resolve_audio_path(rel_path)
+        if filepath is None:
+            self.send_error(404, 'File not found')
+            return
+
+        try:
+            png_bytes, headers = render_freq_perception(filepath)
+        except Exception as e:
+            print(f"[render-freq-perception] Error: {e}")
             self.send_error(500, str(e))
             return
 

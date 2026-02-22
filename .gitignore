@@ -20,7 +20,7 @@ package-lock.json
 *.swo
 
 # Large datasets (keep analysis results, ignore raw data)
-audio-reactive/research/datasets/harmonix/
+audio-reactive/research/datasets/
 
 # Effect preferences (user-specific ratings/order, created at runtime)
 audio-reactive/effects/effect_prefs.json

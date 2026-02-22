@@ -94,10 +94,11 @@ class SyncedVisualizer:
     def __init__(self, filepath, focus_panel=None, show_beats=False,
                  annotations_path=None, annotate_layer=None,
                  led_effect=None, led_output=None, led_brightness=1.0,
-                 panels=None):
+                 panels=None, event_algorithm='b'):
         self.filepath = filepath
         self.focus_panel = focus_panel
         self.panels = panels  # optional list of panel names to show
+        self.event_algorithm = event_algorithm
         self.show_beats = show_beats
         self.annotations_path_override = annotations_path
         self.annotate_layer = annotate_layer  # None = normal mode, str = annotation mode
@@ -184,6 +185,41 @@ class SyncedVisualizer:
             else:
                 self.band_energies[band_name] = energy
 
+        # A-weighted band energies (perceptually weighted before mel grouping)
+        freqs = librosa.fft_frequencies(sr=self.sr, n_fft=self.n_fft)
+        f2 = freqs ** 2
+        a_weight_db = (
+            20 * np.log10(
+                (12194**2 * f2**2) /
+                ((f2 + 20.6**2) * np.sqrt((f2 + 107.7**2) * (f2 + 737.9**2)) * (f2 + 12194**2))
+                + 1e-20
+            )
+            + 2.0
+        )
+        a_weight_linear = 10 ** (a_weight_db / 20.0)
+        a_weight_linear[0] = 0  # DC bin
+
+        S_power = np.abs(librosa.stft(self.y, n_fft=self.n_fft, hop_length=self.hop_length)) ** 2
+        S_weighted = S_power * (a_weight_linear[:, np.newaxis] ** 2)
+        mel_basis_128 = librosa.filters.mel(sr=self.sr, n_fft=self.n_fft, n_mels=128, fmin=20, fmax=8000)
+        mel_weighted_128 = mel_basis_128 @ S_weighted
+
+        # Collect raw A-weighted band energies first, then normalize all bands
+        # against a shared max so cross-band comparison is preserved
+        band_energies_aw_raw = {}
+        self.band_ratios_aw = {}
+        for band_name, (fmin, fmax) in FREQUENCY_BANDS.items():
+            band_mask = (mel_freqs >= fmin) & (mel_freqs <= fmax)
+            energy = np.sum(mel_weighted_128[band_mask, :], axis=0)
+            band_energies_aw_raw[band_name] = energy
+            self.band_ratios_aw[band_name] = np.mean(energy)
+
+        # Single shared max across all bands — preserves A-weighted balance
+        global_max = max(np.max(e) for e in band_energies_aw_raw.values()) + 1e-10
+        self.band_energies_aw = {
+            name: energy / global_max for name, energy in band_energies_aw_raw.items()
+        }
+
         # Onset detection
         self.onset_env = librosa.onset.onset_strength(
             y=self.y, sr=self.sr, hop_length=self.hop_length
@@ -240,9 +276,14 @@ class SyncedVisualizer:
             y=self.y, sr=self.sr, n_mfcc=13,
             n_fft=self.n_fft, hop_length=self.hop_length
         )
-        self.chroma = librosa.feature.chroma_stft(
-            y=self.y, sr=self.sr, n_fft=self.n_fft, hop_length=self.hop_length
+        self.chroma = librosa.feature.chroma_cqt(
+            y=self.y, sr=self.sr, hop_length=self.hop_length
         )
+
+        # Spectral flatness (low = tonal, high = noisy)
+        self.spectral_flatness = librosa.feature.spectral_flatness(
+            y=self.y, n_fft=self.n_fft, hop_length=self.hop_length
+        )[0]
 
         def _cosine_sim(A):
             norms = np.linalg.norm(A, axis=0, keepdims=True)
@@ -255,11 +296,16 @@ class SyncedVisualizer:
         if self.novelty_kernel_size % 2 != 0:
             self.novelty_kernel_size += 1
 
+        self.chroma_kernel_seconds = 6
+        self.chroma_kernel_size = max(16, int(self.chroma_kernel_seconds * fps))
+        if self.chroma_kernel_size % 2 != 0:
+            self.chroma_kernel_size += 1
+
         S = _cosine_sim(self.mfccs)
         self.novelty_mfcc = _checkerboard_novelty(S, self.novelty_kernel_size)
         del S
         S = _cosine_sim(self.chroma)
-        self.novelty_chroma = _checkerboard_novelty(S, self.novelty_kernel_size)
+        self.novelty_chroma = _checkerboard_novelty(S, self.chroma_kernel_size)
         del S
 
         # ── Slow-decay peak normalized band energy (real-time sim) ──
@@ -340,58 +386,217 @@ class SyncedVisualizer:
         return spans
 
     def _compute_events(self):
-        """Detect structural audio events: drops, risers, dropouts, harmonic sections."""
-        from scipy.signal import find_peaks
+        """Dispatch to algorithm A or B based on self.event_algorithm."""
         from scipy.ndimage import gaussian_filter1d
 
         fps = self.sr / self.hop_length
         t = self.times
         n = len(t)
 
-        # ── Drops: MFCC novelty peak within ±0.5s of positive RMS derivative peak ──
-        nov_m = self.novelty_mfcc[:n]
-        rms_d = self.rms_derivative[:n]
-        rms_d_norm = rms_d / (np.max(np.abs(rms_d)) + 1e-10)
-
-        nov_peaks, _ = find_peaks(nov_m, prominence=0.2)
-        rms_peaks, _ = find_peaks(rms_d_norm, height=0.3)
-
-        self.event_drops = []
-        for np_idx in nov_peaks:
-            for rp_idx in rms_peaks:
-                if abs(t[np_idx] - t[rp_idx]) <= 0.5:
-                    self.event_drops.append(t[np_idx])
-                    break
-
-        # ── Risers: smoothed centroid derivative sustained positive ──
+        # ── Risers: shared by both algorithms ──
         cent_d = gaussian_filter1d(self.centroid_derivative[:n], sigma=10)
         cent_d_max = np.max(np.abs(cent_d)) + 1e-10
         riser_mask = cent_d > 0.08 * cent_d_max
         min_riser_frames = max(1, int(1.0 * fps))
         self.event_risers = self._find_spans(riser_mask, t, min_riser_frames)
 
-        # ── Dropouts: per-band energy below threshold ──
-        min_dropout_frames = max(1, int(0.1 * fps))
+        if self.event_algorithm == 'a':
+            self._compute_events_a()
+        else:
+            self._compute_events_b()
+
+        total_dropouts = sum(len(v) for v in self.event_dropouts.values())
+        dropout_bands = ', '.join(f'{b}:{len(v)}' for b, v in self.event_dropouts.items())
+        print(f"Events ({self.event_algorithm.upper()}): {len(self.event_drops)} drops, "
+              f"{len(self.event_risers)} risers, "
+              f"{total_dropouts} dropouts ({dropout_bands}), {len(self.event_harmonic)} harmonic")
+
+    def _compute_events_a(self):
+        """Algorithm A: additive scoring (prominence-based), stricter thresholds."""
+        from scipy.signal import find_peaks
+        from scipy.ndimage import gaussian_filter1d, median_filter, uniform_filter1d
+
+        fps = self.sr / self.hop_length
+        t = self.times
+        n = len(t)
+
+        # ── Drops: additive prominence-based scoring ──
+        nov_m = self.novelty_mfcc[:n]
+        rms = self.rms_energy[:n]
+        rms_max = np.max(rms) + 1e-10
+
+        min_dist = max(1, int(2.0 * fps))
+        nov_peaks, nov_props = find_peaks(nov_m, prominence=0.15, distance=min_dist)
+
+        self.event_drops = []
+        self.event_drop_scores = []
+        half_sec = max(1, int(0.5 * fps))
+
+        for i, peak_idx in enumerate(nov_peaks):
+            # Base score from prominence (0-1)
+            base = nov_props['prominences'][i]
+
+            # Booster 1: RMS discontinuity in ±0.5s window
+            lo = max(0, peak_idx - half_sec)
+            hi = min(n, peak_idx + half_sec)
+            rms_before = np.mean(rms[lo:peak_idx]) if peak_idx > lo else 0
+            rms_after = np.mean(rms[peak_idx:hi]) if hi > peak_idx else 0
+            rms_disc = abs(rms_after - rms_before) / rms_max
+            rms_boost = 0.20 * min(rms_disc / 0.3, 1.0)
+
+            # Booster 2: band deviation spike near peak
+            dev = self.composite_deviation
+            dev_window = dev[lo:hi] if hi > lo else np.array([0])
+            dev_spike = np.max(dev_window)
+            dev_boost = 0.15 * min(dev_spike / 4.0, 1.0)
+
+            score = base + rms_boost + dev_boost
+            if score >= 0.15:
+                self.event_drops.append(float(t[peak_idx]))
+                self.event_drop_scores.append(float(score))
+
+        # ── Dropouts: vectorized causal trailing mean ──
+        trailing_window = int(10.0 * fps)
+        min_dropout_frames = max(1, int(0.3 * fps))
         self.event_dropouts = {}
-        for band_name, energy in self.band_energies.items():
-            e = energy[:n]
-            band_norm = e / (np.max(e) + 1e-10)
-            dropout_mask = band_norm < 0.05
+        for band_name in FREQUENCY_BANDS:
+            energy_rt = self.band_energy_rt[band_name][:n]
+            padded = np.concatenate([np.zeros(trailing_window), energy_rt])
+            trailing_mean = uniform_filter1d(padded, size=trailing_window, mode='reflect')[trailing_window:]
+            was_present = trailing_mean > 0.20
+            is_low = energy_rt < 0.08
+            dropout_mask = was_present & is_low
             spans = self._find_spans(dropout_mask, t, min_dropout_frames)
             if spans:
                 self.event_dropouts[band_name] = spans
 
-        # ── Harmonic: smoothed onset strength below threshold ──
-        onset_smooth = gaussian_filter1d(self.onset_env[:n], sigma=0.5 * fps)
-        onset_max = np.max(onset_smooth) + 1e-10
-        harmonic_mask = onset_smooth < 0.10 * onset_max
-        min_harmonic_frames = max(1, int(1.0 * fps))
+        # ── Harmonic: strict ratio thresholds, median-relative flatness ──
+        onset = self.onset_env[:n]
+        sigma_03s = max(1, int(0.3 * fps))
+        onset_smooth = gaussian_filter1d(onset, sigma=sigma_03s)
+        median_size = max(3, int(15.0 * fps))
+        if median_size % 2 == 0:
+            median_size += 1
+        onset_local_median = median_filter(onset, size=median_size, mode='reflect')
+        self.event_harmonic_ratio = onset_smooth / (onset_local_median + 1e-10)
+
+        flatness = self.spectral_flatness[:n]
+        sigma_05s = max(1, int(0.5 * fps))
+        self.event_harmonic_flatness = gaussian_filter1d(flatness, sigma=sigma_05s)
+        flatness_median = np.median(self.event_harmonic_flatness)
+
+        ratio = self.event_harmonic_ratio
+        flat = self.event_harmonic_flatness
+
+        harmonic_mask = (
+            (ratio < 0.25)
+            | ((ratio < 0.40) & (flat < flatness_median))
+        )
+        silence_gate = rms > 0.02 * rms_max
+        harmonic_mask = harmonic_mask & silence_gate
+
+        min_harmonic_frames = max(1, int(1.5 * fps))
         self.event_harmonic = self._find_spans(harmonic_mask, t, min_harmonic_frames)
 
-        total_dropouts = sum(len(v) for v in self.event_dropouts.values())
-        dropout_bands = ', '.join(f'{b}:{len(v)}' for b, v in self.event_dropouts.items())
-        print(f"Events: {len(self.event_drops)} drops, {len(self.event_risers)} risers, "
-              f"{total_dropouts} dropouts ({dropout_bands}), {len(self.event_harmonic)} harmonic")
+    def _compute_events_b(self):
+        """Algorithm B: multiplicative scoring (novelty-value-based), lenient thresholds."""
+        from scipy.signal import find_peaks
+        from scipy.ndimage import gaussian_filter1d, median_filter
+
+        fps = self.sr / self.hop_length
+        t = self.times
+        n = len(t)
+
+        # ── Drops: multiplicative novelty-value scoring ──
+        nov_m = self.novelty_mfcc[:n]
+        rms_d = self.rms_derivative[:n]
+        rms_d_norm = np.abs(rms_d) / (np.max(np.abs(rms_d)) + 1e-10)
+
+        comp_dev = self.composite_deviation[:n]
+        comp_dev_norm = comp_dev / (np.max(comp_dev) + 1e-10)
+
+        min_peak_dist = max(1, int(2.0 * fps))
+        nov_peaks, nov_props = find_peaks(nov_m, prominence=0.12, distance=min_peak_dist)
+
+        self.event_drops = []
+        self.event_drop_scores = []
+        for idx in nov_peaks:
+            base_score = nov_m[idx]
+
+            window = int(0.5 * fps)
+            lo = max(0, idx - window)
+            hi = min(n, idx + window)
+            rms_boost = np.max(rms_d_norm[lo:hi])
+
+            dev_window = int(1.0 * fps)
+            lo_d = max(0, idx - dev_window)
+            hi_d = min(n, idx + dev_window)
+            dev_boost = np.max(comp_dev_norm[lo_d:hi_d])
+
+            score = base_score * (1.0 + 0.3 * rms_boost + 0.2 * dev_boost)
+
+            self.event_drops.append(t[idx])
+            self.event_drop_scores.append(score)
+
+        # ── Dropouts: cumsum-based causal trailing mean ──
+        trailing_window = int(8.0 * fps)
+        presence_thresh = 0.15
+        low_thresh = 0.05
+        min_dropout_frames = max(1, int(0.5 * fps))
+
+        self.event_dropouts = {}
+        for band_name, energy_rt in self.band_energy_rt.items():
+            e = energy_rt[:n]
+
+            cumsum = np.cumsum(np.insert(e, 0, 0))
+            trailing_mean = np.empty_like(e)
+            for i in range(n):
+                lo = max(0, i - trailing_window)
+                trailing_mean[i] = (cumsum[i] - cumsum[lo]) / max(i - lo, 1)
+
+            was_present = trailing_mean > presence_thresh
+            is_low = e < low_thresh
+            dropout_mask = was_present & is_low
+
+            spans = self._find_spans(dropout_mask, t, min_dropout_frames)
+            if spans:
+                self.event_dropouts[band_name] = spans
+
+        # ── Harmonic: lenient ratio thresholds, fixed flatness threshold ──
+        onset = self.onset_env[:n]
+
+        onset_sigma = max(1, int(0.3 * fps))
+        onset_smooth = gaussian_filter1d(onset, sigma=onset_sigma)
+
+        median_window = max(3, int(15.0 * fps))
+        if median_window % 2 == 0:
+            median_window += 1
+        onset_median = median_filter(onset_smooth, size=median_window, mode='reflect')
+
+        self.event_harmonic_ratio = onset_smooth / (onset_median + 1e-10)
+
+        flatness_sigma = max(1, int(2.0 * fps))
+        self.event_harmonic_flatness = gaussian_filter1d(
+            self.spectral_flatness[:n], sigma=flatness_sigma)
+
+        rms = self.rms_energy[:n]
+        rms_max = np.max(rms) + 1e-10
+        silence_mask = rms > 0.02 * rms_max
+
+        ratio_thresh = 0.4
+        primary_harmonic = (self.event_harmonic_ratio < ratio_thresh) & silence_mask
+
+        flatness_thresh = 0.15
+        ratio_thresh_lenient = 0.65
+        secondary_harmonic = (
+            (self.event_harmonic_ratio < ratio_thresh_lenient)
+            & (self.event_harmonic_flatness < flatness_thresh)
+            & silence_mask
+        )
+
+        harmonic_mask = primary_harmonic | secondary_harmonic
+        min_harmonic_frames = max(1, int(1.0 * fps))
+        self.event_harmonic = self._find_spans(harmonic_mask, t, min_harmonic_frames)
 
     def _compute_calculus(self):
         """Compute second derivatives and time-bounded integrals for calculus tab."""
@@ -400,10 +605,18 @@ class SyncedVisualizer:
         fps = self.sr / self.hop_length
         dt = 1.0 / fps
 
-        # 10s rolling integral of total RMS
+        # Trailing rolling sums of RMS (causal — no look-ahead)
+        # output[i] = sum(rms[max(0, i-w+1) : i+1])
+        cs = np.concatenate([[0.0], np.cumsum(self.rms_energy)])
+        indices = np.arange(len(self.rms_energy))
+
         int_window_10s = int(10 * fps)
-        self.rms_integral_10s = uniform_filter1d(
-            self.rms_energy, size=int_window_10s, mode='reflect') * int_window_10s
+        starts_10 = np.maximum(0, indices - int_window_10s + 1)
+        self.rms_integral_10s = cs[indices + 1] - cs[starts_10]
+
+        int_window_5s = int(5 * fps)
+        starts_5 = np.maximum(0, indices - int_window_5s + 1)
+        self.rms_integral_5s = cs[indices + 1] - cs[starts_5]
 
         # Integral slope: d/dt of 10s integral, smoothed
         raw_slope = np.diff(self.rms_integral_10s, prepend=self.rms_integral_10s[0]) / dt
@@ -512,7 +725,7 @@ class SyncedVisualizer:
     # ── Calculus panels ──────────────────────────────────────────────
 
     def _build_calc_energy_integral_panel(self, ax):
-        """Panel 1: RMS energy + 10s rolling integral (dual y-axis)."""
+        """Panel 1: RMS energy + trailing 5s/10s rolling integrals (dual y-axis)."""
         t = self.times
         n = len(t)
         ax.plot(t, self.rms_energy[:n], color='#FFFFFF', linewidth=0.8, alpha=0.4, label='RMS Energy')
@@ -521,14 +734,24 @@ class SyncedVisualizer:
         ax.tick_params(axis='y', labelcolor='#FFFFFF')
 
         ax2 = ax.twinx()
-        ax2.plot(t, self.rms_integral_10s[:n], color='#FFD740', linewidth=2.5, alpha=0.9, label='10s Integral')
-        ax2.set_ylabel('10s Integral', color='#FFD740')
+        ax2.plot(t, self.rms_integral_5s[:n], color='#69F0AE', linewidth=1.5, alpha=0.7, label='5s Trailing')
+        ax2.plot(t, self.rms_integral_10s[:n], color='#FFD740', linewidth=2.5, alpha=0.9, label='10s Trailing')
+        ax2.set_ylabel('Trailing Integral', color='#FFD740')
         ax2.tick_params(axis='y', labelcolor='#FFD740')
 
-        ax.set_title('Energy + 10s Integral — baseline context', fontsize=11)
+        ax.set_title('Energy + Trailing Integrals (causal — no look-ahead)', fontsize=11)
         ax.legend(loc='upper left', framealpha=0.8, fontsize=8)
         ax2.legend(loc='upper right', framealpha=0.8, fontsize=8)
         ax.grid(True, alpha=0.2)
+
+        ax.text(0.5, 0.02,
+                'Trailing sums: output[i] = sum(rms[i-w..i])  ·  '
+                '5s reacts ~2.5s faster than 10s  ·  '
+                'Downstream slope/curvature add 0.1–0.7s Gaussian (replaceable with exponential for RT)',
+                transform=ax.transAxes, ha='center', va='bottom',
+                fontsize=7, color='#888', alpha=0.7,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.4))
+
         self._overlay_sections(ax)
         if not hasattr(self, 'axes'):
             self.axes = []
@@ -849,6 +1072,7 @@ class SyncedVisualizer:
             'waveform': self._build_waveform_panel,
             'spectrogram': self._build_spectrogram_panel,
             'bands': self._build_band_energy_panel,
+            'bands-aw': self._build_band_energy_aw_panel,
             'rms-derivative': self._build_rms_derivative_panel,
             'centroid': self._build_centroid_panel,
             'centroid-derivative': self._build_centroid_derivative_panel,
@@ -882,12 +1106,12 @@ class SyncedVisualizer:
             builders = [(name, focus_builders[name]) for name in self.panels
                         if name in focus_builders]
             n_panels = len(builders)
-            height_map = {'waveform': 1, 'spectrogram': 2, 'bands': 1,
+            height_map = {'waveform': 1, 'spectrogram': 2, 'bands': 1, 'bands-aw': 1,
                           'rms-derivative': 1, 'centroid': 1, 'centroid-derivative': 1,
                           'band-derivative': 1, 'mfcc': 1.5, 'novelty': 1.5,
                           'band-deviation': 1.5, 'annotations': None,
-                          'event-drops': 0.5, 'event-risers': 0.5,
-                          'event-dropouts': 0.5, 'event-harmonic': 0.5,
+                          'event-drops': 1.0, 'event-risers': 0.5,
+                          'event-dropouts': 1.0, 'event-harmonic': 1.0,
                           'calc-energy-integral': 1, 'calc-integral-slope': 1,
                           'calc-slope-peaks': 1.2, 'calc-integral-curvature': 1,
                           'calc-multi-scale': 1,
@@ -990,6 +1214,29 @@ class SyncedVisualizer:
         max_ratio = max(self.band_ratios.values())
         ratio_text = "Magnitude ratios:\n"
         for name, ratio in self.band_ratios.items():
+            ratio_text += f"  {name}: {ratio / max_ratio:.2f}\n"
+        ax.text(0.02, 0.98, ratio_text, transform=ax.transAxes,
+                va='top', fontsize=7, family='monospace',
+                bbox=dict(boxstyle='round', facecolor='black', alpha=0.5))
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_band_energy_aw_panel(self, ax):
+        """A-weighted band energy: perceptually weighted before mel grouping, shared normalization."""
+        for band_name, energy in self.band_energies_aw.items():
+            ax.plot(self.times, energy, label=band_name,
+                    color=BAND_COLORS[band_name], linewidth=2, alpha=0.9)
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('Energy (shared scale)')
+        ax.set_title('Band Energy (A-weighted, shared norm) — '
+                     'all bands on same scale, bass attenuated to match hearing', fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+
+        max_ratio = max(self.band_ratios_aw.values()) if self.band_ratios_aw else 1
+        ratio_text = "A-weighted ratios:\n"
+        for name, ratio in self.band_ratios_aw.items():
             ratio_text += f"  {name}: {ratio / max_ratio:.2f}\n"
         ax.text(0.02, 0.98, ratio_text, transform=ax.transAxes,
                 va='top', fontsize=7, family='monospace',
@@ -1114,10 +1361,10 @@ class SyncedVisualizer:
         ax2.set_ylabel('MFCC novelty', color='#FF8A65')
         ax2.tick_params(axis='y', labelcolor='#FF8A65')
 
-        ks = self.novelty_kernel_size
-        ksec = self.novelty_kernel_seconds
         ax.set_title(
-            f"Foote's Checkerboard Novelty (kernel={ks} frames, {ksec}s) "
+            f"Foote's Checkerboard Novelty "
+            f"(MFCC {self.novelty_kernel_size}f/{self.novelty_kernel_seconds}s, "
+            f"Chroma {self.chroma_kernel_size}f/{self.chroma_kernel_seconds}s) "
             f"— peaks = section boundaries  [V] events", fontsize=11)
         ax.legend([line_c, line_m], ['Chroma (harmonic)', 'MFCC (timbral)'],
                   loc='upper right', framealpha=0.8, fontsize=8)
@@ -1153,19 +1400,37 @@ class SyncedVisualizer:
     # ── Event timeline panels (one per event type) ─────────────────
 
     def _build_event_drops_panel(self, ax):
-        """Drops: novelty peak + RMS spike coincidence."""
-        for drop_t in self.event_drops:
-            ax.axvline(x=drop_t, color='#FF1744', linestyle='--',
-                       linewidth=2, alpha=0.9)
+        """Drops: MFCC novelty peaks scored with RMS + deviation boosters."""
+        t = self.times
+        n = len(t)
+        nov_m = self.novelty_mfcc[:n]
+
+        # MFCC novelty as context trace
+        ax.plot(t, nov_m, color='#FF8A65', linewidth=1.0, alpha=0.5, label='MFCC novelty')
         ax.set_xlim([0, self.duration])
-        ax.set_yticks([])
-        n = len(self.event_drops)
-        ax.set_title(f'Drops — {n} detected  '
-                     f'(novelty peak + RMS spike within 0.5s)', fontsize=11)
-        ax.legend([plt.Line2D([0], [0], color='#FF1744', linestyle='--', linewidth=2)],
-                  ['Drop (structural change + loudness spike)'],
-                  loc='upper right', framealpha=0.8, fontsize=8)
-        ax.grid(True, axis='x', alpha=0.2)
+        ax.set_ylim([0, max(1.1, max(self.event_drop_scores) * 1.1) if self.event_drop_scores else 1.1])
+
+        # Drop lines with visual weight proportional to score
+        max_score = max(self.event_drop_scores) if self.event_drop_scores else 1.0
+        for drop_t, score in zip(self.event_drops, self.event_drop_scores):
+            # Linewidth 1-4 based on score
+            lw = 1.0 + 3.0 * (score / max_score)
+            alpha = 0.5 + 0.5 * (score / max_score)
+            ax.axvline(x=drop_t, color='#FF1744', linestyle='--',
+                       linewidth=lw, alpha=alpha)
+            # Score label
+            ax.text(drop_t, ax.get_ylim()[1] * 0.92, f'{score:.2f}',
+                    ha='center', va='top', fontsize=7, color='#FF1744',
+                    fontweight='bold', rotation=45,
+                    bbox=dict(boxstyle='round,pad=0.15', facecolor='black', alpha=0.6))
+
+        nd = len(self.event_drops)
+        ax.set_ylabel('Novelty / Score')
+        ax.set_title(f'Drops — {nd} detected  '
+                     f'(MFCC novelty peaks, scored with RMS + deviation boosters)', fontsize=11)
+        ax.legend(loc='upper left', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        self._overlay_sections(ax)
         if not hasattr(self, 'axes'):
             self.axes = []
         self.axes.append(ax)
@@ -1188,42 +1453,108 @@ class SyncedVisualizer:
         self.axes.append(ax)
 
     def _build_event_dropouts_panel(self, ax):
-        """Dropouts: per-band energy drops below threshold."""
+        """Dropouts: presence-gated per-band transitions with RT energy traces."""
+        t = self.times
+        n = len(t)
+
+        # Algorithm-dependent thresholds for display
+        if self.event_algorithm == 'a':
+            presence_display, low_display = 0.20, 0.08
+        else:
+            presence_display, low_display = 0.15, 0.05
+
+        # RT-normalized band energy as thin traces (all 5 bands for context)
+        for band_name in FREQUENCY_BANDS:
+            e_rt = self.band_energy_rt[band_name][:n]
+            ax.plot(t, e_rt, color=BAND_COLORS[band_name],
+                    linewidth=0.8, alpha=0.4, label=band_name)
+
+        # Threshold reference lines
+        ax.axhline(y=presence_display, color='#888', linewidth=0.5, linestyle=':', alpha=0.6)
+        ax.axhline(y=low_display, color='#888', linewidth=0.5, linestyle=':', alpha=0.6)
+        ax.text(self.duration * 0.99, presence_display, 'presence', ha='right', va='bottom',
+                fontsize=6, color='#888', alpha=0.6)
+        ax.text(self.duration * 0.99, low_display, 'low', ha='right', va='bottom',
+                fontsize=6, color='#888', alpha=0.6)
+
+        # Dropout spans as colored overlays
         handles = []
         labels = []
         for band_name, spans in self.event_dropouts.items():
             color = BAND_COLORS.get(band_name, '#E040FB')
             for start, end in spans:
-                ax.axvspan(start, end, color=color, alpha=0.4)
+                ax.axvspan(start, end, color=color, alpha=0.3)
             if spans:
-                handles.append(plt.Rectangle((0, 0), 1, 1, fc=color, alpha=0.4))
-                labels.append(f'{band_name} ({len(spans)})')
+                handles.append(plt.Rectangle((0, 0), 1, 1, fc=color, alpha=0.3))
+                labels.append(f'{band_name} dropout ({len(spans)})')
+
         ax.set_xlim([0, self.duration])
-        ax.set_yticks([])
+        ax.set_ylim([0, 1.1])
+        ax.set_ylabel('RT Energy')
         total = sum(len(v) for v in self.event_dropouts.values())
         ax.set_title(f'Dropouts — {total} detected  '
-                     f'(per-band energy <5% of max)', fontsize=11)
+                     f'(presence-gated: was >{presence_display:.0%}, now <{low_display:.0%})', fontsize=11)
         if handles:
             ax.legend(handles, labels, loc='upper right',
                       framealpha=0.8, fontsize=8, ncol=min(len(handles), 3))
-        ax.grid(True, axis='x', alpha=0.2)
+        ax.grid(True, alpha=0.2)
+        self._overlay_sections(ax)
         if not hasattr(self, 'axes'):
             self.axes = []
         self.axes.append(ax)
 
     def _build_event_harmonic_panel(self, ax):
-        """Harmonic sections: low onset strength = sustained tonal content."""
+        """Harmonic sections: onset/median ratio + spectral flatness diagnostic."""
+        t = self.times
+        n = len(t)
+
+        # Algorithm-dependent thresholds for display
+        if self.event_algorithm == 'a':
+            primary_ratio, lenient_ratio = 0.25, 0.40
+        else:
+            primary_ratio, lenient_ratio = 0.4, 0.65
+
+        # Harmonic spans as background shading
         for start, end in self.event_harmonic:
-            ax.axvspan(start, end, color='#FFD740', alpha=0.35)
+            ax.axvspan(start, end, color='#FFD740', alpha=0.15)
+
+        # Onset ratio trace (primary signal)
+        ratio = self.event_harmonic_ratio[:n]
+        ax.plot(t, ratio, color='#00E5FF', linewidth=1.2, alpha=0.9, label='Onset/median ratio')
+
+        # Threshold lines
+        ax.axhline(y=primary_ratio, color='#FF5252', linewidth=0.8, linestyle='--', alpha=0.6)
+        ax.axhline(y=lenient_ratio, color='#FF9100', linewidth=0.8, linestyle=':', alpha=0.5)
+        ax.text(self.duration * 0.99, primary_ratio, 'primary', ha='right', va='bottom',
+                fontsize=6, color='#FF5252', alpha=0.7)
+        ax.text(self.duration * 0.99, lenient_ratio, 'lenient', ha='right', va='bottom',
+                fontsize=6, color='#FF9100', alpha=0.6)
+
         ax.set_xlim([0, self.duration])
-        ax.set_yticks([])
-        n = len(self.event_harmonic)
-        ax.set_title(f'Harmonic — {n} detected  '
-                     f'(onset strength <10% of max for >1s)', fontsize=11)
-        ax.legend([plt.Rectangle((0, 0), 1, 1, fc='#FFD740', alpha=0.35)],
-                  ['Harmonic (sustained tonal, no percussive attacks)'],
+        ax.set_ylim([0, max(2.0, np.percentile(ratio, 99) * 1.1)])
+        ax.set_ylabel('Onset/Median Ratio', color='#00E5FF')
+        ax.tick_params(axis='y', labelcolor='#00E5FF')
+
+        # Spectral flatness on twin y-axis
+        ax2 = ax.twinx()
+        flatness = self.event_harmonic_flatness[:n]
+        ax2.plot(t, flatness, color='#E040FB', linewidth=1.0, alpha=0.7, label='Spectral flatness')
+        ax2.axhline(y=0.15, color='#E040FB', linewidth=0.5, linestyle=':', alpha=0.4)
+        ax2.set_ylabel('Spectral Flatness', color='#E040FB')
+        ax2.tick_params(axis='y', labelcolor='#E040FB')
+
+        nh = len(self.event_harmonic)
+        harmonic_dur = sum(e - s for s, e in self.event_harmonic)
+        ax.set_title(f'Harmonic — {nh} spans ({harmonic_dur:.1f}s)  '
+                     f'(onset < local median + flatness corroboration)', fontsize=11)
+
+        lines1 = [plt.Line2D([0], [0], color='#00E5FF', linewidth=1.2),
+                   plt.Line2D([0], [0], color='#E040FB', linewidth=1.0),
+                   plt.Rectangle((0, 0), 1, 1, fc='#FFD740', alpha=0.15)]
+        ax.legend(lines1, ['Onset/median ratio', 'Spectral flatness', 'Harmonic span'],
                   loc='upper right', framealpha=0.8, fontsize=8)
-        ax.grid(True, axis='x', alpha=0.2)
+        ax.grid(True, alpha=0.2)
+        self._overlay_sections(ax)
         if not hasattr(self, 'axes'):
             self.axes = []
         self.axes.append(ax)

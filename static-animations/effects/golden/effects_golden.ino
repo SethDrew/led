@@ -50,12 +50,11 @@
 #include "EnhancedCrawlForeground.h"
 #include "FragmentationForeground.h"
 #include "DriftingDecayForeground.h"
-// #include "MagmaSparklesForeground.h"  // File missing
+#include "MagmaSparklesForeground.h"
 
 // ===== HARDWARE CONFIGURATION =====
 
 #define LED_PIN 12
-#define POT_PIN A3  // Pot for speed control
 
 // NUM_PIXELS can be set via build flags (see platformio.ini)
 // Default to 25 for Wokwi simulation if not defined
@@ -63,11 +62,7 @@
 #define NUM_PIXELS 25
 #endif
 
-#ifndef COLOR_ORDER
-#define COLOR_ORDER NEO_GRB
-#endif
-
-Adafruit_NeoPixel strip(NUM_PIXELS, LED_PIN, COLOR_ORDER + NEO_KHZ800);
+Adafruit_NeoPixel strip(NUM_PIXELS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 // ===== RENDERING PARAMETERS =====
 
@@ -103,16 +98,11 @@ void applyBrightness(uint8_t buffer[][3], float brightness) {
 }
 
 void applyMinThreshold(uint8_t buffer[][3], int minValue) {
-  // Per-pixel threshold: if brightest channel is below min, zero the pixel.
-  // Prevents per-channel snapping that causes color shift artifacts.
   for (int i = 0; i < NUM_PIXELS; i++) {
-    uint8_t maxCh = buffer[i][0];
-    if (buffer[i][1] > maxCh) maxCh = buffer[i][1];
-    if (buffer[i][2] > maxCh) maxCh = buffer[i][2];
-    if (maxCh < minValue) {
-      buffer[i][0] = 0;
-      buffer[i][1] = 0;
-      buffer[i][2] = 0;
+    for (int c = 0; c < 3; c++) {
+      if (buffer[i][c] > 0 && buffer[i][c] < minValue) {
+        buffer[i][c] = minValue;
+      }
     }
   }
 }
@@ -141,18 +131,6 @@ void renderLayeredFrame(BackgroundEffect* bg, ForegroundEffect* fg) {
 void nebulaStarsAnimation() {
   static NebulaBackground bg(NUM_PIXELS);
   static CrawlingStarsForeground fg(NUM_PIXELS, 5, 7.0, 0.3);
-
-  // Pot controls crawler speed: 0.05 (slow) to 1.5 (fast)
-  // Smoothed + deadband to avoid jitter-driven velocity drift
-  static float smoothed = analogRead(POT_PIN);
-  static int lastMapped = -1;
-  smoothed += (analogRead(POT_PIN) - smoothed) * 0.05;
-  int mapped = (int)(smoothed + 0.5);
-  if (abs(mapped - lastMapped) > 3) {
-    lastMapped = mapped;
-    float speed = 0.05 + (mapped / 1023.0) * 1.45;
-    fg.setSpeed(speed);
-  }
 
   bg.update();
   fg.update();
@@ -238,8 +216,14 @@ void redSparksAnimation() {
 }
 
 // Example 10: Black background with red-magenta drifting sparkles
-// void magmaSparklesAnimation() {  // MagmaSparklesForeground.h missing
-// }
+void magmaSparklesAnimation() {
+  static SolidColorBackground bg(NUM_PIXELS, 0, 0, 0, 0.0);  // Black
+  static MagmaSparklesForeground fg(NUM_PIXELS, 8, 0.15);
+
+  bg.update();
+  fg.update();
+  renderLayeredFrame(&bg, &fg);
+}
 
 // ===== MAIN =====
 

@@ -58,7 +58,7 @@ public:
   void render(uint8_t buffer[][3], BlendMode blend = REPLACE) override {
     for (int i = 0; i < numPixels; i++) {
       // Create color variation based on position and time
-      float colorPhase = (float)i / numPixels * 3.14159 * 2.0 + (float)frameCount * 0.03;
+      float colorPhase = (float)i / numPixels * 3.14159 * 2.0 + (float)frameCount * BREATH_FREQUENCY;
       float colorShift = 0.5 + 0.5 * sin(colorPhase);
 
       // Shift between pure blue and intense magenta

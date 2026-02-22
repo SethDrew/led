@@ -989,8 +989,11 @@ filePicker.addEventListener('change', () => {
 // ── Tabs ─────────────────────────────────────────────────────────
 
 const decompTabs = new Set(['stems', 'hpss', 'lab-repet', 'lab-nmf']);
-const decompDropdown = document.querySelector('.tab-dropdown');
+const eventsTabs = new Set(['events-a', 'events-b']);
+const decompDropdown = document.getElementById('decompDropdownToggle').parentElement;
 const decompToggle = document.getElementById('decompDropdownToggle');
+const eventsDropdown = document.getElementById('eventsDropdownToggle').parentElement;
+const eventsToggle = document.getElementById('eventsDropdownToggle');
 
 function updateTabUI() {
     document.querySelectorAll('.tabs > .tab').forEach(t => {
@@ -998,6 +1001,8 @@ function updateTabUI() {
     });
     // Decomposition dropdown: highlight toggle if a decomp sub-tab is active
     decompToggle.classList.toggle('active', decompTabs.has(currentTab));
+    // Events dropdown: highlight toggle if an events sub-tab is active
+    eventsToggle.classList.toggle('active', eventsTabs.has(currentTab));
     document.querySelectorAll('.tab-dropdown-item').forEach(t => {
         t.classList.toggle('active', t.dataset.tab === currentTab);
     });
@@ -1019,7 +1024,7 @@ function switchTab(tabId) {
 document.querySelectorAll('.tabs > .tab').forEach(tab => {
     tab.addEventListener('click', () => {
         if (tab.classList.contains('disabled')) return;
-        if (tab.id === 'decompDropdownToggle') return; // handled separately
+        if (tab.id === 'decompDropdownToggle' || tab.id === 'eventsDropdownToggle') return; // handled separately
         switchTab(tab.dataset.tab);
     });
 });
@@ -1027,20 +1032,32 @@ document.querySelectorAll('.tabs > .tab').forEach(tab => {
 // Decomposition dropdown toggle
 decompToggle.addEventListener('click', (e) => {
     e.stopPropagation();
+    eventsDropdown.classList.remove('open');
     decompDropdown.classList.toggle('open');
 });
 
-// Decomposition dropdown item clicks
+// Events dropdown toggle
+eventsToggle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    decompDropdown.classList.remove('open');
+    eventsDropdown.classList.toggle('open');
+});
+
+// Dropdown item clicks (both decomp and events)
 document.querySelectorAll('.tab-dropdown-item').forEach(item => {
     item.addEventListener('click', (e) => {
         e.stopPropagation();
         decompDropdown.classList.remove('open');
+        eventsDropdown.classList.remove('open');
         switchTab(item.dataset.tab);
     });
 });
 
-// Close dropdown on outside click
-document.addEventListener('click', () => decompDropdown.classList.remove('open'));
+// Close dropdowns on outside click
+document.addEventListener('click', () => {
+    decompDropdown.classList.remove('open');
+    eventsDropdown.classList.remove('open');
+});
 
 // ── Panel loading ────────────────────────────────────────────────
 
@@ -1128,6 +1145,7 @@ async function loadPanel() {
         'lab': { label: 'Compute Lab', desc: 'Audio feature analysis', fn: loadLab, dropdown: true },
         'lab-repet': { label: 'Compute REPET', desc: 'Repeating pattern extraction', fn: loadLabRepet },
         'lab-nmf': { label: 'Compute NMF', desc: 'Non-negative matrix factorization separation', fn: loadLabNMF },
+        'freq-perception': { label: 'Compute Freq Perception', desc: 'Equal-loudness weighting at different listening levels', fn: loadFreqPerception },
     };
 
     if (currentTab === 'annotate') {
@@ -1154,14 +1172,16 @@ async function loadPanel() {
         return;
     }
 
-    if (currentTab === 'events') {
+    if (currentTab === 'events-a' || currentTab === 'events-b') {
+        const algo = currentTab === 'events-a' ? 'A (additive/strict)' : 'B (multiplicative/lenient)';
         document.getElementById('controlsHint').innerHTML =
             '<kbd>Space</kbd> play/pause &nbsp; <kbd>&larr;</kbd> <kbd>&rarr;</kbd> &plusmn;5s &nbsp; Click to seek &nbsp; ' +
-            'Drops &middot; Risers &middot; Dropouts &middot; Harmonic';
+            'Events ' + algo + ' &middot; Drops &middot; Risers &middot; Dropouts &middot; Harmonic';
         document.getElementById('stemStatus').style.display = 'none';
 
-        const url = '/api/render-events/' + encodeURIComponent(currentFile);
-        showOverlay('Rendering events...');
+        const suffix = currentTab === 'events-a' ? 'events-a' : 'events-b';
+        const url = '/api/render-' + suffix + '/' + encodeURIComponent(currentFile);
+        showOverlay('Rendering events ' + algo + '...');
         try {
             const result = await cachedFetchPNG(url);
             if (!result) { showOverlay('Render failed'); return; }
@@ -1324,9 +1344,13 @@ async function loadLab() {
     if (!currentFile) return;
     const v = LAB_VARIANTS.find(x => x.value === labVariant);
     showOverlay('Computing ' + (v ? v.label : 'lab') + '...');
-    const hint = labVariant === 'timbral'
-        ? 'MFCC 0-3 &middot; Fine Texture &middot; Timbral Shift'
-        : 'Spectral Flatness &middot; Chromagram &middot; Spectral Contrast &middot; ZCR';
+    const hintMap = {
+        'timbral': 'MFCC 0-3 &middot; Fine Texture &middot; Timbral Shift',
+        'misc': 'Spectral Flatness &middot; Chromagram &middot; Spectral Contrast &middot; ZCR',
+        'onset-absint': 'Onset Strength &middot; AbsIntegral &middot; Overlay &middot; Difference',
+        'zcr-genres': 'ZCR across Electronic &middot; Rock &middot; Hip-Hop &middot; Folk (FMA)',
+    };
+    const hint = hintMap[labVariant] || '';
     document.getElementById('controlsHint').innerHTML =
         '<kbd>Space</kbd> play/pause &nbsp; Click to seek &nbsp; ' + hint;
     document.getElementById('stemStatus').style.display = 'none';
@@ -1385,6 +1409,18 @@ async function loadLabRepet() {
     }
 }
 
+async function loadFreqPerception() {
+    if (!currentFile) return;
+    showOverlay('Computing frequency perception...');
+    const url = '/api/render-freq-perception/' + encodeURIComponent(currentFile);
+    const result = await cachedFetchPNG(url);
+    if (!result) { showOverlay('Render failed'); return; }
+    pixelMapping = result.pixelMapping;
+    panelImg.src = URL.createObjectURL(result.blob);
+    hideOverlay();
+    cursorLine.style.display = 'block';
+}
+
 // ── Overlay ──────────────────────────────────────────────────────
 
 function showOverlay(text) {
@@ -1407,6 +1443,8 @@ function hideOverlay() {
 const LAB_VARIANTS = [
     { value: 'timbral', label: 'Timbral Shape (MFCC)', desc: 'MFCC coefficients broken out — energy, tilt, curvature, texture, and timbral shift' },
     { value: 'misc', label: 'Misc (Chroma, Flatness, Contrast, ZCR)', desc: 'Spectral flatness, chromagram, spectral contrast, zero crossing rate' },
+    { value: 'onset-absint', label: 'Onset + AbsInt', desc: 'Onset strength vs absolute integral — comparing two beat-detection signals' },
+    { value: 'zcr-genres', label: 'ZCR Genre Comparison (FMA)', desc: 'Zero crossing rate compared across 4 genres from FMA dataset' },
 ];
 let labVariant = 'timbral';
 

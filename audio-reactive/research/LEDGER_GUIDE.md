@@ -68,44 +68,14 @@ Independent axes. Something can be:
 - **High both**: Core insights driving the project
 - **Low both**: Noted for completeness, not currently active
 
-## Adding Entries (Concurrent-Safe)
+## Adding Entries
 
-When multiple agents may be active, write session files instead of editing the ledger directly.
+Edit `ledger.yaml` directly. No session files — just append to the `entries:` list.
 
-1. Create: `audio-reactive/research/sessions/<date>-<brief-topic>.yaml`
-2. Use the same format with an `entries:` key
-3. Session files get merged into the main ledger later
+Before adding, check: is this new, should it update an existing entry, or is it a duplicate?
 
-Example session file:
-```yaml
-# Session: 2026-02-18 — Topology adjustments
-entries:
-  - id: gamma-height-curve
-    date: 2026-02-18
-    touched: 2026-02-18
-    title: Gamma curve for non-linear branch height mapping
-    summary: >
-      Added per-branch gamma to sculpture topology...
-    status: integrated
-    warmth: high
-    confidence: high
-    source: audio-reactive/hardware/sculptures.json
-    tags: [hardware, topology]
-    relates_to: [diamond-topology]
-    notes: >
-      Applied in runner.py apply_topology().
-```
-
-To UPDATE an existing entry's status/warmth/connections, add an update entry:
-```yaml
-  - id: update-some-entry-id
-    updates: some-entry-id
-    touched: 2026-02-18
-    status: validated        # only fields that changed
-    warmth: high
-    notes: >
-      Why the update — what happened this session.
-```
+To UPDATE an existing entry, edit it in place — change the `touched` date and whatever
+fields changed. Add a line to `notes` explaining what changed and why.
 
 ## Common Tags
 

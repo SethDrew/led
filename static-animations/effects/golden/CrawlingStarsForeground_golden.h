@@ -37,21 +37,6 @@ public:
     delete[] ledValues;
   }
 
-  void setSpeed(float s) {
-    if (s != speed && speed > 0.001) {
-      float scale = s / speed;
-      float invScale = speed / s;
-      for (int i = 0; i < 10; i++) {
-        if (!orbs[i].active) continue;
-        orbs[i].velocity *= scale;
-        // Scale remaining lifetime inversely so travel distance stays constant
-        float remaining = orbs[i].lifetime - orbs[i].age;
-        orbs[i].lifetime = orbs[i].age + remaining * invScale;
-      }
-    }
-    speed = s;
-  }
-
   void update() override {
     // Decay all LEDs (multiply by decay factor, similar to float version)
     // decayFactor = 1.0 - (1.0 / orbSize), converted to 8-bit integer math
@@ -69,19 +54,15 @@ public:
       if (orbs[i].active) activeCount++;
     }
 
-    // Spawn new orb — scale probability with speed to keep
-    // steady-state active count constant across speed range
-    int spawnChance = (int)(3 * speed / 0.3);
-    if (spawnChance < 1) spawnChance = 1;
-    if (spawnChance > 25) spawnChance = 25;
-    if (activeCount < maxOrbs && random(100) < spawnChance) {
+    // Spawn new orb
+    if (activeCount < maxOrbs && random(100) < 3) {
       for (int i = 0; i < 10; i++) {
         if (!orbs[i].active) {
           orbs[i].active = true;
           orbs[i].position = random(0, numPixels);
           orbs[i].velocity = (random(0, 2) == 0 ? 1 : -1) * speed * (0.5 + random(100) / 200.0);
           orbs[i].age = 0;
-          orbs[i].lifetime = (40 + random(100)) * (0.3 / speed);
+          orbs[i].lifetime = 40 + random(100);
           break;
         }
       }

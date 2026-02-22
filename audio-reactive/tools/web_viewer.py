@@ -1314,6 +1314,8 @@ def render_lab(filepath, variant='timbral'):
         return render_lab_onset_absint(filepath)
     if variant == 'zcr-genres':
         return render_lab_zcr_genres(filepath)
+    if variant == 'zcr-dataset':
+        return render_lab_zcr_dataset(filepath)
     return render_lab_timbral(filepath)
 
 
@@ -1633,6 +1635,7 @@ def render_lab_onset_absint(filepath):
 # ── FMA helpers ───────────────────────────────────────────────────────
 
 _fma_genre_tracks = None  # cached: [(genre, track_id, filepath), ...]
+_fma_zcr_data = None      # cached DataFrame: all FMA small ZCR + spectral features
 
 def _pick_fma_genre_tracks():
     """Pick one representative track per genre from 4 diverse FMA genres.
@@ -1797,6 +1800,225 @@ def render_lab_zcr_genres(filepath):
         'X-Right-Px': str(x_right),
         'X-Png-Width': str(fig_width),
         'X-Duration': str(max_duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
+
+
+def _load_fma_zcr_data():
+    """Load ZCR + spectral features for all FMA small tracks.
+
+    First call extracts from the 907MB features.csv and caches to a small CSV.
+    Subsequent calls load from cache (~200KB).
+    """
+    global _fma_zcr_data
+    if _fma_zcr_data is not None:
+        return _fma_zcr_data
+
+    import pandas as pd
+
+    fma_base = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            '..', 'research', 'datasets', 'fma')
+    cache_csv = os.path.join(fma_base, 'fma_zcr_cache.csv')
+
+    if os.path.exists(cache_csv):
+        print("[zcr-dataset] Loading from cache...")
+        _fma_zcr_data = pd.read_csv(cache_csv, index_col=0)
+        print(f"[zcr-dataset] {len(_fma_zcr_data)} tracks, "
+              f"{_fma_zcr_data['genre'].nunique()} genres")
+        return _fma_zcr_data
+
+    # First run: extract from full features.csv
+    print("[zcr-dataset] Extracting from features.csv (one-time, ~30s)...")
+    tracks_csv = os.path.join(fma_base, 'fma_metadata', 'tracks.csv')
+    features_csv = os.path.join(fma_base, 'fma_metadata', 'features.csv')
+
+    tracks = pd.read_csv(tracks_csv, index_col=0, header=[0, 1])
+    small = tracks[tracks[('set', 'subset')] == 'small']
+    genres = small[('track', 'genre_top')]
+
+    features = pd.read_csv(features_csv, index_col=0, header=[0, 1, 2])
+    common_ids = genres.index.intersection(features.index)
+    features = features.loc[common_ids]
+
+    result = pd.DataFrame(index=common_ids)
+    result['genre'] = genres.loc[common_ids]
+    for stat in ['mean', 'std', 'median', 'skew', 'kurtosis', 'min', 'max']:
+        result[f'zcr_{stat}'] = features[('zcr', stat, '01')].values
+    result['spectral_centroid'] = features[('spectral_centroid', 'mean', '01')].values
+    result['spectral_bandwidth'] = features[('spectral_bandwidth', 'mean', '01')].values
+    result['spectral_rolloff'] = features[('spectral_rolloff', 'mean', '01')].values
+    result['rmse'] = features[('rmse', 'mean', '01')].values
+    result = result.dropna()
+
+    result.to_csv(cache_csv)
+    print(f"[zcr-dataset] Cached {len(result)} tracks to {cache_csv}")
+    _fma_zcr_data = result
+    return result
+
+
+def render_lab_zcr_dataset(filepath):
+    """ZCR Dataset Analysis — zero crossing rate across ALL 8000 FMA Small tracks."""
+    cache_key = ('zcr-dataset', 'lab-zcr-dataset')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    import numpy as np
+    import matplotlib
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+    from scipy import stats as sp_stats
+
+    plt.style.use('dark_background')
+
+    df = _load_fma_zcr_data()
+
+    # Sort genres by median ZCR
+    genre_order = (df.groupby('genre')['zcr_mean']
+                   .median().sort_values().index.tolist())
+
+    # Distinct colors per genre
+    _palette_list = [
+        '#FF8A65', '#4DD0E1', '#B388FF', '#69F0AE',
+        '#FFD54F', '#F48FB1', '#CE93D8', '#4FC3F7',
+    ]
+    palette = {g: _palette_list[i % len(_palette_list)]
+               for i, g in enumerate(genre_order)}
+
+    fig = plt.figure(figsize=(20, 28))
+    gs = gridspec.GridSpec(3, 2, height_ratios=[2.2, 1.6, 0.7],
+                           hspace=0.32, wspace=0.28)
+
+    # ── Panel 1: Violin + strip by genre (full width) ──────────────────────
+    ax1 = fig.add_subplot(gs[0, :])
+    positions = list(range(len(genre_order)))
+    for i, genre in enumerate(genre_order):
+        data = df[df['genre'] == genre]['zcr_mean'].values
+        color = palette[genre]
+        parts = ax1.violinplot([data], positions=[i], showmedians=True,
+                               showmeans=False, showextrema=False,
+                               widths=0.75)
+        for pc in parts['bodies']:
+            pc.set_facecolor(color)
+            pc.set_alpha(0.45)
+        parts['cmedians'].set_color('white')
+        parts['cmedians'].set_linewidth(2)
+        # Jittered strip
+        jitter = np.random.default_rng(42).normal(0, 0.06, len(data))
+        ax1.scatter(i + jitter, data, color=color, alpha=0.12, s=6,
+                    zorder=2, edgecolors='none')
+    # Set limits first, then annotate
+    ymax = df['zcr_mean'].quantile(0.995) * 1.15
+    ax1.set_ylim(0, ymax)
+    for i, genre in enumerate(genre_order):
+        data = df[df['genre'] == genre]['zcr_mean'].values
+        med = np.median(data)
+        ax1.text(i, ymax * 0.91, f'n={len(data)}\nmed={med:.3f}',
+                 ha='center', va='bottom', fontsize=9, color='#bbb')
+
+    ax1.set_xticks(positions)
+    ax1.set_xticklabels(genre_order, fontsize=13, fontweight='bold')
+    ax1.set_ylabel('Mean ZCR per track', fontsize=12)
+    ax1.set_title(
+        f'Zero Crossing Rate across {len(df):,} FMA Small tracks — '
+        'sorted by median\n'
+        'Higher ZCR = more high-frequency energy (noise, cymbals, distortion)',
+        fontsize=13, pad=12)
+    ax1.grid(True, alpha=0.15, axis='y')
+
+    # ── Panel 2: ZCR vs Spectral Centroid (left) ───────────────────────────
+    ax2 = fig.add_subplot(gs[1, 0])
+    for genre in genre_order:
+        mask = df['genre'] == genre
+        ax2.scatter(df.loc[mask, 'zcr_mean'],
+                    df.loc[mask, 'spectral_centroid'],
+                    color=palette[genre], alpha=0.25, s=10, label=genre,
+                    edgecolors='none')
+    # Correlation
+    r_val, _ = sp_stats.pearsonr(df['zcr_mean'], df['spectral_centroid'])
+    z = np.polyfit(df['zcr_mean'], df['spectral_centroid'], 1)
+    x_fit = np.linspace(df['zcr_mean'].min(), df['zcr_mean'].max(), 100)
+    ax2.plot(x_fit, np.polyval(z, x_fit), '--', color='white', alpha=0.6,
+             linewidth=1.5)
+    ax2.text(0.97, 0.07, f'r = {r_val:.2f}', transform=ax2.transAxes,
+             ha='right', fontsize=14, color='white', fontweight='bold',
+             bbox=dict(boxstyle='round,pad=0.3', facecolor='#333', alpha=0.8))
+    ax2.set_xlabel('Mean ZCR', fontsize=11)
+    ax2.set_ylabel('Mean Spectral Centroid (Hz)', fontsize=11)
+    ax2.set_title('ZCR tracks spectral centroid — it measures brightness',
+                  fontsize=12)
+    ax2.legend(fontsize=7, loc='upper left', ncol=2, framealpha=0.5)
+    ax2.grid(True, alpha=0.15)
+
+    # ── Panel 3: ZCR mean vs std (right) ───────────────────────────────────
+    ax3 = fig.add_subplot(gs[1, 1])
+    for genre in genre_order:
+        mask = df['genre'] == genre
+        ax3.scatter(df.loc[mask, 'zcr_mean'], df.loc[mask, 'zcr_std'],
+                    color=palette[genre], alpha=0.25, s=10, label=genre,
+                    edgecolors='none')
+    ax3.set_xlabel('Mean ZCR (overall brightness)', fontsize=11)
+    ax3.set_ylabel('ZCR Std (within-track variability)', fontsize=11)
+    ax3.set_title(
+        'Texture consistency — low std = uniform texture throughout track',
+        fontsize=12)
+    ax3.legend(fontsize=7, loc='upper left', ncol=2, framealpha=0.5)
+    ax3.grid(True, alpha=0.15)
+
+    # ── Panel 4: Summary table + explainer (full width) ────────────────────
+    ax4 = fig.add_subplot(gs[2, :])
+    ax4.axis('off')
+
+    lines = []
+    hdr = (f"{'Genre':>15s} {'N':>6s} {'Mean':>8s} {'Median':>8s} "
+           f"{'Std':>8s} {'Range':>16s}")
+    lines.append(hdr)
+    lines.append('\u2500' * len(hdr))
+    for genre in genre_order:
+        g = df[df['genre'] == genre]['zcr_mean']
+        lines.append(
+            f"{genre:>15s} {len(g):>6d} {g.mean():>8.4f} {g.median():>8.4f} "
+            f"{g.std():>8.4f} [{g.min():.4f}, {g.max():.4f}]")
+
+    r_rms, _ = sp_stats.pearsonr(df['zcr_mean'], df['rmse'])
+    lines.append('')
+    lines.append(
+        f"ZCR\u2013centroid r={r_val:.2f} (strong)   "
+        f"ZCR\u2013loudness r={r_rms:.2f} (weak)   "
+        f"Total: {len(df):,} tracks")
+    lines.append('')
+    lines.append(
+        "ZCR counts waveform sign-changes per frame. It's a cheap proxy for "
+        "spectral brightness (high-freq energy).")
+    lines.append(
+        "High ZCR \u2192 noise, hi-hats, distortion, fricatives.  "
+        "Low ZCR \u2192 bass, clean tones, sub-bass.")
+    lines.append(
+        "For LEDs: ZCR is redundant if you already have FFT bands. "
+        "Spectral centroid is strictly better.")
+
+    stats_text = '\n'.join(lines)
+    ax4.text(0.03, 0.5, stats_text, transform=ax4.transAxes, fontsize=10,
+             fontfamily='monospace', verticalalignment='center', color='#ddd')
+
+    fig.suptitle(
+        'ZCR Dataset Analysis \u2014 what zero crossing rate tells us about music',
+        fontsize=16, fontweight='bold', y=0.995)
+    fig.subplots_adjust(top=0.97, bottom=0.02, left=0.06, right=0.97)
+    fig.canvas.draw()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=DPI, facecolor=fig.get_facecolor())
+    matplotlib.pyplot.close(fig)
+    png_bytes = buf.getvalue()
+
+    # No time axis for this dataset-level plot
+    headers = {
+        'X-Left-Px': '0',
+        'X-Right-Px': '0',
+        'X-Png-Width': str(fig.get_figwidth() * DPI),
+        'X-Duration': '0',
     }
 
     _render_cache[cache_key] = (png_bytes, headers)

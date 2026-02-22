@@ -12,3 +12,6 @@ How to map electronic drop structure to LED effects. Phase-by-phase strategies (
 
 ### HARMONIX_QUICKSTART.md
 Setup guide for the Harmonix Set (912 tracks, beat annotations). How to load JAMS files, extract beat times/segments, run validation. Priority track list and expected results by genre.
+
+### VJ_AUDIO_VISUAL_MAPPING.md
+How VJ systems map audio to visuals. The 6 visual parameters (brightness, color, speed, complexity, spatial position, rhythm sync) and their audio feature sources. Perceptual science (arousal-valence model), MER dimensions and real-time feasibility, proven smoothing/normalization constants. ZCR redundancy confirmed via FMA dataset (r=0.85 with spectral centroid).

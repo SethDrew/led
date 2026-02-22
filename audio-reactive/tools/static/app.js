@@ -988,16 +988,16 @@ filePicker.addEventListener('change', () => {
 
 // ── Tabs ─────────────────────────────────────────────────────────
 
-const decompTabs = new Set(['stems', 'hpss', 'lab-repet', 'lab-nmf']);
-const decompDropdown = document.getElementById('decompDropdownToggle').parentElement;
-const decompToggle = document.getElementById('decompDropdownToggle');
+const analysisTabs = new Set(['analysis', 'band-analysis', 'calculus', 'annotate', 'stems', 'hpss', 'lab-repet', 'lab-nmf', 'lab-timbral', 'lab-misc', 'lab-onset', 'lab-zcr', 'lab-zcr-dataset']);
+const analysisDropdown = document.getElementById('analysisDropdown');
+const analysisToggle = document.getElementById('analysisDropdownToggle');
 
 function updateTabUI() {
     document.querySelectorAll('.tabs > .tab').forEach(t => {
         t.classList.toggle('active', t.dataset.tab === currentTab);
     });
-    // Decomposition dropdown: highlight toggle if a decomp sub-tab is active
-    decompToggle.classList.toggle('active', decompTabs.has(currentTab));
+    // Analysis dropdown: highlight toggle if any analysis sub-tab is active
+    analysisToggle.classList.toggle('active', analysisTabs.has(currentTab));
     document.querySelectorAll('.tab-dropdown-item').forEach(t => {
         t.classList.toggle('active', t.dataset.tab === currentTab);
     });
@@ -1019,29 +1019,29 @@ function switchTab(tabId) {
 document.querySelectorAll('.tabs > .tab').forEach(tab => {
     tab.addEventListener('click', () => {
         if (tab.classList.contains('disabled')) return;
-        if (tab.id === 'decompDropdownToggle') return; // handled separately
+        if (tab.id === 'analysisDropdownToggle') return; // handled separately
         switchTab(tab.dataset.tab);
     });
 });
 
-// Decomposition dropdown toggle
-decompToggle.addEventListener('click', (e) => {
+// Analysis dropdown toggle
+analysisToggle.addEventListener('click', (e) => {
     e.stopPropagation();
-    decompDropdown.classList.toggle('open');
+    analysisDropdown.classList.toggle('open');
 });
 
 // Dropdown item clicks
 document.querySelectorAll('.tab-dropdown-item').forEach(item => {
     item.addEventListener('click', (e) => {
         e.stopPropagation();
-        decompDropdown.classList.remove('open');
+        analysisDropdown.classList.remove('open');
         switchTab(item.dataset.tab);
     });
 });
 
 // Close dropdowns on outside click
 document.addEventListener('click', () => {
-    decompDropdown.classList.remove('open');
+    analysisDropdown.classList.remove('open');
 });
 
 // ── Panel loading ────────────────────────────────────────────────
@@ -1127,9 +1127,13 @@ async function loadPanel() {
     const COMPUTE_TABS = {
         'stems': { label: 'Compute Stems (Demucs)', desc: 'Deep learning source separation — may take 30+ seconds', fn: loadStems },
         'hpss': { label: 'Compute HPSS', desc: 'Harmonic-percussive separation', fn: loadHPSS },
-        'lab': { label: 'Compute Lab', desc: 'Audio feature analysis', fn: loadLab, dropdown: true },
         'lab-repet': { label: 'Compute REPET', desc: 'Repeating pattern extraction', fn: loadLabRepet },
         'lab-nmf': { label: 'Compute NMF', desc: 'Non-negative matrix factorization separation', fn: loadLabNMF },
+        'lab-timbral': { label: 'Compute Timbral Shape', desc: 'MFCC coefficients — energy, tilt, curvature, texture, timbral shift', fn: () => loadLabVariant('timbral') },
+        'lab-misc': { label: 'Compute Misc', desc: 'Spectral flatness, chromagram, spectral contrast, ZCR', fn: () => loadLabVariant('misc') },
+        'lab-onset': { label: 'Compute Onset + AbsInt', desc: 'Onset strength vs absolute integral — comparing two beat-detection signals', fn: () => loadLabVariant('onset-absint') },
+        'lab-zcr': { label: 'Compute ZCR Genres', desc: 'Zero crossing rate compared across 4 genres from FMA dataset', fn: () => loadLabVariant('zcr-genres') },
+        'lab-zcr-dataset': { label: 'Compute ZCR Dataset', desc: 'ZCR across all 8000 FMA Small tracks — distributions, correlations, and texture', fn: () => loadLabVariant('zcr-dataset') },
     };
 
     if (currentTab === 'annotate') {
@@ -1205,7 +1209,7 @@ async function loadPanel() {
             return;
         }
         const info = COMPUTE_TABS[currentTab];
-        showComputePrompt(info.label, info.desc, info.fn, info.dropdown);
+        showComputePrompt(info.label, info.desc, info.fn);
         return;
     }
 
@@ -1301,23 +1305,23 @@ async function loadHPSS() {
     }
 }
 
-async function loadLab() {
+async function loadLabVariant(variant) {
     if (!currentFile) return;
-    const v = LAB_VARIANTS.find(x => x.value === labVariant);
-    showOverlay('Computing ' + (v ? v.label : 'lab') + '...');
     const hintMap = {
         'timbral': 'MFCC 0-3 &middot; Fine Texture &middot; Timbral Shift',
         'misc': 'Spectral Flatness &middot; Chromagram &middot; Spectral Contrast &middot; ZCR',
         'onset-absint': 'Onset Strength &middot; AbsIntegral &middot; Overlay &middot; Difference',
         'zcr-genres': 'ZCR across Electronic &middot; Rock &middot; Hip-Hop &middot; Folk (FMA)',
+        'zcr-dataset': 'ZCR distributions &middot; 8000 tracks &middot; Correlations &middot; All genres',
     };
-    const hint = hintMap[labVariant] || '';
+    showOverlay('Computing lab...');
+    const hint = hintMap[variant] || '';
     document.getElementById('controlsHint').innerHTML =
         '<kbd>Space</kbd> play/pause &nbsp; Click to seek &nbsp; ' + hint;
     document.getElementById('stemStatus').style.display = 'none';
 
     try {
-        const labUrl = '/api/lab/' + encodeURIComponent(currentFile) + '?variant=' + labVariant;
+        const labUrl = '/api/lab/' + encodeURIComponent(currentFile) + '?variant=' + variant;
         const result = await cachedFetchPNG(labUrl);
         if (!result) { showOverlay('Lab render failed'); return; }
         pixelMapping = result.pixelMapping;
@@ -1389,48 +1393,19 @@ function hideOverlay() {
     if (overlay) overlay.style.display = 'none';
 }
 
-const LAB_VARIANTS = [
-    { value: 'timbral', label: 'Timbral Shape (MFCC)', desc: 'MFCC coefficients broken out — energy, tilt, curvature, texture, and timbral shift' },
-    { value: 'misc', label: 'Misc (Chroma, Flatness, Contrast, ZCR)', desc: 'Spectral flatness, chromagram, spectral contrast, zero crossing rate' },
-    { value: 'onset-absint', label: 'Onset + AbsInt', desc: 'Onset strength vs absolute integral — comparing two beat-detection signals' },
-    { value: 'zcr-genres', label: 'ZCR Genre Comparison (FMA)', desc: 'Zero crossing rate compared across 4 genres from FMA dataset' },
-];
-let labVariant = 'timbral';
-
-function showComputePrompt(label, desc, fn, dropdown) {
+function showComputePrompt(label, desc, fn) {
     let overlay = viewer.querySelector('.overlay');
     if (!overlay) {
         overlay = document.createElement('div');
         overlay.className = 'overlay';
         viewer.appendChild(overlay);
     }
-    let dropdownHtml = '';
-    if (dropdown) {
-        const options = LAB_VARIANTS.map(v =>
-            `<option value="${v.value}"${v.value === labVariant ? ' selected' : ''}>${v.label}</option>`
-        ).join('');
-        dropdownHtml = `<select id="labVariantSelect" style="
-            margin-bottom:12px; padding:8px 12px; font-size:14px;
-            background:#222; color:#eee; border:1px solid #555; border-radius:6px;
-            cursor:pointer; width:100%; max-width:400px;
-        ">${options}</select>`;
-        desc = LAB_VARIANTS.find(v => v.value === labVariant).desc;
-    }
     overlay.innerHTML = `
         <div class="compute-prompt">
-            ${dropdownHtml}
             <button class="compute-btn" id="computeBtn">${label}</button>
             <p class="compute-desc" id="computeDesc">${desc}</p>
         </div>`;
     overlay.style.display = 'flex';
-    if (dropdown) {
-        const sel = document.getElementById('labVariantSelect');
-        sel.onchange = () => {
-            labVariant = sel.value;
-            const v = LAB_VARIANTS.find(x => x.value === labVariant);
-            document.getElementById('computeDesc').textContent = v ? v.desc : '';
-        };
-    }
     document.getElementById('computeBtn').onclick = () => {
         overlay.innerHTML = '<span class="overlay-text"></span>';
         fn();

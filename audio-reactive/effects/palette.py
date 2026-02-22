@@ -206,6 +206,14 @@ PALETTE_PRESETS = {
         ],
         gamma=0.6, brightness_cap=0.80, spatial_mode='fibonacci',
     ),
+    'energy_bloom': PaletteMap(
+        colors=[
+            [50,  15, 35],    # dusty mauve (quiet)
+            [160, 30, 70],    # warm rose (mid)
+            [255, 0,  120],   # vivid magenta (loud)
+        ],
+        gamma=0.7, brightness_cap=1.0, spatial_mode='uniform',
+    ),
     'fib_rainbow': PaletteMap(
         colors=[
             [255, 0,   0],

@@ -474,6 +474,7 @@ Quick-reference of what exists and where.
 | `longint_sections` | longint_sections.py | 80% long-horizon RMS + 20% bass absint | fib_orange_purple |
 | `tempo_pulse` | tempo_pulse.py | Free-running pulse at autocorrelation-estimated tempo | reds |
 | `bass_pulse` | bass_pulse.py | Half-wave-rectified spectral flux in bass band | amber |
+| `energy_color` | energy_color.py | Color vibrancy tracks RMS energy; muted mauve → vivid magenta | energy_bloom |
 
 **Full effects** (AudioReactiveEffect — own RGB rendering):
 
@@ -491,6 +492,7 @@ Quick-reference of what exists and where.
 | `band_prop` | band_prop.py | RGB channels = bass/mid/high absint |
 | `hpss_voices` | three_voices.py | Three depth-mapped layers via streaming HPSS |
 | `rap_pulse` | rap_pulse.py | Slow background pulse at 1/6th tempo |
+| `centroid_color` | centroid_color.py | Color temperature drifts warm/cool with spectral centroid; brightness from RMS |
 
 **WLED Sound Reactive reimplementations** (in `effects/wled_sr/`, no registry_name):
 

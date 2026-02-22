@@ -1468,7 +1468,7 @@ entries:
     status: exploring
     warmth: high
     confidence: medium
-    source: synchronicity-led/algorithms/per_band_normalization.md
+    source: audio-reactive/synchronicity-led/algorithms/per_band_normalization.md
     tags: [feature-extraction, effects, architecture, perception]
     relates_to: [equal-loudness-weighting-dead-end, rolling-integral-sustained-energy, airiness-context-deviation, accent-vs-groove-effects]
     notes: >
@@ -1631,15 +1631,44 @@ entries:
     status: spark
     warmth: medium
     confidence: low
-    source: audio-reactive/research/landscape/RESEARCH_AUDIO_VISUAL_MAPPING.md
+    source:
+      - audio-reactive/research/landscape/RESEARCH_AUDIO_VISUAL_MAPPING.md
+      - audio-reactive/synchronicity-led/library/VJ_AUDIO_VISUAL_MAPPING.md
     tags: [architecture, philosophy, future]
-    relates_to: [two-quality-axes, wled-sr-reimplemented, fluora-pixelair-prior-art]
+    relates_to: [two-quality-axes, wled-sr-reimplemented, fluora-pixelair-prior-art, zcr-redundant-with-fft]
     notes: >
       The two-quality-axes principle suggests this matters: VJ conventions are
       strong on mapping quality (proven visual patterns) even if decomposition
       quality is crude. Our calculus features may provide decomposition quality
       that VJ tools lack. The question is whether that decomposition advantage
       produces visibly better LEDs. Unresolved — needs A/B testing on hardware.
+      VJ mapping conventions now documented in library (6 visual parameters,
+      proven constants, perceptual science). No major VJ tool uses ZCR, MFCCs,
+      or spectral rolloff — their pipelines are FFT bands + RMS + beat detection.
+
+  - id: zcr-redundant-with-fft
+    date: 2026-02-21
+    touched: 2026-02-21
+    title: "ZCR is redundant — spectral centroid is strictly better"
+    summary: >
+      Zero crossing rate correlates with spectral centroid at r=0.85 across
+      8000 FMA Small tracks. ZCR is a cheap time-domain brightness proxy but
+      adds nothing if FFT is already available. No major VJ software exposes
+      ZCR. Genre separation exists but distributions overlap heavily.
+    status: validated
+    warmth: low
+    confidence: high
+    source: audio-reactive/synchronicity-led/library/VJ_AUDIO_VISUAL_MAPPING.md
+    tags: [audio-features, dead-end]
+    relates_to: [vj-conventions-reuse-question, two-quality-axes]
+    notes: >
+      Dataset-wide analysis (not anecdotal): computed ZCR stats for all 8000
+      FMA Small tracks using precomputed features.csv. Genre ranking by median
+      ZCR: Instrumental < Folk < Experimental < Pop < Electronic < International
+      < Hip-Hop < Rock. Electronic is mid-pack (synth brightness + hi-hats offset
+      bass), Rock highest (distortion = noise-like = high ZCR). ZCR-RMS correlation
+      is weak — brightness and loudness are independent. Only use case would be
+      on MCU without FFT capability, which doesn't apply to ESP32.
 
   - id: analysis-scripts-removed
     date: 2026-02-21
@@ -1649,7 +1678,7 @@ entries:
       Deleted analysis/scripts/ (32 scripts, ~12K LOC), analysis/taste/ (13 reports),
       analysis/algorithms/ (11 reports), analysis/harmonix/ (9 reports). All conclusions
       already captured in ledger entries. Three reference docs moved to
-      audio-reactive/synchronous-led/library/ (see INDEX.md there).
+      audio-reactive/synchronicity-led/library/ (see INDEX.md there).
     status: integrated
     warmth: low
     confidence: high
@@ -1661,5 +1690,5 @@ entries:
       redundant with ledger entries: taps-track-bass-peaks, airiness-context-deviation,
       flourish-ratio, flourish-audio-properties, derivatives-over-absolutes,
       build-taxonomy, beat-trackers-fail-dense-rock, bass-flux-electronic-failure,
-      harmonix-set-audit. Three reference docs preserved in synchronous-led/library/:
+      harmonix-set-audit. Three reference docs preserved in synchronicity-led/library/:
       LIBRARY_RESEARCH_SUMMARY.md, LED_MAPPING_GUIDE.md, HARMONIX_QUICKSTART.md.

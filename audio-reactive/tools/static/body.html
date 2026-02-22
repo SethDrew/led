@@ -30,20 +30,26 @@
 <div class="tabs">
     <div class="tab" data-tab="welcome" id="welcomeTab">Welcome</div>
     <div class="tab" data-tab="record">Record</div>
-    <div class="tab active" data-tab="analysis">Analysis</div>
-    <div class="tab" data-tab="band-analysis">Band Analysis</div>
-    <div class="tab" data-tab="calculus">Calculus</div>
-    <div class="tab" data-tab="annotate">Annotate</div>
-    <div class="tab-dropdown">
-        <div class="tab" id="decompDropdownToggle">Decomposition &#9662;</div>
-        <div class="tab-dropdown-menu" id="decompDropdownMenu">
+    <div class="tab-dropdown" id="analysisDropdown">
+        <div class="tab" id="analysisDropdownToggle">Analysis &#9662;</div>
+        <div class="tab-dropdown-menu" id="analysisDropdownMenu">
+            <div class="tab-dropdown-item" data-tab="analysis">Overview</div>
+            <div class="tab-dropdown-item" data-tab="band-analysis">Band</div>
+            <div class="tab-dropdown-item" data-tab="calculus">Calculus</div>
+            <div class="tab-dropdown-item" data-tab="annotate">Annotate</div>
+            <div class="tab-dropdown-divider">Decomposition</div>
             <div class="tab-dropdown-item" data-tab="stems">Demucs</div>
             <div class="tab-dropdown-item" data-tab="hpss">HPSS</div>
             <div class="tab-dropdown-item" data-tab="lab-repet">REPET</div>
             <div class="tab-dropdown-item" data-tab="lab-nmf">NMF</div>
+            <div class="tab-dropdown-divider">Lab</div>
+            <div class="tab-dropdown-item" data-tab="lab-timbral">Timbral Shape</div>
+            <div class="tab-dropdown-item" data-tab="lab-misc">Misc</div>
+            <div class="tab-dropdown-item" data-tab="lab-onset">Onset + AbsInt</div>
+            <div class="tab-dropdown-item" data-tab="lab-zcr">ZCR Genres</div>
+            <div class="tab-dropdown-item" data-tab="lab-zcr-dataset">ZCR Dataset (8k)</div>
         </div>
     </div>
-    <div class="tab" data-tab="lab">Lab</div>
     <div class="tab" data-tab="effects">Effects</div>
     <div class="tab" data-tab="reference">Reference</div>
 </div>

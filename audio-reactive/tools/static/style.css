@@ -41,6 +41,17 @@ body {
 }
 .tab-dropdown-item:hover { color: #ccc; background: #16213e; }
 .tab-dropdown-item.active { color: #e94560; }
+.tab-dropdown-divider {
+    padding: 6px 20px 2px;
+    font-size: 11px;
+    color: #555;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-top: 1px solid #333;
+    margin-top: 4px;
+    cursor: default;
+    pointer-events: none;
+}
 
 /* Auth UI */
 .auth-area { position: relative; margin-left: 12px; }

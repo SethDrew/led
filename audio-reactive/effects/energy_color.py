@@ -32,13 +32,15 @@ class EnergyColorEffect(ScalarSignalEffect):
 
     source_features = [
         {'id': 'rms_integral', 'label': 'RMS Integral (10s)', 'color': '#e94560'},
+        {'id': 'live_intensity', 'label': 'Live Intensity (palette input)', 'color': '#ffd740', 'normalized': True},
     ]
 
     # Rolling integral window
     WINDOW_SECONDS = 10.0
 
-    # Peak-decay normalization (~1 minute effective memory)
-    PEAK_DECAY = 0.9995  # ~46s half-life at 30fps
+    # Min-max decay normalization (~1 minute effective memory)
+    PEAK_DECAY = 0.9995   # ceiling: instant attack, slow decay (~46s half-life at 43Hz)
+    FLOOR_RISE = 0.9995   # floor: instant drop, slow rise (same time constant)
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
@@ -51,8 +53,9 @@ class EnergyColorEffect(ScalarSignalEffect):
         self.ring_pos = 0
         self.ring_sum = 0.0
 
-        # Peak-decay reference
-        self.peak = 1e-10
+        # Min-max references (ceiling + floor)
+        self.ceiling = 1e-10
+        self.floor = 0.0
 
         # Smoothed output for render
         self.normalized = 0.0
@@ -80,9 +83,17 @@ class EnergyColorEffect(ScalarSignalEffect):
 
         integral = max(self.ring_sum, 0.0)
 
-        # Peak-decay normalization
-        self.peak = max(integral, self.peak * self.PEAK_DECAY)
-        normalized = integral / self.peak if self.peak > 1e-10 else 0.0
+        # Ceiling: instant attack, slow decay (tracks recent max)
+        self.ceiling = max(integral, self.ceiling * self.PEAK_DECAY)
+        # Floor: instant drop, slow rise (tracks recent min)
+        if integral < self.floor:
+            self.floor = integral
+        else:
+            self.floor += (integral - self.floor) * (1 - self.FLOOR_RISE)
+
+        # Normalize to full [0, 1] using dynamic range
+        span = self.ceiling - self.floor
+        normalized = (integral - self.floor) / span if span > 1e-10 else 0.0
 
         with self._lock:
             self.normalized = normalized
@@ -98,12 +109,15 @@ class EnergyColorEffect(ScalarSignalEffect):
         return self.intensity
 
     def get_source_values(self) -> dict:
-        # Raw integral — caller normalizes for display
-        return {'rms_integral': float(max(self.ring_sum, 0.0))}
+        return {
+            'rms_integral': float(max(self.ring_sum, 0.0)),
+            'live_intensity': float(self.intensity),
+        }
 
     def get_diagnostics(self) -> dict:
         return {
             'intensity': f'{self.intensity:.2f}',
             'integral': f'{self.ring_sum:.3f}',
-            'peak': f'{self.peak:.3f}',
+            'ceiling': f'{self.ceiling:.3f}',
+            'floor': f'{self.floor:.3f}',
         }

@@ -2,7 +2,7 @@
 Centroid Color — color temperature tracks spectral centroid.
 
 Maps spectral centroid (timbral brightness) to color temperature:
-low centroid (bass-heavy) → warm red/orange, high centroid (bright/airy) →
+low centroid (bass-heavy) → warm red/orange, high centroid (bright/treble-heavy) →
 cool blue. Brightness from smoothed RMS.
 
 VJ prior art: spectral centroid → color temperature is the most validated

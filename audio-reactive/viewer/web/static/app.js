@@ -72,9 +72,18 @@ const cacheDB = (() => {
     };
 })();
 
+let _currentFetchController = null;
+
 async function cachedFetchPNG(url) {
+    // Abort any in-flight render fetch so the server connection is freed
+    if (_currentFetchController) _currentFetchController.abort();
+    const controller = new AbortController();
+    _currentFetchController = controller;
+
     const cached = await cacheDB.get(url);
     if (cached) {
+        // Clear controller if this fetch is still current
+        if (_currentFetchController === controller) _currentFetchController = null;
         return {
             blob: new Blob([cached.png], {type: 'image/png'}),
             pixelMapping: cached.pixelMapping
@@ -84,7 +93,7 @@ async function cachedFetchPNG(url) {
     // Bypass browser HTTP cache — our IndexedDB layer is the cache;
     // without this, Cache-Control: max-age=3600 serves stale PNGs
     // after annotations are saved and IndexedDB is cleared.
-    const resp = await fetch(url, { cache: 'no-cache' });
+    const resp = await fetch(url, { cache: 'no-cache', signal: controller.signal });
     if (!resp.ok) return null;
 
     const pm = {
@@ -98,6 +107,7 @@ async function cachedFetchPNG(url) {
 
     await cacheDB.put(url, { png: buf, pixelMapping: pm });
 
+    if (_currentFetchController === controller) _currentFetchController = null;
     return { blob, pixelMapping: pm };
 }
 
@@ -1157,7 +1167,7 @@ async function loadPanel() {
             hideOverlay();
             cursorLine.style.display = 'block';
         } catch (e) {
-            if (gen !== renderGen) return;
+            if (e.name === 'AbortError' || gen !== renderGen) return;
             showOverlay('Error: ' + e.message);
         }
         return;
@@ -1180,7 +1190,7 @@ async function loadPanel() {
             hideOverlay();
             cursorLine.style.display = 'block';
         } catch (e) {
-            if (gen !== renderGen) return;
+            if (e.name === 'AbortError' || gen !== renderGen) return;
             showOverlay('Error: ' + e.message);
         }
         return;
@@ -1203,7 +1213,7 @@ async function loadPanel() {
             hideOverlay();
             cursorLine.style.display = 'block';
         } catch (e) {
-            if (gen !== renderGen) return;
+            if (e.name === 'AbortError' || gen !== renderGen) return;
             showOverlay('Error: ' + e.message);
         }
         return;
@@ -1243,7 +1253,7 @@ async function loadPanel() {
         hideOverlay();
         cursorLine.style.display = 'block';
     } catch (e) {
-        if (gen !== renderGen) return;
+        if (e.name === 'AbortError' || gen !== renderGen) return;
         showOverlay('Error: ' + e.message);
     }
 }
@@ -1280,7 +1290,7 @@ async function loadStems() {
         setupStemAudio(['drums', 'bass', 'vocals', 'other'],
                        '/audio/separated/htdemucs/' + stemName + '/');
     } catch (e) {
-        if (gen !== renderGen) return;
+        if (e.name === 'AbortError' || gen !== renderGen) return;
         showOverlay('Error: ' + e.message);
     }
 }
@@ -1316,7 +1326,7 @@ async function loadHPSS() {
         setupStemAudio(['harmonic', 'percussive'],
                        '/audio/separated/hpss/' + stemName + '/');
     } catch (e) {
-        if (gen !== renderGen) return;
+        if (e.name === 'AbortError' || gen !== renderGen) return;
         showOverlay('Error: ' + e.message);
     }
 }
@@ -1345,7 +1355,7 @@ async function loadLabVariant(variant) {
         hideOverlay();
         cursorLine.style.display = 'block';
     } catch (e) {
-        if (gen !== renderGen) return;
+        if (e.name === 'AbortError' || gen !== renderGen) return;
         showOverlay('Error: ' + e.message);
     }
 }
@@ -1369,7 +1379,7 @@ async function loadLabNMF() {
         setupStemAudio(['drums', 'bass', 'vocals', 'other'],
                        '/audio/separated/nmf/' + stemName + '/');
     } catch (e) {
-        if (gen !== renderGen) return;
+        if (e.name === 'AbortError' || gen !== renderGen) return;
         showOverlay('Error: ' + e.message);
     }
 }
@@ -1392,7 +1402,7 @@ async function loadLabRepet() {
         setupStemAudio(['repeating', 'non-repeating'],
                        '/audio/separated/repet/' + stemName + '/');
     } catch (e) {
-        if (gen !== renderGen) return;
+        if (e.name === 'AbortError' || gen !== renderGen) return;
         showOverlay('Error: ' + e.message);
     }
 }
@@ -2750,18 +2760,39 @@ function showEffectsList() {
 // ── Feature Canvas Drawing ──────────────────────────────────────
 
 function drawStaticFeatureCanvas(ctx, w, h, features, sourceMeta) {
+    const margin = 32;  // left margin for y-axis labels
+    const plotW = w - margin;
+
     ctx.fillStyle = '#0f0f1a';
     ctx.fillRect(0, 0, w, h);
 
     const n = features.length;
     if (n < 2) return;
 
+    // Y-axis scale
+    ctx.font = '10px SF Mono, Menlo, monospace';
+    ctx.fillStyle = '#555';
+    ctx.textAlign = 'right';
+    for (let v = 0; v <= 1.0; v += 0.25) {
+        const y = h - v * h;
+        ctx.fillText(v.toFixed(2), margin - 4, y + 3);
+        // Grid line
+        ctx.beginPath();
+        ctx.strokeStyle = '#1a2a4e';
+        ctx.lineWidth = 0.5;
+        ctx.moveTo(margin, y);
+        ctx.lineTo(w, y);
+        ctx.stroke();
+    }
+    ctx.textAlign = 'left';
+
+    // Feature lines
     sourceMeta.forEach(f => {
         ctx.beginPath();
         ctx.strokeStyle = f.color || '#888';
         ctx.lineWidth = 1.5;
         for (let i = 0; i < n; i++) {
-            const x = (i / (n - 1)) * w;
+            const x = margin + (i / (n - 1)) * plotW;
             const y = h - (features[i][f.id] || 0) * h;
             if (i === 0) ctx.moveTo(x, y);
             else ctx.lineTo(x, y);
@@ -2771,7 +2802,7 @@ function drawStaticFeatureCanvas(ctx, w, h, features, sourceMeta) {
 
     // Legend
     ctx.font = '11px -apple-system, system-ui, sans-serif';
-    let lx = 8;
+    let lx = margin + 4;
     sourceMeta.forEach(f => {
         ctx.fillStyle = f.color || '#888';
         ctx.fillRect(lx, 8, 14, 4);

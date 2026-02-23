@@ -73,8 +73,8 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 pip install demucs  # optional, for source separation
-cd audio-reactive/tools
-python segment.py web
+cd audio-reactive/viewer
+python explore.py
 ```
 
 ### Record system audio (macOS)
@@ -90,12 +90,14 @@ To hear the audio while recording, create a **Multi-Output Device** in Audio MID
 ## Project structure
 
 ```
-audio-reactive/
-  tools/          — segment.py CLI, web_viewer.py, viewer.py
-  effects/        — audio-reactive LED effects
-  research/       — analysis scripts, separation algorithms, datasets
-firmware/         — Arduino/ESP32 LED controller firmware
-static-animations/ — non-audio-reactive LED effects
+audio-reactive/           — synchronicity-led project
+  viewer/                 — explore.py CLI, viewer.py, web/ (deprecated)
+  effects/                — audio-reactive LED effects
+  hardware/               — sculptures.json, controllers.json
+  research/               — analysis scripts, ledger, datasets
+  ARCHITECTURE.md         — design space framework
+firmware/                 — Arduino/ESP32 LED controller firmware
+static-animations/        — non-audio-reactive LED effects
 ```
 
 ## Contact

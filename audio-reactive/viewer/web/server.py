@@ -5,9 +5,9 @@ Web-based audio analysis viewer.
 Browser-based replacement for the matplotlib viewer with perfect audio sync,
 three view tabs (Analysis, Annotations, Stems), and a file picker.
 
-Usage (via segment.py):
-    python segment.py web              # Opens browser, explore all files
-    python segment.py web --port 8080  # Fixed port
+Usage (via explore.py):
+    python explore.py                  # Opens browser, explore all files
+    python explore.py --port 8080      # Fixed port
 
 Architecture:
     Python server pre-renders analysis panels as PNGs using matplotlib Agg backend.
@@ -30,6 +30,7 @@ import threading
 import time
 import wave
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -39,8 +40,87 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 
-SEGMENTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'research', 'audio-segments')
+# Add parent dir (viewer/) to path so `from viewer import ...` still works
+_viewer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
+if _viewer_dir not in sys.path:
+    sys.path.insert(0, _viewer_dir)
+
+SEGMENTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'research', 'audio-segments')
 DPI = 100
+
+# ── Threading + subprocess rendering ──────────────────────────────────
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
+import multiprocessing as _mp
+
+_render_gen = 0
+_render_proc = None
+_render_pipe = None
+_render_lock = threading.Lock()
+_fork_ctx = _mp.get_context('fork')
+
+
+class RenderCancelled(Exception):
+    pass
+
+
+def _render_target(conn, func_name, func_args):
+    """Subprocess target: call the named render function, send result via pipe."""
+    try:
+        result = globals()[func_name](*func_args)
+        conn.send(result)
+    except Exception as e:
+        conn.send(e)
+    finally:
+        conn.close()
+
+
+def submit_render(func_name, func_args):
+    """Run a render in a forked subprocess. Kills any stale render first."""
+    global _render_gen, _render_proc, _render_pipe
+
+    with _render_lock:
+        _render_gen += 1
+        my_gen = _render_gen
+
+        # Kill stale render
+        if _render_proc is not None and _render_proc.is_alive():
+            _render_proc.kill()
+            _render_proc.join(timeout=5)
+        if _render_pipe is not None:
+            try: _render_pipe.close()
+            except OSError: pass
+
+        # Fork new render
+        parent_conn, child_conn = _fork_ctx.Pipe(duplex=False)
+        proc = _fork_ctx.Process(
+            target=_render_target,
+            args=(child_conn, func_name, func_args),
+            daemon=True,
+        )
+        proc.start()
+        child_conn.close()
+        _render_proc = proc
+        _render_pipe = parent_conn
+
+    # Wait outside lock so new requests can cancel us
+    proc.join(timeout=300)
+
+    if my_gen != _render_gen:
+        raise RenderCancelled()
+
+    try:
+        if parent_conn.poll():
+            result = parent_conn.recv()
+            if isinstance(result, Exception):
+                raise result
+            return result
+    except (EOFError, OSError):
+        raise RenderCancelled()
+
+    raise RenderCancelled()
 
 # ── Caches ────────────────────────────────────────────────────────────
 
@@ -62,13 +142,13 @@ _feature_meta = None  # list of {id, label, color} from runner's _meta line
 _feature_lock = threading.Lock()
 _feature_reader_thread = None
 
-EFFECTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'effects')
+EFFECTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'effects')
 
 # ── Controllers ──────────────────────────────────────────────────────
 
 def _load_controllers():
     """Load LED controller definitions from controllers.json."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'controllers.json')
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'hardware', 'controllers.json')
     try:
         with open(path) as f:
             return json.load(f)
@@ -118,7 +198,7 @@ _resolve_controller_ports(_controllers)
 
 def _load_sculptures():
     """Load sculpture definitions from hardware/sculptures.json."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'hardware', 'sculptures.json')
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'hardware', 'sculptures.json')
     try:
         with open(path) as f:
             return json.load(f)
@@ -175,8 +255,8 @@ def _source_hash():
     static_files = sorted(
         str(p) for p in Path(static_dir).glob('*') if p.is_file()
     ) if os.path.isdir(static_dir) else []
-    controllers_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'controllers.json')
-    sculptures_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'hardware', 'sculptures.json')
+    controllers_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'hardware', 'controllers.json')
+    sculptures_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'hardware', 'sculptures.json')
     for path in [__file__, controllers_file, sculptures_file] + static_files + sorted(
         str(p) for p in Path(EFFECTS_DIR).glob('*.py') if p.is_file()
     ):
@@ -824,6 +904,7 @@ def render_single_panel(filepath, panel_name):
 
     viz.fig.suptitle('', fontsize=1)
     viz.fig.set_figheight(4)
+
     viz.fig.canvas.draw()
 
     ax = viz.axes[0]
@@ -871,13 +952,13 @@ def render_stems(filepath):
 
     viz = StemVisualizer(filepath, stem_names, stems_playback, stems_mono)
 
-    # Remove matplotlib cursor lines
     for line in viz.cursor_lines:
         line.remove()
 
     filename = Path(filepath).name
     viz.fig.suptitle(f'{filename} — Stems', fontsize=14, fontweight='bold', y=0.995)
     viz.fig.subplots_adjust(top=0.975, bottom=0.02)
+
     viz.fig.canvas.draw()
 
     ax = viz.axes[0]
@@ -964,6 +1045,7 @@ def render_hpss(filepath):
     filename = Path(filepath).name
     viz.fig.suptitle(f'{filename} — HPSS', fontsize=14, fontweight='bold', y=0.995)
     viz.fig.subplots_adjust(top=0.975, bottom=0.02)
+
     viz.fig.canvas.draw()
 
     ax = viz.axes[0]
@@ -3021,6 +3103,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_GET(self):
+        try:
+            self._do_GET()
+        except BrokenPipeError:
+            pass  # Client disconnected (e.g. AbortController)
+
+    def _do_GET(self):
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         query = parse_qs(parsed.query)
@@ -3197,12 +3285,21 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404, 'File not found')
             return
 
-        try:
-            png_bytes, headers = render_analysis(filepath, with_annotations, features)
-        except Exception as e:
-            print(f"[render] Error: {e}")
-            self.send_error(500, str(e))
-            return
+        tab = 'annotations' if with_annotations else 'analysis'
+        feat_key = frozenset(sorted(features.items())) if features else None
+        cache_key = (filepath, tab, feat_key)
+        if cache_key in _render_cache:
+            png_bytes, headers = _render_cache[cache_key]
+        else:
+            try:
+                png_bytes, headers = submit_render('render_analysis', (filepath, with_annotations, features))
+            except RenderCancelled:
+                return
+            except Exception as e:
+                print(f"[render] Error: {e}")
+                self.send_error(500, str(e))
+                return
+            _render_cache[cache_key] = (png_bytes, headers)
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3222,12 +3319,19 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404, 'File not found')
             return
 
-        try:
-            png_bytes, headers = render_annotate(filepath)
-        except Exception as e:
-            print(f"[render-annotate] Error: {e}")
-            self.send_error(500, str(e))
-            return
+        cache_key = (filepath, 'annotate')
+        if cache_key in _render_cache:
+            png_bytes, headers = _render_cache[cache_key]
+        else:
+            try:
+                png_bytes, headers = submit_render('render_annotate', (filepath,))
+            except RenderCancelled:
+                return
+            except Exception as e:
+                print(f"[render-annotate] Error: {e}")
+                self.send_error(500, str(e))
+                return
+            _render_cache[cache_key] = (png_bytes, headers)
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3246,12 +3350,19 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404, 'File not found')
             return
 
-        try:
-            png_bytes, headers = render_band_analysis(filepath)
-        except Exception as e:
-            print(f"[render-band-analysis] Error: {e}")
-            self.send_error(500, str(e))
-            return
+        cache_key = (filepath, 'band-analysis')
+        if cache_key in _render_cache:
+            png_bytes, headers = _render_cache[cache_key]
+        else:
+            try:
+                png_bytes, headers = submit_render('render_band_analysis', (filepath,))
+            except RenderCancelled:
+                return
+            except Exception as e:
+                print(f"[render-band-analysis] Error: {e}")
+                self.send_error(500, str(e))
+                return
+            _render_cache[cache_key] = (png_bytes, headers)
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3270,12 +3381,19 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404, 'File not found')
             return
 
-        try:
-            png_bytes, headers = render_calculus(filepath)
-        except Exception as e:
-            print(f"[render-calculus] Error: {e}")
-            self.send_error(500, str(e))
-            return
+        cache_key = (filepath, 'calculus')
+        if cache_key in _render_cache:
+            png_bytes, headers = _render_cache[cache_key]
+        else:
+            try:
+                png_bytes, headers = submit_render('render_calculus', (filepath,))
+            except RenderCancelled:
+                return
+            except Exception as e:
+                print(f"[render-calculus] Error: {e}")
+                self.send_error(500, str(e))
+                return
+            _render_cache[cache_key] = (png_bytes, headers)
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3294,15 +3412,22 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404, 'File not found')
             return
 
-        try:
-            png_bytes, headers = render_single_panel(filepath, panel_name)
-        except ValueError as e:
-            self._json_response({'error': str(e)}, status=400)
-            return
-        except Exception as e:
-            print(f"[render-panel] Error: {e}")
-            self.send_error(500, str(e))
-            return
+        cache_key = (filepath, 'panel', panel_name)
+        if cache_key in _render_cache:
+            png_bytes, headers = _render_cache[cache_key]
+        else:
+            try:
+                png_bytes, headers = submit_render('render_single_panel', (filepath, panel_name))
+            except RenderCancelled:
+                return
+            except ValueError as e:
+                self._json_response({'error': str(e)}, status=400)
+                return
+            except Exception as e:
+                print(f"[render-panel] Error: {e}")
+                self.send_error(500, str(e))
+                return
+            _render_cache[cache_key] = (png_bytes, headers)
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3345,12 +3470,19 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
 
-        try:
-            png_bytes, headers = render_stems(filepath)
-        except Exception as e:
-            print(f"[stems] Error: {e}")
-            self.send_error(500, str(e))
-            return
+        cache_key = (filepath, 'stems')
+        if cache_key in _render_cache:
+            png_bytes, headers = _render_cache[cache_key]
+        else:
+            try:
+                png_bytes, headers = submit_render('render_stems', (filepath,))
+            except RenderCancelled:
+                return
+            except Exception as e:
+                print(f"[stems] Error: {e}")
+                self.send_error(500, str(e))
+                return
+            _render_cache[cache_key] = (png_bytes, headers)
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3369,12 +3501,19 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
 
-        try:
-            png_bytes, headers = render_hpss(filepath)
-        except Exception as e:
-            print(f"[hpss] Error: {e}")
-            self.send_error(500, str(e))
-            return
+        cache_key = (filepath, 'hpss')
+        if cache_key in _render_cache:
+            png_bytes, headers = _render_cache[cache_key]
+        else:
+            try:
+                png_bytes, headers = submit_render('render_hpss', (filepath,))
+            except RenderCancelled:
+                return
+            except Exception as e:
+                print(f"[hpss] Error: {e}")
+                self.send_error(500, str(e))
+                return
+            _render_cache[cache_key] = (png_bytes, headers)
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3393,14 +3532,21 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
 
-        try:
-            png_bytes, headers = render_lab_nmf(filepath)
-        except Exception as e:
-            print(f"[lab-nmf] Error: {e}")
-            import traceback
-            traceback.print_exc()
-            self.send_error(500, str(e))
-            return
+        cache_key = (filepath, 'lab-nmf')
+        if cache_key in _render_cache:
+            png_bytes, headers = _render_cache[cache_key]
+        else:
+            try:
+                png_bytes, headers = submit_render('render_lab_nmf', (filepath,))
+            except RenderCancelled:
+                return
+            except Exception as e:
+                print(f"[lab-nmf] Error: {e}")
+                import traceback
+                traceback.print_exc()
+                self.send_error(500, str(e))
+                return
+            _render_cache[cache_key] = (png_bytes, headers)
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3419,12 +3565,19 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
 
-        try:
-            png_bytes, headers = render_lab_repet(filepath)
-        except Exception as e:
-            print(f"[lab-repet] Error: {e}")
-            self.send_error(500, str(e))
-            return
+        cache_key = (filepath, 'lab-repet')
+        if cache_key in _render_cache:
+            png_bytes, headers = _render_cache[cache_key]
+        else:
+            try:
+                png_bytes, headers = submit_render('render_lab_repet', (filepath,))
+            except RenderCancelled:
+                return
+            except Exception as e:
+                print(f"[lab-repet] Error: {e}")
+                self.send_error(500, str(e))
+                return
+            _render_cache[cache_key] = (png_bytes, headers)
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3443,12 +3596,19 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
 
-        try:
-            png_bytes, headers = render_lab(filepath, variant=variant)
-        except Exception as e:
-            print(f"[lab] Error: {e}")
-            self.send_error(500, str(e))
-            return
+        cache_key = (filepath, f'lab-{variant}')
+        if cache_key in _render_cache:
+            png_bytes, headers = _render_cache[cache_key]
+        else:
+            try:
+                png_bytes, headers = submit_render('render_lab', (filepath, variant))
+            except RenderCancelled:
+                return
+            except Exception as e:
+                print(f"[lab] Error: {e}")
+                self.send_error(500, str(e))
+                return
+            _render_cache[cache_key] = (png_bytes, headers)
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3533,7 +3693,7 @@ def run_server(port=0, host='127.0.0.1', no_browser=False):
     from datetime import datetime, timezone
     _server_start_iso = datetime.now(timezone.utc).isoformat()
 
-    server = HTTPServer((host, port), ViewerHandler)
+    server = ThreadedHTTPServer((host, port), ViewerHandler)
     actual_port = server.server_address[1]
 
     url = f'http://{host}:{actual_port}'

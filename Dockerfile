@@ -23,8 +23,9 @@ RUN pip install --no-cache-dir \
     matplotlib>=3.7.0
 
 # Copy application code
-COPY audio-reactive/tools/ /app/audio-reactive/tools/
+COPY audio-reactive/viewer/ /app/audio-reactive/viewer/
 COPY audio-reactive/effects/ /app/audio-reactive/effects/
+COPY audio-reactive/hardware/ /app/audio-reactive/hardware/
 COPY audio-reactive/research/separation/ /app/audio-reactive/research/separation/
 
 # Create audio directory (mount point for user's music)
@@ -34,5 +35,5 @@ RUN mkdir -p /app/audio-reactive/research/audio-segments
 EXPOSE 8080
 
 # Run the viewer
-WORKDIR /app/audio-reactive/tools
-CMD ["python", "segment.py", "web", "--port", "8080", "--host", "0.0.0.0"]
+WORKDIR /app/audio-reactive/viewer
+CMD ["python", "explore.py", "--port", "8080", "--host", "0.0.0.0"]

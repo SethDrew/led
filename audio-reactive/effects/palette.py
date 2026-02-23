@@ -61,10 +61,12 @@ class PaletteMap:
     """
 
     def __init__(self, colors, gamma=0.7, brightness_cap=1.0,
-                 spatial_mode='uniform', fill_from='start'):
+                 spatial_mode='uniform', fill_from='start',
+                 brightness_floor=0.25):
         self.colors = np.array(colors, dtype=np.float32)
         self.gamma = gamma
         self.brightness_cap = brightness_cap
+        self.brightness_floor = brightness_floor
         self.spatial_mode = spatial_mode
         self.fill_from = fill_from  # kept for serialization compat
 
@@ -110,7 +112,9 @@ class PaletteMap:
 
     def _colorize_uniform(self, intensity, num_leds):
         """All LEDs same color, sampled by intensity."""
-        b = min(intensity, 1.0) * self.brightness_cap
+        # Brightness: floor ensures low-intensity colors are visible
+        f = self.brightness_floor
+        b = (f + (1.0 - f) * min(intensity, 1.0)) * self.brightness_cap
         display_b = b ** self.gamma
         color = _sample_colors(self.colors, intensity)
         pixel = (color * display_b).clip(0, 255).astype(np.uint8)
@@ -120,7 +124,8 @@ class PaletteMap:
         """Per-LED color from fibonacci sections, uniform brightness."""
         if self._led_colors is None or len(self._led_colors) != num_leds:
             self.setup(num_leds)
-        b = min(intensity, 1.0) * self.brightness_cap
+        f = self.brightness_floor
+        b = (f + (1.0 - f) * min(intensity, 1.0)) * self.brightness_cap
         display_b = b ** self.gamma
         return (self._led_colors * display_b).clip(0, 255).astype(np.uint8)
 
@@ -242,6 +247,7 @@ def palette_to_dict(pal):
         'colors': pal.colors.astype(int).tolist(),
         'gamma': pal.gamma,
         'brightness_cap': pal.brightness_cap,
+        'brightness_floor': pal.brightness_floor,
         'spatial_mode': pal.spatial_mode,
         'fill_from': pal.fill_from,
     }
@@ -253,6 +259,7 @@ def _spec_to_palette(spec):
         colors=spec.get('colors', spec.get('palette', [[255, 255, 255]])),
         gamma=spec.get('gamma', 0.7),
         brightness_cap=spec.get('brightness_cap', 1.0),
+        brightness_floor=spec.get('brightness_floor', 0.25),
         spatial_mode=spec.get('spatial_mode', 'uniform'),
         fill_from=spec.get('fill_from', 'start'),
     )

@@ -107,7 +107,7 @@ Build vs climax has identical static features (RMS ±0.5%) but climax brightens 
 
 #### Key principle: context deviation
 
-All features are relative to a running baseline. The adaptation time constant IS the temporal scope. "Airy" is not a fixed spectral shape — it's deviation from the surrounding context's norm. (Ledger: `airiness-context-deviation`)
+All features are relative to a running baseline. The adaptation time constant IS the temporal scope. A subjective quality is not a fixed spectral shape — it's deviation from the surrounding context's norm. (Ledger: `airiness-context-deviation`)
 
 ### Axis 4: LED Behaviors
 
@@ -293,7 +293,7 @@ Precise definitions for terms used throughout the project so far. Prevents re-de
 
 **Derivatives vs absolutes:** Rate-of-change is the signal, not position. Build vs climax have identical RMS but climax brightens 58x faster. Always prefer `d(feature)/dt` over `feature`. (from `derivatives-over-absolutes`)
 
-**Context deviation:** Feelings are relative to surrounding context, not absolute acoustic properties. "Airy" is whatever deviates from the local norm. Use deviation-from-running-average, not fixed thresholds. (from `airiness-context-deviation`)
+**Context deviation:** Feelings are relative to surrounding context, not absolute acoustic properties. What feels "intense" or "sparse" depends on what surrounds it, not on fixed feature values. Use deviation-from-running-average, not fixed thresholds. (from `airiness-context-deviation`)
 
 **The two quality axes:** Audio decomposition quality (can we extract features?) and LED mapping quality (do the LEDs look/feel right?) are independent. WLED proves crude audio + great visuals = great product. (from `two-quality-axes`)
 
@@ -537,9 +537,9 @@ In `effects/feature_computer.py`:
 |---|---|---|
 | Research ledger | `research/ledger.yaml` | All findings, 100+ entries |
 | Ledger guide | `research/LEDGER_GUIDE.md` | Format and conventions |
-| This document | `synchronicity-led/ARCHITECTURE.md` | Design space framework |
-| Algorithm specs | `synchronicity-led/algorithms/` | Formal algorithm specifications |
-| Reference library | `synchronicity-led/library/` | Research summaries, guides (see INDEX.md) |
+| This document | `ARCHITECTURE.md` | Design space framework |
+| Algorithm specs | `algorithms/` | Formal algorithm specifications |
+| Reference library | `library/` | Research summaries, guides (see INDEX.md) |
 | Audio-visual mapping | `research/landscape/RESEARCH_AUDIO_VISUAL_MAPPING.md` | VJ prior art, constants, code snippets |
 | Audio analysis landscape | `research/landscape/RESEARCH_AUDIO_ANALYSIS.md` | MIR techniques survey |
 | ESP32 audio DSP | `research/landscape/ESP32_AUDIO_DSP.md` | Hardware constraints |

@@ -270,7 +270,7 @@ entries:
     status: integrated
     warmth: high
     confidence: high
-    source: audio-reactive/tools/segment.py
+    source: audio-reactive/viewer/explore.py
     tags: [source-separation, hpss, real-time, esp32]
     relates_to: [demucs-offline, hs-tasnet-future, band-zone-pulse-effect, hpss-vs-flux-empirical]
     notes: >
@@ -718,7 +718,7 @@ entries:
     status: exploring
     warmth: medium
     confidence: medium
-    source: audio-reactive/tools/viewer.py
+    source: audio-reactive/viewer/viewer.py
     tags: [feature-extraction, effects]
     relates_to: [build-taxonomy, derivatives-over-absolutes]
     notes: >
@@ -1429,7 +1429,7 @@ entries:
     status: validated
     warmth: low
     confidence: high
-    source: audio-reactive/tools/web_viewer.py
+    source: audio-reactive/viewer/web/server.py
     tags: [feature-extraction, perception, dead-end]
     relates_to: [perceptual-spectrum-preprocessing, continuous-perceptual-remap, excitation-pattern-future]
     notes: >
@@ -1467,7 +1467,7 @@ entries:
     status: exploring
     warmth: high
     confidence: high
-    source: audio-reactive/synchronicity-led/algorithms/per_band_normalization.md
+    source: audio-reactive/algorithms/per_band_normalization.md
     tags: [feature-extraction, effects, architecture, perception]
     relates_to: [equal-loudness-weighting-dead-end, rolling-integral-sustained-energy, airiness-context-deviation, accent-vs-groove-effects, normalization-prior-art-audit]
     notes: >
@@ -1498,7 +1498,7 @@ entries:
     status: validated
     warmth: medium
     confidence: high
-    source: audio-reactive/synchronicity-led/ARCHITECTURE.md
+    source: audio-reactive/ARCHITECTURE.md
     tags: [architecture, feature-extraction, philosophy]
     relates_to: [accent-vs-groove-effects, flourish-ratio, two-quality-axes]
     notes: >
@@ -1523,7 +1523,7 @@ entries:
     status: exploring
     warmth: medium
     confidence: medium
-    source: audio-reactive/synchronicity-led/ARCHITECTURE.md
+    source: audio-reactive/ARCHITECTURE.md
     tags: [feature-extraction, architecture, future]
     relates_to: [band-zone-pulse-effect, onset-vs-absint-comparison, signal-processing-tree]
     notes: >
@@ -1545,7 +1545,7 @@ entries:
     status: dead-end
     warmth: high
     confidence: high
-    source: audio-reactive/tools/viewer.py
+    source: audio-reactive/viewer/viewer.py
     tags: [architecture, effects, feature-extraction, future, dead-end]
     relates_to: [build-taxonomy, accent-vs-groove-effects, rolling-integral-sustained-energy]
     notes: >
@@ -1572,7 +1572,7 @@ entries:
     status: resonates
     warmth: high
     confidence: high
-    source: audio-reactive/synchronicity-led/ARCHITECTURE.md
+    source: audio-reactive/ARCHITECTURE.md
     tags: [architecture, feature-extraction, philosophy]
     relates_to: [airiness-context-deviation, per-band-normalization-with-dropout-handling, rolling-integral-sustained-energy]
     notes: >
@@ -1620,7 +1620,7 @@ entries:
     confidence: low
     source:
       - audio-reactive/research/landscape/RESEARCH_AUDIO_VISUAL_MAPPING.md
-      - audio-reactive/synchronicity-led/library/VJ_AUDIO_VISUAL_MAPPING.md
+      - audio-reactive/library/VJ_AUDIO_VISUAL_MAPPING.md
     tags: [architecture, philosophy, future]
     relates_to: [two-quality-axes, wled-sr-reimplemented, fluora-pixelair-prior-art, zcr-redundant-with-fft]
     notes: >
@@ -1645,7 +1645,7 @@ entries:
     status: validated
     warmth: low
     confidence: high
-    source: audio-reactive/synchronicity-led/library/VJ_AUDIO_VISUAL_MAPPING.md
+    source: audio-reactive/library/VJ_AUDIO_VISUAL_MAPPING.md
     tags: [audio-features, dead-end]
     relates_to: [vj-conventions-reuse-question, two-quality-axes]
     notes: >
@@ -1665,7 +1665,7 @@ entries:
       Deleted analysis/scripts/ (32 scripts, ~12K LOC), analysis/taste/ (13 reports),
       analysis/algorithms/ (11 reports), analysis/harmonix/ (9 reports). All conclusions
       already captured in ledger entries. Three reference docs moved to
-      audio-reactive/synchronicity-led/library/ (see INDEX.md there).
+      audio-reactive/library/ (see INDEX.md there).
     status: integrated
     warmth: low
     confidence: high
@@ -1677,7 +1677,7 @@ entries:
       redundant with ledger entries: taps-track-bass-peaks, airiness-context-deviation,
       flourish-ratio, flourish-audio-properties, derivatives-over-absolutes,
       build-taxonomy, beat-trackers-fail-dense-rock, bass-flux-electronic-failure,
-      harmonix-set-audit. Three reference docs preserved in synchronicity-led/library/:
+      harmonix-set-audit. Three reference docs preserved in library/:
       LIBRARY_RESEARCH_SUMMARY.md, LED_MAPPING_GUIDE.md, HARMONIX_QUICKSTART.md.
 
   - id: normalization-prior-art-audit

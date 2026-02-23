@@ -87,7 +87,7 @@ def load_sculpture(sculpture_id):
 
     with open(os.path.join(base_dir, 'hardware', 'sculptures.json')) as f:
         sculptures = json.load(f)
-    with open(os.path.join(base_dir, 'tools', 'controllers.json')) as f:
+    with open(os.path.join(base_dir, 'hardware', 'controllers.json')) as f:
         controllers = json.load(f)
 
     sculpture = next((s for s in sculptures if s['id'] == sculpture_id), None)
@@ -615,7 +615,11 @@ def analyze_effect(effect_name, wav_path, num_leds=NUM_LEDS, sample_rate=SAMPLE_
         source_meta = list(effect.source_features)
         feature_keys = [f['id'] for f in source_meta]
         # Normalize raw source values to 0-1 by global max per feature
+        # Skip features already marked as normalized (e.g. live_intensity)
+        pre_normalized = {fm['id'] for fm in source_meta if fm.get('normalized')}
         for key in feature_keys:
+            if key in pre_normalized:
+                continue
             global_max = max((f[key] for f in feat_list), default=0.0)
             if global_max > 1e-10:
                 for f in feat_list:

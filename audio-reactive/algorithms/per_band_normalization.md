@@ -20,7 +20,7 @@ Equal-loudness curves (A/C-weighting, ISO 226) applied to mastered music **doubl
 
 Raw bass energy is ~100x treble energy. Without normalization, bass always dominates. Normalizing each band against its own recent history puts all bands on a 0-1 scale where 1.0 = "loud for this band right now."
 
-This matches the "context deviation" principle — what matters is deviation from a band's own recent context, not absolute energy levels (ledger: `airiness-context-deviation`).
+This matches the "context deviation" principle — what matters is deviation from a band's own recent context, not absolute energy levels (ledger: `context-deviation`, originally `airiness-context-deviation`).
 
 ---
 

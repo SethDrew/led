@@ -9,9 +9,8 @@ where you can record feeling-based annotations while seeing the analysis.
 Annotations can be point taps (list of timestamps) or labeled segment spans
 (list of {start, end, label} dicts).
 
-Usage (via segment.py):
-    python segment.py play "Opiate Intro.wav"
-    python segment.py play "Opiate Intro.wav" --annotate beat
+Usage (via explore.py):
+    python explore.py
 
 Dependencies:
     pip install sounddevice soundfile numpy librosa matplotlib pyyaml

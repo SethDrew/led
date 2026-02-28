@@ -59,7 +59,7 @@ _render_gen = 0
 _render_proc = None
 _render_pipe = None
 _render_lock = threading.Lock()
-_fork_ctx = _mp.get_context('fork')
+_fork_ctx = _mp.get_context('spawn')
 
 
 class RenderCancelled(Exception):
@@ -105,20 +105,24 @@ def submit_render(func_name, func_args):
         _render_proc = proc
         _render_pipe = parent_conn
 
-    # Wait outside lock so new requests can cancel us
-    proc.join(timeout=300)
+    # Read result from pipe BEFORE joining (avoids deadlock when result
+    # exceeds the OS pipe buffer — child blocks on send, parent on join).
+    try:
+        if parent_conn.poll(timeout=300):
+            result = parent_conn.recv()
+        else:
+            raise RenderCancelled()
+    except (EOFError, OSError):
+        raise RenderCancelled()
+
+    proc.join(timeout=10)
 
     if my_gen != _render_gen:
         raise RenderCancelled()
 
-    try:
-        if parent_conn.poll():
-            result = parent_conn.recv()
-            if isinstance(result, Exception):
-                raise result
-            return result
-    except (EOFError, OSError):
-        raise RenderCancelled()
+    if isinstance(result, Exception):
+        raise result
+    return result
 
     raise RenderCancelled()
 
@@ -191,8 +195,12 @@ def _resolve_controller_ports(controllers):
             c['port'] = None
             print(f"[controllers] {c['name']}: not connected (vid={vid} pid={pid})")
 
-_controllers = _load_controllers()
-_resolve_controller_ports(_controllers)
+# Only run hardware init in the main process (spawned render children reimport this module)
+if _mp.current_process().name == 'MainProcess':
+    _controllers = _load_controllers()
+    _resolve_controller_ports(_controllers)
+else:
+    _controllers = []
 
 # ── Sculptures ──────────────────────────────────────────────────
 
@@ -244,7 +252,10 @@ def _build_output_targets(sculptures, controllers):
     return targets
 
 
-_sculptures = _load_sculptures()
+if _mp.current_process().name == 'MainProcess':
+    _sculptures = _load_sculptures()
+else:
+    _sculptures = []
 
 # ── Live reload (local dev only) ──────────────────────────────────────
 

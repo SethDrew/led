@@ -1,0 +1,48 @@
+# Lateralus 90-150s — Fibonacci vocals + meter spiral
+# Source: Dorhauer 2025, community analysis
+# Confidence: community (Fibonacci pattern is exact)
+
+meter_map:
+- start: 0.0
+  end: 7.0
+  time_sig: "4/4"
+  label: "verse continuation"
+- start: 7.0
+  end: 18.0
+  time_sig: "9/8"
+  label: "chorus meter 1"
+- start: 18.0
+  end: 26.0
+  time_sig: "8/8"
+  label: "chorus meter 2"
+- start: 26.0
+  end: 35.0
+  time_sig: "7/8"
+  label: "chorus meter 3"
+- start: 35.0
+  end: 45.0
+  time_sig: "9/8"
+  label: "chorus repeat"
+- start: 45.0
+  end: 53.0
+  time_sig: "8/8"
+  label: "chorus repeat"
+- start: 53.0
+  end: 60.0
+  time_sig: "7/8"
+  label: "chorus repeat"
+
+segments:
+- start: 0.0
+  end: 7.0
+  label: verse
+- start: 7.0
+  end: 60.0
+  label: chorus
+
+fibonacci_syllables:
+  description: "Vocal syllable counts per phrase follow Fibonacci sequence"
+  sequence: [1, 1, 2, 3, 5, 8, 5, 3, 2, 1, 1, 2, 3, 5, 8, 13, 8, 5, 3]
+  total_eighth_notes: 987
+  fibonacci_index: 16
+  note: "Voice entrance at 1:37 in full song = 1.618 minutes = golden ratio φ"

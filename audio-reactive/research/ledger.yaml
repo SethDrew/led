@@ -28,23 +28,25 @@ entries:
       First major insight. Changed thinking about all feature extraction.
       Validated on fa_br_drop1.wav. Needs testing on more songs.
 
-  - id: airiness-context-deviation
+  - id: feelings-are-contextual
     date: 2026-01-18
-    touched: 2026-02-10
-    title: "Airiness = deviation from local context"
+    touched: 2026-02-27
+    title: "Feelings are contextual — deviation from local norm, not absolute thresholds"
     summary: >
-      Two acoustically opposite moments both feel "airy" because both deviate
-      from surrounding music's norm. Use deviation-from-running-average,
-      not fixed thresholds.
+      Subjective musical qualities emerge from deviation from the surrounding
+      context, not from absolute acoustic properties. Use deviation-from-running-
+      average, not fixed thresholds.
     status: validated
     warmth: high
     confidence: high
     source: research/analysis/taste/air_feature_analysis.md
-    tags: [feature-extraction, airiness, context, feelings]
-    relates_to: [feeling-layer-human-loop]
+    tags: [feature-extraction, context, feelings, perception]
+    relates_to: [feeling-layer-human-loop, perception-is-layered-by-timescale]
     notes: >
-      Key principle: feelings are relative to context, not absolute acoustic
-      properties. Generalizes beyond airiness to other subjective qualities.
+      Feelings are relative to context, not absolute acoustic properties.
+      A synth pad feels "open" after a dense section but "flat" after silence.
+      The principle generalizes to all subjective qualities — they're
+      comparisons, not measurements.
 
   - id: taps-track-bass-peaks
     date: 2026-01-20
@@ -80,6 +82,39 @@ entries:
       Primer = cyclic ramps, sustained = upward trajectory, bridge = chaos,
       drop = sustained plateau. All phases independent, not sequential.
       Validated on fa_br_drop1.wav.
+
+  - id: energy-states-full-taxonomy
+    date: 2026-03-02
+    touched: 2026-03-02
+    title: "23+ distinct energy states exist beyond build/drop/breakdown, each with measurable acoustic correlates"
+    summary: >
+      Academic MIR research and production theory reveal far more than 3 energy
+      states. High-energy: drop/climax (sustained high RMS), bridge/chaos
+      (HIGHEST RMS + high flux), euphoria (high arousal + high valence),
+      aggression (high arousal + low valence). Medium-energy: sustained build
+      (positive RMS slope — critically, static features are nearly identical to
+      climax, only the derivative distinguishes them), groove (high onset density
+      + strong autocorrelation), accent (sparse transients), harmonic (sustained
+      chords). Low-energy: breakdown (band dropout), ambient (low density,
+      spatial), melancholy. Transitional: primer (cyclic ramps), riser
+      (frequency sweep), dropout-to-reintroduction, crescendo, section boundary.
+      Each state has specific acoustic correlates that can be measured in
+      real-time.
+    status: validated
+    warmth: high
+    confidence: high
+    source: ISMIR papers on structural segmentation, EDM drop detection, Russell's circumplex model (14k citations), Berkeley emotion research (13 emotions), Spotify audio features API, MIR toolkits (librosa, essentia, madmom)
+    tags: [audio-analysis, architecture, energy, emotion, feature-extraction]
+    relates_to: [derivatives-over-absolutes, feelings-are-contextual, perception-is-layered-by-timescale, build-taxonomy]
+    notes: >
+      The critical finding reinforcing derivatives-over-absolutes: build vs
+      climax have RMS within +/-0.5% but climax brightens 58x faster. Static
+      features fail to distinguish them — only the derivative works. Tension is
+      created by rising pitch, increasing density, filter opening, harmonic
+      dissonance, rhythmic acceleration, and increasing compression (dropping
+      crest factor). The adaptation time constant IS the temporal scope —
+      computing a feature relative to a 5-second running average means you're
+      operating at phrase scope.
 
   # ── Working Theories ─────────────────────────────────────────────
 
@@ -122,14 +157,14 @@ entries:
     touched: 2026-02-10
     title: Feeling layer needs human-in-the-loop
     summary: >
-      No library provides detect_airiness(). Features exist (centroid,
+      No library provides detect_feeling(). Features exist (centroid,
       flatness, RMS, HPSS) but mapping to feelings is subjective.
     status: resonates
     warmth: high
     confidence: medium
     source: []
     tags: [feelings, architecture, human-loop, art]
-    relates_to: [airiness-context-deviation, two-quality-axes]
+    relates_to: [feelings-are-contextual, two-quality-axes]
     notes: >
       Theory, not directly actionable yet. But this IS the core thesis —
       capturing feeling, not just volume. The whole point of the project.
@@ -430,6 +465,36 @@ entries:
       One of the first effects built. May need revisiting with newer
       understanding of feature extraction.
 
+  - id: particle-interaction-taxonomy
+    date: 2026-03-02
+    touched: 2026-03-02
+    title: "Nine interaction types for multi-entity effects on sculptures"
+    summary: >
+      Cataloged 9 ways entities (particles, orbs, organisms) can interact on a
+      sculpture: collision (merge/bounce/annihilate/spawn),
+      attraction/repulsion (gravity wells, flocking), communication (signal
+      propagation, chain reaction), competition (territorial expansion,
+      reaction-diffusion), symbiosis (mutual enhancement, resonance),
+      predator/prey (chase/consume), synchronization (Kuramoto model, firefly
+      sync), inheritance (parent spawns mutated children), decay/growth (aging,
+      seasons, lifecycle). Each maps to specific audio roles and sculpture
+      topologies. Tree topology is uniquely suited — trunk as gravity well,
+      branches as escape routes, junctions as collision points.
+    status: exploring
+    warmth: high
+    confidence: medium
+    source: particle systems literature, cellular automata, boids/flocking, Kuramoto model, reaction-diffusion systems
+    tags: [effects, particles, interactions, topology]
+    relates_to: [topology-native-effects-principle, input-role-taxonomy, sculpture-3d-vs-addressing-1d]
+    notes: >
+      Most interaction types require at minimum branch identity (already have)
+      and ideally 3D proximity (don't have yet). Synchronization is
+      particularly interesting — builds could drive coupling strength (entities
+      sync up during builds, desync during breakdowns), creating emergent order
+      from chaos that mirrors the musical tension/release arc. Competition maps
+      naturally to frequency bands competing for spatial territory on the
+      sculpture.
+
   # ── Architecture & Decisions ─────────────────────────────────────
 
   - id: nebula-pipeline-foundation
@@ -482,6 +547,70 @@ entries:
     relates_to: [wled-sr-reimplemented]
     notes: >
       Prevents premature coupling. Each pillar can evolve independently.
+
+  - id: input-role-taxonomy
+    date: 2026-03-02
+    touched: 2026-03-02
+    title: "Effects should declare abstract input ROLES (EVENT, RATE, INTENSITY, MOOD...) not specific signals"
+    summary: >
+      Every parameter an effect consumes can be described by an abstract role —
+      what KIND of input it needs — independent of which signal fills that role.
+      13 roles identified: EVENT (discrete trigger), RATE (cyclic speed),
+      INTENSITY (continuous level), MOOD (character/color quality), TRAJECTORY
+      (direction of change), TEXTURE (categorical character), NOVELTY (deviation
+      from context), DENSITY (how many things at once), SPACE (openness),
+      POSITION (spatial mapping), FAMILIARITY (recognition), SURPRISE
+      (unexpectedness of specific event), PHASE (position within cycle). Each
+      role operates at multiple timescales. Separating role from signal enables
+      swapping sources (audio features, user knobs, ML models, sensors) without
+      changing effect code.
+    status: exploring
+    warmth: high
+    confidence: medium
+    source: synthesis of LD/VJ research, MIR literature, and existing ARCHITECTURE.md principles
+    tags: [architecture, effects, abstraction, input-design]
+    relates_to: [two-quality-axes, perception-is-layered-by-timescale, derivatives-over-absolutes, feelings-are-contextual]
+    notes: >
+      This is the most architecturally significant finding of the session. The
+      role taxonomy creates a "routing table" between signals and effects — like
+      DAW sends. One signal can route to multiple roles at different gains, one
+      role can blend inputs from multiple signals. User knobs become just another
+      signal source. Key composition patterns: EVENT+INTENSITY+POSITION
+      (reactive sparkle), RATE+PHASE+MOOD (groove lock),
+      INTENSITY+TRAJECTORY+MOOD (section painting),
+      EVENT+SURPRISE+NOVELTY (intelligent reaction). TRAJECTORY is the critical
+      gap role — most effects don't consume it because the streaming section
+      detector doesn't exist yet.
+
+  - id: sculpture-3d-vs-addressing-1d
+    date: 2026-03-02
+    touched: 2026-03-02
+    title: "3D sculptures viewed from any angle are 2D screens — separate addressing (1D) from rendering (3D)"
+    summary: >
+      The 1D LED addressing constraint (strip index) is distinct from the 3D
+      rendering opportunity (sculpture in physical space). A 3D sculpture viewed
+      from any angle presents a 2D image — different viewers see different
+      projections. Effects already use height mapping from sculptures.json (NOT
+      raw strip index), but lack the lateral dimension (x,y positions). Adding
+      approximate 3D coordinates would unlock cross-branch spatial effects
+      (ripples, directional waves, proximity-based particle interactions) and
+      correct "1D adaptation" ratings — many effects rated poorly for 1D
+      actually work great on a 3D sculpture with spatial coordinates.
+    status: exploring
+    warmth: high
+    confidence: medium
+    source: analysis of sculptures.json topology data, review of effect spatial requirements
+    tags: [architecture, topology, 3d, spatial]
+    relates_to: [topology-native-effects-principle, input-role-taxonomy, diamond-topology]
+    notes: >
+      Three coordinate systems: Index space (1D array — hardware), Topology
+      space (branch-relative with height — current), World space (x,y,z
+      physical positions — missing). The tree sculpture has rich 3D structure
+      but only height is mapped. Adding x,y coordinates (photograph from two
+      angles, annotate key positions, interpolate) would unlock a whole class
+      of effects. Different viewing angles creating different visual
+      experiences is a feature unique to 3D sculptures — can't happen on a
+      flat screen.
 
   # ── Data & Methodology ───────────────────────────────────────────
 
@@ -585,6 +714,36 @@ entries:
     relates_to: []
     notes: >
       Guide and setup script already written. Just needs execution.
+
+  - id: signal-routing-ui-spark
+    date: 2026-03-02
+    touched: 2026-03-02
+    title: "Visual wire-patching UI for connecting signal sources to effect input roles"
+    summary: >
+      Imagined UI where users can connect different signal sources (audio
+      features, user knobs, ML models, sensors) to the 13 input roles like
+      patching cables in a modular synthesizer. Drag wires from signal outputs
+      to role inputs. Each connection can have a gain/scaling knob. Multiple
+      signals can blend into one role. One signal can fan out to multiple
+      roles. Presets save routing configurations. This makes the system a
+      creative instrument — the same effects with different signal routing
+      create fundamentally different shows.
+    status: spark
+    warmth: high
+    confidence: low
+    source: modular synthesis patching paradigm (Eurorack, VCV Rack, Max/MSP), DAW send/return architecture
+    tags: [ui, architecture, creative-tool, input-design, future]
+    relates_to: [input-role-taxonomy, two-quality-axes, feeling-layer-human-loop]
+    notes: >
+      This is the "human in the loop" interface for the feeling layer. Instead
+      of tweaking individual effect parameters, users patch WHICH signals drive
+      WHICH visual behaviors. A novice could use presets. An expert could
+      rewire onset->MOOD (making color follow transients) or centroid->EVENT
+      (making brightness spikes follow timbral shifts). The patching metaphor
+      naturally supports experimentation — try a connection, hear/see the
+      result, keep or discard. Future: could be a web UI, could be physical
+      patch cables on a hardware controller, could be automated by an ML
+      system that learns preferred routings.
 
   # ── Feb 18 session merges ────────────────────────────────────────
 
@@ -1469,7 +1628,7 @@ entries:
     confidence: high
     source: audio-reactive/algorithms/per_band_normalization.md
     tags: [feature-extraction, effects, architecture, perception]
-    relates_to: [equal-loudness-weighting-dead-end, rolling-integral-sustained-energy, airiness-context-deviation, accent-vs-groove-effects, normalization-prior-art-audit]
+    relates_to: [equal-loudness-weighting-dead-end, rolling-integral-sustained-energy, feelings-are-contextual, accent-vs-groove-effects, normalization-prior-art-audit]
     notes: >
       Evolved through three design phases:
       (1) Original: asymmetric EMA + constant decay + dropout freeze + reintroduction
@@ -1560,27 +1719,37 @@ entries:
       interpret and didn't effectively capture the event signals. The V:events
       toggle on the novelty panel remains as a placeholder for future work.
 
-  - id: adaptation-time-constant-is-temporal-scope
+  - id: perception-is-layered-by-timescale
     date: 2026-02-21
-    touched: 2026-02-21
-    title: "The adaptation time constant IS the temporal scope"
+    touched: 2026-02-28
+    title: "Perception is layered by timescale — each layer needs its own normalization"
     summary: >
-      To detect a phrase-level musical event, you need phrase-level memory.
-      The adaptation time constant of a feature's running baseline determines
-      what temporal scope of events it can detect. 150ms window → beat events.
-      5s window → phrase events. Slow-decay peak → song-level adaptation.
-    status: resonates
+      Listeners perceive multiple musical phenomena simultaneously, each
+      operating at a different timescale: transient attacks (<1s), rhythmic
+      patterns (~1-4s), phrase dynamics (~10s), section-level energy (~1min),
+      and whole-song arcs (~5min). These aren't just the same signal at
+      different zoom levels — they're different perceptual phenomena. A kick
+      drum hit, a 4-bar build, and a 5-minute crescendo are different things
+      you feel differently. A single normalization with one decay constant
+      can only serve one layer. Capturing what humans actually hear likely
+      requires multiple normalization techniques at multiple timescales,
+      possibly with fundamentally different algorithm structures per layer.
+    status: validated
     warmth: high
     confidence: high
-    source: audio-reactive/ARCHITECTURE.md
-    tags: [architecture, feature-extraction, philosophy]
-    relates_to: [airiness-context-deviation, per-band-normalization-with-dropout-handling, rolling-integral-sustained-energy]
+    source: [audio-reactive/ARCHITECTURE.md, audio-reactive/effects/energy_color.py]
+    tags: [architecture, feature-extraction, perception]
+    relates_to: [feelings-are-contextual, per-band-normalization-with-dropout-handling, rolling-integral-sustained-energy, normalization-events-separation, peak-decay-demand-charge-analogy]
     notes: >
-      Unifies several findings: airiness-as-context-deviation (feelings are relative
-      to running baseline), per-band normalization (adaptation rate shapes what events
-      register), rolling integral (5s window for phrase-level detection). The insight
-      is that these aren't separate design choices — they're all instances of the same
-      principle: memory horizon defines detection capability.
+      Concrete evidence: energy_color on 10-minute Chase & Status DnB with
+      peak-decay 0.9995 (~46s half-life) produces binary 0/100% — ceiling and
+      floor converge within a minute, erasing the multi-minute energy arc
+      entirely. The listener hears builds, plateaus, and drops spanning minutes
+      that the 46s window adapts away.
+      Implication: arc-level normalization might use no adaptive tracking at all
+      (raw integral with fixed reference), while beat-level needs fast peak-decay.
+      These may not even belong under the same "normalization" umbrella — they're
+      different operations serving different perceptual layers.
 
   - id: context-expensive-code-cheap
     date: 2026-02-21
@@ -1674,7 +1843,7 @@ entries:
     relates_to: [repo-discoverability]
     notes: >
       Everything recoverable from git history. Output report conclusions were
-      redundant with ledger entries: taps-track-bass-peaks, airiness-context-deviation,
+      redundant with ledger entries: taps-track-bass-peaks, feelings-are-contextual,
       flourish-ratio, flourish-audio-properties, derivatives-over-absolutes,
       build-taxonomy, beat-trackers-fail-dense-rock, bass-flux-electronic-failure,
       harmonix-set-audit. Three reference docs preserved in library/:
@@ -1729,7 +1898,7 @@ entries:
     confidence: high
     source: design conversation
     tags: [architecture, philosophy]
-    relates_to: [per-band-normalization-with-dropout-handling, normalization-prior-art-audit, adaptation-time-constant-is-temporal-scope, event-detection-viewer-only]
+    relates_to: [per-band-normalization-with-dropout-handling, normalization-prior-art-audit, perception-is-layered-by-timescale, event-detection-viewer-only]
     notes: >
       Emerged from trying to build dropout emphasis into the normalization
       algorithm (reference freeze, constant decay, recovery attack rates).
@@ -1760,3 +1929,570 @@ entries:
     source: design conversation
     tags: [architecture, analogy]
     relates_to: [per-band-normalization-with-dropout-handling]
+
+  - id: d2-spike-drop-detector
+    date: 2026-02-27
+    touched: 2026-02-27
+    title: "d² spike density of audio features correlates with perceived drops in DnB"
+    summary: >
+      Second derivative peak-spiking — regions where d² goes crazy relative to
+      surroundings — correlates with perceived "drops" in Chase & Status Boiler
+      Room DnB set. Observed first on onset strength d², then added absint d²
+      for comparison. Both show promise but appear to respond to different types
+      of drops: onset d² captures spectral-flux-driven transient explosions,
+      absint d² (which is already d¹ of RMS, integrated over 150ms) captures
+      broader energy-change accelerations. They're two lenses on the same
+      structural moment.
+    status: exploring
+    warmth: high
+    confidence: medium
+    source: [audio-reactive/viewer/viewer.py, audio-reactive/research/audio-segments/chase-status/]
+    tags: [feature-extraction, beat-detection, perception]
+    relates_to: [onset-vs-absint-comparison, edm-drop-detection-paper, derivatives-over-absolutes, perception-is-layered-by-timescale]
+    notes: >
+      The user observed onset d² "going crazy relative to what's around it"
+      maps to drops in DnB. Added absint d² panels to calculus tab
+      (calc-absint-d2, calc-absint-jitter) for side-by-side comparison.
+      The two signals are different: onset is per-frame spectral flux (sharp,
+      percussive), absint integrates |d(RMS)/dt| over 150ms (stickier, responds
+      to sustained energy shifts). Different drop types may favor one or the
+      other — a percussive DnB drop vs a trance-style energy swell landing
+      differently in each. Needs validation across genres and drop styles.
+      The Yadati 2014 EDM drop detection paper used SoundCloud timed comments
+      as ground truth — our approach is signal-only.
+
+  # ── Visual Design & Show Architecture ─────────────────────────────
+
+  - id: ld-vj-decision-decomposition
+    date: 2026-03-02
+    touched: 2026-03-02
+    title: "LD and VJ decisions decompose into discrete signal types at multiple timescales"
+    summary: >
+      Professional lighting designers and VJs don't just "feel" the music —
+      their intuitive decisions decompose into discrete signal responses at
+      specific timescales. LDs count 8-bar phrases, use modular building blocks
+      (not complete looks), think in energy states (low/medium/high/peak), and
+      make decisions at phrase boundaries. VJs think in compositional layers
+      (background/midground/foreground), hold states for 8-16 bars minimum, and
+      switch scenes at section boundaries. Both use a hybrid approach: automation
+      handles low-level sync (beat-locked effects), humans handle high-level
+      decisions (scene changes, narrative arc). The gap between automated and
+      human shows is at the phrase/section timescale — frame and beat level are
+      solved, arc level is too slow to matter moment-to-moment.
+    status: validated
+    warmth: high
+    confidence: high
+    source: web research — interviews with Steve Lieberman (SJ Lighting), Ross Chapple, Resolume/TouchDesigner/VDMX communities, ControlBooth forums, DJ Techtools, PLSN podcasts
+    tags: [visual-design, architecture, timescale, show-control]
+    relates_to: [automated-show-phrase-detection-is-key, perception-is-layered-by-timescale, two-quality-axes]
+    notes: >
+      Key heuristic from LDs — limit to 2 contrasting colors per song (avoid
+      "rainbow vomit"). Reserve strobes for genuine climaxes (max 2-3 per song).
+      VJ anti-pattern: beginners over-switch effects, pros hold states longer.
+      Both LD and VJ communities confirm the hybrid approach wins — timecoded
+      sequences for choreographed moments + live "busking" for spontaneity.
+
+  - id: topology-native-effects-principle
+    date: 2026-03-01
+    touched: 2026-03-01
+    title: "Best LED effects exploit physical form — they can't exist on a screen"
+    summary: >
+      Effects that take the shape of the sculpture they're mapped onto (sap flow
+      on a tree, gravity drops on a diamond, heartbeat from a trunk) are
+      qualitatively different from screen effects squished onto a strip. This is
+      the filter for which VJ/shader/LED idioms to steal: does it gain something
+      from the physical form?
+    status: resonates
+    warmth: high
+    confidence: medium
+    source: architecture/AUTOMATED-LIGHTSHOW.md
+    tags: [visual-design, topology, effects, art, philosophy]
+    relates_to: [two-quality-axes, wled-sr-reimplemented]
+    notes: >
+      User stated this directly: "I like effects that can't be rendered on a
+      screen, that more take the form that they are mapped onto." This
+      separates the project's visual ambition from WLED — WLED treats strips
+      as flat canvases, we treat sculptures as physical forms with spatial
+      meaning (trunk, branches, height, symmetry). Catalogued 60+ idioms
+      in AUTOMATED-LIGHTSHOW.md, prioritizing topology-aware ones.
+
+  - id: automated-show-phrase-detection-is-key
+    date: 2026-03-01
+    touched: 2026-03-02
+    title: "Phrase-level section detection is the critical gap — and NOT solved"
+    summary: >
+      Real-time phrase/section detection is NOT a solved problem. Beat/downbeat
+      tracking is solved (BeatNet, BEAST >80% F1, <50ms latency). But semantic
+      section detection (verse/chorus/build/drop) relies on self-similarity
+      matrices requiring the full song — fundamentally non-streaming. All
+      commercial DJ tools (Rekordbox, Mixed In Key, SoundSwitch) use pre-analysis,
+      not real-time detection. Simple streaming heuristics exist (rolling integral
+      slope, kick dropout, onset density, spectral centroid derivative) but are
+      crude and will need significant project-specific R&D.
+    status: exploring
+    warmth: high
+    confidence: medium
+    source: [architecture/AUTOMATED-LIGHTSHOW.md, web research (SoundSwitch, MaestroDMX, Engine Lighting, BeatNet, BEAST, ISMIR papers, madmom, librosa, essentia)]
+    tags: [architecture, feature-extraction, future, phrase-detection]
+    relates_to: [event-detection-viewer-only, d2-spike-drop-detector, perception-is-layered-by-timescale, normalization-events-separation, rolling-integral-sustained-energy]
+    notes: >
+      2026-03-01: Initial entry claimed commercial tools "prove" phrase detection
+      is solved-enough. This was based on marketing copy.
+
+      2026-03-02 correction: Deeper research reveals commercial tools use
+      PRE-ANALYSIS, not real-time streaming. Rekordbox, Mixed In Key, SoundSwitch
+      all analyze tracks before playback. Only MaestroDMX claims real-time, but
+      its algorithm is proprietary and user reviews call it "not much more
+      sophisticated than enhanced sound-to-light."
+
+      The fundamental problem: self-similarity matrices (the basis of good section
+      detection) are O(n²) in song length and require the full signal. No published
+      causal alternative matches offline methods. MIR toolkits (madmom, librosa,
+      essentia) are batch-oriented — none have native streaming section detection.
+
+      What exists for real-time: simple heuristics — rolling integral slope, kick
+      dropout (40-100Hz onset density), onset density gradients, spectral centroid
+      derivative. These are causal and fast (<1ms) but crude. They won't generalize
+      across genres without tuning, and even for our use case will likely need
+      significant R&D to feel right. This is an active research area, not a solved
+      problem we can import.
+
+      Song-level energy arc (10+ minute trajectory) is actually EASIER than phrase
+      detection — long timescales are forgiving, multi-scale rolling averages work
+      well. This may be more important than phrase-level for our use case (whole-song
+      lightshows on sculptures playing DJ sets).
+
+      Our rolling integral (5s window, per-band) exists in viewer.py but is untested
+      as a streaming section detector. d² spike density is complementary for drops.
+
+  - id: dj-crowd-energy-encoding
+    date: 2026-03-01
+    touched: 2026-03-02
+    title: "DJ crowd reading — musical decisions encode energy state"
+    summary: >
+      When a DJ reads the crowd and responds, their decisions manifest as
+      measurable audio changes: tempo drift (2-3 BPM gradual shifts), breakdown
+      duration, transition speed, filter sweeps, percussive density changes, and
+      key shifts. The music itself becomes a proxy for crowd energy state. For an
+      automated LED system receiving DJ audio, the DJ is already the crowd
+      sensor — we detect the DJ's responses, not the crowd directly.
+    status: validated
+    warmth: high
+    confidence: high
+    source: web research — DJ TechTools, Mixed In Key, Rekordbox documentation, r/DJs, r/Beatmatch, Digital DJ Tips, DJ education materials, forums, academic sources
+    tags: [audio-analysis, dj-analysis, energy-encoding, crowd-reading, music-structure, architecture, crowd-energy]
+    relates_to: [automated-show-phrase-detection-is-key, derivatives-over-absolutes, feelings-are-contextual, feeling-layer-human-loop, perception-is-layered-by-timescale]
+    notes: >
+      ## Core Insight
+      When LED sculpture receives music from a DJ, the DJ has ALREADY read the
+      crowd and encoded that reading into their musical decisions. The music
+      itself is the crowd state proxy. DJs respond to low energy vs high energy
+      with detectable changes in the audio stream.
+
+      ## Discrete Signals DJs Detect from Crowds
+      - Head-nodding and foot-tapping (medium energy)
+      - Synchronized cheers and sing-alongs (peak engagement)
+      - Hands in the air, bodies moving closer to booth (high energy)
+      - Bar traffic, phone use, crossed arms (energy dips)
+      - Zone analysis: front (high), middle (medium), back (low energy)
+      - Top DJs spend ~42% of set time observing crowd behavior patterns
+      - If 30%+ of crowd moves to bar = immediate energy dip requiring action
+
+      ## Musical Changes DJs Make in Response
+
+      ### Building Energy (responding to crowd readiness)
+      - Increase tempo (gradual 2-3 BPM steps feel natural)
+      - Shorter breakdown duration (8 bars vs 16-32 bars)
+      - Faster transitions (16-32 beats vs longer blends)
+      - Filter sweeps (high-pass removing lows, then sudden release)
+      - Add percussive layers (increasing density)
+      - Familiar tracks with high recognition value
+      - Rising key changes (using Camelot Wheel +1 position)
+      - Harder kicks with more low-end weight (40-100 Hz emphasis)
+      - Shorter loop cycles (creating tension through repetition)
+
+      ### Cooling Down (responding to fatigue or over-stimulation)
+      - Lower tempo (gradual decrease)
+      - Longer breakdowns (16-32 bars, melodic interludes)
+      - Genre shift to deeper/mellower subgenres
+      - More space between elements (minimalist approach)
+      - Deep cuts and unfamiliar tracks (less demanding)
+      - Lower energy level ratings (on 1-10 scale)
+      - Extended filter sweeps (slower development)
+
+      ## DJ Set Structure Vocabulary
+
+      ### Standard Arc (Three Acts)
+      1. Warm-Up: 110-125 BPM, energy level <7, light/eclectic, 16-32 bar intros
+      2. Peak Time: 128-135 BPM, maximum energy, shorter breakdowns (8 bars),
+         familiar tracks, tension/release cycles
+      3. Closing/Cool-Down: Can wind down OR go out with emotional impact,
+         deeper sounds, longer phrases
+
+      ### Energy Management
+      - "Peaks and valleys" — not constant maximum
+      - One main peak ~2/3 through set, plus 1-2 smaller peaks earlier
+      - Valleys give crowd chance to breathe and reset
+      - Well-timed breakdown can be as powerful as drop after sustained intensity
+
+      ### Phrasing (Critical for Detection)
+      - 4 beats = 1 bar
+      - 8 bars = standard phrase (most common mixing unit)
+      - 16 bars = typical intro/outro (designed for transitions)
+      - 32 bars = common full intro in tech house
+      - Breakdowns: 8-16 bars (house/techno), up to 32 bars (deep house)
+      - Builds: typically 8 bars, can be 4-12 bars
+      - DJs mix on phrase boundaries for smooth transitions
+
+      ## Tension and Release Techniques
+
+      ### Creating Tension
+      - Remove kick drum (4-8 bars before drop)
+      - High-pass filter sweep (progressively remove lows)
+      - Add risers, reverb tails, delay feedback
+      - Percussion builds (gradually adding layers)
+      - Loop tightening (shorter and shorter loops creating frenzy)
+      - Resonance boost on filter sweeps
+
+      ### Providing Release
+      - Full frequency spectrum return (especially 40-100 Hz kick fundamental)
+      - Drop on phrase boundary (predictable timing)
+      - Bassline return after high-pass filter
+      - Familiar melodic element recognition
+      - "Energy reset" track for genre shifts
+
+      ## Audio Features That Encode DJ Decisions
+
+      ### Tempo/BPM Ranges by Genre and Energy State
+      - Deep house warm-up: 120-125 BPM
+      - Peak house: 128 BPM
+      - Peak techno: 130-135 BPM
+      - Minimal techno: 120-150 BPM (varies by subgenre)
+      - Hip hop: 80-100 BPM
+      - Drum & bass: 165-180 BPM
+      - Small BPM changes (2-3) feel natural, large jumps signal major shift
+
+      ### Frequency Content
+      - Kick fundamental: 40-100 Hz (most modern kicks 80-120 Hz)
+      - Kick body/character: 100-600 Hz
+      - Kick attack/click: 1-4 kHz
+      - High-pass filtering indicates build/tension
+      - Full spectrum return = release/drop
+      - Spectral brightness increase = energy rising
+
+      ### Breakdown Structure (Detectable in Real-Time)
+      - Kick removal (clearest signal of breakdown)
+      - Filter sweep progression (time-domain feature)
+      - Percussive density reduction
+      - Reverb/delay increase (creating space)
+      - Duration: 8-16 bars typical, 32 bars for deep genres
+
+      ### Percussive Density
+      - Minimal techno: few elements, lots of space
+      - Peak energy: maximum layering of percussion
+      - Gradual addition of hi-hats, shakers, claps = building
+      - Stripped back to kick only = creating anticipation
+
+      ### Track Familiarity (Harder to Detect, But Relevant)
+      - DJs use familiar tracks at energy peaks (60% of clubgoers prefer mix)
+      - Recognition creates shared excitement
+      - Deep cuts for artistic moments, warm-up, cool-down
+      - Cannot be detected from audio alone, but affects crowd response
+
+      ## Energy Level Detection in DJ Software
+
+      ### Mixed In Key (Patented System)
+      - Energy Level: 1-10 scale (patented algorithm)
+      - Higher = more danceable
+      - Can sort playlists by energy level
+      - Integrates with Rekordbox, Serato, Traktor
+      - Algorithm details proprietary, but likely uses:
+        * Loudness (RMS, LUFS)
+        * Spectral features (brightness, centroid)
+        * Percussive density
+        * Tempo
+
+      ### Rekordbox
+      - Phrase analysis (low/mid/high mood detection)
+      - Vocal analysis (AI-based)
+      - Relies on Mixed In Key for energy level metadata
+      - Beatgrid analysis (static vs dynamic)
+      - Real-time energy indicators (1-5 scale on mobile app)
+
+      ### Harmonic Mixing (Camelot Wheel)
+      - Key compatibility for smooth transitions
+      - Energy Boost: +1 position on wheel = rising key feel
+      - DJs use key changes to add tension/release independent of tempo
+
+      ## Implications for LED System
+
+      ### Detectable in Real-Time from Audio Stream
+      1. Tempo changes (BPM tracking over time)
+      2. Kick presence/absence (40-100 Hz energy, onset detection)
+      3. Filter sweep direction (spectral centroid derivative)
+      4. Percussive density (onset count per time window)
+      5. Breakdown detection (kick removal + spectral change)
+      6. Build detection (rising high-pass filter, increasing density)
+      7. Phrase boundaries (8/16/32 bar detection via beat tracking)
+      8. Frequency spectrum shifts (brightness, low-end weight)
+
+      ### Not Easily Detectable (But Still Relevant)
+      - Track familiarity (would need database/fingerprinting)
+      - Genre classification (complex, but doable with ML)
+      - Crowd energy (DJs detect visually, we infer from music)
+      - DJ's intention (build toward peak vs cool-down)
+
+      ### Design Implications
+      - LED system should respond to DERIVATIVES of these features, not absolutes
+        (aligns with derivatives-over-absolutes principle)
+      - Context matters: same BPM feels different at different points in arc
+        (aligns with feelings-are-contextual principle)
+      - Multiple timescales: phrase-level (8 bars), section-level (verse/chorus),
+        arc-level (warm-up → peak → cool-down)
+        (aligns with perception-is-layered-by-timescale principle)
+      - Tension/release cycles are THE core DJ technique
+        (aligns with build-taxonomy and tension-mapping entries)
+      - Breakdown detection is critical: kick removal + filter sweep + duration
+        (implementable with existing onset + spectral features)
+
+      ## Next Steps for Implementation
+      1. BPM tracking over time (detect gradual shifts vs sudden jumps)
+      2. Kick onset detector (40-100 Hz band, onset strength)
+      3. Spectral centroid derivative (filter sweep detection)
+      4. 8-bar phrase boundary detection (rhythmic self-similarity)
+      5. Percussive density (onset count per 8-bar window)
+      6. Breakdown classifier: kick_present + spectral_brightness + duration
+      7. Energy level estimator (combine tempo, density, spectrum)
+
+      ## Vocabulary for Future Use
+      - Warm-up, peak time, cool-down (set structure)
+      - Breakdown, build, drop (phrase-level events)
+      - Filter sweep (high-pass/low-pass frequency manipulation)
+      - Phrase, bar, beat (rhythmic units: 8 bars = phrase)
+      - Tension and release (core aesthetic driver)
+      - Percussive density (layering metric)
+      - Energy level (1-10 scale, subjective danceability)
+      - Phrasing (aligning transitions to phrase boundaries)
+      - Mix-in, mix-out (transition entry/exit points)
+      - Cue points (markers for key structural moments)
+      - Energy reset (palate cleanser for genre shifts)
+      - Peaks and valleys (energy arc wave pattern)
+
+      ## 2026-03-02 update
+      Refined framing: the DJ IS the crowd sensor. For an automated LED system,
+      we don't need to detect the crowd — we detect what the DJ already decided
+      to do in response. Most detectable signals: kick presence/absence (clearest
+      structural marker), filter sweep direction (spectral centroid derivative),
+      percussive density (onset count), phrase boundaries (8/16/32 bar), tempo
+      drift. Key insight: +1 on Camelot wheel = energy boost. Standard DJ set
+      arc: warm-up (110-125 BPM, energy <7) -> peak time (128-135 BPM, energy
+      8-10) -> cool-down. Main peak typically at ~2/3 through set.
+
+  - id: rgb-color-gamut-limitations
+    date: 2026-03-02
+    touched: 2026-03-02
+    title: "RGB LED color gamut is physically constrained — but fixable in layers"
+    summary: >
+      RGB LED strips have two stacked color problems: (1) no gamma correction
+      means linear PWM vs nonlinear perception — orange looks yellow, warm tones
+      are wrong; (2) 8-bit depth crushes low-brightness resolution after gamma
+      correction (~28 values map to 0). Four complementary fixes exist, each
+      adding a layer of quality.
+    status: spark
+    warmth: high
+    confidence: high
+    source: []
+    tags: [hardware, perception, color, future]
+    relates_to: [gamma-height-curve, hue-shift-low-brightness]
+    notes: >
+      Excited about this direction — exploring at own pace.
+
+      ## The problem stack
+      1. **Gamma correction missing**: LED driver ICs use linear PWM but eyes
+         perceive brightness logarithmically. Monitors/OS handle this transparently;
+         LED strips don't. A gamma LUT (exponent ~2.5-2.7) fixes most color mixing
+         issues. Per-channel R/G/B tables can further tune white balance.
+      2. **8-bit quantization at low brightness**: After gamma correction, the
+         first ~28 input values all map to 0 output. Pastels and subtle warm tones
+         get destroyed. This is intrinsic to 8-bit PWM.
+
+      ## Solution layers (cumulative, in order of effort)
+      1. **Gamma LUT (software, free)**: Apply per-channel gamma correction before
+         sending to strip. Step one regardless of anything else. Adafruit has a
+         full guide. We already use gamma for height mapping — this is the same
+         concept for color.
+      2. **RGBW strips (hardware swap)**: SK6812 RGBW adds a dedicated white channel
+         (warm 3000K / neutral 4000K / cool 6000K). Fourth mixing dimension helps
+         enormously with pastels, skin tones, amber. Warm-white variant fills
+         exactly the spectral gaps that make orange/warm tones hard with pure RGB.
+         Drop-in compatible with WS2812B code (just needs 4-channel support in
+         FastLED/WLED).
+      3. **Temporal dithering (Fadecandy approach)**: Delta-sigma modulation — rapidly
+         wiggle each pixel ±1 at ~400Hz to achieve effective 16-bit resolution for
+         fades. Especially powerful for low-brightness colors and smooth gradients.
+         Tradeoff: max ~64 LEDs per line due to high refresh rate. Fadecandy project
+         abandoned (creator MIA since 2018), but technique implementable on ESP32
+         with DMA. WLED community has discussed adding it.
+      4. **Physical diffusion**: Material matters but distance matters more. Spatially
+         averages adjacent pixels = free spatial dithering. Combined with temporal
+         dithering, larger/diffuse sculptures get even higher low-brightness precision.
+         Milky/opal acrylic in aluminum channel is standard. Opal variants may shift
+         color temp slightly warmer — could actually help warm-tone problem.
+
+      ## Key insight
+      We're not capped out on color quality. The likely state is: sending linear RGB
+      values to LEDs that need gamma-corrected values, using RGB strips where RGBW
+      would give richer mixing. Recommended stack: SK6812 RGBW (warm white) + gamma
+      LUT + diffusion channel. Add temporal dithering if extreme low-brightness
+      smoothness needed. These are corrections monitors have had for decades — LED
+      strips just leave them up to you.
+
+      ## Connection to project
+      Gamma correction for color is distinct from our gamma-height-curve (topology
+      mapping) but same mathematical concept. Color gamma would live in the rendering
+      pipeline, applied to final RGB values before serial write. RGBW would require
+      4-byte-per-pixel serial protocol change and new firmware.
+
+  - id: signal-level-fusion-tempo
+    date: 2026-03-02
+    touched: 2026-03-02
+    title: "Signal-level multi-onset fusion beats period-level fusion and plain onset for tempo"
+    summary: >
+      Normalizing 3 onset functions (spectral flux, energy flux, harmonic flux)
+      by running peak and summing into a single signal before autocorrelation
+      achieves 62% LED-acceptable on FMA 300 tracks — +9pp over onset alone (53%)
+      and +6pp over period-level fusion vote (56%). PLP offline ceiling is 77%.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: effects/test_tempo_3way.py, research/tempo_3way_results.json
+    tags: [tempo, onset, fusion, autocorrelation, benchmark]
+    relates_to: [onset-vs-absint-comparison, onset-envelope-for-tempo]
+    notes: >
+      Tested 6 algorithms on FMA 300-track stratified sample + 10-track curated set.
+
+      ## Ranking (FMA 300, LED-acceptable = octave multiples within 10%)
+      1. PLP (offline, librosa.beat.plp): 77% — ceiling, needs full signal
+      2. SignalFusionTempoTracker: 62% — REAL-TIME WINNER
+      3. FusionTempoTracker (vote, period-level): 56%
+      4. AdaptiveTempoTracker (onset + fusion fallback): 55%
+      5. OnsetTempoTracker (HW spectral flux): 53% — baseline
+      6. HarmonicChangeTempoTracker (chroma L2): 49%
+
+      ## Signal-level fusion architecture
+      Three onset functions per frame:
+      - Spectral flux (HW multi-band): detects energy onsets
+      - Energy flux (HW RMS diff): broadband energy changes
+      - Harmonic flux (chroma L2): chord boundaries
+      Each normalized 0-1 by running peak (decay 0.998), summed, single autocorrelation.
+      Key: one autocorrelation on combined signal > combining separate period estimates.
+
+      ## Genre effects (SignalFusion vs Onset)
+      - International: +28pp (76% vs 48%) — biggest gain
+      - Rock: +16pp (66% vs 50%)
+      - Folk: +15pp (50% vs 35%)
+      - Hip-Hop: +5pp (66% vs 61%)
+      - Electronic: -9pp (56% vs 65%) — chroma/energy add noise to clean percussive signal
+      - Instrumental: tied at 83%
+
+      ## Why Adaptive disappoints
+      Onset locks early (5.5s median) even when wrong. The "fallback after 10s if
+      low confidence" strategy rarely triggers. Would need confidence-quality check
+      (is the lock CORRECT?) not just confidence-existence check.
+
+      ## PLP gap (15pp)
+      PLP uses predominant local pulse — fundamentally different from autocorrelation.
+      Works on onset envelope via librosa, offline only. Real-time PLP approximation
+      could be valuable future work.
+
+      ## Practical recommendation
+      SignalFusionTempoTracker should replace OnsetTempoTracker as default for LED
+      effects. +9pp across all genres, huge gains on folk/international/rock.
+
+  - id: spatial-topology-coordinate-embedding
+    date: 2026-03-03
+    touched: 2026-03-03
+    title: "2D coordinate embedding beats graph-based topology for small planar sculptures"
+    summary: >
+      For the diamond sculpture (72 LEDs, 3 branches, planar structure),
+      assigning (x, y) coordinates via keyframe interpolation and pre-computing
+      a Euclidean distance matrix is simpler and more effective than an explicit
+      graph representation. The 72x72 distance matrix is equivalent to a
+      fully-connected weighted graph — every pair has a distance. Spatial effects
+      (pulse radiation, ripples, proximity glow) use distances_from() which is
+      just a row lookup.
+    status: integrated
+    warmth: high
+    confidence: high
+    source: implementation of topology.py, analysis of diamond spatial layout
+    tags: [architecture, topology, spatial, coordinate-system]
+    relates_to: [sculpture-3d-vs-addressing-1d, diamond-topology, input-role-taxonomy]
+    notes: >
+      The diamond sculpture has non-trivial topology: right and middle branches
+      cross twice (apex 42/71, mid-height 46/66), right branch self-loops at
+      52/56, and LEDs 4/63 are near-neighbors across left/middle branches.
+      Coordinate embedding handles all of this naturally — crossovers become
+      coincident points, self-loops become path segments that revisit a
+      coordinate, and near-neighbors get small distances automatically.
+
+      When would a graph beat coordinates? (1) Non-planar structures where
+      Euclidean distance is misleading (e.g., LEDs on opposite sides of a tube).
+      (2) When you want path distance (along the wire) rather than Euclidean.
+      (3) Structures too complex for keyframe interpolation. For the diamond
+      and tree sculptures, coordinate embedding is the right choice — the
+      structure is planar and small enough that the full distance matrix is
+      trivial (~20KB).
+
+  - id: tempo-genre-applicability
+    date: 2026-03-04
+    touched: 2026-03-04
+    title: "Onset autocorrelation tempo detection only applies to electronic/hip-hop — folk/rock/metal need different approach"
+    summary: >
+      Autocorrelation-based tempo trackers (Onset, SignalFusion, Harmonic)
+      fundamentally detect periodicity in onset/energy envelopes. This works
+      for genres with steady percussive patterns (electronic, hip-hop) but
+      fails on folk, rock, and metal where tempo is carried by human feel,
+      guitar strumming patterns, or complex polyrhythmic drumming. Removing
+      these genres from the evaluation changes the ranking: OnsetTempoTracker
+      is best for electronic (+9pp over SignalFusion), roughly tied on
+      hip-hop. SignalFusion's harmonic component actively hurts on electronic
+      (adds noise to clean percussive signal).
+    status: validated
+    warmth: high
+    confidence: high
+    source: re-analysis of tempo-tracker-3way-comparison results by genre
+    tags: [tempo, genre, methodology, evaluation]
+    relates_to: [tempo-tracker-3way-comparison, tactus-ambiguity]
+    notes: >
+      ## Design philosophy: don't solve all problems with the same tool
+
+      OnsetTempoTracker is preferred not because it's the "best" tracker
+      overall, but because it's the most honest. When onset autocorrelation
+      fails to find tempo, it reports low confidence — and that's the correct
+      answer. The music may genuinely not be tempo-driven in the way onsets
+      can detect. SignalFusion tries harder by fusing 3 signals, but "trying
+      harder" on music that isn't onset-periodic just produces confident
+      wrong answers.
+
+      The cost asymmetry is key: a false positive (pulsing on wrong tempo)
+      looks actively bad. A false negative (falling back to fixed period or
+      a non-tempo-driven mode) looks fine. So we want the tracker that fails
+      honestly, not the one that fails less often but lies about it.
+
+      ## Folk, rock, metal: different analysis entirely
+
+      If onset autocorrelation can't detect tempo in these genres, the right
+      response isn't to build a better tempo detector — it's to question
+      whether tempo is even the right signal to extract. These genres may be
+      better served by:
+      - Energy contour / dynamics (loud vs quiet, tension vs release)
+      - Spectral texture evolution (bright vs dark, dense vs sparse)
+      - Section-level structure (verse/chorus feel changes)
+      - Melodic/harmonic movement (chord progressions, key changes)
+
+      The LED mapping for a folk song might not pulse at all — it might
+      breathe with phrasing, shift color with harmony, or track intensity
+      arcs. Forcing a tempo grid onto music that doesn't live on one is
+      the wrong abstraction. This connects to the MOOD vector research
+      (Brightness, Texture, Tension, Fullness) which may be more
+      universally applicable than tempo across genres.

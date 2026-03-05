@@ -1,0 +1,33 @@
+# Pneuma 60-120s — Clean 3:4 polyrhythm
+# Source: Vic Firth transcription, Drumeo, community
+# Confidence: community
+
+meter_map:
+- start: 0.0
+  end: 20.0
+  time_sig: "12/8"
+  label: "verse section"
+- start: 20.0
+  end: 35.0
+  time_sig: "11/8"
+  label: "meter contraction"
+- start: 35.0
+  end: 50.0
+  time_sig: "12/8"
+  label: "verse return"
+- start: 50.0
+  end: 60.0
+  time_sig: "10/8"
+  label: "further contraction"
+
+segments:
+- start: 0.0
+  end: 60.0
+  label: verse
+
+polyrhythm_zones:
+- start: 0.0
+  end: 60.0
+  ratio: "3:4"
+  description: "3-note 16th groupings over 4/4 bass rhythm throughout"
+  counting_pattern: "1-2/1-2-3/1-2/1-2-3-4-5-6"

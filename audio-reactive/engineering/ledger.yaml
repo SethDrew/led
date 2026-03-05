@@ -1,0 +1,318 @@
+# Engineering Ledger
+# Hardware decisions, protocol designs, firmware fixes, and performance findings.
+# Guide: audio-reactive/engineering/LEDGER_GUIDE.md
+
+entries:
+
+  # ── Serial Protocol & Firmware Reliability ──────────────────────
+
+  - id: serial-frame-sync-recovery
+    date: 2026-03-03
+    touched: 2026-03-03
+    title: "Serial streaming glitch: interrupt collision during strip.show()"
+    summary: >
+      Arduino Nano streaming receiver glitches every 30-60s because strip.show()
+      disables interrupts for ~2-4ms (73 LEDs), causing UART buffer overflow
+      (64 bytes hardware limit at 1Mbps). Lost bytes misalign frame boundaries,
+      and the old receiver had no resync logic — corruption cascaded until
+      accidental realignment.
+    status: resolved
+    severity: high
+    scope: firmware
+    source:
+      - firmware/strip/src/streaming_receiver.cpp
+      - firmware/tree/src/diamond_receiver.cpp
+      - audio-reactive/effects/runner.py
+    tags: [serial, protocol, neopixel, nano, uart, root-cause, reliability]
+    relates_to: []
+    notes: >
+      Root cause: ATmega328 has 64-byte UART hardware buffer. At 1Mbps, ~100 bytes/ms
+      arrive. strip.show() disables interrupts for N_LEDs * 30us (~2.2ms for 73 LEDs).
+      If a frame boundary lands during show(), bytes overflow and the receiver's
+      byte-count-based reader consumes data from the wrong frame.
+
+      Fix (three parts):
+      1. State machine sync: byte-at-a-time processing through WAIT_SYNC1 -> WAIT_SYNC2
+         -> READ_FRAME. Handles consecutive 0xFF correctly (stays in WAIT_SYNC2).
+         Single corrupted byte cannot cascade.
+      2. XOR checksum: computed on-the-fly as bytes arrive (zero extra RAM). Invalid
+         frames silently dropped — strip holds last good display.
+      3. Frame timeout: 50ms. Abandons incomplete frames and returns to sync scan.
+
+      Protocol changed from [0xFF][0xAA][RGB data] to [0xFF][0xAA][RGB data][XOR].
+      Python sender (runner.py send_frame) updated to append checksum byte.
+      Both sides must be updated together.
+
+      ESP32 largely avoids this because RMT peripheral drives NeoPixels without
+      disabling interrupts, and UART hardware FIFO is deeper (128+ bytes).
+      But the state machine + checksum are still good practice for any receiver.
+
+      RAM impact: +7 bytes (state vars). Flash: ~+200 bytes. Well within Nano limits
+      (27% RAM, 15% flash after fix).
+
+  # ── WS2812B Hardware Constraints & Workarounds ──────────────────
+
+  - id: ws2812b-timing-architecture
+    date: 2026-03-03
+    touched: 2026-03-03
+    title: "WS2812B timing requirement defines pipeline architecture"
+    summary: >
+      WS2812B requires precise bit-level timing during data transmission, forcing
+      a non-negotiable architecture: audio callback stores state → fixed-rate
+      main loop reads state and renders → serial flush to strip. Cannot merge
+      audio processing and LED output in same thread.
+    status: resolved
+    severity: high
+    scope: firmware
+    source:
+      - audio-reactive/effects/runner.py
+      - firmware/strip/src/streaming_receiver.cpp
+    tags: [ws2812b, architecture, timing, neopixel, design-decision]
+    relates_to: [nebula-pipeline-foundation]
+    notes: >
+      WS2812B protocol requires 800kHz bit-level timing (1.25us per bit, 30us per
+      LED). On Arduino Nano, strip.show() must disable interrupts for N_LEDs * 30us
+      (~2.2ms for 73 LEDs) to maintain timing precision. This blocks UART reception.
+
+      ESP32 mostly avoids interrupt disabling via RMT peripheral, but architecture
+      pattern still holds: audio callback (ISR context or high-priority task) must
+      not block on LED transmission. Decoupling via state buffer is mandatory.
+
+      All effects must respect this callback/render split. Audio processing happens
+      in callback context, LED rendering happens in fixed-rate loop. No exceptions.
+
+  - id: ws2812b-hue-shift-workaround
+    date: 2026-03-03
+    touched: 2026-03-03
+    title: "WS2812B hue shift at low brightness due to uint8 quantization"
+    summary: >
+      Colors with unequal RGB ratios (e.g. orange R255 G140 B0) shift hue during
+      fade-out because smaller channels round to 0 before larger ones in uint8.
+      Fix: clamp non-zero color channels to minimum 1, use brightness cutoff >= 0.04.
+    status: resolved
+    severity: medium
+    scope: firmware
+    source:
+      - audio-reactive/effects/band_zone_pulse.py
+    tags: [ws2812b, color, quantization, workaround]
+    relates_to: [hue-shift-low-brightness, ws2812b-gamma-correction]
+    notes: >
+      Root cause: uint8 quantization. Example: orange fading at brightness=0.02
+      becomes R5 G3 B0 → R3 G1 B0 → R1 G0 B0 (now red) → R0 G0 B0 (black).
+      The green channel disappears before red, shifting apparent hue.
+
+      Two-part fix:
+      1. During compositing, clamp each non-zero RGB channel to minimum 1.0 before
+         uint8 conversion. Prevents channels from dropping out prematurely.
+      2. Use higher brightness cutoff threshold (>= 0.04) to skip extremely dim
+         values where quantization dominates.
+
+      This is a fundamental WS2812B limitation — 8-bit PWM has only 256 steps.
+      Gamma correction (ws2812b-gamma-correction) helps but doesn't eliminate the
+      issue. For high color fidelity, consider SK6812 RGBW or temporal dithering.
+
+  # ── Hardware Specifications & Deployment ────────────────────────
+
+  - id: diamond-sculpture-hardware-spec
+    date: 2026-03-03
+    touched: 2026-03-03
+    title: "Diamond sculpture hardware specification"
+    summary: >
+      73 LEDs across 3 branches (42 up + 20 down + 11 up). Arduino Nano CH340.
+      Uses existing sculpture_stream PlatformIO env (80 pixels, NEO_RGB, 1Mbps).
+      Branch indices: [0, 42, 62]. Branch 3 (up2) uses gamma=0.55 for height alignment.
+    status: resolved
+    severity: high
+    scope: hardware
+    source:
+      - audio-reactive/hardware/sculptures.json
+      - firmware/strip/platformio.ini
+    tags: [hardware, deployment, sculpture, nano, ch340]
+    relates_to: [diamond-topology, gamma-topology-compensation]
+    notes: >
+      Physical configuration:
+      - Total: 73 LEDs, 3 branches
+      - Branch 1 (up1): 42 LEDs, index 0-41
+      - Branch 2 (down): 20 LEDs, index 42-61
+      - Branch 3 (up2): 11 LEDs, index 62-72
+      - Controller: Arduino Nano CH340
+      - Data pin: varies by deployment (check sculptures.json)
+      - Protocol: [0xFF][0xAA][RGB x 73][XOR checksum] at 1Mbps, 30 FPS
+
+      Firmware: Use sculpture_stream environment in firmware/strip/platformio.ini.
+      Configured for 80 pixels (gives headroom), NEO_RGB color order, 1Mbps serial.
+
+      Topology mode: height-mapped. Logical LED array mapped across branches sharing
+      common height axis. Branch 3 uses gamma=0.55 to compensate for non-linear
+      physical geometry (see gamma-topology-compensation).
+
+      Deployment checklist:
+      1. Verify sculptures.json matches physical wiring (branch indices, pin assignment)
+      2. Flash firmware/strip with sculpture_stream env
+      3. Test serial connection at 1Mbps (wrong baud = garbage)
+      4. Verify XOR checksum enabled in both firmware and runner.py
+
+  - id: gamma-topology-compensation
+    date: 2026-03-03
+    touched: 2026-03-03
+    title: "Gamma curves for non-uniform branch geometry"
+    summary: >
+      Physical LED branches rarely have uniform height distribution. Per-branch
+      gamma parameter (gamma < 1) compresses base, stretches peak to align visual
+      zones with physical geometry. Diamond branch 3 uses gamma=0.55 to shift
+      zone boundaries ~2 LEDs downward.
+    status: resolved
+    severity: low
+    scope: firmware
+    source:
+      - audio-reactive/hardware/sculptures.json
+      - audio-reactive/effects/runner.py
+    tags: [topology, gamma, sculpture, mapping, design-decision]
+    relates_to: [gamma-height-curve, diamond-sculpture-hardware-spec]
+    notes: >
+      Applied in runner.py apply_topology() during height-mode rendering. Default
+      gamma=1.0 (linear mapping). Configurable per-branch in sculptures.json.
+
+      How it works: For a branch rising steeply at base then leveling off at top,
+      logical height h is mapped to physical position as h^gamma before indexing
+      into LED array. Gamma < 1 makes low values rise faster (compressed base),
+      high values rise slower (stretched peak).
+
+      Example: Diamond branch 3 has 11 LEDs but rises same physical height as
+      42-LED branch 1. Without correction, zone boundaries appear misaligned.
+      gamma=0.55 shifts boundaries ~2 LEDs downward for visual coherence.
+
+      This is a deployment-time calibration parameter. Measure physical heights,
+      render test pattern (e.g. three zones), adjust gamma until zone boundaries
+      visually align across branches. No code changes needed — edit sculptures.json.
+
+  - id: esp32-hardware-selection-rationale
+    date: 2026-03-03
+    touched: 2026-03-03
+    title: "ESP32 vs STM32: why ESP32 for standalone audio-reactive"
+    summary: >
+      ESP32 chosen for 197-LED tree because WiFi is needed for web viewer, dual-core
+      240MHz handles audio + LEDs, and community support is strong. STM32 has better
+      real-time (DMA flush without CPU) but no WiFi/BT and only matters at 500+ LEDs.
+    status: resolved
+    severity: medium
+    scope: hardware
+    source: []
+    tags: [esp32, stm32, hardware, design-decision]
+    relates_to: [stm32-vs-esp32, ws2812b-timing-architecture]
+    notes: >
+      Comparison:
+      - ESP32: WiFi+BT built-in, dual-core 240MHz, RMT peripheral for WS2812B,
+        good-enough real-time, $4-8, huge community, Arduino/PlatformIO mature.
+      - STM32: No WiFi/BT (needs external W5500 for Ethernet), better real-time via
+        DMA (flushes WS2812B without CPU), huge variant family, $2 Blue Pill, but
+        steeper learning curve and less audio-reactive ecosystem.
+
+      Decision: ESP32 is right for standalone audio-reactive at our scale (197 LEDs).
+      WiFi needed for web viewer, real-time is good enough (RMT peripheral handles
+      WS2812B timing without blocking CPU for long periods like Arduino Nano).
+
+      STM32 becomes relevant for distributed architectures beyond ~500 LEDs, where
+      you want cheap branch controllers doing one job (like Tree of Ténéré: 208
+      STM32 Blue Pills + W5500 Ethernet for 175K LEDs). At that scale, STM32's
+      deterministic real-time and per-unit cost ($2 vs $8) justify the complexity.
+
+      ESP32 WiFi stack can occasionally steal CPU cycles, making real-time slightly
+      less deterministic than STM32 DMA, but this is irrelevant for 197 LEDs at
+      30 FPS. If upgrading past ~500 LEDs on single controller, reconsider.
+
+  # ── Protocol & Timing Requirements ──────────────────────────────
+
+  - id: tempo-startup-buffer-requirement
+    date: 2026-03-03
+    touched: 2026-03-03
+    title: "Autocorrelation requires full buffer before first tempo estimate"
+    summary: >
+      Running autocorrelation on partially-filled ring buffer produces garbage tempo
+      estimate that permanently poisons the 80/20 period smoother. Smoother rejects
+      correct tempo forever because correct/garbage ratio falls outside correction
+      windows. Must wait ~5s for full buffer before first estimate.
+    status: resolved
+    severity: high
+    scope: protocol
+    source:
+      - audio-reactive/effects/signals.py
+    tags: [beat-detection, tempo, autocorrelation, protocol, root-cause]
+    relates_to: [ac-buffer-must-fill]
+    notes: >
+      Root cause: Non-obvious interaction between autocorrelation and period smoother.
+
+      Autocorrelation finds repeating patterns in onset envelope. If buffer is only
+      40% full, autocorrelation may lock onto buffer boundaries or partial patterns,
+      producing tempo estimate that is wildly wrong (e.g. 300 BPM instead of 120 BPM).
+
+      The 80/20 period smoother accepts new estimates only if they fall within
+      correction windows around current value. Once initialized with garbage (300 BPM),
+      correct values (120 BPM) fall outside all windows and are permanently rejected.
+      The estimate never recovers.
+
+      Fix: Add buffer fill check before first autocorrelation. Wait for
+      onset_buffer.is_full() before calling autocorrelation_tempo(). At 44.1kHz with
+      512-sample hop, this is ~5s warmup period. Display "waiting for buffer" state
+      in UI during startup.
+
+      Deployment gotcha: If controller reboots mid-song (power glitch, crash), tempo
+      will be wrong for 5s until buffer refills. For critical installations, consider
+      persisting last-known-good tempo to EEPROM and using as initial estimate.
+
+  # ── WS2812B Color & Gamma Correction ────────────────────────────
+
+  - id: ws2812b-gamma-correction
+    date: 2026-03-03
+    touched: 2026-03-03
+    title: "WS2812B lacks hardware gamma correction"
+    summary: >
+      WS2812B uses linear PWM but human vision is logarithmic. No hardware gamma
+      correction means colors look wrong (orange appears yellow, warm tones off).
+      8-bit quantization crushes low-brightness resolution after software gamma
+      (~28 values map to 0). Solutions: software gamma LUT, dithering, or SK6812 RGBW.
+    status: identified
+    severity: medium
+    scope: hardware
+    source: []
+    tags: [ws2812b, gamma, color, perception, quantization]
+    relates_to: [rgb-color-gamut-limitations, ws2812b-hue-shift-workaround]
+    notes: >
+      Two stacked problems:
+
+      1. **No gamma correction**: LED driver ICs use linear PWM, but eyes perceive
+         brightness logarithmically. Monitors/OS handle this transparently; WS2812B
+         doesn't. Result: color mixing is wrong, orange looks yellow, warm tones off.
+         Fix: Apply per-channel gamma LUT (exponent ~2.5-2.7) in software before
+         sending to strip. Adafruit has full guide. We already use gamma for height
+         mapping (gamma-topology-compensation) — same concept for color.
+
+      2. **8-bit quantization at low brightness**: After gamma correction, first ~28
+         input values all map to 0 output. Pastels and subtle warm tones destroyed.
+         This is intrinsic to 8-bit PWM — you can't fix it in software alone.
+
+      Solution layers (cumulative, in order of effort):
+
+      1. **Software gamma LUT (free)**: Implement in runner.py before send_frame().
+         Fixes most color mixing issues. Step one regardless of anything else.
+
+      2. **SK6812 RGBW strips (hardware swap)**: Adds dedicated white channel (3000K
+         warm / 4000K neutral / 6000K cool). Fourth mixing dimension helps enormously
+         with pastels, skin tones, amber. Warm-white variant fills spectral gaps that
+         make orange/warm hard with pure RGB. Drop-in compatible with WS2812B code
+         (just needs 4-channel support in FastLED/WLED).
+
+      3. **Temporal dithering (complex)**: Delta-sigma modulation — rapidly wiggle
+         each pixel ±1 at ~400Hz for effective 16-bit resolution. Powerful for
+         low-brightness colors and smooth gradients. Tradeoff: max ~64 LEDs per line
+         due to high refresh rate. Fadecandy project (now abandoned) pioneered this.
+         Implementable on ESP32 with DMA. WLED community has discussed adding it.
+
+      4. **Physical diffusion (environmental)**: Milky/opal acrylic diffuser in
+         aluminum channel. Distance matters more than material — spatially averages
+         adjacent pixels = free spatial dithering. Combined with temporal dithering,
+         larger/diffuse sculptures get even higher low-brightness precision.
+
+      Current status: No gamma LUT implemented yet. For now, we work around with
+      brightness cutoffs (ws2812b-hue-shift-workaround) and avoid pastels. Gamma LUT
+      should be added before considering RGBW upgrade.

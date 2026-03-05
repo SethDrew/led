@@ -998,7 +998,7 @@ filePicker.addEventListener('change', () => {
 
 // ── Tabs ─────────────────────────────────────────────────────────
 
-const analysisTabs = new Set(['analysis', 'band-analysis', 'calculus', 'annotate', 'stems', 'hpss', 'lab-repet', 'lab-nmf', 'lab-timbral', 'lab-misc', 'lab-onset']);
+const analysisTabs = new Set(['analysis', 'band-analysis', 'calculus', 'annotate', 'stems', 'hpss', 'lab-repet', 'lab-nmf', 'lab-timbral', 'lab-misc', 'lab-onset', 'lab-mood', 'lab-tempo']);
 const analysisDropdown = document.getElementById('analysisDropdown');
 const analysisToggle = document.getElementById('analysisDropdownToggle');
 
@@ -1145,6 +1145,8 @@ async function loadPanel() {
         'lab-timbral': { label: 'Compute Timbral Shape', desc: 'MFCC coefficients — energy, tilt, curvature, texture, timbral shift', fn: () => loadLabVariant('timbral') },
         'lab-misc': { label: 'Compute Misc', desc: 'Spectral flatness, chromagram, spectral contrast, ZCR', fn: () => loadLabVariant('misc') },
         'lab-onset': { label: 'Compute Onset + AbsInt', desc: 'Onset strength vs absolute integral — comparing two beat-detection signals', fn: () => loadLabVariant('onset-absint') },
+        'lab-mood': { label: 'Compute MOOD Vectors', desc: 'Brightness, Texture, Tension, Fullness — 4D mood signal', fn: () => loadLabVariant('mood') },
+        'lab-tempo': { label: 'Compute Tempo Compare', desc: 'OnsetTempoTracker vs AbsIntegral — side-by-side tempo detection', fn: () => loadLabVariant('tempo') },
     };
 
     if (currentTab === 'annotate') {
@@ -1338,6 +1340,8 @@ async function loadLabVariant(variant) {
         'timbral': 'MFCC 0-3 &middot; Fine Texture &middot; Timbral Shift',
         'misc': 'Spectral Flatness &middot; Chromagram &middot; Spectral Contrast &middot; ZCR',
         'onset-absint': 'Onset Strength &middot; AbsIntegral &middot; Overlay &middot; Difference',
+        'mood': 'Brightness (slope) &middot; Texture (harmonic ratio) &middot; Tension (chroma entropy) &middot; Fullness (spread)',
+        'tempo': 'Onset Tracker &middot; AbsIntegral &middot; BPM comparison',
     };
     showOverlay('Computing lab...');
     const hint = hintMap[variant] || '';
@@ -1559,7 +1563,7 @@ audio.addEventListener('ended', () => {
 });
 
 document.addEventListener('keydown', (e) => {
-    if (e.target.tagName === 'SELECT') return;
+    if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
     if (e.code === 'Space') {
         e.preventDefault();

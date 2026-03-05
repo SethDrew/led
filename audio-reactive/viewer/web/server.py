@@ -48,83 +48,10 @@ if _viewer_dir not in sys.path:
 SEGMENTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'research', 'audio-segments')
 DPI = 100
 
-# ── Threading + subprocess rendering ──────────────────────────────────
+# ── Threaded server ───────────────────────────────────────────────────
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
-
-import multiprocessing as _mp
-
-_render_gen = 0
-_render_proc = None
-_render_pipe = None
-_render_lock = threading.Lock()
-_fork_ctx = _mp.get_context('spawn')
-
-
-class RenderCancelled(Exception):
-    pass
-
-
-def _render_target(conn, func_name, func_args):
-    """Subprocess target: call the named render function, send result via pipe."""
-    try:
-        result = globals()[func_name](*func_args)
-        conn.send(result)
-    except Exception as e:
-        conn.send(e)
-    finally:
-        conn.close()
-
-
-def submit_render(func_name, func_args):
-    """Run a render in a forked subprocess. Kills any stale render first."""
-    global _render_gen, _render_proc, _render_pipe
-
-    with _render_lock:
-        _render_gen += 1
-        my_gen = _render_gen
-
-        # Kill stale render
-        if _render_proc is not None and _render_proc.is_alive():
-            _render_proc.kill()
-            _render_proc.join(timeout=5)
-        if _render_pipe is not None:
-            try: _render_pipe.close()
-            except OSError: pass
-
-        # Fork new render
-        parent_conn, child_conn = _fork_ctx.Pipe(duplex=False)
-        proc = _fork_ctx.Process(
-            target=_render_target,
-            args=(child_conn, func_name, func_args),
-            daemon=True,
-        )
-        proc.start()
-        child_conn.close()
-        _render_proc = proc
-        _render_pipe = parent_conn
-
-    # Read result from pipe BEFORE joining (avoids deadlock when result
-    # exceeds the OS pipe buffer — child blocks on send, parent on join).
-    try:
-        if parent_conn.poll(timeout=300):
-            result = parent_conn.recv()
-        else:
-            raise RenderCancelled()
-    except (EOFError, OSError):
-        raise RenderCancelled()
-
-    proc.join(timeout=10)
-
-    if my_gen != _render_gen:
-        raise RenderCancelled()
-
-    if isinstance(result, Exception):
-        raise result
-    return result
-
-    raise RenderCancelled()
 
 # ── Caches ────────────────────────────────────────────────────────────
 
@@ -132,12 +59,13 @@ _render_cache = {}      # (filepath, tab) -> (png_bytes, headers_dict)
 _file_list_cache = None  # JSON-serializable list
 _demucs_status = {}     # filepath -> bool (True = ready)
 _demucs_locks = {}      # filepath -> threading.Lock
-_recording = None       # {'stream': sd.InputStream, 'frames': list} or None
+_recording = None       # {'stream': sd.InputStream, 'sf': sf.SoundFile, 'path': str, 'n_frames': int, 'vu_buf': collections.deque} or None
 
 # ── Effects management ────────────────────────────────────────────────
 
 _effect_process = None   # subprocess.Popen or None
 _active_controller = None  # id of the controller the running effect is using, or None
+_effect_start_params = None  # dict of params passed to _start_effect, for hot reload
 
 # ── Live feature streaming ────────────────────────────────────────
 _feature_buffer = collections.deque(maxlen=900)  # 30s @ 30fps
@@ -195,12 +123,15 @@ def _resolve_controller_ports(controllers):
             c['port'] = None
             print(f"[controllers] {c['name']}: not connected (vid={vid} pid={pid})")
 
-# Only run hardware init in the main process (spawned render children reimport this module)
-if _mp.current_process().name == 'MainProcess':
-    _controllers = _load_controllers()
-    _resolve_controller_ports(_controllers)
-else:
-    _controllers = []
+_controllers = None
+
+def _get_controllers():
+    """Lazy init: load and resolve controllers on first use."""
+    global _controllers
+    if _controllers is None:
+        _controllers = _load_controllers()
+        _resolve_controller_ports(_controllers)
+    return _controllers
 
 # ── Sculptures ──────────────────────────────────────────────────
 
@@ -252,10 +183,14 @@ def _build_output_targets(sculptures, controllers):
     return targets
 
 
-if _mp.current_process().name == 'MainProcess':
-    _sculptures = _load_sculptures()
-else:
-    _sculptures = []
+_sculptures = None
+
+def _get_sculptures():
+    """Lazy init: load sculptures on first use."""
+    global _sculptures
+    if _sculptures is None:
+        _sculptures = _load_sculptures()
+    return _sculptures
 
 # ── Live reload (local dev only) ──────────────────────────────────────
 
@@ -278,6 +213,44 @@ def _source_hash():
     return h.hexdigest()[:12]
 
 _startup_hash = _source_hash()
+
+
+def _effects_hash():
+    """Hash only effect .py files (fast, for hot reload polling)."""
+    h = hashlib.md5()
+    for p in sorted(Path(EFFECTS_DIR).glob('*.py')):
+        try:
+            h.update(p.read_bytes())
+        except OSError:
+            pass
+    return h.hexdigest()[:12]
+
+
+def _effect_hot_reload_loop():
+    """Daemon thread: poll source files every 1s.
+
+    - Effect .py change + effect running → auto-restart effect
+    - Any source change (server/viewer/static/effects) → clear render cache
+    """
+    last_effects = _effects_hash()
+    last_source = _source_hash()
+    while True:
+        time.sleep(1)
+        cur_effects = _effects_hash()
+        cur_source = _source_hash()
+        if cur_source != last_source:
+            last_source = cur_source
+            n = len(_render_cache)
+            if n:
+                _render_cache.clear()
+                print(f"[hot-reload] Source changed, cleared {n} cached renders")
+        if cur_effects != last_effects:
+            last_effects = cur_effects
+            params = _effect_start_params
+            if params:
+                print(f"[hot-reload] Effect files changed, restarting '{params['name']}'")
+                _start_effect(**params)
+
 
 # ── Auth ─────────────────────────────────────────────────────────────
 
@@ -456,11 +429,18 @@ def _start_effect(name, controller_id=None, sculpture_id=None, palette_name=None
         palette_name: Palette override for signal effects
         brightness: Brightness cap (0-1)
     """
-    global _effect_process, _active_controller
+    global _effect_process, _active_controller, _effect_start_params
     _stop_effect()
 
+    # Save params for hot reload
+    _effect_start_params = {
+        'name': name, 'controller_id': controller_id,
+        'sculpture_id': sculpture_id, 'palette_name': palette_name,
+        'brightness': brightness,
+    }
+
     # Re-resolve ports in case devices were unplugged/replugged
-    _resolve_controller_ports(_controllers)
+    _resolve_controller_ports(_get_controllers())
 
     cmd = [sys.executable, 'runner.py', name]
 
@@ -474,9 +454,9 @@ def _start_effect(name, controller_id=None, sculpture_id=None, palette_name=None
     # controller port internally. Controller mode: --port/--leds as before.
     target_id = None
     if sculpture_id:
-        sculpture = next((s for s in _sculptures if s['id'] == sculpture_id), None)
+        sculpture = next((s for s in _get_sculptures() if s['id'] == sculpture_id), None)
         if sculpture:
-            controller = next((c for c in _controllers if c['id'] == sculpture['controller']), None)
+            controller = next((c for c in _get_controllers() if c['id'] == sculpture['controller']), None)
             if controller and controller.get('port'):
                 cmd += ['--sculpture', sculpture_id, '--port', controller['port']]
                 target_id = sculpture_id
@@ -485,7 +465,7 @@ def _start_effect(name, controller_id=None, sculpture_id=None, palette_name=None
         else:
             cmd.append('--no-leds')
     elif controller_id:
-        controller = next((c for c in _controllers if c['id'] == controller_id), None)
+        controller = next((c for c in _get_controllers() if c['id'] == controller_id), None)
         if controller and controller.get('port'):
             cmd += ['--port', controller['port'], '--leds', str(controller['leds'])]
             target_id = controller_id
@@ -658,6 +638,35 @@ def discover_files():
                 'has_annotations': ann_path.exists(),
                 'group': 'uploads',
             })
+
+    # FMA folk clips
+    fma_folk_dir = segments_path / 'fma-folk'
+    if fma_folk_dir.exists():
+        for wav in sorted(fma_folk_dir.glob('*.wav')):
+            ann_path = wav.with_suffix('.annotations.yaml')
+            dur = _get_wav_duration(str(wav))
+            files.append({
+                'name': wav.name,
+                'path': f'fma-folk/{wav.name}',
+                'duration': dur,
+                'has_annotations': ann_path.exists(),
+                'group': 'fma-folk',
+            })
+
+    # YouTube sets
+    for subdir_name in ('chase-status', '90s-hiphop', 'solomun', 'tool'):
+        subdir = segments_path / subdir_name
+        if subdir.exists():
+            for wav in sorted(subdir.glob('*.wav')):
+                dur = _get_wav_duration(str(wav))
+                ann_path = wav.with_suffix('.annotations.yaml')
+                files.append({
+                    'name': wav.name,
+                    'path': f'{subdir_name}/{wav.name}',
+                    'duration': dur,
+                    'has_annotations': ann_path.exists(),
+                    'group': subdir_name,
+                })
 
     _file_list_cache = files
     return files
@@ -846,6 +855,7 @@ def render_band_analysis(filepath):
 CALCULUS_PANELS = ('calc-energy-integral', 'calc-integral-slope',
                     'calc-slope-peaks', 'calc-integral-curvature',
                     'calc-multi-scale', 'calc-onset-d2', 'calc-jitter',
+                    'calc-absint-d2', 'calc-absint-jitter',
                     'calc-build-detector')
 
 
@@ -1456,7 +1466,252 @@ def render_lab(filepath, variant='timbral'):
         return render_lab_zcr_genres(filepath)
     if variant == 'zcr-dataset':
         return render_lab_zcr_dataset(filepath)
+    if variant == 'mood':
+        return render_lab_mood(filepath)
+    if variant == 'tempo':
+        return render_lab_tempo(filepath)
     return render_lab_timbral(filepath)
+
+
+def render_lab_mood(filepath):
+    """MOOD Vectors Lab — 4D mood signal: Brightness, Texture, Tension, Fullness."""
+    cache_key = (filepath, 'lab-mood')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    import numpy as np
+    import librosa
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+    from scipy.ndimage import gaussian_filter1d
+
+    plt.style.use('dark_background')
+
+    y, sr = librosa.load(filepath, sr=None, mono=True)
+    duration = librosa.get_duration(y=y, sr=sr)
+    n_fft = 2048
+    hop_length = 512
+    fps = sr / hop_length
+
+    # Smoothing: ~3s window in frames
+    sigma = int(3.0 * fps)
+
+    # ── Compute STFT (shared by all dimensions) ──
+    S = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop_length))
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+    n_frames = S.shape[1]
+    times = librosa.frames_to_time(np.arange(n_frames), sr=sr, hop_length=hop_length)
+
+    # ── 1. Brightness: Spectral Slope ──
+    # Linear regression slope of log-magnitude spectrum per frame
+    log_freqs = np.log(freqs[1:] + 1e-10)  # skip DC
+    # Center log_freqs for numerical stability
+    log_freqs_centered = log_freqs - np.mean(log_freqs)
+    denom = np.sum(log_freqs_centered ** 2)
+
+    brightness_raw = np.zeros(n_frames)
+    for i in range(n_frames):
+        log_mags = np.log(S[1:, i] + 1e-10)
+        log_mags_centered = log_mags - np.mean(log_mags)
+        brightness_raw[i] = np.sum(log_freqs_centered * log_mags_centered) / (denom + 1e-20)
+
+    # Normalize to 0-1 (slope is typically negative; more negative = warmer)
+    # Invert so that warm=0, bright=1
+    b_min, b_max = np.percentile(brightness_raw, [2, 98])
+    if b_max - b_min > 1e-10:
+        brightness_norm = (brightness_raw - b_min) / (b_max - b_min)
+    else:
+        brightness_norm = np.zeros_like(brightness_raw)
+    brightness_norm = np.clip(brightness_norm, 0, 1)
+    brightness_smooth = gaussian_filter1d(brightness_norm, sigma=sigma)
+
+    # ── 2. Texture: Spectral Contrast (mean peak-valley ratio) ──
+    # spectral_contrast returns (n_bands+1, n_frames) — difference between
+    # spectral peaks and valleys in each sub-band (in dB).
+    # High contrast = clear/tonal, low contrast = diffuse/noisy.
+    contrast = librosa.feature.spectral_contrast(S=S, sr=sr, n_fft=n_fft,
+                                                  hop_length=hop_length,
+                                                  n_bands=6, fmin=200.0)
+    # Mean contrast across bands per frame (exclude the last "valley" band)
+    texture_raw = np.mean(contrast[:6, :], axis=0)
+    # Normalize to 0-1 via percentile (contrast values are in dB, vary widely)
+    t_min, t_max = np.percentile(texture_raw, [2, 98])
+    if t_max - t_min > 1e-10:
+        texture_norm = (texture_raw - t_min) / (t_max - t_min)
+    else:
+        texture_norm = np.zeros_like(texture_raw)
+    texture_norm = np.clip(texture_norm, 0, 1)
+    texture_smooth = gaussian_filter1d(texture_norm, sigma=sigma)
+
+    # ── 3. Tension: Sharpened Chroma Entropy ──
+    # Raw chroma entropy saturates at ~1.0 because polyphonic music spreads
+    # energy across all 12 pitch classes. Sharpening (raising chroma to a power)
+    # amplifies dominant pitch classes and suppresses weak ones, creating
+    # meaningful dynamic range between simple harmony (low) and complex (high).
+    chroma = librosa.feature.chroma_stft(S=S, sr=sr, n_fft=n_fft, hop_length=hop_length)
+    sharpen_exp = 4.0  # raise chroma to 4th power — amplifies dominant pitches
+    max_entropy = np.log(12.0)
+    tension_raw = np.zeros(n_frames)
+    for i in range(n_frames):
+        c = chroma[:, i]
+        c_sharp = c ** sharpen_exp  # sharpen: dominant bins grow, weak bins shrink
+        c_sum = np.sum(c_sharp)
+        if c_sum > 1e-10:
+            p = c_sharp / c_sum
+            p = p[p > 1e-10]  # avoid log(0)
+            tension_raw[i] = -np.sum(p * np.log(p)) / max_entropy
+        else:
+            tension_raw[i] = 0.0
+    # Percentile normalization to use actual observed range
+    tn_min, tn_max = np.percentile(tension_raw, [2, 98])
+    if tn_max - tn_min > 1e-10:
+        tension_norm = (tension_raw - tn_min) / (tn_max - tn_min)
+    else:
+        tension_norm = np.zeros_like(tension_raw)
+    tension_norm = np.clip(tension_norm, 0, 1)
+    tension_smooth = gaussian_filter1d(tension_norm, sigma=sigma)
+
+    # ── 4. Fullness: Spectral Spread ──
+    centroid = librosa.feature.spectral_centroid(S=S, sr=sr, n_fft=n_fft, hop_length=hop_length)[0]
+    fullness_raw = np.zeros(n_frames)
+    for i in range(n_frames):
+        spec = S[:, i]
+        total = np.sum(spec)
+        if total > 1e-10:
+            c = centroid[i]
+            fullness_raw[i] = np.sqrt(np.sum(((freqs - c) ** 2) * spec) / total)
+        else:
+            fullness_raw[i] = 0.0
+    # Normalize to 0-1 via percentile
+    f_min, f_max = np.percentile(fullness_raw, [2, 98])
+    if f_max - f_min > 1e-10:
+        fullness_norm = (fullness_raw - f_min) / (f_max - f_min)
+    else:
+        fullness_norm = np.zeros_like(fullness_raw)
+    fullness_norm = np.clip(fullness_norm, 0, 1)
+    fullness_smooth = gaussian_filter1d(fullness_norm, sigma=sigma)
+
+    # ── Correlation analysis ──
+    dims = {
+        'Brightness': brightness_smooth,
+        'Texture': texture_smooth,
+        'Tension': tension_smooth,
+        'Fullness': fullness_smooth,
+    }
+    dim_names = list(dims.keys())
+    corr_pairs = []
+    for i in range(len(dim_names)):
+        for j in range(i + 1, len(dim_names)):
+            r = np.corrcoef(dims[dim_names[i]], dims[dim_names[j]])[0, 1]
+            corr_pairs.append((dim_names[i], dim_names[j], r))
+
+    # ── Colors ──
+    colors = {
+        'Brightness': '#FF9800',  # amber/orange
+        'Texture': '#26A69A',     # teal
+        'Tension': '#EF5350',     # red/crimson
+        'Fullness': '#AB47BC',    # purple
+    }
+
+    # ── Layout: 6 rows ──
+    fig = plt.figure(figsize=(18, 24))
+    gs = gridspec.GridSpec(6, 1, height_ratios=[1.5, 1, 1, 1, 1, 0.8], hspace=0.35)
+
+    # ── Panel 1: All 4 dimensions overlaid ──
+    ax = fig.add_subplot(gs[0])
+    for name, signal in dims.items():
+        ax.plot(times, signal, color=colors[name], linewidth=2, label=name, alpha=0.85)
+    ax.set_xlim([0, duration])
+    ax.set_ylim([-0.05, 1.05])
+    ax.set_ylabel('Normalized')
+    ax.set_title('4D MOOD Vector Overview', fontsize=12, fontweight='bold')
+    ax.legend(loc='upper right', framealpha=0.8, fontsize=9)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panel 2: Brightness (Spectral Slope) ──
+    ax = fig.add_subplot(gs[1])
+    ax.plot(times, brightness_norm, color=colors['Brightness'], linewidth=0.4, alpha=0.3)
+    ax.plot(times, brightness_smooth, color=colors['Brightness'], linewidth=2)
+    ax.set_xlim([0, duration])
+    ax.set_ylim([-0.05, 1.05])
+    ax.set_ylabel('Brightness')
+    ax.set_title('Brightness (Spectral Slope) \u2014 0 = warm/dark, 1 = bright/airy. '
+                 'Tracks filter sweeps and timbral shifts.', fontsize=11)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panel 3: Texture (Harmonic Ratio) ──
+    ax = fig.add_subplot(gs[2])
+    ax.plot(times, texture_norm, color=colors['Texture'], linewidth=0.4, alpha=0.3)
+    ax.plot(times, texture_smooth, color=colors['Texture'], linewidth=2)
+    ax.set_xlim([0, duration])
+    ax.set_ylim([-0.05, 1.05])
+    ax.set_ylabel('Texture')
+    ax.set_title('Texture (Spectral Contrast) \u2014 0 = diffuse/noisy, 1 = clear/tonal. '
+                 'Mean peak-valley ratio across 6 sub-bands.', fontsize=11)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panel 4: Tension (Chroma Entropy) ──
+    ax = fig.add_subplot(gs[3])
+    ax.plot(times, tension_norm, color=colors['Tension'], linewidth=0.4, alpha=0.3)
+    ax.plot(times, tension_smooth, color=colors['Tension'], linewidth=2)
+    ax.set_xlim([0, duration])
+    ax.set_ylim([-0.05, 1.05])
+    ax.set_ylabel('Tension')
+    ax.set_title('Tension (Sharpened Chroma Entropy) \u2014 0 = clear key/resolved, '
+                 '1 = complex/ambiguous. Chroma^4 then entropy.', fontsize=11)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panel 5: Fullness (Spectral Spread) ──
+    ax = fig.add_subplot(gs[4])
+    ax.plot(times, fullness_norm, color=colors['Fullness'], linewidth=0.4, alpha=0.3)
+    ax.plot(times, fullness_smooth, color=colors['Fullness'], linewidth=2)
+    ax.set_xlim([0, duration])
+    ax.set_ylim([-0.05, 1.05])
+    ax.set_ylabel('Fullness')
+    ax.set_xlabel('Time (s)')
+    ax.set_title('Fullness (Spectral Spread) \u2014 0 = narrow/intimate, '
+                 '1 = wide/immersive. How broadly energy is distributed.', fontsize=11)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panel 6: Correlation summary ──
+    ax = fig.add_subplot(gs[5])
+    ax.axis('off')
+    # Build correlation text
+    corr_lines = []
+    for n1, n2, r in sorted(corr_pairs, key=lambda x: -abs(x[2])):
+        strength = 'strong' if abs(r) > 0.6 else 'moderate' if abs(r) > 0.3 else 'weak'
+        direction = '+' if r > 0 else '\u2212'
+        corr_lines.append(f'{n1} \u2194 {n2}: r={r:+.2f} ({strength} {direction})')
+    corr_text = 'Pairwise correlations (smoothed):\n' + '\n'.join(corr_lines)
+    ax.text(0.02, 0.95, corr_text, transform=ax.transAxes, fontsize=10,
+            verticalalignment='top', fontfamily='monospace', color='#aaa',
+            bbox=dict(boxstyle='round,pad=0.5', facecolor='#1a1a2e', edgecolor='#333'))
+
+    filename = Path(filepath).name
+    fig.suptitle(f'{filename} \u2014 MOOD Vectors (Brightness, Texture, Tension, Fullness)',
+                 fontsize=14, fontweight='bold', y=0.995)
+    fig.subplots_adjust(top=0.975, bottom=0.02)
+    fig.canvas.draw()
+
+    ax0 = fig.axes[0]
+    x_left = ax0.transData.transform((0, 0))[0]
+    x_right = ax0.transData.transform((duration, 0))[0]
+    fig_width = fig.get_figwidth() * DPI
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=DPI, facecolor=fig.get_facecolor())
+    matplotlib.pyplot.close(fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
 
 
 def render_lab_misc(filepath):
@@ -1747,6 +2002,708 @@ def render_lab_onset_absint(filepath):
 
     filename = Path(filepath).name
     fig.suptitle(f'{filename} — Onset + AbsInt Lab', fontsize=14,
+                 fontweight='bold', y=0.995)
+    fig.subplots_adjust(top=0.975, bottom=0.02)
+    fig.canvas.draw()
+
+    ax0 = fig.axes[0]
+    x_left = ax0.transData.transform((0, 0))[0]
+    x_right = ax0.transData.transform((duration, 0))[0]
+    fig_width = fig.get_figwidth() * DPI
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=DPI, facecolor=fig.get_facecolor())
+    matplotlib.pyplot.close(fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
+
+
+def _find_harmonix_beats(filepath, duration):
+    """Try to find Harmonix beat annotations for the given audio file.
+
+    Returns (beat_times, gt_bpm, gt_beat_count) or (None, None, None) if
+    no matching annotations found. Beat times are relative to the audio
+    file's start (offset-corrected).
+    """
+    import os, re, csv
+    import numpy as np
+
+    harmonix_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                '..', '..', 'research', 'datasets', 'harmonix')
+    beats_dir = os.path.join(harmonix_dir, 'dataset', 'beats_and_downbeats')
+    metadata_csv = os.path.join(harmonix_dir, 'dataset', 'metadata.csv')
+
+    if not os.path.isdir(beats_dir) or not os.path.isfile(metadata_csv):
+        return None, None, None
+
+    filename = os.path.basename(filepath)
+    stem = os.path.splitext(filename)[0].lower()
+
+    # Build lookup: harmonix_name -> beat_file_path
+    # Also build name_only lookup (strip numeric prefix)
+    beat_files = {}    # '0012_aroundtheworld' -> path
+    name_only = {}     # 'aroundtheworld' -> '0012_aroundtheworld'
+    for f in os.listdir(beats_dir):
+        if not f.endswith('.txt'):
+            continue
+        hx_id = f[:-4]  # strip .txt
+        beat_files[hx_id] = os.path.join(beats_dir, f)
+        # Strip numeric prefix: '0012_aroundtheworld' -> 'aroundtheworld'
+        m = re.match(r'\d+_(.*)', hx_id)
+        if m:
+            name_only[m.group(1)] = hx_id
+
+    # Load metadata for BPM lookup
+    meta_bpm = {}  # harmonix_id -> bpm
+    try:
+        with open(metadata_csv, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                meta_bpm[row['File']] = float(row['BPM'])
+    except Exception:
+        pass
+
+    # Strategy 1: filename contains a Harmonix ID (e.g. '0026_blackandyellow_60s')
+    hx_match = None
+    m = re.match(r'(\d{4}_[a-z0-9]+)', stem)
+    if m:
+        candidate = m.group(1)
+        if candidate in beat_files:
+            hx_match = candidate
+
+    # Strategy 2: exact name match after stripping suffixes
+    if not hx_match:
+        clean = re.sub(r'_\d+s$', '', stem)  # strip _60s, _5s, _10s
+        if clean in name_only:
+            hx_match = name_only[clean]
+
+    # Strategy 3: fuzzy — check if stem (sans suffixes) is a substring
+    if not hx_match:
+        clean = re.sub(r'_\d+s$', '', stem)
+        for name, hx_id in name_only.items():
+            if clean == name or name == clean:
+                hx_match = hx_id
+                break
+
+    if not hx_match:
+        return None, None, None
+
+    # Load beat times from file (format: time\tbeat_num\tbar_num)
+    beat_path = beat_files[hx_match]
+    raw_beats = []
+    try:
+        with open(beat_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split('\t')
+                if parts:
+                    raw_beats.append(float(parts[0]))
+    except Exception:
+        return None, None, None
+
+    if not raw_beats:
+        return None, None, None
+
+    raw_beats = np.array(raw_beats)
+
+    # Determine time offset — our audio clips are excerpts from full songs
+    # Check both catalog files for offset info
+    offset = 0.0
+    segments_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                '..', '..', 'research', 'audio-segments')
+
+    # Check main catalog.yaml for harmonix_segment_start + harmonix_offset_sec
+    main_catalog = os.path.join(segments_dir, 'catalog.yaml')
+    harmonix_catalog = os.path.join(segments_dir, 'harmonix', 'catalog.yaml')
+
+    try:
+        import yaml
+        # Check main catalog for entries with harmonix_id
+        if os.path.isfile(main_catalog):
+            with open(main_catalog, 'r') as f:
+                entries = yaml.safe_load(f) or []
+            for entry in entries:
+                if isinstance(entry, dict):
+                    hx_id = entry.get('harmonix_id', '')
+                    if hx_id == hx_match:
+                        seg_start = entry.get('harmonix_segment_start', 0)
+                        hx_offset = entry.get('harmonix_offset_sec', 0)
+                        offset = seg_start - hx_offset
+                        break
+
+        # Check harmonix catalog for source_window
+        if offset == 0.0 and os.path.isfile(harmonix_catalog):
+            with open(harmonix_catalog, 'r') as f:
+                hx_cat = yaml.safe_load(f) or {}
+            for key, entry in hx_cat.items():
+                if isinstance(entry, dict):
+                    hx_file = entry.get('file', '')
+                    if os.path.splitext(hx_file)[0].lower() == stem:
+                        sw = entry.get('source_window', '')
+                        m = re.match(r'(\d+)-(\d+)s', sw)
+                        if m:
+                            offset = float(m.group(1))
+                        break
+    except Exception:
+        pass
+
+    # Apply offset: shift beat times to be relative to audio clip start
+    adjusted = raw_beats - offset
+    # Filter to within audio duration (with small margin)
+    mask = (adjusted >= -0.1) & (adjusted <= duration + 0.1)
+    adjusted = adjusted[mask]
+    adjusted = np.clip(adjusted, 0, duration)
+
+    if len(adjusted) < 2:
+        return None, None, None
+
+    # Compute ground truth BPM from median beat interval
+    intervals = np.diff(adjusted)
+    if len(intervals) > 0:
+        median_interval = np.median(intervals)
+        gt_bpm = 60.0 / median_interval if median_interval > 0 else 0.0
+    else:
+        gt_bpm = meta_bpm.get(hx_match, 0.0)
+
+    # Also use metadata BPM as fallback/reference
+    if gt_bpm == 0.0:
+        gt_bpm = meta_bpm.get(hx_match, 0.0)
+
+    return adjusted, gt_bpm, len(adjusted)
+
+
+def render_lab_tempo(filepath):
+    """Tempo Compare Lab — OnsetTempoTracker vs AbsIntegral side-by-side."""
+    cache_key = (filepath, 'lab-tempo')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    import numpy as np
+    import librosa
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+    import sys, os
+
+    # Import the actual algorithm classes
+    effects_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               '..', '..', 'effects')
+    if effects_dir not in sys.path:
+        sys.path.insert(0, effects_dir)
+    from signals import OverlapFrameAccumulator, OnsetTempoTracker, AbsIntegral
+
+    plt.style.use('dark_background')
+
+    y, sr = librosa.load(filepath, sr=None, mono=True)
+    duration = librosa.get_duration(y=y, sr=sr)
+
+    # ── Load Harmonix ground truth (if available) ──
+    gt_beats, gt_bpm, gt_beat_count = _find_harmonix_beats(filepath, duration)
+    has_gt = gt_beats is not None and len(gt_beats) > 0
+    n_fft = 2048
+    hop_length = 512
+
+    # ── Run both algorithms frame-by-frame ──
+    accum_onset = OverlapFrameAccumulator(frame_len=n_fft, hop=hop_length)
+    accum_absint = OverlapFrameAccumulator(frame_len=n_fft, hop=hop_length)
+    onset_tracker = OnsetTempoTracker(sample_rate=sr, frame_len=n_fft)
+    absint = AbsIntegral(frame_len=n_fft, sample_rate=sr)
+
+    # AbsIntegral autocorrelation state (from tempo_pulse.py)
+    ac_window_sec = 30.0
+    ac_rms_fps = sr / hop_length
+    ac_window_frames = int(ac_window_sec * ac_rms_fps)
+    ac_buf = np.zeros(ac_window_frames, dtype=np.float32)
+    ac_buf_pos = 0
+    ac_buf_filled = 0
+    ac_min_confidence = 0.25
+    ac_confidence = 0.0
+    ac_estimated_period = 0.0
+    ac_update_interval = 1.0
+    ac_last_update = 0.0
+    min_period_sec = 0.300
+    max_period_sec = 1.500
+    min_period_frames = max(1, int(min_period_sec * ac_rms_fps))
+    max_period_frames = int(max_period_sec * ac_rms_fps)
+
+    # Timelines to collect
+    chunk_size = 1024
+    onset_env_timeline = []     # onset envelope values
+    absint_timeline = []        # absint raw values
+    onset_bpm_timeline = []     # (time, bpm, confidence)
+    absint_bpm_timeline = []    # (time, bpm, confidence)
+    onset_env_times = []
+    absint_times_list = []
+
+    frame_dt = hop_length / sr
+    time_acc = 0.0
+
+    # Last autocorrelation data for panel 2
+    onset_last_autocorr = None
+    onset_last_lags = None
+    absint_last_autocorr = None
+    absint_last_lags = None
+
+    for start in range(0, len(y) - chunk_size, chunk_size):
+        chunk = y[start:start + chunk_size]
+
+        # Feed OnsetTempoTracker
+        for frame in accum_onset.feed(chunk):
+            onset_tracker.feed_frame(frame)
+            # Collect onset envelope (latest value from ring buffer)
+            idx = (onset_tracker.buf_pos - 1) % onset_tracker.ac_window_frames
+            onset_env_timeline.append(float(onset_tracker.onset_buf[idx]))
+            onset_env_times.append(onset_tracker.time_acc)
+
+        # Feed AbsIntegral
+        for frame in accum_absint.feed(chunk):
+            absint.update(frame)
+            absint_timeline.append(float(absint.raw))
+            absint_times_list.append(absint.time_acc)
+
+            # Store in autocorrelation buffer
+            ac_buf[ac_buf_pos % ac_window_frames] = absint.raw
+            ac_buf_pos += 1
+            ac_buf_filled = min(ac_buf_filled + 1, ac_window_frames)
+
+            # Periodically update autocorrelation
+            if absint.time_acc - ac_last_update > ac_update_interval:
+                ac_last_update = absint.time_acc
+                if ac_buf_filled >= min_period_frames * 4:
+                    n = ac_buf_filled
+                    if n >= ac_window_frames:
+                        s = ac_buf_pos % ac_window_frames
+                        signal = np.concatenate([ac_buf[s:], ac_buf[:s]])
+                    else:
+                        signal = ac_buf[:n].copy()
+                    signal = signal - np.mean(signal)
+                    norm = np.dot(signal, signal)
+                    if norm > 1e-20:
+                        ml = min_period_frames
+                        xl = min(max_period_frames, len(signal) // 2)
+                        if ml < xl:
+                            ac = np.zeros(xl - ml, dtype=np.float64)
+                            for i, lag in enumerate(range(ml, xl)):
+                                ac[i] = np.dot(signal[:-lag], signal[lag:]) / norm
+                            absint_last_autocorr = ac
+                            absint_last_lags = np.arange(ml, xl)
+                            # Find best peak
+                            best_corr = 0.0
+                            best_lag = -1
+                            for i in range(1, len(ac) - 1):
+                                if ac[i] > ac[i-1] and ac[i] > ac[i+1]:
+                                    if ac[i] > best_corr:
+                                        best_corr = ac[i]
+                                        best_lag = ml + i
+                                        if best_corr > ac_min_confidence:
+                                            break
+                            ac_confidence = best_corr
+                            if best_corr > ac_min_confidence and best_lag > 0:
+                                new_period = best_lag / ac_rms_fps
+                                if ac_estimated_period > 0:
+                                    ratio = new_period / ac_estimated_period
+                                    if 0.8 < ratio < 1.2:
+                                        ac_estimated_period = 0.8 * ac_estimated_period + 0.2 * new_period
+                                    elif 0.45 < ratio < 0.55:
+                                        ac_estimated_period = 0.8 * ac_estimated_period + 0.2 * (new_period * 2)
+                                    elif 1.8 < ratio < 2.2:
+                                        ac_estimated_period = 0.8 * ac_estimated_period + 0.2 * (new_period / 2)
+                                else:
+                                    ac_estimated_period = new_period
+
+        time_acc = start / sr
+
+        # Sample BPM estimates every ~0.5s
+        if int(time_acc * 2) > int(((start - chunk_size) / sr) * 2) and start > 0:
+            # Onset tracker
+            o_bpm = onset_tracker.bpm
+            o_conf = onset_tracker.confidence
+            onset_bpm_timeline.append((time_acc, o_bpm, o_conf))
+
+            # AbsInt
+            a_bpm = 60.0 / ac_estimated_period if ac_estimated_period > 0 else 0.0
+            absint_bpm_timeline.append((time_acc, a_bpm, ac_confidence))
+
+    # Capture final onset autocorrelation
+    if onset_tracker.buf_filled >= onset_tracker.ac_window_frames:
+        s = onset_tracker.buf_pos % onset_tracker.ac_window_frames
+        sig = np.concatenate([onset_tracker.onset_buf[s:], onset_tracker.onset_buf[:s]])
+        sig = sig - np.mean(sig)
+        norm = np.dot(sig, sig)
+        if norm > 1e-20:
+            ml = onset_tracker.min_lag
+            xl = min(onset_tracker.max_lag, len(sig) // 2)
+            if ml < xl:
+                ac = np.zeros(xl - ml, dtype=np.float64)
+                for i, lag in enumerate(range(ml, xl)):
+                    ac[i] = np.dot(sig[:-lag], sig[lag:]) / norm
+                onset_last_autocorr = ac
+                onset_last_lags = np.arange(ml, xl)
+
+    # Convert timelines to arrays
+    onset_env_arr = np.array(onset_env_timeline) if onset_env_timeline else np.zeros(1)
+    onset_env_t = np.array(onset_env_times) if onset_env_times else np.zeros(1)
+    absint_arr = np.array(absint_timeline) if absint_timeline else np.zeros(1)
+    absint_t = np.array(absint_times_list) if absint_times_list else np.zeros(1)
+
+    onset_bpm_t = np.array([t for t, b, c in onset_bpm_timeline])
+    onset_bpm_v = np.array([b for t, b, c in onset_bpm_timeline])
+    onset_bpm_c = np.array([c for t, b, c in onset_bpm_timeline])
+    absint_bpm_t = np.array([t for t, b, c in absint_bpm_timeline])
+    absint_bpm_v = np.array([b for t, b, c in absint_bpm_timeline])
+    absint_bpm_c = np.array([c for t, b, c in absint_bpm_timeline])
+
+    # ── Layout: 6 rows ──
+    fig = plt.figure(figsize=(18, 28))
+    gs = gridspec.GridSpec(6, 1, height_ratios=[1, 1, 1.2, 0.5, 1.0, 0.8], hspace=0.35)
+
+    # ── Panel 1a: Onset envelope ──
+    gs_top = gs[0].subgridspec(2, 1, hspace=0.25)
+    ax1a = fig.add_subplot(gs_top[0])
+    if len(onset_env_arr) > 1:
+        onset_env_norm = onset_env_arr / (onset_env_arr.max() + 1e-10)
+        ax1a.plot(onset_env_t, onset_env_norm, color='#FF8A65', linewidth=0.5, alpha=0.6)
+        from scipy.ndimage import gaussian_filter1d
+        onset_smooth = gaussian_filter1d(onset_env_norm, sigma=8)
+        ax1a.plot(onset_env_t, onset_smooth, color='#FF8A65', linewidth=2)
+    ax1a.set_xlim([0, duration])
+    ax1a.set_ylim([0, 1.1])
+    ax1a.set_ylabel('Onset Env')
+    ax1a.set_title('Onset Envelope (multi-band spectral flux)', fontsize=11)
+    ax1a.grid(True, alpha=0.15)
+
+    # ── Panel 1b: AbsIntegral signal ──
+    ax1b = fig.add_subplot(gs_top[1])
+    if len(absint_arr) > 1:
+        absint_norm = absint_arr / (absint_arr.max() + 1e-10)
+        ax1b.plot(absint_t, absint_norm, color='#4DD0E1', linewidth=0.5, alpha=0.6)
+        from scipy.ndimage import gaussian_filter1d
+        absint_smooth = gaussian_filter1d(absint_norm, sigma=8)
+        ax1b.plot(absint_t, absint_smooth, color='#4DD0E1', linewidth=2)
+    ax1b.set_xlim([0, duration])
+    ax1b.set_ylim([0, 1.1])
+    ax1b.set_ylabel('AbsIntegral')
+    ax1b.set_title('AbsIntegral (|d(RMS)/dt| integrated over 150ms)', fontsize=11)
+    ax1b.set_xlabel('Time (s)')
+    ax1b.grid(True, alpha=0.15)
+
+    # ── Panel 2: Autocorrelation comparison ──
+    gs_ac = gs[1].subgridspec(2, 1, hspace=0.25)
+
+    ax2a = fig.add_subplot(gs_ac[0])
+    if onset_last_autocorr is not None and onset_last_lags is not None:
+        onset_bpm_lags = 60.0 * onset_tracker.rms_fps / onset_last_lags
+        ax2a.plot(onset_bpm_lags, onset_last_autocorr, color='#FF8A65', linewidth=1.5)
+        # Mark detected peak
+        if onset_tracker.estimated_period > 0:
+            det_bpm = onset_tracker.bpm
+            ax2a.axvline(det_bpm, color='#FFCC80', linewidth=2, linestyle='--',
+                        label=f'Detected: {det_bpm:.1f} BPM')
+            ax2a.legend(loc='upper right', fontsize=10)
+    if has_gt and gt_bpm > 0:
+        ax2a.axvline(gt_bpm, color='#66BB6A', linewidth=1.5, linestyle=':',
+                    alpha=0.6, label=f'GT: {gt_bpm:.0f} BPM')
+        ax2a.legend(loc='upper right', fontsize=10)
+    ax2a.set_xlim([30, 310])
+    ax2a.set_ylabel('Correlation')
+    ax2a.set_title('OnsetTempoTracker — Autocorrelation (final window)', fontsize=11)
+    ax2a.grid(True, alpha=0.15)
+    ax2a.invert_xaxis()
+
+    ax2b = fig.add_subplot(gs_ac[1])
+    if absint_last_autocorr is not None and absint_last_lags is not None:
+        absint_bpm_lags = 60.0 * ac_rms_fps / absint_last_lags
+        ax2b.plot(absint_bpm_lags, absint_last_autocorr, color='#4DD0E1', linewidth=1.5)
+        # Mark detected peak
+        if ac_estimated_period > 0:
+            det_bpm = 60.0 / ac_estimated_period
+            ax2b.axvline(det_bpm, color='#80DEEA', linewidth=2, linestyle='--',
+                        label=f'Detected: {det_bpm:.1f} BPM')
+            ax2b.legend(loc='upper right', fontsize=10)
+    if has_gt and gt_bpm > 0:
+        ax2b.axvline(gt_bpm, color='#66BB6A', linewidth=1.5, linestyle=':',
+                    alpha=0.6, label=f'GT: {gt_bpm:.0f} BPM')
+        ax2b.legend(loc='upper right', fontsize=10)
+    ax2b.set_xlim([30, 310])
+    ax2b.set_ylabel('Correlation')
+    ax2b.set_xlabel('BPM')
+    ax2b.set_title('AbsIntegral — Autocorrelation (final window)', fontsize=11)
+    ax2b.grid(True, alpha=0.15)
+    ax2b.invert_xaxis()
+
+    # ── Panel 3: BPM over time ──
+    ax3 = fig.add_subplot(gs[2])
+    if len(onset_bpm_t) > 0:
+        # Confidence as shaded region
+        ax3.fill_between(onset_bpm_t, 0, onset_bpm_c * 50,
+                         alpha=0.1, color='#FF8A65')
+        # Only plot where BPM > 0
+        mask_o = onset_bpm_v > 0
+        if mask_o.any():
+            ax3.plot(onset_bpm_t[mask_o], onset_bpm_v[mask_o],
+                    color='#FF8A65', linewidth=2, marker='.', markersize=3,
+                    label='Onset Tracker')
+            # Mark lock time
+            locked = onset_bpm_c > 0.15
+            if locked.any():
+                lock_idx = np.argmax(locked & (onset_bpm_v > 0))
+                ax3.axvline(onset_bpm_t[lock_idx], color='#FF8A65', linewidth=1,
+                           linestyle=':', alpha=0.7)
+                ax3.annotate(f'Lock {onset_bpm_t[lock_idx]:.1f}s',
+                           xy=(onset_bpm_t[lock_idx], onset_bpm_v[lock_idx]),
+                           xytext=(10, 15), textcoords='offset points',
+                           fontsize=9, color='#FF8A65',
+                           arrowprops=dict(arrowstyle='->', color='#FF8A65', lw=0.8))
+
+    if len(absint_bpm_t) > 0:
+        ax3.fill_between(absint_bpm_t, 0, absint_bpm_c * 50,
+                         alpha=0.1, color='#4DD0E1')
+        mask_a = absint_bpm_v > 0
+        if mask_a.any():
+            ax3.plot(absint_bpm_t[mask_a], absint_bpm_v[mask_a],
+                    color='#4DD0E1', linewidth=2, marker='.', markersize=3,
+                    label='AbsIntegral')
+            locked_a = absint_bpm_c >= ac_min_confidence
+            if locked_a.any():
+                lock_idx_a = np.argmax(locked_a & (absint_bpm_v > 0))
+                ax3.axvline(absint_bpm_t[lock_idx_a], color='#4DD0E1', linewidth=1,
+                           linestyle=':', alpha=0.7)
+                ax3.annotate(f'Lock {absint_bpm_t[lock_idx_a]:.1f}s',
+                           xy=(absint_bpm_t[lock_idx_a], absint_bpm_v[lock_idx_a]),
+                           xytext=(10, -20), textcoords='offset points',
+                           fontsize=9, color='#4DD0E1',
+                           arrowprops=dict(arrowstyle='->', color='#4DD0E1', lw=0.8))
+
+    # Ground truth BPM horizontal line
+    if has_gt and gt_bpm > 0:
+        ax3.axhline(gt_bpm, color='#66BB6A', linewidth=2, linestyle='--',
+                    alpha=0.8, label=f'Ground Truth: {gt_bpm:.1f} BPM')
+        # Also show octave multiples as faint lines
+        for mult in [0.5, 2.0]:
+            ax3.axhline(gt_bpm * mult, color='#66BB6A', linewidth=1,
+                        linestyle=':', alpha=0.3)
+
+    ax3.set_xlim([0, duration])
+    bpm_values = []
+    if len(onset_bpm_v) > 0:
+        bpm_values.extend(onset_bpm_v[onset_bpm_v > 0].tolist())
+    if len(absint_bpm_v) > 0:
+        bpm_values.extend(absint_bpm_v[absint_bpm_v > 0].tolist())
+    if has_gt and gt_bpm > 0:
+        bpm_values.extend([gt_bpm, gt_bpm * 0.5, gt_bpm * 2.0])
+    if bpm_values:
+        ax3.set_ylim([max(0, min(bpm_values) - 20), max(bpm_values) + 20])
+    ax3.set_ylabel('BPM')
+    ax3.set_xlabel('Time (s)')
+    title3 = 'Estimated BPM Over Time (confidence shaded below)'
+    if has_gt:
+        title3 += ' — green = Harmonix ground truth'
+    ax3.set_title(title3, fontsize=11)
+    ax3.legend(loc='upper right', fontsize=10)
+    ax3.grid(True, alpha=0.2)
+
+    # ── Panel 4: Beat comparison lanes (dedicated panel) ──
+    ax4 = fig.add_subplot(gs[3])
+
+    # Simulate phase oscillators to get beat markers
+    # OnsetTempoTracker phase
+    accum2 = OverlapFrameAccumulator(frame_len=n_fft, hop=hop_length)
+    ott2 = OnsetTempoTracker(sample_rate=sr, frame_len=n_fft)
+    phase_o = 0.0
+    onset_beats = []
+    for start in range(0, len(y) - chunk_size, chunk_size):
+        chunk = y[start:start + chunk_size]
+        for frame in accum2.feed(chunk):
+            ott2.feed_frame(frame)
+            if ott2.estimated_period > 0 and ott2.confidence > 0.15:
+                period = ott2.estimated_period
+                phase_o += frame_dt / period
+                if phase_o >= 1.0:
+                    phase_o -= 1.0
+                    onset_beats.append(ott2.time_acc)
+            else:
+                phase_o = 0.0
+
+    # AbsIntegral phase
+    accum3 = OverlapFrameAccumulator(frame_len=n_fft, hop=hop_length)
+    ai2 = AbsIntegral(frame_len=n_fft, sample_rate=sr)
+    ac_buf2 = np.zeros(ac_window_frames, dtype=np.float32)
+    ac_bp2 = 0
+    ac_bf2 = 0
+    ac_ep2 = 0.0
+    ac_conf2 = 0.0
+    ac_lu2 = 0.0
+    phase_a = 0.0
+    absint_beats = []
+    for start in range(0, len(y) - chunk_size, chunk_size):
+        chunk = y[start:start + chunk_size]
+        for frame in accum3.feed(chunk):
+            ai2.update(frame)
+            ac_buf2[ac_bp2 % ac_window_frames] = ai2.raw
+            ac_bp2 += 1
+            ac_bf2 = min(ac_bf2 + 1, ac_window_frames)
+            if ai2.time_acc - ac_lu2 > ac_update_interval:
+                ac_lu2 = ai2.time_acc
+                if ac_bf2 >= min_period_frames * 4:
+                    n2 = ac_bf2
+                    if n2 >= ac_window_frames:
+                        s2 = ac_bp2 % ac_window_frames
+                        sig2 = np.concatenate([ac_buf2[s2:], ac_buf2[:s2]])
+                    else:
+                        sig2 = ac_buf2[:n2].copy()
+                    sig2 = sig2 - np.mean(sig2)
+                    norm2 = np.dot(sig2, sig2)
+                    if norm2 > 1e-20:
+                        ml2 = min_period_frames
+                        xl2 = min(max_period_frames, len(sig2) // 2)
+                        if ml2 < xl2:
+                            ac2 = np.zeros(xl2 - ml2, dtype=np.float64)
+                            for i, lag in enumerate(range(ml2, xl2)):
+                                ac2[i] = np.dot(sig2[:-lag], sig2[lag:]) / norm2
+                            bc2 = 0.0
+                            bl2 = -1
+                            for i in range(1, len(ac2) - 1):
+                                if ac2[i] > ac2[i-1] and ac2[i] > ac2[i+1]:
+                                    if ac2[i] > bc2:
+                                        bc2 = ac2[i]
+                                        bl2 = ml2 + i
+                                        if bc2 > ac_min_confidence:
+                                            break
+                            ac_conf2 = bc2
+                            if bc2 > ac_min_confidence and bl2 > 0:
+                                np2 = bl2 / ac_rms_fps
+                                if ac_ep2 > 0:
+                                    r2 = np2 / ac_ep2
+                                    if 0.8 < r2 < 1.2:
+                                        ac_ep2 = 0.8 * ac_ep2 + 0.2 * np2
+                                    elif 0.45 < r2 < 0.55:
+                                        ac_ep2 = 0.8 * ac_ep2 + 0.2 * (np2 * 2)
+                                    elif 1.8 < r2 < 2.2:
+                                        ac_ep2 = 0.8 * ac_ep2 + 0.2 * (np2 / 2)
+                                else:
+                                    ac_ep2 = np2
+            if ac_ep2 > 0 and ac_conf2 >= ac_min_confidence:
+                phase_a += frame_dt / ac_ep2
+                if phase_a >= 1.0:
+                    phase_a -= 1.0
+                    absint_beats.append(ai2.time_acc)
+            else:
+                phase_a = 0.0
+
+    # Draw beat lanes: 3 horizontal rows with vertical tick marks
+    # Lane positions (y-axis): GT=2.5, Onset=1.5, AbsInt=0.5
+    lane_labels = []
+    if has_gt:
+        for bt in gt_beats:
+            ax4.vlines(bt, 2.15, 2.85, colors='#66BB6A', linewidth=1.2, alpha=0.8)
+        lane_labels.append(('Ground Truth', 2.5, '#66BB6A'))
+    for bt in onset_beats:
+        y_lo = 1.15 if has_gt else 0.65
+        y_hi = 1.85 if has_gt else 1.35
+        ax4.vlines(bt, y_lo, y_hi, colors='#FF8A65', linewidth=1.2, alpha=0.8)
+    lane_labels.append(('Onset Tracker', 1.5 if has_gt else 1.0, '#FF8A65'))
+    for bt in absint_beats:
+        y_lo = 0.15 if has_gt else -0.35
+        y_hi = 0.85 if has_gt else 0.35
+        ax4.vlines(bt, y_lo, y_hi, colors='#4DD0E1', linewidth=1.2, alpha=0.8)
+    lane_labels.append(('AbsIntegral', 0.5 if has_gt else 0.0, '#4DD0E1'))
+
+    # Lane dividers and labels
+    n_lanes = 3 if has_gt else 2
+    for label, y_pos, color in lane_labels:
+        ax4.text(-duration * 0.005, y_pos, label, fontsize=10, fontweight='bold',
+                 color=color, ha='right', va='center')
+    # Horizontal lane separators
+    if has_gt:
+        for sep_y in [1.0, 2.0]:
+            ax4.axhline(sep_y, color='#444', linewidth=0.5, alpha=0.5)
+        ax4.set_ylim([-0.1, 3.1])
+    else:
+        ax4.axhline(0.5 if has_gt else 0.0, color='#444', linewidth=0.5, alpha=0.5)
+        ax4.set_ylim([-0.6, 1.6])
+
+    ax4.set_xlim([0, duration])
+    ax4.set_xlabel('Time (s)')
+    ax4.set_yticks([])
+    ax4.grid(True, axis='x', alpha=0.15)
+    ax4.set_title('Beat Comparison — vertical ticks show where each algorithm places beats',
+                  fontsize=11)
+
+    # ── Panel 5: Spectrogram (reference) ──
+    ax5 = fig.add_subplot(gs[4])
+    S = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop_length))
+    S_db = librosa.amplitude_to_db(S, ref=np.max)
+    librosa.display.specshow(S_db, sr=sr, hop_length=hop_length,
+                             x_axis='time', y_axis='log', ax=ax5,
+                             cmap='magma', vmin=-60, vmax=0)
+    ax5.set_title('Spectrogram — audio reference', fontsize=11)
+
+    # ── Panel 6: Summary stats ──
+    ax6 = fig.add_subplot(gs[5])
+    ax6.axis('off')
+    final_onset_bpm = onset_tracker.bpm
+    final_absint_bpm = 60.0 / ac_estimated_period if ac_estimated_period > 0 else 0.0
+    onset_locked = onset_tracker.estimated_period > 0 and onset_tracker.confidence > 0.15
+    absint_locked = ac_estimated_period > 0 and ac_confidence >= ac_min_confidence
+
+    # Find lock times
+    onset_lock_t = None
+    for t, b, c in onset_bpm_timeline:
+        if c > 0.15 and b > 0:
+            onset_lock_t = t
+            break
+    absint_lock_t = None
+    for t, b, c in absint_bpm_timeline:
+        if c >= ac_min_confidence and b > 0:
+            absint_lock_t = t
+            break
+
+    if has_gt:
+        gt_col = f"{'Ground Truth':>22s}"
+        gt_bpm_str = f"{gt_bpm:>18.1f} BPM"
+        gt_beats_str = f"{gt_beat_count:>21d}"
+        summary = (
+            f"{'':8s}{'OnsetTempoTracker':>22s}    {'AbsIntegral':>22s}    {gt_col}\n"
+            f"{'BPM':8s}{final_onset_bpm:>18.1f} BPM    {final_absint_bpm:>18.1f} BPM    {gt_bpm_str}\n"
+            f"{'Conf':8s}{onset_tracker.confidence:>21.3f}    {ac_confidence:>21.3f}    {'---':>21s}\n"
+            f"{'Lock':8s}"
+            f"{'%7.1fs' % onset_lock_t if onset_lock_t else '       NEVER':>21s}    "
+            f"{'%7.1fs' % absint_lock_t if absint_lock_t else '       NEVER':>21s}    "
+            f"{'---':>21s}\n"
+            f"{'Beats':8s}{len(onset_beats):>21d}    {len(absint_beats):>21d}    {gt_beats_str}\n"
+            f"{'Status':8s}{'LOCKED' if onset_locked else 'NOT LOCKED':>21s}    "
+            f"{'LOCKED' if absint_locked else 'NOT LOCKED':>21s}    "
+            f"{'HARMONIX':>21s}\n"
+        )
+    else:
+        summary = (
+            f"{'':8s}{'OnsetTempoTracker':>22s}    {'AbsIntegral':>22s}\n"
+            f"{'BPM':8s}{final_onset_bpm:>18.1f} BPM    {final_absint_bpm:>18.1f} BPM\n"
+            f"{'Conf':8s}{onset_tracker.confidence:>21.3f}    {ac_confidence:>21.3f}\n"
+            f"{'Lock':8s}"
+            f"{'%7.1fs' % onset_lock_t if onset_lock_t else '       NEVER':>21s}    "
+            f"{'%7.1fs' % absint_lock_t if absint_lock_t else '       NEVER':>21s}\n"
+            f"{'Beats':8s}{len(onset_beats):>21d}    {len(absint_beats):>21d}\n"
+            f"{'Status':8s}{'LOCKED' if onset_locked else 'NOT LOCKED':>21s}    "
+            f"{'LOCKED' if absint_locked else 'NOT LOCKED':>21s}\n"
+            f"\n{'No Harmonix ground truth available for this track.':s}\n"
+        )
+    ax6.text(0.05, 0.95, summary, transform=ax6.transAxes,
+             fontsize=13, fontfamily='monospace', verticalalignment='top',
+             color='#ccc',
+             bbox=dict(boxstyle='round', facecolor='#1a1a2e', edgecolor='#333',
+                      alpha=0.9, pad=0.8))
+    ax6.set_title('Summary — Final State', fontsize=11)
+
+    filename = Path(filepath).name
+    fig.suptitle(f'{filename} — Tempo Compare Lab', fontsize=14,
                  fontweight='bold', y=0.995)
     fig.subplots_adjust(top=0.975, bottom=0.02)
     fig.canvas.draw()
@@ -2359,6 +3316,10 @@ def _run_demucs_background(filepath):
 
 
 # ── Recording ────────────────────────────────────────────────────────
+# Crash-safe: streams audio to disk via sf.SoundFile so data survives
+# server restarts.  A small ring buffer feeds the VU meter.
+
+_VU_BUF_CHUNKS = 10  # ~100ms of audio callback chunks for VU meter
 
 def start_recording():
     """Start recording from BlackHole. Returns {ok: bool, error: str}."""
@@ -2367,7 +3328,8 @@ def start_recording():
         return {'ok': False, 'error': 'Already recording'}
 
     import sounddevice as sd
-    import numpy as np
+    import soundfile as sf
+    from datetime import datetime
 
     # Find BlackHole device
     device_id = None
@@ -2379,43 +3341,57 @@ def start_recording():
     if device_id is None:
         return {'ok': False, 'error': 'BlackHole device not found'}
 
-    frames = []
+    # Open WAV for streaming writes — file is always valid on disk
+    os.makedirs(SEGMENTS_DIR, exist_ok=True)
+    temp_name = f"_recording_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+    temp_path = os.path.join(SEGMENTS_DIR, temp_name)
+    sf_file = sf.SoundFile(temp_path, mode='w', samplerate=44100, channels=2)
+
+    # Ring buffer for VU meter (last ~100ms of chunks)
+    vu_buf = collections.deque(maxlen=_VU_BUF_CHUNKS)
+    n_frames = [0]  # mutable counter for callback
 
     def callback(indata, frame_count, time_info, status):
-        frames.append(indata.copy())
+        sf_file.write(indata)
+        vu_buf.append(indata.copy())
+        n_frames[0] += len(indata)
 
     stream = sd.InputStream(
         device=device_id, channels=2, samplerate=44100, callback=callback
     )
     stream.start()
-    _recording = {'stream': stream, 'frames': frames}
-    print("[record] Started recording from BlackHole")
+    _recording = {
+        'stream': stream, 'sf': sf_file, 'path': temp_path,
+        'n_frames': n_frames, 'vu_buf': vu_buf,
+    }
+    print(f"[record] Started recording to {temp_path}")
     return {'ok': True}
 
 
 def stop_recording(name=''):
-    """Stop recording, save WAV. Returns {ok, filename, duration} or {ok: false, error}."""
+    """Stop recording, rename WAV, update catalog. Returns {ok, filename, duration}."""
     global _recording, _file_list_cache
     if _recording is None:
         return {'ok': False, 'error': 'Not recording'}
 
-    import numpy as np
-    import soundfile as sf
     import yaml
     from datetime import datetime
 
     stream = _recording['stream']
-    frames = _recording['frames']
+    sf_file = _recording['sf']
+    temp_path = _recording['path']
+    n_frames = _recording['n_frames'][0]
     stream.stop()
     stream.close()
+    sf_file.close()
     _recording = None
 
-    if not frames:
-        return {'ok': False, 'error': 'No audio captured'}
-
-    audio_data = np.concatenate(frames)
     sr = 44100
-    duration = round(len(audio_data) / sr, 1)
+    duration = round(n_frames / sr, 1)
+
+    if n_frames == 0:
+        os.remove(temp_path)
+        return {'ok': False, 'error': 'No audio captured'}
 
     if not name:
         name = f"segment_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -2424,10 +3400,22 @@ def stop_recording(name=''):
     filename = f"{name}.wav"
     filepath = os.path.join(SEGMENTS_DIR, filename)
 
-    sf.write(filepath, audio_data, sr)
+    os.rename(temp_path, filepath)
     print(f"[record] Saved {filepath} ({duration}s)")
 
     # Update catalog
+    _catalog_add(name, filename, duration, sr)
+
+    # Clear file list cache
+    _file_list_cache = None
+
+    return {'ok': True, 'filename': filename, 'duration': duration}
+
+
+def _catalog_add(name, filename, duration, sr):
+    """Add an entry to catalog.yaml."""
+    import yaml
+    from datetime import datetime
     catalog_path = os.path.join(SEGMENTS_DIR, 'catalog.yaml')
     catalog = []
     if os.path.exists(catalog_path):
@@ -2443,10 +3431,31 @@ def stop_recording(name=''):
     with open(catalog_path, 'w') as f:
         yaml.dump(catalog, f, default_flow_style=False)
 
-    # Clear file list cache
-    _file_list_cache = None
 
-    return {'ok': True, 'filename': filename, 'duration': duration}
+def _recover_orphaned_recordings():
+    """On startup, detect orphaned _recording_*.wav files and catalog them."""
+    import soundfile as sf
+    if not os.path.isdir(SEGMENTS_DIR):
+        return
+    for fname in os.listdir(SEGMENTS_DIR):
+        if fname.startswith('_recording_') and fname.endswith('.wav'):
+            fpath = os.path.join(SEGMENTS_DIR, fname)
+            try:
+                info = sf.info(fpath)
+                duration = round(info.frames / info.samplerate, 1)
+                if info.frames == 0:
+                    os.remove(fpath)
+                    print(f"[record] Removed empty orphan: {fname}")
+                    continue
+                # Rename to a proper name
+                base = fname.replace('_recording_', 'recovered_').replace('.wav', '')
+                final_name = f"{base}.wav"
+                final_path = os.path.join(SEGMENTS_DIR, final_name)
+                os.rename(fpath, final_path)
+                _catalog_add(base, final_name, duration, info.samplerate)
+                print(f"[record] Recovered orphaned recording: {fname} -> {final_name} ({duration}s)")
+            except Exception as e:
+                print(f"[record] Could not recover {fname}: {e}")
 
 
 def get_recording_level():
@@ -2454,25 +3463,13 @@ def get_recording_level():
     if _recording is None:
         return {'recording': False}
 
-    import numpy as np
-
-    frames = _recording['frames']
-    if not frames:
+    vu_buf = _recording['vu_buf']
+    if not vu_buf:
         return {'recording': True, 'rms': 0, 'waveform': []}
 
-    # Take last ~100ms of audio (4410 samples at 44100Hz)
-    # Frames are arrays of shape (chunk_size, 2)
-    target_samples = 4410
-    recent = []
-    total = 0
-    for chunk in reversed(frames):
-        recent.append(chunk)
-        total += len(chunk)
-        if total >= target_samples:
-            break
-
-    recent.reverse()
-    block = np.concatenate(recent)[-target_samples:]
+    # Snapshot the ring buffer (deque is thread-safe for iteration)
+    chunks = list(vu_buf)
+    block = np.concatenate(chunks)
 
     # Mix to mono for display
     if block.ndim > 1:
@@ -2645,7 +3642,9 @@ class ViewerHandler(BaseHTTPRequestHandler):
         self._json_response({'ok': True})
 
     def _handle_effect_stop(self):
+        global _effect_start_params
         _stop_effect()
+        _effect_start_params = None  # explicit stop — don't hot-reload
         self._json_response({'ok': True})
 
     def _handle_effect_rate(self):
@@ -3186,8 +4185,9 @@ class ViewerHandler(BaseHTTPRequestHandler):
             rel_path = path[len('/api/annotations/'):]
             self._serve_annotations(rel_path)
         elif path == '/api/controllers':
-            global _sculptures
+            global _sculptures, _controllers
             _sculptures = _load_sculptures()
+            _controllers = _load_controllers()
             _resolve_controller_ports(_controllers)
             targets = _build_output_targets(_sculptures, _controllers)
             self._json_response(targets)
@@ -3206,7 +4206,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
                     target_type = 'controller'
             else:
                 # Determine type from active target
-                if any(s['id'] == target for s in _sculptures):
+                if any(s['id'] == target for s in _get_sculptures()):
                     target_type = 'sculpture'
                 else:
                     target_type = 'controller'
@@ -3296,21 +4296,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404, 'File not found')
             return
 
-        tab = 'annotations' if with_annotations else 'analysis'
-        feat_key = frozenset(sorted(features.items())) if features else None
-        cache_key = (filepath, tab, feat_key)
-        if cache_key in _render_cache:
-            png_bytes, headers = _render_cache[cache_key]
-        else:
-            try:
-                png_bytes, headers = submit_render('render_analysis', (filepath, with_annotations, features))
-            except RenderCancelled:
-                return
-            except Exception as e:
-                print(f"[render] Error: {e}")
-                self.send_error(500, str(e))
-                return
-            _render_cache[cache_key] = (png_bytes, headers)
+        try:
+            png_bytes, headers = render_analysis(filepath, with_annotations, features)
+        except Exception as e:
+            print(f"[render] Error: {e}")
+            self.send_error(500, str(e))
+            return
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3330,19 +4321,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404, 'File not found')
             return
 
-        cache_key = (filepath, 'annotate')
-        if cache_key in _render_cache:
-            png_bytes, headers = _render_cache[cache_key]
-        else:
-            try:
-                png_bytes, headers = submit_render('render_annotate', (filepath,))
-            except RenderCancelled:
-                return
-            except Exception as e:
-                print(f"[render-annotate] Error: {e}")
-                self.send_error(500, str(e))
-                return
-            _render_cache[cache_key] = (png_bytes, headers)
+        try:
+            png_bytes, headers = render_annotate(filepath)
+        except Exception as e:
+            print(f"[render-annotate] Error: {e}")
+            self.send_error(500, str(e))
+            return
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3361,19 +4345,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404, 'File not found')
             return
 
-        cache_key = (filepath, 'band-analysis')
-        if cache_key in _render_cache:
-            png_bytes, headers = _render_cache[cache_key]
-        else:
-            try:
-                png_bytes, headers = submit_render('render_band_analysis', (filepath,))
-            except RenderCancelled:
-                return
-            except Exception as e:
-                print(f"[render-band-analysis] Error: {e}")
-                self.send_error(500, str(e))
-                return
-            _render_cache[cache_key] = (png_bytes, headers)
+        try:
+            png_bytes, headers = render_band_analysis(filepath)
+        except Exception as e:
+            print(f"[render-band-analysis] Error: {e}")
+            self.send_error(500, str(e))
+            return
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3392,19 +4369,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404, 'File not found')
             return
 
-        cache_key = (filepath, 'calculus')
-        if cache_key in _render_cache:
-            png_bytes, headers = _render_cache[cache_key]
-        else:
-            try:
-                png_bytes, headers = submit_render('render_calculus', (filepath,))
-            except RenderCancelled:
-                return
-            except Exception as e:
-                print(f"[render-calculus] Error: {e}")
-                self.send_error(500, str(e))
-                return
-            _render_cache[cache_key] = (png_bytes, headers)
+        try:
+            png_bytes, headers = render_calculus(filepath)
+        except Exception as e:
+            print(f"[render-calculus] Error: {e}")
+            self.send_error(500, str(e))
+            return
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3423,22 +4393,15 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404, 'File not found')
             return
 
-        cache_key = (filepath, 'panel', panel_name)
-        if cache_key in _render_cache:
-            png_bytes, headers = _render_cache[cache_key]
-        else:
-            try:
-                png_bytes, headers = submit_render('render_single_panel', (filepath, panel_name))
-            except RenderCancelled:
-                return
-            except ValueError as e:
-                self._json_response({'error': str(e)}, status=400)
-                return
-            except Exception as e:
-                print(f"[render-panel] Error: {e}")
-                self.send_error(500, str(e))
-                return
-            _render_cache[cache_key] = (png_bytes, headers)
+        try:
+            png_bytes, headers = render_single_panel(filepath, panel_name)
+        except ValueError as e:
+            self._json_response({'error': str(e)}, status=400)
+            return
+        except Exception as e:
+            print(f"[render-panel] Error: {e}")
+            self.send_error(500, str(e))
+            return
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3481,19 +4444,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
 
-        cache_key = (filepath, 'stems')
-        if cache_key in _render_cache:
-            png_bytes, headers = _render_cache[cache_key]
-        else:
-            try:
-                png_bytes, headers = submit_render('render_stems', (filepath,))
-            except RenderCancelled:
-                return
-            except Exception as e:
-                print(f"[stems] Error: {e}")
-                self.send_error(500, str(e))
-                return
-            _render_cache[cache_key] = (png_bytes, headers)
+        try:
+            png_bytes, headers = render_stems(filepath)
+        except Exception as e:
+            print(f"[stems] Error: {e}")
+            self.send_error(500, str(e))
+            return
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3512,19 +4468,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
 
-        cache_key = (filepath, 'hpss')
-        if cache_key in _render_cache:
-            png_bytes, headers = _render_cache[cache_key]
-        else:
-            try:
-                png_bytes, headers = submit_render('render_hpss', (filepath,))
-            except RenderCancelled:
-                return
-            except Exception as e:
-                print(f"[hpss] Error: {e}")
-                self.send_error(500, str(e))
-                return
-            _render_cache[cache_key] = (png_bytes, headers)
+        try:
+            png_bytes, headers = render_hpss(filepath)
+        except Exception as e:
+            print(f"[hpss] Error: {e}")
+            self.send_error(500, str(e))
+            return
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3543,21 +4492,14 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
 
-        cache_key = (filepath, 'lab-nmf')
-        if cache_key in _render_cache:
-            png_bytes, headers = _render_cache[cache_key]
-        else:
-            try:
-                png_bytes, headers = submit_render('render_lab_nmf', (filepath,))
-            except RenderCancelled:
-                return
-            except Exception as e:
-                print(f"[lab-nmf] Error: {e}")
-                import traceback
-                traceback.print_exc()
-                self.send_error(500, str(e))
-                return
-            _render_cache[cache_key] = (png_bytes, headers)
+        try:
+            png_bytes, headers = render_lab_nmf(filepath)
+        except Exception as e:
+            print(f"[lab-nmf] Error: {e}")
+            import traceback
+            traceback.print_exc()
+            self.send_error(500, str(e))
+            return
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3576,19 +4518,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
 
-        cache_key = (filepath, 'lab-repet')
-        if cache_key in _render_cache:
-            png_bytes, headers = _render_cache[cache_key]
-        else:
-            try:
-                png_bytes, headers = submit_render('render_lab_repet', (filepath,))
-            except RenderCancelled:
-                return
-            except Exception as e:
-                print(f"[lab-repet] Error: {e}")
-                self.send_error(500, str(e))
-                return
-            _render_cache[cache_key] = (png_bytes, headers)
+        try:
+            png_bytes, headers = render_lab_repet(filepath)
+        except Exception as e:
+            print(f"[lab-repet] Error: {e}")
+            self.send_error(500, str(e))
+            return
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3607,19 +4542,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
 
-        cache_key = (filepath, f'lab-{variant}')
-        if cache_key in _render_cache:
-            png_bytes, headers = _render_cache[cache_key]
-        else:
-            try:
-                png_bytes, headers = submit_render('render_lab', (filepath, variant))
-            except RenderCancelled:
-                return
-            except Exception as e:
-                print(f"[lab] Error: {e}")
-                self.send_error(500, str(e))
-                return
-            _render_cache[cache_key] = (png_bytes, headers)
+        try:
+            png_bytes, headers = render_lab(filepath, variant)
+        except Exception as e:
+            print(f"[lab] Error: {e}")
+            self.send_error(500, str(e))
+            return
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/png')
@@ -3704,12 +4632,19 @@ def run_server(port=0, host='127.0.0.1', no_browser=False):
     from datetime import datetime, timezone
     _server_start_iso = datetime.now(timezone.utc).isoformat()
 
+    # Recover any recordings that were interrupted by a previous crash
+    _recover_orphaned_recordings()
+
     server = ThreadedHTTPServer((host, port), ViewerHandler)
     actual_port = server.server_address[1]
 
     url = f'http://{host}:{actual_port}'
     print(f"Audio Explorer running at {url}")
     print("Press Ctrl+C to stop\n")
+
+    # Start effect hot reload watcher (local dev only)
+    if not PUBLIC_MODE:
+        threading.Thread(target=_effect_hot_reload_loop, daemon=True).start()
 
     if not no_browser:
         import webbrowser

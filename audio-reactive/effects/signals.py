@@ -385,8 +385,9 @@ class OnsetTempoTracker:
                  ac_window_sec: float = 5.0, update_interval_sec: float = 0.5,
                  min_bpm: float = 40, max_bpm: float = 300,
                  prior_center: float = 100, prior_sigma: float = 99999,
-                 n_bands: int = 6):
+                 n_bands: int = 6, full_wave: bool = False):
         self.sample_rate = sample_rate
+        self.full_wave = full_wave
         self.frame_len = frame_len
         self.dt = frame_len / sample_rate
         self.rms_fps = sample_rate / 512  # hop-based rate
@@ -457,8 +458,10 @@ class OnsetTempoTracker:
             band_energy[b] = np.log1p(np.sum(spectrum[sl] ** 2))
         flux = band_energy - self._prev_band_energy
         self._prev_band_energy = band_energy
-        # Half-wave rectify + mean: onset strength this frame
-        onset = np.mean(np.maximum(0, flux))
+        # Rectify + mean: onset strength this frame
+        # Half-wave (default): only energy increases (onsets)
+        # Full-wave: both increases and decreases (onsets + offsets)
+        onset = np.mean(np.abs(flux)) if self.full_wave else np.mean(np.maximum(0, flux))
 
         # Store in ring buffer
         self.onset_buf[self.buf_pos % self.ac_window_frames] = onset
@@ -551,3 +554,363 @@ class OnsetTempoTracker:
     def bpm(self) -> float:
         """Current estimated BPM, or 0 if unknown."""
         return 60.0 / self.estimated_period if self.estimated_period > 0 else 0.0
+
+
+class OnsetOffsetTempoTracker(OnsetTempoTracker):
+    """Tempo estimation via onset-offset-envelope autocorrelation.
+
+    Identical to OnsetTempoTracker but uses FULL-WAVE rectification
+    (absolute value) instead of half-wave. This captures both:
+      - Onsets (energy arriving, positive spectral flux)
+      - Offsets (energy leaving, negative spectral flux)
+
+    Expected behavior:
+      - Tempo: May be slightly worse than onset-only (more smeared)
+      - Percussion: Should be better (captures full drum envelope)
+
+    The signal is equivalent to |d(spectral_energy)/dt| per band,
+    summed across 6 mel-spaced bands. This preserves multi-band
+    separation (unlike AbsIntegral's single-band RMS) while adding
+    sensitivity to energy decay.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(full_wave=True, **kwargs)
+
+
+class HarmonicChangeTempoTracker(OnsetTempoTracker):
+    """Tempo estimation via chroma change (harmonic flux) autocorrelation.
+
+    Instead of spectral flux (energy onset), uses Euclidean distance between
+    consecutive chroma frames as the onset signal. This detects chord boundaries,
+    which are more reliable beat markers than energy onsets for music with
+    soft attacks (folk, acoustic, strummed guitar).
+
+    Reuses OnsetTempoTracker's autocorrelation and smoothing logic.
+    """
+
+    def __init__(self, **kwargs):
+        # Don't pass n_bands or full_wave — we don't use mel-band spectral flux
+        kwargs.pop('n_bands', None)
+        kwargs.pop('full_wave', None)
+        super().__init__(**kwargs)
+        # Chroma state (overrides parent's band state, which we won't use)
+        self._prev_chroma = np.zeros(12, dtype=np.float64)
+        # Precompute pitch class bin mapping for chroma
+        fft_size = self.frame_len // 2 + 1
+        freqs = np.fft.rfftfreq(self.frame_len, 1.0 / self.sample_rate)
+        # Map each FFT bin to a pitch class (0-11), skip DC and very low bins
+        self._chroma_bins = [[] for _ in range(12)]
+        for i, f in enumerate(freqs):
+            if f < 65:  # below C2, skip
+                continue
+            if f > self.sample_rate / 2 * 0.9:  # near Nyquist, skip
+                continue
+            # MIDI note number → pitch class
+            midi = 69 + 12 * np.log2(f / 440.0)
+            pc = int(round(midi)) % 12
+            self._chroma_bins[pc].append(i)
+
+    def feed_frame(self, frame: np.ndarray):
+        """Feed one audio frame. Computes chroma diff as onset signal."""
+        spectrum = np.abs(np.fft.rfft(frame))
+
+        # Compute 12-bin chroma from spectrum
+        chroma = np.zeros(12, dtype=np.float64)
+        for pc in range(12):
+            bins = self._chroma_bins[pc]
+            if bins:
+                chroma[pc] = np.sum(spectrum[bins] ** 2)
+        # Log-scale and normalize
+        chroma = np.log1p(chroma)
+        total = np.sum(chroma)
+        if total > 1e-10:
+            chroma /= total
+
+        # Harmonic change = Euclidean distance between consecutive chroma
+        onset = np.linalg.norm(chroma - self._prev_chroma)
+        self._prev_chroma = chroma.copy()
+
+        # Store in ring buffer (same as parent)
+        self.onset_buf[self.buf_pos % self.ac_window_frames] = onset
+        self.buf_pos += 1
+        self.buf_filled = min(self.buf_filled + 1, self.ac_window_frames)
+        self.time_acc += self.rms_dt
+
+        # Periodically run autocorrelation (same as parent)
+        self.frames_since_update += 1
+        if self.frames_since_update >= self.update_interval:
+            self.frames_since_update = 0
+            self._update_autocorrelation()
+
+
+class SignalFusionTempoTracker(OnsetTempoTracker):
+    """Signal-level multi-onset fusion tempo tracker.
+
+    Computes 3 onset functions per frame, normalizes each by running peak,
+    sums them into a single fused onset signal, then feeds into the standard
+    autocorrelation pipeline. This is the MIREX-style multi-feature approach.
+
+    Onset functions:
+      1. Spectral flux (half-wave rectified, multi-band) — same as OnsetTempoTracker
+      2. Energy flux (half-wave rectified RMS difference)
+      3. Harmonic flux (chroma L2 distance)
+
+    Each function is normalized to 0-1 by its own running peak before summing.
+    """
+
+    def __init__(self, sample_rate: int = 44100, peak_decay: float = 0.998,
+                 **kwargs):
+        kwargs.pop('full_wave', None)
+        super().__init__(sample_rate=sample_rate, **kwargs)
+        self._peak_decay = peak_decay
+
+        # Energy flux state
+        self._prev_rms = 0.0
+        self._energy_peak = 1e-10
+
+        # Harmonic flux state (chroma)
+        self._prev_chroma = np.zeros(12, dtype=np.float64)
+        self._chroma_peak = 1e-10
+        fft_size = self.frame_len // 2 + 1
+        freqs = np.fft.rfftfreq(self.frame_len, 1.0 / sample_rate)
+        self._chroma_bins = [[] for _ in range(12)]
+        for i, f in enumerate(freqs):
+            if f < 65 or f > sample_rate / 2 * 0.9:
+                continue
+            midi = 69 + 12 * np.log2(f / 440.0)
+            pc = int(round(midi)) % 12
+            self._chroma_bins[pc].append(i)
+
+        # Spectral flux peak (for normalization)
+        self._spectral_peak = 1e-10
+
+    def feed_frame(self, frame: np.ndarray):
+        """Feed one audio frame. Computes 3 onset functions, normalizes, sums."""
+        spectrum = np.abs(np.fft.rfft(frame))
+
+        # 1. Spectral flux (half-wave, multi-band) — same as parent
+        band_energy = np.zeros(self.n_bands, dtype=np.float64)
+        for b, sl in enumerate(self._band_slices):
+            band_energy[b] = np.log1p(np.sum(spectrum[sl] ** 2))
+        flux = band_energy - self._prev_band_energy
+        self._prev_band_energy = band_energy
+        spectral_onset = np.mean(np.maximum(0, flux))
+        self._spectral_peak = max(spectral_onset, self._spectral_peak * self._peak_decay)
+        norm_spectral = spectral_onset / self._spectral_peak if self._spectral_peak > 1e-10 else 0.0
+
+        # 2. Energy flux (half-wave rectified RMS diff)
+        rms = np.sqrt(np.mean(frame ** 2))
+        energy_diff = max(0.0, rms - self._prev_rms)
+        self._prev_rms = rms
+        self._energy_peak = max(energy_diff, self._energy_peak * self._peak_decay)
+        norm_energy = energy_diff / self._energy_peak if self._energy_peak > 1e-10 else 0.0
+
+        # 3. Harmonic flux (chroma L2 distance)
+        chroma = np.zeros(12, dtype=np.float64)
+        for pc in range(12):
+            bins = self._chroma_bins[pc]
+            if bins:
+                chroma[pc] = np.sum(spectrum[bins] ** 2)
+        chroma = np.log1p(chroma)
+        total = np.sum(chroma)
+        if total > 1e-10:
+            chroma /= total
+        chroma_diff = np.linalg.norm(chroma - self._prev_chroma)
+        self._prev_chroma = chroma.copy()
+        self._chroma_peak = max(chroma_diff, self._chroma_peak * self._peak_decay)
+        norm_chroma = chroma_diff / self._chroma_peak if self._chroma_peak > 1e-10 else 0.0
+
+        # Fused onset: sum of normalized onset functions
+        onset = norm_spectral + norm_energy + norm_chroma
+
+        # Store in ring buffer and run autocorrelation (parent logic)
+        self.onset_buf[self.buf_pos % self.ac_window_frames] = onset
+        self.buf_pos += 1
+        self.buf_filled = min(self.buf_filled + 1, self.ac_window_frames)
+        self.time_acc += self.rms_dt
+
+        self.frames_since_update += 1
+        if self.frames_since_update >= self.update_interval:
+            self.frames_since_update = 0
+            self._update_autocorrelation()
+
+
+class AdaptiveTempoTracker:
+    """Adaptive tempo tracker: onset by default, fusion fallback.
+
+    Uses OnsetTempoTracker as primary. If onset confidence stays below
+    threshold after a timeout, switches to SignalFusionTempoTracker.
+    Best-of-both: onset's stability when it works, fusion's robustness
+    when onset struggles (folk, ambient, soft attacks).
+    """
+
+    def __init__(self, sample_rate: int = 44100,
+                 fallback_timeout: float = 10.0, conf_threshold: float = 0.15,
+                 **kwargs):
+        self.onset = OnsetTempoTracker(sample_rate=sample_rate, **kwargs)
+        self.fusion = SignalFusionTempoTracker(sample_rate=sample_rate, **kwargs)
+        self.fallback_timeout = fallback_timeout
+        self.conf_threshold = conf_threshold
+        self._using_fusion = False
+        self._time_acc = 0.0
+        self._rms_dt = 512 / sample_rate
+
+    def feed_frame(self, frame: np.ndarray):
+        """Feed audio frame to both trackers, decide which to use."""
+        self.onset.feed_frame(frame)
+        self.fusion.feed_frame(frame)
+        self._time_acc += self._rms_dt
+
+        # Switch to fusion if onset hasn't locked after timeout
+        if (not self._using_fusion
+                and self._time_acc > self.fallback_timeout
+                and self.onset.confidence < self.conf_threshold):
+            self._using_fusion = True
+
+        # Switch back to onset if it regains confidence
+        if self._using_fusion and self.onset.confidence >= self.conf_threshold:
+            self._using_fusion = False
+
+    @property
+    def _active(self):
+        return self.fusion if self._using_fusion else self.onset
+
+    @property
+    def estimated_period(self) -> float:
+        return self._active.estimated_period
+
+    @property
+    def confidence(self) -> float:
+        return self._active.confidence
+
+    @property
+    def bpm(self) -> float:
+        return 60.0 / self.estimated_period if self.estimated_period > 0 else 0.0
+
+    # Expose internal buffers for peak sharpness (use active tracker's buf)
+    @property
+    def onset_buf(self):
+        return self._active.onset_buf
+
+    @property
+    def buf_pos(self):
+        return self._active.buf_pos
+
+    @property
+    def buf_filled(self):
+        return self._active.buf_filled
+
+    @property
+    def ac_window_frames(self):
+        return self._active.ac_window_frames
+
+    @property
+    def min_lag(self):
+        return self._active.min_lag
+
+    @property
+    def max_lag(self):
+        return self._active.max_lag
+
+    @property
+    def rms_fps(self):
+        return self._active.rms_fps
+
+
+class FusionTempoTracker:
+    """Period-level multi-onset fusion tempo tracker via committee voting.
+
+    Runs spectral flux (OnsetTempoTracker) and harmonic change
+    (HarmonicChangeTempoTracker) in parallel, fuses their period estimates.
+
+    Fusion methods:
+      - 'sum': confidence-weighted average of periods
+      - 'max': pick tracker with highest confidence
+      - 'vote': average if they agree within 10%, else pick highest confidence
+    """
+
+    def __init__(self, sample_rate: int = 44100, fusion_method: str = 'sum',
+                 **kwargs):
+        self.spectral = OnsetTempoTracker(sample_rate=sample_rate, **kwargs)
+        self.harmonic = HarmonicChangeTempoTracker(sample_rate=sample_rate,
+                                                   **kwargs)
+        self.fusion_method = fusion_method
+
+    def feed_frame(self, frame: np.ndarray):
+        """Feed audio frame to both trackers."""
+        self.spectral.feed_frame(frame)
+        self.harmonic.feed_frame(frame)
+
+    @property
+    def estimated_period(self) -> float:
+        s_period = self.spectral.estimated_period
+        h_period = self.harmonic.estimated_period
+        s_conf = self.spectral.confidence
+        h_conf = self.harmonic.confidence
+
+        if self.fusion_method == 'sum':
+            if s_conf + h_conf < 0.01:
+                return 0.0
+            return (s_period * s_conf + h_period * h_conf) / (s_conf + h_conf)
+
+        elif self.fusion_method == 'max':
+            if s_conf >= h_conf:
+                return s_period
+            return h_period
+
+        elif self.fusion_method == 'vote':
+            if s_period > 0 and h_period > 0:
+                ratio = max(s_period, h_period) / min(s_period, h_period)
+                if ratio < 1.1:
+                    return (s_period + h_period) / 2
+            if s_conf >= h_conf:
+                return s_period
+            return h_period
+
+        return 0.0
+
+    @property
+    def confidence(self) -> float:
+        if self.fusion_method == 'vote':
+            s_period = self.spectral.estimated_period
+            h_period = self.harmonic.estimated_period
+            if s_period > 0 and h_period > 0:
+                ratio = max(s_period, h_period) / min(s_period, h_period)
+                if ratio < 1.1:
+                    return min(1.0, (self.spectral.confidence +
+                                     self.harmonic.confidence) / 2 * 1.2)
+        return max(self.spectral.confidence, self.harmonic.confidence)
+
+    @property
+    def bpm(self) -> float:
+        return 60.0 / self.estimated_period if self.estimated_period > 0 else 0.0
+
+    # Expose internal buffers for peak sharpness computation
+    @property
+    def onset_buf(self):
+        return self.spectral.onset_buf
+
+    @property
+    def buf_pos(self):
+        return self.spectral.buf_pos
+
+    @property
+    def buf_filled(self):
+        return self.spectral.buf_filled
+
+    @property
+    def ac_window_frames(self):
+        return self.spectral.ac_window_frames
+
+    @property
+    def min_lag(self):
+        return self.spectral.min_lag
+
+    @property
+    def max_lag(self):
+        return self.spectral.max_lag
+
+    @property
+    def rms_fps(self):
+        return self.spectral.rms_fps

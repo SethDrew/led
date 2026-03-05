@@ -1,0 +1,43 @@
+# Fear Inoculum 300-360s — True polymeter
+# Source: Hack Music Theory breakdown, community analysis
+# Confidence: community
+
+meter_map:
+- start: 0.0
+  end: 12.0
+  time_sig: "12/8"
+  label: "guitar layer 1"
+- start: 12.0
+  end: 20.0
+  time_sig: "5/4"
+  label: "guitar layer 2"
+- start: 20.0
+  end: 32.0
+  time_sig: "12/8"
+  label: "guitar layer 1 return"
+- start: 32.0
+  end: 40.0
+  time_sig: "5/4"
+  label: "guitar layer 2 return"
+- start: 40.0
+  end: 60.0
+  time_sig: "11/8"
+  label: "convergence toward 11/8"
+
+segments:
+- start: 0.0
+  end: 40.0
+  label: instrumental
+- start: 40.0
+  end: 60.0
+  label: verse
+
+polyrhythm_zones:
+- start: 0.0
+  end: 40.0
+  ratio: "polymeter"
+  description: "Guitar alternates 12/8 and 5/4. Bass+drums play 11/8 (subdivided 3+3+3+2). True polymeter — different instruments in different meters simultaneously."
+  key: "A Phrygian"
+
+coda_layers:
+  note: "This section demonstrates true polymeter rather than polyrhythm — the instruments are in genuinely different meters, not just different subdivisions of the same meter"

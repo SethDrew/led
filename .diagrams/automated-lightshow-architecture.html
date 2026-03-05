@@ -1,0 +1,1493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Automated Light Show Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;600;700&family=Noto+Sans+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* ============ THEME ============ */
+  :root {
+    --font-body: 'Crimson Pro', Georgia, serif;
+    --font-mono: 'Noto Sans Mono', 'SF Mono', Consolas, monospace;
+
+    /* Paper/ink — warm cream palette */
+    --bg: #faf7f5;
+    --surface: #fffcfa;
+    --surface2: #f5f0ec;
+    --surface-elevated: #fff9f5;
+    --border: rgba(92, 74, 60, 0.12);
+    --border-bright: rgba(92, 74, 60, 0.22);
+    --text: #2d2520;
+    --text-dim: #897868;
+    --accent: #b5761d;
+    --accent-dim: rgba(181, 118, 29, 0.08);
+    --sage: #5a7f4b;
+    --sage-dim: rgba(90, 127, 75, 0.08);
+    --terracotta: #a74b38;
+    --terracotta-dim: rgba(167, 75, 56, 0.08);
+    --slate: #4a5568;
+    --slate-dim: rgba(74, 85, 104, 0.08);
+    --warm: #c97838;
+    --warm-dim: rgba(201, 120, 56, 0.08);
+    --cool: #3e6d7d;
+    --cool-dim: rgba(62, 109, 125, 0.08);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1512;
+      --surface: #251f1b;
+      --surface2: #2e2622;
+      --surface-elevated: #342d28;
+      --border: rgba(255, 245, 235, 0.08);
+      --border-bright: rgba(255, 245, 235, 0.15);
+      --text: #f5ebe0;
+      --text-dim: #b8a693;
+      --accent: #d4a76a;
+      --accent-dim: rgba(212, 167, 106, 0.12);
+      --sage: #8cb576;
+      --sage-dim: rgba(140, 181, 118, 0.12);
+      --terracotta: #d17866;
+      --terracotta-dim: rgba(209, 120, 102, 0.12);
+      --slate: #94a3b8;
+      --slate-dim: rgba(148, 163, 184, 0.12);
+      --warm: #e8a673;
+      --warm-dim: rgba(232, 166, 115, 0.12);
+      --cool: #6ba3b8;
+      --cool-dim: rgba(107, 163, 184, 0.12);
+    }
+  }
+
+  /* ============ RESET + BASE ============ */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    background-image:
+      radial-gradient(ellipse at 30% 0%, var(--accent-dim) 0%, transparent 50%),
+      radial-gradient(ellipse at 70% 100%, var(--sage-dim) 0%, transparent 50%);
+    color: var(--text);
+    font-family: var(--font-body);
+    padding: 48px 32px;
+    min-height: 100vh;
+    line-height: 1.7;
+  }
+
+  /* ============ ANIMATION ============ */
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(14px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .section, .flow-arrow, .hero-card {
+    animation: fadeUp 0.5s ease-out both;
+    animation-delay: calc(var(--i, 0) * 0.06s);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-delay: 0ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  /* ============ TYPOGRAPHY ============ */
+  h1 {
+    font-size: 46px;
+    font-weight: 700;
+    letter-spacing: -1.5px;
+    margin-bottom: 10px;
+    text-wrap: balance;
+    color: var(--text);
+  }
+
+  .subtitle {
+    color: var(--text-dim);
+    font-size: 16px;
+    margin-bottom: 12px;
+    font-style: italic;
+  }
+
+  .tagline {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 48px;
+    padding-left: 2px;
+  }
+
+  h2 {
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    margin-bottom: 20px;
+    color: var(--text);
+  }
+
+  h3 {
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: var(--text);
+  }
+
+  /* ============ LAYOUT ============ */
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  .diagram {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 32px;
+  }
+
+  /* ============ SECTION CARD ============ */
+  .section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 28px 32px;
+  }
+
+  .section--hero {
+    background: var(--surface-elevated);
+    border-left: 4px solid var(--accent);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.04);
+    padding: 36px 40px;
+  }
+
+  .section--recessed {
+    background: var(--surface2);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.03);
+  }
+
+  .section-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 18px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .section-label .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+
+  /* Color variants */
+  .section--accent { border-left-color: var(--accent); }
+  .section--accent .section-label { color: var(--accent); }
+  .section--accent .section-label .dot { background: var(--accent); }
+
+  .section--sage { border-left-color: var(--sage); }
+  .section--sage .section-label { color: var(--sage); }
+  .section--sage .section-label .dot { background: var(--sage); }
+
+  .section--terracotta { border-left-color: var(--terracotta); }
+  .section--terracotta .section-label { color: var(--terracotta); }
+  .section--terracotta .section-label .dot { background: var(--terracotta); }
+
+  .section--slate { border-left-color: var(--slate); }
+  .section--slate .section-label { color: var(--slate); }
+  .section--slate .section-label .dot { background: var(--slate); }
+
+  .section--warm { border-left-color: var(--warm); }
+  .section--warm .section-label { color: var(--warm); }
+  .section--warm .section-label .dot { background: var(--warm); }
+
+  .section--cool { border-left-color: var(--cool); }
+  .section--cool .section-label { color: var(--cool); }
+  .section--cool .section-label .dot { background: var(--cool); }
+
+  /* ============ HERO ORGANIZING PRINCIPLE ============ */
+  .hero-card {
+    background: linear-gradient(135deg, var(--accent-dim), var(--sage-dim));
+    border: 2px solid var(--border-bright);
+    border-radius: 16px;
+    padding: 48px;
+    text-align: center;
+    margin-bottom: 32px;
+  }
+
+  .hero-card__quote {
+    font-size: 28px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--text);
+    font-style: italic;
+    margin-bottom: 16px;
+  }
+
+  .hero-card__attribution {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+  }
+
+  /* ============ GRID LAYOUTS ============ */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+
+  .three-col {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+  }
+
+  .four-col {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 18px;
+  }
+
+  /* ============ EFFECT CARD (INNER CARD) ============ */
+  .effect-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+    margin-top: 20px;
+  }
+
+  .effect-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    transition: border-color 0.2s, transform 0.2s;
+  }
+
+  .effect-card:hover {
+    border-color: var(--border-bright);
+    transform: translateY(-2px);
+  }
+
+  .effect-card__name {
+    font-weight: 700;
+    font-size: 15px;
+    margin-bottom: 6px;
+    color: var(--text);
+  }
+
+  .effect-card__desc {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+
+  .effect-card__tags {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .tag {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 500;
+    padding: 3px 8px;
+    border-radius: 4px;
+    background: var(--accent-dim);
+    color: var(--accent);
+  }
+
+  .tag--topo { background: var(--sage-dim); color: var(--sage); }
+  .tag--audio { background: var(--terracotta-dim); color: var(--terracotta); }
+
+  /* ============ TOPOLOGY TABLE ============ */
+  .topology-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin-top: 20px;
+  }
+
+  .topology-table th {
+    background: var(--surface-elevated);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    text-align: left;
+    padding: 12px 16px;
+    border-bottom: 2px solid var(--border-bright);
+  }
+
+  .topology-table td {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+
+  .topology-table tbody tr:nth-child(even) {
+    background: var(--accent-dim);
+  }
+
+  .topology-table tbody tr:hover {
+    background: var(--border);
+  }
+
+  .topology-table tbody tr:last-child td {
+    border-bottom: none;
+  }
+
+  .fit-dot {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    margin: 0 3px;
+  }
+
+  .fit-dot--excellent { background: var(--sage); }
+  .fit-dot--good { background: var(--accent); }
+  .fit-dot--fair { background: var(--warm); }
+  .fit-dot--poor { background: var(--slate); }
+
+  /* ============ ARCHITECTURE LAYERS ============ */
+  .layer-stack {
+    display: grid;
+    gap: 16px;
+    margin-top: 20px;
+  }
+
+  .layer {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 10px;
+    padding: 18px 24px;
+  }
+
+  .layer__title {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+  }
+
+  .layer__content {
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+
+  .layer__items {
+    list-style: none;
+    padding: 0;
+    margin: 8px 0 0 0;
+    font-size: 13px;
+    line-height: 1.8;
+  }
+
+  .layer__items li {
+    padding-left: 16px;
+    position: relative;
+  }
+
+  .layer__items li::before {
+    content: '→';
+    color: var(--text-dim);
+    font-weight: 600;
+    position: absolute;
+    left: 0;
+  }
+
+  .layer__items code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--accent-dim);
+    color: var(--accent);
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+
+  /* ============ COMPONENT BOXES ============ */
+  .component-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px;
+    margin-top: 20px;
+  }
+
+  .component {
+    background: var(--surface-elevated);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  }
+
+  .component__title {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 10px;
+    color: var(--text);
+  }
+
+  .component__desc {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-dim);
+  }
+
+  /* ============ MAPPING TABLE ============ */
+  .mapping-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin-top: 20px;
+  }
+
+  .mapping-table th {
+    background: var(--surface-elevated);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    text-align: left;
+    padding: 12px 16px;
+    border-bottom: 2px solid var(--border-bright);
+  }
+
+  .mapping-table td {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+
+  .mapping-table tbody tr:nth-child(even) {
+    background: var(--sage-dim);
+  }
+
+  .mapping-table tbody tr:hover {
+    background: var(--border);
+  }
+
+  .mapping-table tbody tr:last-child td {
+    border-bottom: none;
+  }
+
+  .mapping-table strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  /* ============ PHASE TIMELINE ============ */
+  .phase-timeline {
+    display: grid;
+    gap: 20px;
+    margin-top: 20px;
+    position: relative;
+  }
+
+  .phase {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent);
+    border-radius: 10px;
+    padding: 24px 28px;
+    position: relative;
+  }
+
+  .phase__num {
+    font-family: var(--font-mono);
+    font-size: 40px;
+    font-weight: 700;
+    color: var(--accent-dim);
+    position: absolute;
+    top: 20px;
+    right: 24px;
+    line-height: 1;
+  }
+
+  .phase__title {
+    font-size: 18px;
+    font-weight: 700;
+    margin-bottom: 12px;
+    color: var(--text);
+  }
+
+  .phase__desc {
+    font-size: 14px;
+    line-height: 1.7;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+  }
+
+  .phase__tasks {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.8;
+  }
+
+  .phase__tasks li {
+    padding-left: 18px;
+    position: relative;
+    color: var(--text);
+  }
+
+  .phase__tasks li::before {
+    content: '✓';
+    color: var(--sage);
+    font-weight: 700;
+    position: absolute;
+    left: 0;
+  }
+
+  /* ============ PRIORITY TIERS ============ */
+  .tier-grid {
+    display: grid;
+    gap: 20px;
+    margin-top: 20px;
+  }
+
+  .tier {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+  }
+
+  .tier--1 {
+    border-left: 4px solid var(--sage);
+    background: var(--sage-dim);
+  }
+
+  .tier--2 {
+    border-left: 4px solid var(--accent);
+    background: var(--accent-dim);
+  }
+
+  .tier--3 {
+    border-left: 4px solid var(--slate);
+    background: var(--slate-dim);
+  }
+
+  .tier__label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 14px;
+  }
+
+  .tier--1 .tier__label { color: var(--sage); }
+  .tier--2 .tier__label { color: var(--accent); }
+  .tier--3 .tier__label { color: var(--slate); }
+
+  .tier__effects {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    font-size: 14px;
+    line-height: 2;
+  }
+
+  .tier__effects li {
+    padding-left: 20px;
+    position: relative;
+    color: var(--text);
+  }
+
+  .tier__effects li::before {
+    content: '→';
+    color: var(--text-dim);
+    font-weight: 600;
+    position: absolute;
+    left: 0;
+  }
+
+  .tier__effects strong {
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  /* ============ LEGEND ============ */
+  .legend {
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+    padding: 16px;
+    background: var(--surface2);
+    border-radius: 8px;
+    margin-top: 16px;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+  }
+
+  /* ============ FLOW ARROW ============ */
+  .flow-arrow {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 10px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 8px 0;
+  }
+
+  .flow-arrow svg {
+    width: 22px;
+    height: 22px;
+    fill: none;
+    stroke: var(--border-bright);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  /* ============ RESPONSIVE ============ */
+  @media (max-width: 900px) {
+    body { padding: 28px 20px; }
+    h1 { font-size: 36px; }
+    .hero-card__quote { font-size: 22px; }
+    .two-col, .three-col { grid-template-columns: 1fr; }
+    .effect-grid { grid-template-columns: 1fr; }
+    .component-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <h1>Automated Light Show Architecture</h1>
+  <p class="subtitle">Visual Effects for Physical Sculptures</p>
+  <p class="tagline">Topology-Native LED Design</p>
+
+  <div class="hero-card" style="--i:0">
+    <div class="hero-card__quote">"The best effects can't be rendered on a screen — they take the form of the object they're mapped onto."</div>
+    <div class="hero-card__attribution">Organizing Principle</div>
+  </div>
+
+  <div class="diagram">
+
+    <!-- ============ PART 1: VISUAL EFFECT IDIOMS ============ -->
+
+    <div class="section section--hero section--accent" style="--i:1">
+      <div class="section-label"><span class="dot"></span> Part 1: Visual Effect Idioms Catalog</div>
+      <h2>4 Categories of LED Effects</h2>
+      <p style="margin-bottom:24px;color:var(--text-dim);font-size:15px;">Effects organized by their relationship to physical form. Each category exploits different properties of sculpture topology.</p>
+
+      <div class="four-col">
+        <div class="component">
+          <div class="component__title">1. Strip-Native</div>
+          <div class="component__desc">Proven 1D LED effects from WLED/FastLED. Motion, noise, particles, waves, composition.</div>
+        </div>
+        <div class="component">
+          <div class="component__title">2. Topology-Aware</div>
+          <div class="component__desc">Exploit physical form: hub-and-spoke, height-mapped, symmetry. The signature effects.</div>
+        </div>
+        <div class="component">
+          <div class="component__title">3. Shader/VJ Adapted</div>
+          <div class="component__desc">2D effects as 1D slices. Metaballs, reaction-diffusion, cellular automata, flow fields.</div>
+        </div>
+        <div class="component">
+          <div class="component__title">4. Nature Simulations</div>
+          <div class="component__desc">Physical presence effects. Candle flicker, bioluminescence, electrical storms, breathing.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Category 1: Strip-Native -->
+    <div class="section section--sage" style="--i:2">
+      <div class="section-label"><span class="dot"></span> Category 1: Strip-Native Idioms</div>
+      <h3>Motion Idioms</h3>
+      <div class="effect-grid">
+        <div class="effect-card">
+          <div class="effect-card__name">Chase / Theater</div>
+          <div class="effect-card__desc">Lit pixels march along strip</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Speed from tempo</span>
+            <span class="tag tag--topo">Linear</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Comet / Meteor</div>
+          <div class="effect-card__desc">Bright head with decaying tail</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Spawned on beat</span>
+            <span class="tag tag--topo">Tree (base→tip)</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Larson Scanner</div>
+          <div class="effect-card__desc">Bouncing dot (Cylon/KITT)</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Bounce rate from tempo</span>
+            <span class="tag tag--topo">Linear, diamond</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Wipe</div>
+          <div class="effect-card__desc">Color fills strip then retreats</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Section change trigger</span>
+            <span class="tag tag--topo">Height-mapped</span>
+          </div>
+        </div>
+      </div>
+
+      <h3 style="margin-top:28px;">Noise / Organic Idioms</h3>
+      <div class="effect-grid">
+        <div class="effect-card">
+          <div class="effect-card__name">Perlin Noise Field</div>
+          <div class="effect-card__desc">Smoothly evolving color landscape</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Speed from tempo</span>
+            <span class="tag tag--topo">All topologies</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Plasma</div>
+          <div class="effect-card__desc">Overlapping sine waves create flowing color</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Phase speed from tempo</span>
+            <span class="tag tag--topo">All topologies</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Fire / Flame</div>
+          <div class="effect-card__desc">Heat rises and flickers (FastLED Fire2012)</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Sparking rate from onset</span>
+            <span class="tag tag--topo">Height-mapped (tree)</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Aurora / Northern Lights</div>
+          <div class="effect-card__desc">Curtains of shifting green/purple</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Speed from tempo</span>
+            <span class="tag tag--topo">Linear, wide strips</span>
+          </div>
+        </div>
+      </div>
+
+      <h3 style="margin-top:28px;">Particle Idioms</h3>
+      <div class="effect-grid">
+        <div class="effect-card">
+          <div class="effect-card__name">Sparkle / Twinkle</div>
+          <div class="effect-card__desc">Random pixels flash and fade</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Density from spectral flatness</span>
+            <span class="tag tag--topo">All topologies</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Fireworks</div>
+          <div class="effect-card__desc">Explosion point → spreading particles</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Triggered on beat</span>
+            <span class="tag tag--topo">Hub-and-spoke</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Fireflies</div>
+          <div class="effect-card__desc">Slow random blinks, organic timing</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Density from RMS</span>
+            <span class="tag tag--topo">All (especially tree)</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Rain / Drip</div>
+          <div class="effect-card__desc">Drops fall from top to bottom</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Rate from onset density</span>
+            <span class="tag tag--topo">Height-mapped</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Category 2: Topology-Aware (The Good Stuff) -->
+    <div class="section section--hero section--terracotta" style="--i:3">
+      <div class="section-label"><span class="dot"></span> Category 2: Topology-Aware Idioms (The Good Stuff)</div>
+      <h2>Effects That Exploit Physical Form</h2>
+      <p style="margin-bottom:24px;color:var(--text-dim);font-size:15px;">These effects <strong>can't exist on a flat screen</strong> — they use hub-and-spoke, height-mapping, or symmetry properties unique to 3D sculptures.</p>
+
+      <h3>Hub-and-Spoke / Tree Topology</h3>
+      <div class="effect-grid">
+        <div class="effect-card">
+          <div class="effect-card__name">Sap Flow / Growth</div>
+          <div class="effect-card__desc">LEDs light progressively from base to tips — energy literally <em>rises</em> through the sculpture</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Rolling integral drives fill height</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Root Pulse</div>
+          <div class="effect-card__desc">Flash originates at base, travels outward to all branch tips</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Bass hit triggers pulse at trunk</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Branch Lightning</div>
+          <div class="effect-card__desc">Random branch illuminates tip→base, quick flash + slow fade</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Strong transients trigger</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Capillary Fill</div>
+          <div class="effect-card__desc">Slow fill from base, each branch fills at different rate — like water drawn through vessels</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Per-band energy → per-branch fill</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Bloom</div>
+          <div class="effect-card__desc">Tips light up first (like flowers opening), then fills inward</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Treble energy drives tip brightness</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Heartbeat</div>
+          <div class="effect-card__desc">Pulsing wave from center outward, like a circulatory system</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Bass-locked double-pulse (lub-dub)</span>
+          </div>
+        </div>
+      </div>
+
+      <h3 style="margin-top:28px;">Height-Mapped Topology (Diamond, Tree)</h3>
+      <div class="effect-grid">
+        <div class="effect-card">
+          <div class="effect-card__name">Tide / Water Level</div>
+          <div class="effect-card__desc">Color fills from bottom to a level, with surface shimmer — water filling a vessel</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">RMS drives water level</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Stratification</div>
+          <div class="effect-card__desc">Layers of color at different heights, like geological strata</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Per-band energy maps to height</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Rising Heat</div>
+          <div class="effect-card__desc">Warm colors at base, cool at top, boundary shifts — heat rises</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Spectral centroid → boundary height</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Gravity Drops</div>
+          <div class="effect-card__desc">Lit pixels fall from tips to base and pool — physical gravity</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Onset spawns drops at tips</span>
+          </div>
+        </div>
+      </div>
+
+      <h3 style="margin-top:28px;">Symmetry Topology (Diamond, Multi-Branch)</h3>
+      <div class="effect-grid">
+        <div class="effect-card">
+          <div class="effect-card__name">Mirror Pulse</div>
+          <div class="effect-card__desc">Identical animations on symmetric branches — emphasizes geometry</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Beat-synced, mirrored</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Asymmetric Counterpoint</div>
+          <div class="effect-card__desc">Different-but-related patterns on each branch — musical counterpoint made visible</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Bass one side, treble the other</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Convergence</div>
+          <div class="effect-card__desc">Patterns flow inward from tips to center — energy gathering</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Build sections drive convergence</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Divergence</div>
+          <div class="effect-card__desc">Patterns flow outward from center to tips — energy radiating</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Drop sections drive divergence</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Category 3 & 4: Shader/VJ + Nature -->
+    <div class="section section--warm" style="--i:4">
+      <div class="section-label"><span class="dot"></span> Category 3: Shader/VJ Idioms Adapted for 1D</div>
+      <div class="effect-grid">
+        <div class="effect-card">
+          <div class="effect-card__name">Metaballs / Blobs</div>
+          <div class="effect-card__desc">Gaussian blobs that merge when close on strip — organic merging/separating</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Blob count from onset density</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Reaction-Diffusion</div>
+          <div class="effect-card__desc">1D activator-inhibitor system — evolving spots/stripes without repetition</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Feed/kill rates from RMS + centroid</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Cellular Automata</div>
+          <div class="effect-card__desc">Rule 30, Rule 110 — emergent complexity from simple rules</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Rule selection from section</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Feedback / Echo</div>
+          <div class="effect-card__desc">Buffer history blended into current frame — ghostly trails, accumulation</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Feedback amount from rolling integral</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section section--cool" style="--i:5">
+      <div class="section-label"><span class="dot"></span> Category 4: Nature Simulations (Physical Presence)</div>
+      <div class="effect-grid">
+        <div class="effect-card">
+          <div class="effect-card__name">Candle Flicker</div>
+          <div class="effect-card__desc">Perlin noise with warm palette, asymmetric — sculpture becomes a candle</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Flicker rate from spectral flatness</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Bioluminescence</div>
+          <div class="effect-card__desc">Random soft glows that pulse independently, blue-green — sculpture glows like it's alive</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Pulse rate from tempo</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Electrical Storm</div>
+          <div class="effect-card__desc">Quick white flash on random segment + slow purple afterglow — sculpture crackles with energy</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Flash from strong transient</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Embers / Coals</div>
+          <div class="effect-card__desc">Deep red base with occasional orange flares — sculpture smolders</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Flare rate from onset</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Breathing Organism</div>
+          <div class="effect-card__desc">Sine brightness + subtle color shift, very slow — sculpture breathes</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Rate slightly offset from tempo</span>
+          </div>
+        </div>
+        <div class="effect-card">
+          <div class="effect-card__name">Mycelium Network</div>
+          <div class="effect-card__desc">Signal travels between nodes, activating neighbors — network of life under the surface</div>
+          <div class="effect-card__tags">
+            <span class="tag tag--audio">Signal = onset detection</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Topology Ratings Table -->
+    <div class="section section--slate" style="--i:6">
+      <div class="section-label"><span class="dot"></span> Topology Fit Ratings</div>
+      <h3>How Effects Map to Physical Forms</h3>
+      <p style="margin-bottom:16px;color:var(--text-dim);font-size:14px;">Effect suitability across sculpture topologies. Some effects are universal; the best ones are topology-specific.</p>
+
+      <div class="legend">
+        <div class="legend-item"><span class="fit-dot fit-dot--excellent"></span> Excellent fit</div>
+        <div class="legend-item"><span class="fit-dot fit-dot--good"></span> Good fit</div>
+        <div class="legend-item"><span class="fit-dot fit-dot--fair"></span> Fair fit</div>
+        <div class="legend-item"><span class="fit-dot fit-dot--poor"></span> Poor fit</div>
+      </div>
+
+      <div style="overflow-x:auto;">
+        <table class="topology-table">
+          <thead>
+            <tr>
+              <th>Effect Category</th>
+              <th>Linear</th>
+              <th>Tree</th>
+              <th>Diamond</th>
+              <th>Height-Mapped</th>
+              <th>Hub-and-Spoke</th>
+              <th>Symmetry</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Chase / Comet</strong></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--good"></span></td>
+              <td><span class="fit-dot fit-dot--fair"></span></td>
+              <td><span class="fit-dot fit-dot--good"></span></td>
+              <td><span class="fit-dot fit-dot--fair"></span></td>
+            </tr>
+            <tr>
+              <td><strong>Perlin Noise / Plasma</strong></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+            </tr>
+            <tr>
+              <td><strong>Fire / Flame</strong></td>
+              <td><span class="fit-dot fit-dot--fair"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--good"></span></td>
+              <td><span class="fit-dot fit-dot--fair"></span></td>
+            </tr>
+            <tr>
+              <td><strong>Sparkle / Twinkle</strong></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+            </tr>
+            <tr>
+              <td><strong>Sap Flow / Growth</strong></td>
+              <td><span class="fit-dot fit-dot--poor"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--good"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--fair"></span></td>
+            </tr>
+            <tr>
+              <td><strong>Root Pulse</strong></td>
+              <td><span class="fit-dot fit-dot--poor"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--fair"></span></td>
+              <td><span class="fit-dot fit-dot--fair"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--good"></span></td>
+            </tr>
+            <tr>
+              <td><strong>Tide / Water Level</strong></td>
+              <td><span class="fit-dot fit-dot--fair"></span></td>
+              <td><span class="fit-dot fit-dot--good"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--fair"></span></td>
+              <td><span class="fit-dot fit-dot--fair"></span></td>
+            </tr>
+            <tr>
+              <td><strong>Mirror Pulse</strong></td>
+              <td><span class="fit-dot fit-dot--poor"></span></td>
+              <td><span class="fit-dot fit-dot--good"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--fair"></span></td>
+              <td><span class="fit-dot fit-dot--good"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+            </tr>
+            <tr>
+              <td><strong>Bioluminescence</strong></td>
+              <td><span class="fit-dot fit-dot--good"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--good"></span></td>
+              <td><span class="fit-dot fit-dot--excellent"></span></td>
+              <td><span class="fit-dot fit-dot--good"></span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Priority Effects -->
+    <div class="section section--hero section--sage" style="--i:7">
+      <div class="section-label"><span class="dot"></span> Priority Effects (User Taste Signals)</div>
+      <h2>Build Order Based on Stated Preferences</h2>
+      <p style="margin-bottom:24px;color:var(--text-dim);font-size:15px;">User likes effects that take physical form, likes sparkles-on-beat, likes tree sap flow. Prioritized accordingly.</p>
+
+      <div class="tier-grid">
+        <div class="tier tier--1">
+          <div class="tier__label">Tier 1 — Build These First</div>
+          <ul class="tier__effects">
+            <li><strong>Sap Flow + Beat Sparkle</strong> — growth effect with sparkle overlay on transients (composite)</li>
+            <li><strong>Perlin Noise Field</strong> — organic evolving background, parameters from audio</li>
+            <li><strong>Bioluminescence</strong> — slow independent glows, pulsing with music</li>
+            <li><strong>Root Pulse</strong> — bass-triggered energy radiating from trunk to tips</li>
+          </ul>
+        </div>
+
+        <div class="tier tier--2">
+          <div class="tier__label">Tier 2 — High Potential</div>
+          <ul class="tier__effects">
+            <li><strong>Fire / Flame</strong> — classic, topology-native on tree, well-documented (FastLED Fire2012)</li>
+            <li><strong>Metaballs / Blobs</strong> — 1D merging blobs feel organic, sound-reactive blob count</li>
+            <li><strong>Reaction-Diffusion</strong> — emergent patterns, never repeats</li>
+            <li><strong>Electrical Storm</strong> — dramatic, good for drops and climactic moments</li>
+          </ul>
+        </div>
+
+        <div class="tier tier--3">
+          <div class="tier__label">Tier 3 — Interesting Experiments</div>
+          <ul class="tier__effects">
+            <li><strong>Feedback / Echo</strong> — temporal smearing reveals rhythm structure</li>
+            <li><strong>Gravity Drops</strong> — onset spawns drops, physical feel</li>
+            <li><strong>Frost Crystallization</strong> — great for section transitions (slow reveal)</li>
+            <li><strong>Heartbeat</strong> — double-pulse at bass rate, physiological feel</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ PART 2: AUTOMATED SHOW ARCHITECTURE ============ -->
+
+    <div class="flow-arrow" style="--i:8">
+      <svg viewBox="0 0 20 20"><path d="M10 4 L10 16 M6 12 L10 16 L14 12"/></svg>
+      visual vocabulary established
+    </div>
+
+    <div class="section section--hero section--accent" style="--i:9">
+      <div class="section-label"><span class="dot"></span> Part 2: Automated Show Architecture</div>
+      <h2>Multi-Hour Show Control Without a VJ</h2>
+      <p style="margin-bottom:24px;color:var(--text-dim);font-size:15px;">VJs make three real-time decisions: effect selection, parameter modulation, transitions. Automate the first two, prepare the third.</p>
+
+      <div class="component-grid">
+        <div class="component">
+          <div class="component__title">Detection Stack</div>
+          <div class="component__desc">4 layers: frame-level, beat-level, phrase-level, song-level. Phrase-level is the critical gap.</div>
+        </div>
+        <div class="component">
+          <div class="component__title">Show Controller</div>
+          <div class="component__desc">Section detector, effect selector, parameter modulator, palette manager. Orchestrates the show.</div>
+        </div>
+        <div class="component">
+          <div class="component__title">Section Mapping</div>
+          <div class="component__desc">Intro/verse/build/drop/breakdown/climax/outro → effect families with configurable defaults.</div>
+        </div>
+        <div class="component">
+          <div class="component__title">Fatigue Prevention</div>
+          <div class="component__desc">Effect rotation, palette cycling, complexity curve, spatial rotation, novelty injection.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Detection Stack -->
+    <div class="section section--slate" style="--i:10">
+      <div class="section-label"><span class="dot"></span> Detection Stack (4 Layers)</div>
+
+      <div class="layer-stack">
+        <div class="layer" style="border-left-color:var(--sage);">
+          <div class="layer__title" style="color:var(--sage);">Layer 1: Frame-Level (Already Have)</div>
+          <div class="layer__content">Real-time audio features computed every frame (30 FPS). Foundation for all higher-level detection.</div>
+          <ul class="layer__items">
+            <li><code>RMS / loudness</code> — envelope tracking</li>
+            <li><code>Onset / transient</code> — per-band spectral flux</li>
+            <li><code>Spectral centroid</code> — brightness/warmth</li>
+            <li><code>Per-band energy</code> — 5-band mel decomposition</li>
+            <li><code>Absint (rate of change)</code> — derivatives over absolutes</li>
+          </ul>
+        </div>
+
+        <div class="layer" style="border-left-color:var(--accent);">
+          <div class="layer__title" style="color:var(--accent);">Layer 2: Beat-Level (Partially Have)</div>
+          <div class="layer__content">Tempo and rhythm tracking. Octave-ambiguous but functional for most use cases.</div>
+          <ul class="layer__items">
+            <li><code>Tempo (BPM)</code> — implemented, octave-ambiguous</li>
+            <li><code>Beat prediction</code> — BeatPredictor in signals.py</li>
+            <li><code>Onset envelope</code> — OnsetTempoTracker</li>
+            <li><code>Downbeat detection</code> — partial (every-4th heuristic, not true downbeat)</li>
+            <li><code>Vocal presence</code> — NOT implemented (spectral shape heuristics or ML)</li>
+          </ul>
+        </div>
+
+        <div class="layer" style="border-left-color:var(--terracotta);">
+          <div class="layer__title" style="color:var(--terracotta);">Layer 3: Phrase-Level (Critical Gap)</div>
+          <div class="layer__content">Where automated show control lives. Largely unimplemented. Highest priority.</div>
+          <ul class="layer__items">
+            <li><code>Build detection</code> — rolling integral slope > threshold for N seconds (medium difficulty)</li>
+            <li><code>Drop detection</code> — RMS jump after build phase, bass energy spike (medium)</li>
+            <li><code>Breakdown detection</code> — rolling integral slope < 0, spectral flatness drops (medium)</li>
+            <li><code>Section boundary</code> — self-similarity novelty, streaming alternative to Foote (hard)</li>
+            <li><code>Riser detection</code> — rising spectral centroid + increasing RMS over 2-8s (medium)</li>
+            <li><code>Dropout detection</code> — per-band energy drops to near-zero (easy — already have normalization)</li>
+          </ul>
+        </div>
+
+        <div class="layer" style="border-left-color:var(--slate);">
+          <div class="layer__title" style="color:var(--slate);">Layer 4: Song-Level (Future / Optional)</div>
+          <div class="layer__content">Long-horizon adaptation for multi-hour sets. Low priority until phrase-level works.</div>
+          <ul class="layer__items">
+            <li><code>Song transition</code> — one track fading into another (DJ context)</li>
+            <li><code>Genre/mood shift</code> — sliding window over spectral shape, onset density</li>
+            <li><code>Energy arc</code> — set-wide intensity trajectory (prevent visual fatigue over hours)</li>
+            <li><code>Key detection</code> — chroma analysis for palette selection (feasible but low priority)</li>
+          </ul>
+        </div>
+      </div>
+
+      <p style="margin-top:20px;font-size:14px;color:var(--text-dim);line-height:1.7;">
+        <strong style="color:var(--text);">Priority:</strong> Build detection → drop detection → breakdown → section boundary. These four cover 80% of automated show control decisions.
+      </p>
+    </div>
+
+    <!-- Show Controller Components -->
+    <div class="section section--warm" style="--i:11">
+      <div class="section-label"><span class="dot"></span> Show Controller Components</div>
+
+      <div class="component-grid">
+        <div class="component">
+          <div class="component__title">Section Detector</div>
+          <div class="component__desc">Consumes frame-level features. Outputs build/drop/break state and section boundaries. Streaming alternative to Foote's method.</div>
+        </div>
+
+        <div class="component">
+          <div class="component__title">Effect Selector</div>
+          <div class="component__desc">Section → effect map with transition logic and fatigue prevention. After 3 drops with Fire, switch to Root Pulse.</div>
+        </div>
+
+        <div class="component">
+          <div class="component__title">Parameter Modulator</div>
+          <div class="component__desc">Audio → visual mapping. Continuous modulation of effect intensity, speed, color, complexity from audio features.</div>
+        </div>
+
+        <div class="component">
+          <div class="component__title">Palette Manager</div>
+          <div class="component__desc">Mood → palette map with rotation timer. Cycles through warm, cool, monochrome, complementary families over 10-20 min periods.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section → Effect Mapping -->
+    <div class="section section--cool" style="--i:12">
+      <div class="section-label"><span class="dot"></span> Section → Effect Mapping</div>
+      <h3>Default Mapping (Configurable, Not Prescriptive)</h3>
+      <p style="margin-bottom:16px;color:var(--text-dim);font-size:14px;">Works reasonably without intervention. Human overrides for taste.</p>
+
+      <div style="overflow-x:auto;">
+        <table class="mapping-table">
+          <thead>
+            <tr>
+              <th>Detected Section</th>
+              <th>Effect Family</th>
+              <th>Intensity</th>
+              <th>Palette Temperature</th>
+              <th>Speed</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Intro / Low Energy</strong></td>
+              <td>Ambient (noise field, bioluminescence, breathing)</td>
+              <td>Low</td>
+              <td>Warm/cool neutral</td>
+              <td>Slow</td>
+            </tr>
+            <tr>
+              <td><strong>Verse / Groove</strong></td>
+              <td>Groove (tempo-locked pulse, flowing noise)</td>
+              <td>Medium</td>
+              <td>Warm</td>
+              <td>Medium, locked to tempo</td>
+            </tr>
+            <tr>
+              <td><strong>Build</strong></td>
+              <td>Convergence + rising complexity</td>
+              <td>Rising</td>
+              <td>Shifts warmer</td>
+              <td>Accelerating</td>
+            </tr>
+            <tr>
+              <td><strong>Drop</strong></td>
+              <td>Full-intensity (root pulse, fire, electrical storm)</td>
+              <td>High, sustained</td>
+              <td>Hot (reds, whites)</td>
+              <td>Fast</td>
+            </tr>
+            <tr>
+              <td><strong>Breakdown</strong></td>
+              <td>Ambient + sparkle (embers, fireflies, bioluminescence)</td>
+              <td>Low-medium, falling</td>
+              <td>Cool (blues, purples)</td>
+              <td>Slow, decoupled from tempo</td>
+            </tr>
+            <tr>
+              <td><strong>Climax / Peak</strong></td>
+              <td>Maximum complexity (composite: background + sparkle + pulse)</td>
+              <td>Maximum</td>
+              <td>White-hot</td>
+              <td>Maximum</td>
+            </tr>
+            <tr>
+              <td><strong>Outro / Fade</strong></td>
+              <td>Retreat (reverse growth, cooling embers, fading noise)</td>
+              <td>Decreasing to zero</td>
+              <td>Cooling</td>
+              <td>Decelerating</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Visual Fatigue Prevention -->
+    <div class="section section--terracotta" style="--i:13">
+      <div class="section-label"><span class="dot"></span> Visual Fatigue Prevention</div>
+      <h3>Strategies for Multi-Hour Autonomy</h3>
+      <p style="margin-bottom:20px;color:var(--text-dim);font-size:14px;">For multi-hour automated shows, the system needs strategies to stay interesting and avoid visual habituation.</p>
+
+      <div class="layer-stack">
+        <div class="layer">
+          <div class="layer__title">1. Effect Rotation</div>
+          <div class="layer__content">Don't use the same effect for more than N consecutive sections of the same type. After 3 drops with Fire, switch to Root Pulse or Electrical Storm.</div>
+        </div>
+
+        <div class="layer">
+          <div class="layer__title">2. Palette Cycling</div>
+          <div class="layer__content">Rotate through palette families (warm, cool, monochrome, complementary) over 10-20 minute periods, independent of section detection.</div>
+        </div>
+
+        <div class="layer">
+          <div class="layer__title">3. Complexity Curve</div>
+          <div class="layer__content">Track a long-horizon "visual complexity" metric. If it's been high for too long, force a simpler section. Mirror the concept of dynamic range in audio mastering.</div>
+        </div>
+
+        <div class="layer">
+          <div class="layer__title">4. Spatial Rotation</div>
+          <div class="layer__content">Alternate between topology modes (full-strip, zoned, height-mapped, branch-independent) to keep the spatial experience fresh.</div>
+        </div>
+
+        <div class="layer">
+          <div class="layer__title">5. Novelty Injection</div>
+          <div class="layer__content">Periodically introduce a rare effect (frost crystallization, reaction-diffusion) that hasn't been used recently. The surprise factor prevents habituation.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Implementation Phases -->
+    <div class="section section--hero section--accent" style="--i:14">
+      <div class="section-label"><span class="dot"></span> Implementation Phases</div>
+      <h2>4-Phase Roadmap to Multi-Hour Autonomy</h2>
+
+      <div class="phase-timeline">
+        <div class="phase">
+          <div class="phase__num">1</div>
+          <div class="phase__title">Streaming Section Detector</div>
+          <div class="phase__desc">Foundation for automated show control. Phrase-level detection in real-time.</div>
+          <ul class="phase__tasks">
+            <li>Implement rolling integral slope as build/drop/breakdown detector</li>
+            <li>Add per-band dropout detection (already have normalization)</li>
+            <li>Expose detected section as state in runner.py</li>
+            <li>Test against annotated audio segments</li>
+          </ul>
+        </div>
+
+        <div class="phase">
+          <div class="phase__num">2</div>
+          <div class="phase__title">Effect Library Expansion</div>
+          <div class="phase__desc">Build out 4-6 new effects from Tier 1/2 priority list. Composable layers.</div>
+          <ul class="phase__tasks">
+            <li>Implement Sap Flow + Beat Sparkle (composite)</li>
+            <li>Implement Perlin Noise Field (background)</li>
+            <li>Implement Bioluminescence (ambient)</li>
+            <li>Implement Root Pulse (high-energy)</li>
+            <li>Each effect exposes parameters that map to audio features</li>
+            <li>Build as composable layers (background + foreground pattern)</li>
+          </ul>
+        </div>
+
+        <div class="phase">
+          <div class="phase__num">3</div>
+          <div class="phase__title">Show Controller</div>
+          <div class="phase__desc">Orchestration layer. Section → effect mapping, transitions, palette management.</div>
+          <ul class="phase__tasks">
+            <li>Section → effect mapping with configurable defaults</li>
+            <li>Transition logic (crossfade, cut, morph between effects)</li>
+            <li>Palette manager with rotation</li>
+            <li>Fatigue prevention heuristics (effect rotation, complexity curve)</li>
+          </ul>
+        </div>
+
+        <div class="phase">
+          <div class="phase__num">4</div>
+          <div class="phase__title">Multi-Hour Autonomy</div>
+          <div class="phase__desc">Long-horizon adaptation. Energy arc tracking, set-wide intensity management.</div>
+          <ul class="phase__tasks">
+            <li>Energy arc tracking over minutes (very long rolling average, trend detection)</li>
+            <li>Effect rotation memory (don't repeat too soon)</li>
+            <li>Long-horizon adaptation (overall set intensity curve)</li>
+            <li>Manual override via controller input (human-in-the-loop for taste)</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- Key Insight from Commercial Systems -->
+    <div class="section section--recessed" style="--i:15">
+      <div class="section-label"><span class="dot"></span> Lesson from Commercial Systems</div>
+      <h3>SoundSwitch, MaestroDMX, Engine Lighting</h3>
+      <p style="font-size:15px;line-height:1.8;color:var(--text);">
+        Commercial automated lighting systems (SoundSwitch, MaestroDMX, Engine Lighting) validate the approach: <strong>phrase detection is a solved-enough problem</strong> in the commercial world. The challenge isn't detecting drops — it's making the <em>visual response</em> to a detected drop feel right.
+      </p>
+      <p style="margin-top:16px;font-size:15px;line-height:1.8;color:var(--text);">
+        This is exactly where the "two quality axes" framework applies: <strong>detection quality is necessary but mapping quality is what people see</strong>. SoundSwitch ships with 32 pre-built "Autoloops" (effect sequences for common song structures). Users customize by editing loops, not by writing detection code.
+      </p>
+    </div>
+
+  </div>
+
+</div>
+
+</body>
+</html>

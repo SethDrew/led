@@ -1,0 +1,40 @@
+# Schism 180-240s — Dense 6/8→9/8 middle section into breakdown
+# Source: Wikipedia meter map, community analysis
+# Confidence: community
+
+meter_map:
+- start: 0.0
+  end: 29.0
+  time_sig: "6/8+9/8"
+  label: "middle section — 3 bars 6/8 + 1 bar 9/8, repeating"
+- start: 29.0
+  end: 32.0
+  time_sig: "9/8"
+  label: "suspended bar"
+- start: 32.0
+  end: 38.0
+  time_sig: "13/8"
+  label: "breakdown — single bar 13/8"
+- start: 38.0
+  end: 48.0
+  time_sig: "9/8"
+  label: "post-breakdown 9/8"
+- start: 48.0
+  end: 55.0
+  time_sig: "5/8+9/8"
+  label: "alternation returns"
+- start: 55.0
+  end: 60.0
+  time_sig: "5/8+6/8"
+  label: "variant pattern"
+
+segments:
+- start: 0.0
+  end: 32.0
+  label: middle
+- start: 32.0
+  end: 48.0
+  label: breakdown
+- start: 48.0
+  end: 60.0
+  label: riff_return

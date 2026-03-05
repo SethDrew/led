@@ -1,0 +1,50 @@
+# Schism 0-60s — Iconic opening meter alternation
+# Source: Wikipedia meter map, community analysis, Biamonte 2014
+# Confidence: community (timestamps rounded to 0.1s)
+
+meter_map:
+- start: 0.0
+  end: 6.0
+  time_sig: "5/4"
+  label: "intro — two bars of 5/4"
+- start: 6.0
+  end: 8.5
+  time_sig: "4/4"
+  label: "single bar transition"
+- start: 8.5
+  end: 20.0
+  time_sig: "5/8+7/8"
+  label: "verse 1 — alternating 5/8 and 7/8, band calls this '6.5/8'"
+- start: 20.0
+  end: 32.0
+  time_sig: "6/8+7/8"
+  label: "interlude 1"
+- start: 32.0
+  end: 45.0
+  time_sig: "5/8+7/8"
+  label: "verse 2 — same alternation pattern"
+- start: 45.0
+  end: 55.0
+  time_sig: "6/4"
+  label: "transition — four bars of 6/4"
+- start: 55.0
+  end: 60.0
+  time_sig: "11/8"
+  label: "single bar of 11/8"
+
+segments:
+- start: 0.0
+  end: 8.5
+  label: intro
+- start: 8.5
+  end: 20.0
+  label: verse
+- start: 20.0
+  end: 32.0
+  label: interlude
+- start: 32.0
+  end: 45.0
+  label: verse
+- start: 45.0
+  end: 60.0
+  label: transition

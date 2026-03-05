@@ -297,11 +297,19 @@ class SerialLEDOutput:
                 self.ser = None
 
     def send_frame(self, frame):
-        """Send RGB frame. frame shape: (num_leds, 3), dtype uint8."""
+        """Send RGB frame. frame shape: (num_leds, 3), dtype uint8.
+
+        Protocol: [0xFF][0xAA][RGB bytes][XOR checksum]
+        Checksum = XOR of all RGB bytes. Firmware validates and holds
+        last good frame on mismatch (prevents glitch flashes).
+        """
         if self.ser:
             try:
+                rgb = frame.flatten()
+                checksum = int(np.bitwise_xor.reduce(rgb))
                 packet = bytearray([START_BYTE_1, START_BYTE_2])
-                packet.extend(frame.flatten().tobytes())
+                packet.extend(rgb.tobytes())
+                packet.append(checksum)
                 self.ser.write(packet)
                 self.ser.flush()
                 # Drain any Arduino responses (FPS stats, ready signals)

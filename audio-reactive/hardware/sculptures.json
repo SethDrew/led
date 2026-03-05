@@ -11,12 +11,42 @@
     "id": "cob_diamond",
     "name": "Diamond Sculpture",
     "controller": "sculpture",
+    "num_leds": 72,
     "mode": "height",
+
     "branches": [
-      {"name": "up1", "start": 0, "count": 42, "reverse": false},
-      {"name": "down", "start": 42, "count": 20, "reverse": true},
-      {"name": "up2", "start": 62, "count": 11, "reverse": false, "gamma": 0.55}
-    ]
+      {
+        "name": "left", "start": 0, "count": 42, "reverse": false,
+        "direction": "base_to_top",
+        "height_keyframes": [[0, 0.0], [26, 0.35], [41, 1.0]],
+        "xy_keyframes": [[0, 0.0, 0.0], [24, -0.90, 0.33], [26, -1.0, 0.35], [27, -0.90, 0.33], [41, 0.0, 1.0]]
+      },
+      {
+        "name": "right", "start": 42, "count": 20, "reverse": true,
+        "direction": "top_to_base",
+        "height_keyframes": [[42, 1.0], [46, 0.85], [55, 0.3], [61, 0.0]],
+        "xy_keyframes": [[42, 0.0, 1.0], [44, -0.08, 0.92], [46, 0.0, 0.85], [49, 0.25, 0.60], [52, 0.40, 0.35], [53, 0.50, 0.29], [54, 0.40, 0.23], [55, 0.30, 0.29], [56, 0.35, 0.32], [57, 0.40, 0.35], [58, 0.25, 0.21], [61, 0.0, 0.0]]
+      },
+      {
+        "name": "middle", "start": 62, "count": 10, "reverse": false,
+        "direction": "base_to_top",
+        "height_keyframes": [[62, 0.0], [71, 1.0]],
+        "xy_keyframes": [[62, 0.0, 0.0], [63, -0.05, 0.10], [64, -0.15, 0.12], [66, 0.0, 0.85], [71, 0.0, 1.0]]
+      }
+    ],
+
+    "landmarks": {
+      "base_start": 0,
+      "left_tip": 26,
+      "apex_left": 41,
+      "apex_right": 42,
+      "crossover": 46,
+      "right_tip": 55,
+      "base_junction": 61,
+      "middle_end": 71
+    },
+
+    "notes": "Strip starts at base (LED 0), wraps up left branch to apex (41-42 junction). Left tip at LED 26 dips below middle height. Right branch crosses middle twice: at apex (42/71, R-to-L) and at 46/66 (L-to-R). After crossing, right branch stays to the right of middle (~0.25 in x). Right branch self-loops at 52/57 (same physical position). LED 54 is peak of loop, ~6 LEDs from middle. Base convergence: 0/61/62. LEDs 4 and 63 are near-neighbors across left/middle branches. Middle branch runs roughly straight up center (x=0) with slight leftward lean at base. Total 72 active LEDs on 80-pixel strip."
   },
   {
     "id": "strip_150",

@@ -2,11 +2,13 @@
  * LED STREAMING RECEIVER / WHITE TEST
  *
  * Receives RGB frame data from computer via serial and displays on LEDs.
- * Protocol: [0xFF] [0xAA] [R0] [G0] [B0] [R1] [G1] [B1] ... [R149] [G149] [B149]
+ * Protocol: [0xFF] [0xAA] [R0] [G0] [B0] ... [Rn] [Gn] [Bn] [XOR_CHECKSUM]
+ * XOR_CHECKSUM = XOR of all RGB bytes. Invalid frames hold last good display.
+ *
+ * State machine sync recovery: scans for 0xFF+0xAA pair byte-by-byte,
+ * so a single corrupted byte can't cascade into multi-frame glitching.
  *
  * If WHITE_TEST is defined, displays solid white at 60% brightness instead.
- *
- * FUTURE: Can add frame buffering here (store 1-2 frames for smooth playback)
  */
 
 #include <Adafruit_NeoPixel.h>
@@ -36,9 +38,18 @@ uint8_t frameBuffer[NUM_PIXELS * 3];
 // Protocol bytes
 const uint8_t START_BYTE_1 = 0xFF;
 const uint8_t START_BYTE_2 = 0xAA;
+const uint16_t FRAME_BYTES = NUM_PIXELS * 3;
+
+// Receiver state machine — resilient sync recovery
+enum RxState { WAIT_SYNC1, WAIT_SYNC2, READ_FRAME };
+RxState rxState = WAIT_SYNC1;
+uint16_t bytesRead = 0;
+uint8_t runningXor = 0;
+unsigned long frameStartTime = 0;
 
 // Stats
 unsigned long framesReceived = 0;
+unsigned long framesDropped = 0;
 unsigned long lastStatsTime = 0;
 #endif
 
@@ -95,49 +106,75 @@ void loop() {
   delay(1000);
 #else
   // STREAMING RECEIVER MODE
-  // Wait for start sequence
-  if (Serial.available() >= 2) {
-    if (Serial.read() == START_BYTE_1 && Serial.read() == START_BYTE_2) {
-      // Read RGB data for all LEDs
-      int bytesNeeded = NUM_PIXELS * 3;
-      int bytesRead = 0;
+  //
+  // State machine processes one byte at a time for robust sync recovery.
+  // Protocol: [0xFF][0xAA][RGB x N][XOR_CHECKSUM]
+  // On checksum fail or timeout: hold last good frame, scan for next sync.
+  while (Serial.available()) {
+    uint8_t b = Serial.read();
 
-      // Read with timeout
-      unsigned long startTime = millis();
-      while (bytesRead < bytesNeeded && (millis() - startTime) < 100) {
-        if (Serial.available()) {
-          frameBuffer[bytesRead++] = Serial.read();
+    switch (rxState) {
+      case WAIT_SYNC1:
+        if (b == START_BYTE_1) rxState = WAIT_SYNC2;
+        break;
+
+      case WAIT_SYNC2:
+        if (b == START_BYTE_2) {
+          // Found sync pair — start reading frame
+          rxState = READ_FRAME;
+          bytesRead = 0;
+          runningXor = 0;
+          frameStartTime = millis();
+        } else if (b == START_BYTE_1) {
+          // Consecutive 0xFF — stay, next byte might be 0xAA
+        } else {
+          rxState = WAIT_SYNC1;
         }
-      }
+        break;
 
-      // If we got a complete frame, display it
-      if (bytesRead == bytesNeeded) {
-        // Update LEDs from frame buffer
-        for (int i = 0; i < NUM_PIXELS; i++) {
-          int idx = i * 3;
-          strip.setPixelColor(i, frameBuffer[idx], frameBuffer[idx+1], frameBuffer[idx+2]);
+      case READ_FRAME:
+        if (bytesRead < FRAME_BYTES) {
+          frameBuffer[bytesRead++] = b;
+          runningXor ^= b;
+        } else {
+          // This byte is the XOR checksum
+          if (runningXor == b) {
+            // Valid frame — update LEDs
+            for (uint16_t i = 0; i < NUM_PIXELS; i++) {
+              uint16_t idx = i * 3;
+              strip.setPixelColor(i, frameBuffer[idx], frameBuffer[idx+1], frameBuffer[idx+2]);
+            }
+            strip.show();
+            framesReceived++;
+          } else {
+            // Checksum mismatch — hold last good frame
+            framesDropped++;
+          }
+          rxState = WAIT_SYNC1;
         }
-        strip.show();
-
-        framesReceived++;
-
-        // Print stats every second
-        if (millis() - lastStatsTime > 1000) {
-          Serial.print("FPS: ");
-          Serial.println(framesReceived);
-          framesReceived = 0;
-          lastStatsTime = millis();
-        }
-      } else {
-        // Incomplete frame - just skip it
-        Serial.println("Warning: Incomplete frame");
-      }
+        break;
     }
   }
 
-  // NOTE: Future buffering would go here
-  // - Store incoming frames in a ring buffer
-  // - Display from buffer while receiving next frame
-  // - Smooth out any computer pauses
+  // Frame timeout — abandon incomplete frame if data stops arriving
+  if (rxState == READ_FRAME && (millis() - frameStartTime) > 50) {
+    rxState = WAIT_SYNC1;
+    framesDropped++;
+  }
+
+  // Stats every 2s
+  if (millis() - lastStatsTime > 2000) {
+    unsigned long elapsed = millis() - lastStatsTime;
+    Serial.print("FPS: ");
+    Serial.print(framesReceived * 1000 / elapsed);
+    if (framesDropped > 0) {
+      Serial.print(" drop:");
+      Serial.print(framesDropped);
+    }
+    Serial.println();
+    framesReceived = 0;
+    framesDropped = 0;
+    lastStatsTime = millis();
+  }
 #endif
 }

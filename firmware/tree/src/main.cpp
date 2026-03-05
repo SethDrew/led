@@ -1,16 +1,11 @@
 /*
- * TREE EFFECTS - MODULAR SYSTEM (Memory Optimized)
+ * LED TREE — Standalone Animation
  *
- * Renders directly to tree strips (no buffer overhead)
- * Each animation runs one effect at a time
+ * Tree: Sap flow animation (3 strips, 197 LEDs)
  *
  * Available Effects:
  *   - DepthWaveForeground: Wave flowing up/down tree
  *   - SapFlowForeground: Particles rising through tree
- *
- * Modes:
- *   - STREAMING_MODE: Receive RGB data from serial (see streaming_receiver.cpp)
- *   - Normal mode: Run preset animations
  */
 
 #include "TreeTopology.h"
@@ -24,17 +19,7 @@
 // Global tree instance
 Tree tree;
 
-// Standalone sculpture on pin 12 (not part of tree topology)
-#ifndef SCULPTURE_PIN
-#define SCULPTURE_PIN 13
-#endif
-#ifndef SCULPTURE_LEDS
-#define SCULPTURE_LEDS 120  // 5m FCOB WS2811: 24 ICs/m × 5m = 120 addressable pixels (36 LEDs per IC)
-#endif
-// WS2811 FCOB 12V strip
-Adafruit_NeoPixel sculpture(SCULPTURE_LEDS, SCULPTURE_PIN, NEO_GRB + NEO_KHZ800);
-
-// ===== ANIMATIONS =====
+// ===== TREE ANIMATIONS =====
 
 // Animation 1: Classic green wave
 void classicWaveAnimation() {
@@ -90,36 +75,17 @@ void setup() {
   Serial.println("=================================");
   Serial.println("LED TREE");
   Serial.println("=================================");
-  Serial.println("Tree Effects - Memory Optimized");
-  Serial.print("Total LEDs: ");
+  Serial.print("Tree LEDs: ");
   Serial.println(tree.getNumLEDs());
 
   tree.begin();
 
-  // Sculpture: solid red on pin 12
-  sculpture.begin();
-  sculpture.setBrightness(8);  // Low brightness for testing
-  for (int i = 0; i < SCULPTURE_LEDS; i++) {
-    sculpture.setPixelColor(i, 255, 0, 0);
-  }
-  sculpture.show();
-  Serial.print("Sculpture on pin ");
-  Serial.print(SCULPTURE_PIN);
-  Serial.println(": all red");
-
+  Serial.println("Tree: sap flow");
   Serial.println("Ready!");
 }
 
 void loop() {
-  // Uncomment one animation:
-
-  // classicWaveAnimation();   // Green wave
-  sapFlowAnimation();          // Green sap flow ← ACTIVE
-  // blueWaveAnimation();      // Blue wave
-  // orangeWaveAnimation();    // Orange wave
-  // whiteSapAnimation();      // White sap
-  // solidWhiteAnimation();    // Solid white - all LEDs
-
+  sapFlowAnimation();
   delay(40);  // ~25 FPS
 }
 

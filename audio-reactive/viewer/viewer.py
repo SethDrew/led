@@ -78,12 +78,17 @@ def _ema_deviation(features, alpha=0.02):
     O(n) causal complement to feature flux.  Catches buildups and texture
     shifts that flux misses.
     """
-    n_frames = features.shape[1]
-    ema = features[:, 0].copy().astype(np.float64)
+    # Normalize so all coefficients contribute equally (matches _feature_flux)
+    norms = np.linalg.norm(features, axis=0, keepdims=True)
+    norms[norms == 0] = 1
+    normed = features / norms
+
+    n_frames = normed.shape[1]
+    ema = normed[:, 0].copy().astype(np.float64)
     deviation = np.zeros(n_frames)
     for t in range(1, n_frames):
-        deviation[t] = np.linalg.norm(features[:, t] - ema)
-        ema = alpha * features[:, t] + (1 - alpha) * ema
+        deviation[t] = np.linalg.norm(normed[:, t] - ema)
+        ema = alpha * normed[:, t] + (1 - alpha) * ema
     mx = np.max(deviation)
     if mx > 0:
         deviation /= mx
@@ -679,6 +684,21 @@ class SyncedVisualizer:
             d2 = np.diff(smoothed, n=2, prepend=[smoothed[0], smoothed[0]]) / (dt ** 2)
             self.rms_d2[sigma] = d2
 
+        # AbsInt: rolling sum of |d(RMS)/dt| over 150ms window (offline equivalent of AbsIntegral)
+        absint_window = max(1, int(0.15 * fps))
+        abs_deriv = np.abs(self.rms_derivative)
+        absint_cs = np.concatenate([[0.0], np.cumsum(abs_deriv)])
+        absint_idx = np.arange(len(abs_deriv))
+        absint_starts = np.maximum(0, absint_idx - absint_window + 1)
+        self.absint_signal = (absint_cs[absint_idx + 1] - absint_cs[absint_starts]) * dt
+
+        # AbsInt second derivatives at multiple smoothing scales
+        self.absint_d2 = {}
+        for sigma in (1, 3, 10, 30):
+            smoothed = gaussian_filter1d(self.absint_signal, sigma=sigma)
+            d2 = np.diff(smoothed, n=2, prepend=[smoothed[0], smoothed[0]]) / (dt ** 2)
+            self.absint_d2[sigma] = d2
+
         # Build detector spans
         self._detect_builds()
 
@@ -953,6 +973,75 @@ class SyncedVisualizer:
             self.axes = []
         self.axes.append(ax)
 
+    def _build_calc_absint_d2_panel(self, ax):
+        """AbsInt second derivative — peak detection via d² zero-crossings."""
+        from scipy.ndimage import gaussian_filter1d
+
+        t = self.times
+        n = len(t)
+
+        # AbsInt signal (smoothed σ=3) with zero-crossing peaks
+        absint = gaussian_filter1d(self.absint_signal[:n], sigma=3)
+        d2 = self.absint_d2[3][:n]
+
+        ax.plot(t, absint / (np.max(absint) + 1e-10), color='#76FF03', linewidth=1.5, alpha=0.9, label='AbsInt (σ=3)')
+
+        # Detect peaks: zero-crossings of d2 from positive to negative
+        zero_crossings = np.where((d2[:-1] > 0) & (d2[1:] <= 0))[0]
+        if len(zero_crossings) > 0:
+            absint_norm = absint / (np.max(absint) + 1e-10)
+            ax.scatter(t[zero_crossings], absint_norm[zero_crossings],
+                       color='#FF4081', s=15, zorder=5, marker='v', label='d² peaks')
+
+        # Beat annotation ticks if available
+        beats = self.annotations.get('beats', self.annotations.get('beat', []))
+        if beats and isinstance(beats, list):
+            beat_times = [b if isinstance(b, (int, float)) else b.get('time', b.get('start', 0)) for b in beats]
+            beat_times = [b for b in beat_times if isinstance(b, (int, float))]
+            if beat_times:
+                for bt in beat_times:
+                    ax.axvline(x=bt, color='#FFD740', alpha=0.3, linewidth=0.8)
+
+        ax.set_xlim([0, self.duration])
+        ax.set_ylim([0, 1.1])
+        ax.set_ylabel('AbsInt Strength')
+        ax.set_title('AbsInt Second Derivative — peak detection via d² zero-crossings', fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        self._overlay_sections(ax)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_calc_absint_jitter_panel(self, ax):
+        """AbsInt second derivative at 4 smoothing levels — jitter vs smoothing tradeoff."""
+        t = self.times
+        n = len(t)
+        fps = self.sr / self.hop_length
+        dt_ms = 1000.0 / fps
+
+        alphas = {1: 0.3, 3: 0.5, 10: 0.7, 30: 0.9}
+        colors = {1: '#B2FF59', 3: '#76FF03', 10: '#64DD17', 30: '#33691E'}
+
+        for sigma in (1, 3, 10, 30):
+            d2 = self.absint_d2[sigma][:n]
+            mx = np.max(np.abs(d2)) + 1e-10
+            d2_norm = d2 / mx
+            ms = sigma * dt_ms
+            ax.plot(t, d2_norm, color=colors[sigma], linewidth=1.2,
+                    alpha=alphas[sigma], label=f'σ={sigma} ({ms:.0f}ms)')
+
+        ax.axhline(y=0, color='#666', linewidth=0.5)
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('d²AbsInt/dt² (normalized)')
+        ax.set_title('AbsInt Jitter vs Smoothing — lighter = jittery (σ=1), darker = smooth (σ=30)', fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        self._overlay_sections(ax)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
     def _sections_to_spans(self):
         """Convert section boundary annotations to (start, end, label) spans.
 
@@ -1090,6 +1179,8 @@ class SyncedVisualizer:
             'calc-multi-scale': self._build_calc_multi_scale_panel,
             'calc-onset-d2': self._build_calc_onset_d2_panel,
             'calc-jitter': self._build_calc_jitter_panel,
+            'calc-absint-d2': self._build_calc_absint_d2_panel,
+            'calc-absint-jitter': self._build_calc_absint_jitter_panel,
             'calc-build-detector': self._build_calc_build_detector_panel,
         }
         if has_annotations:

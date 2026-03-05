@@ -1,0 +1,81 @@
+# Tool — metrically complex clips with community-sourced meter maps
+# Source: YouTube (yt-dlp), annotations from academic + community analysis
+# Unlike Harmonix, these have NO beat-level annotations — instead: meter_map, polyrhythm_zones
+
+schism_intro:
+  file: schism_intro.wav
+  artist: Tool
+  title: Schism
+  genre: prog_metal
+  bpm: 109
+  source_window: "0-60s"
+  sections: "intro → verse"
+  time_sigs: ["5/4", "4/4", "5/8", "7/8"]
+  polyrhythm: null
+  meter_changes: 12
+  notes: "Iconic opening meter alternation, bass riff establishes 5/8+7/8 pattern"
+
+schism_middle:
+  file: schism_middle.wav
+  artist: Tool
+  title: Schism
+  genre: prog_metal
+  bpm: 109
+  source_window: "180-240s"
+  sections: "middle → breakdown"
+  time_sigs: ["6/8", "9/8", "13/8"]
+  polyrhythm: null
+  meter_changes: 18
+  notes: "Dense meter transition section, 3 bars 6/8 + 1 bar 9/8 pattern, then 13/8 breakdown"
+
+lateralus_chorus:
+  file: lateralus_chorus.wav
+  artist: Tool
+  title: Lateralus
+  genre: prog_metal
+  bpm: 98
+  source_window: "90-150s"
+  sections: "verse → chorus"
+  time_sigs: ["9/8", "8/8", "7/8"]
+  polyrhythm: null
+  meter_changes: 8
+  notes: "Fibonacci vocal syllables (1,1,2,3,5,8,5,3), voice enters at 1:37 = golden ratio"
+
+pneuma_verse:
+  file: pneuma_verse.wav
+  artist: Tool
+  title: Pneuma
+  genre: prog_metal
+  bpm: 77
+  source_window: "60-120s"
+  sections: "verse"
+  time_sigs: ["12/8", "11/8", "10/8"]
+  polyrhythm: "3:4"
+  meter_changes: 4
+  notes: "Clean 3:4 polyrhythm — 3-note 16th groupings over 4/4 bass"
+
+rosetta_stoned_complex:
+  file: rosetta_stoned_complex.wav
+  artist: Tool
+  title: Rosetta Stoned
+  genre: prog_metal
+  bpm: 120
+  source_window: "180-240s"
+  sections: "instrumental → verse"
+  time_sigs: ["8/8", "5/4", "10/4", "9/8", "6/8", "11/4", "7/8"]
+  polyrhythm: "3:4:5"
+  meter_changes: 15
+  notes: "7+ distinct time sigs in 60s, Danny plays 3/4 while implying 4/4 on right hand and 5/16 on bass drum"
+
+fear_inoculum_polymeter:
+  file: fear_inoculum_polymeter.wav
+  artist: Tool
+  title: Fear Inoculum
+  genre: prog_metal
+  bpm: 91
+  source_window: "300-360s"
+  sections: "instrumental → verse"
+  time_sigs: ["12/8", "5/4", "11/8"]
+  polyrhythm: "polymeter"
+  meter_changes: 6
+  notes: "True polymeter — guitar alternates 12/8+5/4, bass+drums play 11/8 (3+3+3+2). A Phrygian."

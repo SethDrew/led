@@ -1,0 +1,54 @@
+# FMA folk tracks — 30-second clips from Free Music Archive (Creative Commons)
+# Source: https://github.com/mdeff/fma (fma_small subset, 8000 tracks)
+# BPM from Echo Nest API (single estimate, no per-beat timestamps)
+# These are tempo detection stress tests: soft attacks, rubato, minimal percussion
+
+fishermans_girl:
+  file: fishermans_girl.wav
+  fma_id: 6783
+  artist: Cath and Phil Tyler
+  title: Fisherman's Girl
+  genre: folk
+  bpm: 105.6
+  duration: 30s
+  notes: "Traditional folk duo, acoustic"
+
+dont_love_you:
+  file: dont_love_you.wav
+  fma_id: 93704
+  artist: The Chapin Sisters
+  title: Don't Love You
+  genre: folk
+  bpm: 68.1
+  duration: 30s
+  notes: "Slow folk duo, very soft attacks"
+
+crows_in_the_basilica:
+  file: crows_in_the_basilica.wav
+  fma_id: 85438
+  artist: Chuck Johnson
+  title: Crows In The Basilica
+  genre: folk
+  bpm: 97.9
+  duration: 30s
+  notes: "Instrumental folk/ambient guitar, likely rubato"
+
+blood_rushes_on:
+  file: blood_rushes_on.wav
+  fma_id: 91938
+  artist: Zachary Cale
+  title: Blood Rushes On
+  genre: folk
+  bpm: 78.7
+  duration: 30s
+  notes: "Slow singer-songwriter, finger-picked guitar"
+
+seadrift:
+  file: seadrift.wav
+  fma_id: 3272
+  artist: Arborea
+  title: Seadrift
+  genre: folk
+  bpm: 141.6
+  duration: 30s
+  notes: "Folk duo, moderate tempo"

@@ -55,3 +55,68 @@ limelight:
   bpm: 130
   source_window: "55-115s"
   sections: "verse → chorus → postchorus → instrumental → verse"
+
+# ── Country / folk-proxy (soft attacks, acoustic — tempo detection stress tests) ──
+
+tennesseeme:
+  file: tennesseeme.wav
+  artist: The Secret Sisters
+  title: Tennessee Me
+  genre: country
+  bpm: 115
+  source_window: "11-71s"
+  sections: "verse → verse"
+  notes: "Acoustic folk-country duo, very soft attacks"
+
+americanhoney:
+  file: americanhoney.wav
+  artist: Lady Antebellum
+  title: American Honey
+  genre: country
+  bpm: 86
+  source_window: "35-95s"
+  sections: "verse → chorus → verse"
+  notes: "Soft ballad, gentle strumming"
+
+thehousethatbuiltme:
+  file: thehousethatbuiltme.wav
+  artist: Miranda Lambert
+  title: The House That Built Me
+  genre: country
+  bpm: 81
+  source_window: "17-77s"
+  sections: "verse → verse → chorus"
+  notes: "Slow country ballad, minimal percussion"
+
+# ── Metal (complex time sigs, tempo changes, syncopation) ──
+
+andjusticeforall:
+  file: andjusticeforall.wav
+  artist: Metallica
+  title: "...And Justice for All"
+  genre: metal
+  bpm: 172
+  time_sig: "6/4"
+  source_window: "135-195s"
+  sections: "verse → prechorus → chorus"
+  notes: "6/4 time signature — odd meter stress test"
+
+hallowedbethyname:
+  file: hallowedbethyname.wav
+  artist: Iron Maiden
+  title: Hallowed Be Thy Name
+  genre: metal
+  bpm: 120
+  source_window: "98-158s"
+  sections: "instrumental → verse → instrumental"
+  notes: "Tempo changes within song, galloping rhythm"
+
+devilsisland:
+  file: devilsisland.wav
+  artist: Megadeth
+  title: "Devil's Island"
+  genre: metal
+  bpm: 167
+  source_window: "55-115s"
+  sections: "verse → chorus → verse"
+  notes: "Fast thrash, heavy syncopation"

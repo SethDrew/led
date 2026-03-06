@@ -18,8 +18,8 @@ There are TWO ledgers. Read BOTH guides to decide which one fits:
   For: How we *think* about audio, LEDs, feelings. Perceptual insights, artistic observations,
   signal processing hypotheses, dead ends in analysis approaches.
 
-- **Engineering ledger** (`audio-reactive/engineering/ledger.yaml`)
-  Guide: `audio-reactive/engineering/LEDGER_GUIDE.md`
+- **Engineering ledger** (`engineering/ledger.yaml`)
+  Guide: `engineering/LEDGER_GUIDE.md`
   For: How we *build and deploy* the system. Protocol designs, firmware fixes, hardware
   constraints, performance findings, reliability improvements.
 

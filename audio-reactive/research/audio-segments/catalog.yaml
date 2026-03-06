@@ -114,11 +114,12 @@
   duration_seconds: 60.0
   filename: harmonix/0141_indaclub_60s.wav
   genre: Hip-Hop
-  harmonix_id: '0141_indaclub'
+  harmonix_id: 0141_indaclub
   harmonix_offset_sec: 0.673
   harmonix_segment_start: 21.99
   id: harmonix_indaclub
-  notes: '60s segment from t=21.99s. 90 BPM. Alt YT version (z8BYGMdHDQ0). Good alignment (78% <50ms).'
+  notes: 60s segment from t=21.99s. 90 BPM. Alt YT version (z8BYGMdHDQ0). Good alignment
+    (78% <50ms).
   recorded: 2026-02-19 15:00
   sample_rate: 44100
   song: In da Club
@@ -127,11 +128,11 @@
   duration_seconds: 60.0
   filename: harmonix/0026_blackandyellow_60s.wav
   genre: Hip-Hop
-  harmonix_id: '0026_blackandyellow'
-  harmonix_offset_sec: 1.300
+  harmonix_id: 0026_blackandyellow
+  harmonix_offset_sec: 1.3
   harmonix_segment_start: 21.79
   id: harmonix_blackandyellow
-  notes: '60s segment from t=21.79s. 82 BPM. Strong alignment (94% <50ms).'
+  notes: 60s segment from t=21.79s. 82 BPM. Strong alignment (94% <50ms).
   recorded: 2026-02-19 15:00
   sample_rate: 44100
   song: Black and Yellow
@@ -140,11 +141,11 @@
   duration_seconds: 60.0
   filename: harmonix/0439_lovethewayyoulie_60s.wav
   genre: Hip-Hop
-  harmonix_id: '0439_lovethewayyoulie'
+  harmonix_id: 0439_lovethewayyoulie
   harmonix_offset_sec: 0.395
   harmonix_segment_start: 21.15
   id: harmonix_lovethewayyoulie
-  notes: '60s segment from t=21.15s. 87 BPM. Good alignment (84% <50ms).'
+  notes: 60s segment from t=21.15s. 87 BPM. Good alignment (84% <50ms).
   recorded: 2026-02-19 15:00
   sample_rate: 44100
   song: Love the Way You Lie
@@ -153,11 +154,31 @@
   duration_seconds: 60.0
   filename: harmonix/0607_cantholdus_60s.wav
   genre: Hip-Hop
-  harmonix_id: '0607_cantholdus'
+  harmonix_id: 0607_cantholdus
   harmonix_offset_sec: 3.947
   harmonix_segment_start: 20.48
   id: harmonix_cantholdus
-  notes: '60s segment from t=20.48s. 73 BPM. Good alignment (83% <50ms).'
+  notes: 60s segment from t=20.48s. 73 BPM. Good alignment (83% <50ms).
   recorded: 2026-02-19 15:00
   sample_rate: 44100
   song: Can't Hold Us
+- duration_seconds: 8.7
+  filename: work_complete.wav
+  id: work_complete
+  recorded: 2026-03-06 08:32
+  sample_rate: 44100
+- duration_seconds: 4.0
+  filename: work_complete.wav
+  id: work_complete
+  recorded: 2026-03-06 08:33
+  sample_rate: 44100
+- duration_seconds: 12.3
+  filename: work_complete.wav
+  id: work_complete
+  recorded: 2026-03-06 08:34
+  sample_rate: 44100
+- duration_seconds: 13.9
+  filename: wcp.wav
+  id: wcp
+  recorded: 2026-03-06 08:35
+  sample_rate: 44100

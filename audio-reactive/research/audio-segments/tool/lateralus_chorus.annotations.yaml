@@ -1,48 +1,96 @@
-# Lateralus 90-150s — Fibonacci vocals + meter spiral
-# Source: Dorhauer 2025, community analysis
-# Confidence: community (Fibonacci pattern is exact)
+# Lateralus 90-150s (1:30-2:30) — End of Intro + Verse
+# Source: Dorhauer 2025, "Over Analyzing Separates the Body from the Mind:
+#   Metric Juxtapositions in Tool's 'Lateralus'"
+# URL: https://johndorhauer.com/2025/01/16/over-analyzing-separates-the-body-from-the-mind-metric-juxtapositions-in-tools-lateralus/
+# Confidence: academic (section timestamps from published form chart)
+#
+# IMPORTANT: This clip is MISNAMED. It covers the end of the intro (subsection b)
+# and the verse (subsections c, c', start of d) — NOT the chorus.
+# The chorus (subsection b') begins at 2:33 in the full song, 3 seconds after
+# this clip ends. The clip name "lateralus_chorus" is retained for file continuity.
+
+# Dorhauer's form chart for the full-song sections that fall within this clip:
+#   Intro b:  1:14-1:38  (3/4, 6/8 juxtaposition, ~180 BPM)
+#   Verse c:  1:38-2:05  (5/4, 3+2 grouping)
+#   Verse c': 2:05-2:18  (5/4, variant of c)
+#   Verse d:  2:18-2:33  (transition — 3 bars 3/4 + 1 bar 2/4, leads to chorus)
+# Our clip captures 1:30-2:30, so we get the tail of intro b through most of d.
 
 meter_map:
 - start: 0.0
-  end: 7.0
-  time_sig: "4/4"
-  label: "verse continuation"
-- start: 7.0
-  end: 18.0
-  time_sig: "9/8"
-  label: "chorus meter 1"
-- start: 18.0
-  end: 26.0
-  time_sig: "8/8"
-  label: "chorus meter 2"
-- start: 26.0
+  end: 8.0
+  time_sig: "3/4"
+  tempo: 180
+  label: "intro subsection b (tail) — post metric modulation"
+  note: "Metric modulation at 1:14 converted 4/4 ~112 BPM to 3/4 ~180 BPM.
+    Guitar/bass play dotted-quarter rhythms implying 6/8 against drums in 3/4."
+  source: "Dorhauer 2025, form chart + metric modulation analysis"
+- start: 8.0
   end: 35.0
-  time_sig: "7/8"
-  label: "chorus meter 3"
+  time_sig: "5/4"
+  tempo: 180
+  label: "verse subsection c — 3+2 grouping"
+  note: "Vocals enter here. Dorhauer identifies 5/4 with 3+2 subdivision."
+  source: "Dorhauer 2025, form chart"
 - start: 35.0
-  end: 45.0
-  time_sig: "9/8"
-  label: "chorus repeat"
-- start: 45.0
-  end: 53.0
-  time_sig: "8/8"
-  label: "chorus repeat"
-- start: 53.0
+  end: 48.0
+  time_sig: "5/4"
+  tempo: 180
+  label: "verse subsection c' — variant"
+  note: "Dorhauer marks this as c-prime, a variant of subsection c. Still 5/4."
+  source: "Dorhauer 2025, form chart"
+- start: 48.0
   end: 60.0
-  time_sig: "7/8"
-  label: "chorus repeat"
+  time_sig: "3/4"
+  tempo: 180
+  label: "verse subsection d (partial) — transition to chorus"
+  note: "Dorhauer describes the transition into chorus as 3 measures of 3/4
+    followed by 1 measure of 2/4. Our clip ends at 2:30, before the chorus
+    at 2:33. The full subsection d runs 2:18-2:33."
+  source: "Dorhauer 2025, form chart + transition description"
 
 segments:
 - start: 0.0
-  end: 7.0
-  label: verse
-- start: 7.0
+  end: 8.0
+  label: "intro (subsection b, tail)"
+  source: "Dorhauer 2025, form chart: intro b = 1:14-1:38"
+- start: 8.0
+  end: 35.0
+  label: "verse (subsection c)"
+  source: "Dorhauer 2025, form chart: verse c = 1:38-2:05"
+- start: 35.0
+  end: 48.0
+  label: "verse (subsection c')"
+  source: "Dorhauer 2025, form chart: verse c' = 2:05-2:18"
+- start: 48.0
   end: 60.0
-  label: chorus
+  label: "verse transition (subsection d, partial)"
+  source: "Dorhauer 2025, form chart: verse d = 2:18-2:33"
 
 fibonacci_syllables:
-  description: "Vocal syllable counts per phrase follow Fibonacci sequence"
+  description: "Vocal syllable counts per phrase follow Fibonacci sequence.
+    Vocals enter at 1:37-1:38 in the full song, which falls within this clip."
   sequence: [1, 1, 2, 3, 5, 8, 5, 3, 2, 1, 1, 2, 3, 5, 8, 13, 8, 5, 3]
-  total_eighth_notes: 987
-  fibonacci_index: 16
-  note: "Voice entrance at 1:37 in full song = 1.618 minutes = golden ratio φ"
+  source: "Community analysis (jaced.com, GeekShizzle, ProgArchives) — NOT from Dorhauer"
+  confidence: "community — widely cited but not independently verified here"
+  note: "Community claims voice enters at 1:37 = 1.617 minutes, approximating
+    phi (1.618). Also claims total eighth-note count of 987 = Fibonacci F(16).
+    Dorhauer's article does NOT discuss Fibonacci patterns.
+    These claims are included for completeness but are not academically sourced."
+
+analytical_discrepancy:
+  topic: "Chorus time signature (outside this clip, but relevant context)"
+  community_view: "Chorus uses 9/8 -> 8/8 -> 7/8 time signatures in sequence.
+    Working title '987' = Fibonacci F(16). This is the dominant internet analysis."
+  dorhauer_view: "Chorus (subsection b') is in 3/4 with 6/8 juxtaposition —
+    a continuation of the metric dissonance from intro subsection b.
+    Dorhauer does not describe changing meters in the chorus."
+  reconciliation: "These may describe different analytical layers of the same music.
+    The community 9/8-8/8-7/8 could refer to composite grouping patterns
+    (how phrases are perceived), while Dorhauer's 3/4 with 6/8 describes
+    the underlying notated meter and its metric dissonance.
+    Neither analysis is necessarily wrong — they may be at different levels."
+  previous_annotation_error: "The original annotation placed 9/8-8/8-7/8
+    starting at clip second 7.0, which would be ~1:37 in the full song.
+    Per Dorhauer, the chorus does not begin until 2:33 (clip second 63,
+    outside this clip entirely). The previous annotation was structurally incorrect."

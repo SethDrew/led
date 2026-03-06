@@ -95,6 +95,145 @@ def _ema_deviation(features, alpha=0.02):
     return deviation
 
 
+def _foote_novelty(features, kernel_size=64):
+    """Foote's checkerboard novelty — offline O(n^2) structural boundary detector.
+
+    Builds a self-similarity matrix, convolves with a checkerboard kernel
+    along the diagonal. Peaks indicate where music before differs maximally
+    from music after — i.e., section boundaries.
+
+    Offline only — requires full audio. Cannot run in real-time.
+    """
+    # L2-normalize features (same as flux)
+    norms = np.linalg.norm(features, axis=0, keepdims=True)
+    norms[norms == 0] = 1
+    normed = features / norms
+
+    # Self-similarity matrix (cosine similarity since features are L2-normed)
+    S = normed.T @ normed  # (n_frames, n_frames)
+
+    # Checkerboard kernel (Foote 2000)
+    # Diagonal blocks (+1): within-section similarity (high at boundaries)
+    # Off-diagonal blocks (-1): cross-section similarity (low at boundaries)
+    # Result: positive at boundaries, zero in homogeneous regions
+    half = kernel_size // 2
+    kernel = -np.ones((kernel_size, kernel_size))
+    kernel[:half, :half] = 1    # top-left: before vs before
+    kernel[half:, half:] = 1    # bottom-right: after vs after
+
+    n = S.shape[0]
+    novelty = np.zeros(n)
+    for i in range(half, n - half):
+        patch = S[i - half:i + half, i - half:i + half]
+        novelty[i] = np.sum(patch * kernel)
+
+    # Half-wave rectify (only positive = boundary-like)
+    novelty = np.maximum(0, novelty)
+
+    # Normalize
+    mx = np.max(novelty)
+    if mx > 0:
+        novelty /= mx
+
+    return novelty
+
+
+def _multiscale_ema_deviation(features, alphas=(0.004, 0.0002, 0.00004)):
+    """EMA deviation at multiple timescales — drift from context at ~3s, ~1min, ~5min.
+
+    Returns list of 3 arrays, each normalized independently to [0, 1].
+    O(1) per frame per scale. ESP32-feasible.
+    """
+    norms = np.linalg.norm(features, axis=0, keepdims=True)
+    norms[norms == 0] = 1
+    normed = features / norms
+
+    n_frames = normed.shape[1]
+    results = []
+    for alpha in alphas:
+        ema = normed[:, 0].copy().astype(np.float64)
+        deviation = np.zeros(n_frames)
+        for t in range(1, n_frames):
+            deviation[t] = np.linalg.norm(normed[:, t] - ema)
+            ema = alpha * normed[:, t] + (1 - alpha) * ema
+        mx = np.max(deviation)
+        if mx > 0:
+            deviation /= mx
+        results.append(deviation)
+    return results
+
+
+def _cumulative_zscore(features):
+    """Running mean + variance z-score — how unusual vs everything heard so far.
+
+    Uses Welford's online algorithm. O(1) per frame, O(d) memory.
+    Normalized to [0, 1]. Note: z-scores dilute over time as variance grows.
+    """
+    n_dims, n_frames = features.shape
+    norms = np.linalg.norm(features, axis=0, keepdims=True)
+    norms[norms == 0] = 1
+    normed = features / norms
+
+    running_mean = np.zeros(n_dims)
+    running_var = np.zeros(n_dims)
+    scores = np.zeros(n_frames)
+
+    for t in range(n_frames):
+        x = normed[:, t]
+        if t == 0:
+            running_mean = x.copy()
+            continue
+        delta = x - running_mean
+        running_mean += delta / (t + 1)
+        running_var += delta * (x - running_mean)  # Welford's
+        if t > 1:
+            std = np.sqrt(running_var / t)
+            std[std == 0] = 1
+            scores[t] = np.linalg.norm((x - running_mean) / std)
+
+    mx = np.max(scores)
+    if mx > 0:
+        scores /= mx
+    return scores
+
+
+def _knn_reservoir_novelty(features, reservoir_size=500, k=5):
+    """Reservoir sampling + KNN distance — 'have I heard this timbre before?'
+
+    Each frame's score = distance to K-th nearest neighbor among reservoir entries.
+    Reservoir sampling ensures uniform coverage of the song's history.
+    O(N) per frame. ESP32-feasible at N<=500.
+    """
+    n_dims, n_frames = features.shape
+    norms = np.linalg.norm(features, axis=0, keepdims=True)
+    norms[norms == 0] = 1
+    normed = features / norms
+
+    reservoir = []
+    scores = np.zeros(n_frames)
+    rng = np.random.RandomState(42)  # deterministic for reproducibility
+
+    for t in range(n_frames):
+        x = normed[:, t]
+        if len(reservoir) >= k:
+            dists = np.linalg.norm(np.array(reservoir) - x, axis=1)
+            dists.sort()
+            scores[t] = dists[k - 1]  # K-th nearest
+
+        # Reservoir sampling
+        if len(reservoir) < reservoir_size:
+            reservoir.append(x.copy())
+        else:
+            j = rng.randint(0, t + 1)
+            if j < reservoir_size:
+                reservoir[j] = x.copy()
+
+    mx = np.max(scores)
+    if mx > 0:
+        scores /= mx
+    return scores
+
+
 # ── Interactive Visualizer ────────────────────────────────────────────
 
 class SyncedVisualizer:
@@ -296,6 +435,10 @@ class SyncedVisualizer:
         self.novelty_chroma = _feature_flux(self.chroma)
         self.ema_mfcc = _ema_deviation(self.mfccs, alpha=0.02)
         self.ema_chroma = _ema_deviation(self.chroma, alpha=0.02)
+
+        print("Computing Foote's novelty (offline)...")
+        self.foote_mfcc = _foote_novelty(self.mfccs)
+        self.foote_chroma = _foote_novelty(self.chroma)
 
         # ── Per-band normalization: asymmetric EMA + dropout detection ──
         # (ledger: per-band-normalization-with-dropout-handling)
@@ -1279,6 +1422,7 @@ class SyncedVisualizer:
             x_axis='time', y_axis='mel', fmin=20, fmax=None,
             ax=ax, cmap='magma'
         )
+        ax.set_xlim([0, self.duration])
         ax.set_ylabel('Frequency (Hz)')
         ax.set_title('Mel Spectrogram — full frequency range (20 Hz - 22 kHz)', fontsize=11)
         if not hasattr(self, 'axes'):
@@ -1417,8 +1561,9 @@ class SyncedVisualizer:
         self.axes.append(ax)
 
     def _build_novelty_panel(self, ax):
-        """Causal novelty: flux (sharp edges) + EMA deviation (gradual drift).
-        Chroma on left axis, MFCC on right axis (independent scales)."""
+        """Causal novelty: flux (sharp edges) + EMA deviation (gradual drift)
+        + Foote's checkerboard (offline structural boundaries).
+        Chroma on left axis, MFCC + Foote on right axis (independent scales)."""
         from scipy.signal import find_peaks
 
         t = self.times
@@ -1427,6 +1572,7 @@ class SyncedVisualizer:
         nov_c = self.novelty_chroma[:n]
         ema_m = self.ema_mfcc[:n]
         ema_c = self.ema_chroma[:n]
+        foote_m = self.foote_mfcc[:n]
 
         fps = self.sr / self.hop_length
         peak_dist = max(1, int(fps * 1.5))
@@ -1450,11 +1596,19 @@ class SyncedVisualizer:
         ax2.set_ylabel('MFCC novelty', color='#FF8A65')
         ax2.tick_params(axis='y', labelcolor='#FF8A65')
 
+        # Foote's offline novelty (gold standard reference) on MFCC axis
+        line_f, = ax2.plot(t, foote_m, color='#FFD740', linewidth=1.8, alpha=0.85,
+                           label="Foote's (offline)")
+        ax2.fill_between(t, foote_m, alpha=0.1, color='#FFD740')
+        peaks_f, _ = find_peaks(foote_m, prominence=0.15, distance=peak_dist)
+        ax2.scatter(t[peaks_f], foote_m[peaks_f], color='#FFD740', s=25, zorder=5, marker='D')
+
         ax.set_title(
-            "Causal Novelty — flux (solid) detects sharp edges, "
-            "EMA deviation (dashed) detects gradual drift  "
+            "Novelty — causal flux (solid) vs Foote's checkerboard (gold, offline)  "
             "[V] events (todo)", fontsize=11)
-        ax.legend([line_c, line_m], ['Chroma flux (harmonic)', 'MFCC flux (timbral)'],
+        ax.legend([line_c, line_m, line_f],
+                  ['Chroma flux (harmonic)', 'MFCC flux (timbral)',
+                   "Foote's (offline, structural)"],
                   loc='upper right', framealpha=0.8, fontsize=8)
 
         # V:events — placeholder for future real-time event overlay (todo)

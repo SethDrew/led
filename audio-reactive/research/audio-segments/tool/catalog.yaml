@@ -33,13 +33,18 @@ lateralus_chorus:
   artist: Tool
   title: Lateralus
   genre: prog_metal
-  bpm: 98
+  bpm: 180
   source_window: "90-150s"
-  sections: "verse → chorus"
-  time_sigs: ["9/8", "8/8", "7/8"]
-  polyrhythm: null
-  meter_changes: 8
-  notes: "Fibonacci vocal syllables (1,1,2,3,5,8,5,3), voice enters at 1:37 = golden ratio"
+  sections: "intro (tail) → verse (c, c', d partial)"
+  time_sigs: ["3/4", "5/4"]
+  polyrhythm: "3/4 vs 6/8 juxtaposition in intro subsection b"
+  meter_changes: 3
+  notes: >
+    MISNAMED: clip covers end of intro + verse, NOT the chorus.
+    Chorus begins at 2:33, 3s after clip ends. Post metric-modulation
+    tempo (~180 BPM, not 98). Verse is 5/4 (3+2 grouping).
+    Fibonacci syllable claims are community-sourced, not from Dorhauer.
+    See annotations file for full Dorhauer 2025 attribution.
 
 pneuma_verse:
   file: pneuma_verse.wav

@@ -88,12 +88,34 @@ def _load_controllers():
         print(f"[controllers] Could not load controllers.json: {e}")
         return []
 
-def _resolve_controller_ports(controllers):
-    """Match controllers to connected serial ports by USB VID/PID.
+CMD_IDENTIFY = 0xFE
 
-    Each controller in controllers.json specifies vid/pid (hex strings).
-    We scan connected ports and assign the 'port' field at runtime.
-    If multiple devices share the same VID/PID, assignment is arbitrary.
+def _query_device_id(port, baud=1000000, timeout=0.5):
+    """Query a serial port for its EEPROM device_id. Returns id (int) or None.
+    Opening triggers Arduino reset (DTR), so we wait for bootloader (~2s).
+    """
+    import serial
+    import time
+    try:
+        ser = serial.Serial(port, baud, timeout=timeout)
+        time.sleep(2.0)  # bootloader timeout
+        ser.reset_input_buffer()
+        ser.write(bytes([CMD_IDENTIFY]))
+        resp = ser.read(2)
+        ser.close()
+        if len(resp) == 2 and resp[0] == CMD_IDENTIFY:
+            return resp[1]
+    except Exception:
+        pass
+    return None
+
+def _resolve_controller_ports(controllers):
+    """Match controllers to connected serial ports by EEPROM device_id,
+    falling back to USB VID/PID + port_hint.
+
+    Each controller in controllers.json specifies vid/pid (hex strings),
+    an optional device_id (EEPROM-based, definitive), and an optional
+    port_hint (substring match on device path, fallback).
     """
     try:
         from serial.tools import list_ports
@@ -109,6 +131,18 @@ def _resolve_controller_ports(controllers):
             key = (f"{p.vid:04x}", f"{p.pid:04x}")
             by_vidpid.setdefault(key, []).append(p.device)
 
+    # Query EEPROM device_id for all CH340 ports (vid=1a86, pid=7523)
+    ch340_ports = by_vidpid.get(("1a86", "7523"), [])
+    port_ids = {}  # port -> device_id
+    if ch340_ports:
+        for port in ch340_ports:
+            dev_id = _query_device_id(port)
+            if dev_id is not None:
+                port_ids[port] = dev_id
+                print(f"[controllers] {port}: EEPROM device_id={dev_id}")
+            else:
+                print(f"[controllers] {port}: no EEPROM response (unprovisioned?)")
+
     for c in controllers:
         vid = c.get('vid')
         pid = c.get('pid')
@@ -116,11 +150,29 @@ def _resolve_controller_ports(controllers):
             continue
         key = (vid.lower(), pid.lower())
         ports = by_vidpid.get(key, [])
-        if ports:
-            c['port'] = ports.pop(0)  # consume one; arbitrary if >1
-            print(f"[controllers] {c['name']}: {c['port']} (vid={vid} pid={pid})")
+
+        # Try EEPROM device_id first (definitive match)
+        target_id = c.get('device_id')
+        if target_id is not None:
+            match = [p for p, did in port_ids.items() if did == target_id]
+            if match:
+                c['port'] = match[0]
+                print(f"[controllers] {c['name']}: {c['port']} (device_id={target_id})")
+                continue
+
+        # Fallback: port_hint
+        hint = c.get('port_hint')
+        if hint and ports:
+            match = [p for p in ports if hint in p]
+            c['port'] = match[0] if match else ports[0]
+        elif ports:
+            c['port'] = ports[0]
         else:
             c['port'] = None
+
+        if c['port']:
+            print(f"[controllers] {c['name']}: {c['port']} (vid={vid} pid={pid}, hint fallback)")
+        else:
             print(f"[controllers] {c['name']}: not connected (vid={vid} pid={pid})")
 
 _controllers = None
@@ -438,9 +490,6 @@ def _start_effect(name, controller_id=None, sculpture_id=None, palette_name=None
         'sculpture_id': sculpture_id, 'palette_name': palette_name,
         'brightness': brightness,
     }
-
-    # Re-resolve ports in case devices were unplugged/replugged
-    _resolve_controller_ports(_get_controllers())
 
     cmd = [sys.executable, 'runner.py', name]
 
@@ -1470,7 +1519,220 @@ def render_lab(filepath, variant='timbral'):
         return render_lab_mood(filepath)
     if variant == 'tempo':
         return render_lab_tempo(filepath)
+    if variant == 'novelty':
+        return render_lab_novelty(filepath)
     return render_lab_timbral(filepath)
+
+
+def render_lab_novelty(filepath):
+    """Novelty Lab — all novelty approaches side by side for comparison."""
+    cache_key = (filepath, 'lab-novelty')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    import numpy as np
+    import librosa
+    import librosa.display
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+    from scipy.signal import find_peaks
+    from scipy.ndimage import gaussian_filter1d
+
+    plt.style.use('dark_background')
+
+    y, sr = librosa.load(filepath, sr=None, mono=True)
+    duration = librosa.get_duration(y=y, sr=sr)
+    n_fft = 2048
+    hop_length = 512
+    fps = sr / hop_length
+
+    # Compute features: MFCCs + Chroma (both used as flux/Foote inputs)
+    mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, n_fft=n_fft, hop_length=hop_length)
+    chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length)
+    times = librosa.frames_to_time(np.arange(mfccs.shape[1]), sr=sr, hop_length=hop_length)
+    n = len(times)
+
+    # Compute all novelty signals
+    from viewer import (_feature_flux, _ema_deviation, _foote_novelty,
+                        _multiscale_ema_deviation, _cumulative_zscore,
+                        _knn_reservoir_novelty)
+
+    # Standard flux + EMA (both features, matching analysis overview)
+    flux_mfcc = _feature_flux(mfccs)
+    flux_chroma = _feature_flux(chroma)
+    ema_mfcc = _ema_deviation(mfccs, alpha=0.02)
+    ema_chroma = _ema_deviation(chroma, alpha=0.02)
+
+    # Foote's on both feature sets
+    print("[novelty-lab] Computing Foote's (MFCC)...")
+    foote_mfcc = _foote_novelty(mfccs)
+    print("[novelty-lab] Computing Foote's (chroma)...")
+    foote_chroma = _foote_novelty(chroma)
+
+    # New long-memory techniques (MFCC-based)
+    ema_scales_raw = _multiscale_ema_deviation(mfccs)  # 3 arrays: ~3s, ~1min, ~5min
+    zscore = _cumulative_zscore(mfccs)
+    knn = _knn_reservoir_novelty(mfccs)
+
+    # Smooth EMA deviations proportional to their timescale
+    # ~3s → sigma ~1s, ~1min → sigma ~4s, ~5min → sigma ~10s
+    ema_sigmas = [int(1.0 * fps), int(4.0 * fps), int(10.0 * fps)]
+    ema_scales = [gaussian_filter1d(sig, sigma=s) for sig, s in zip(ema_scales_raw, ema_sigmas)]
+    # Re-normalize after smoothing
+    for i in range(len(ema_scales)):
+        mx = np.max(ema_scales[i])
+        if mx > 0:
+            ema_scales[i] /= mx
+
+    # Also smooth z-score and knn lightly (~0.5s)
+    smooth_sigma = max(1, int(0.5 * fps))
+    zscore = gaussian_filter1d(zscore, sigma=smooth_sigma)
+    mx = np.max(zscore)
+    if mx > 0:
+        zscore /= mx
+    knn = gaussian_filter1d(knn, sigma=smooth_sigma)
+    mx = np.max(knn)
+    if mx > 0:
+        knn /= mx
+
+    peak_dist = max(1, int(fps * 1.5))
+
+    # Layout: 7 rows — standard flux/Foote comparison on top, new techniques below
+    fig = plt.figure(figsize=(18, 34))
+    gs = gridspec.GridSpec(7, 1, height_ratios=[0.8, 1.0, 1.2, 1.2, 1.2, 1.0, 1.0], hspace=0.35)
+
+    # ── Row 1: Waveform ──
+    ax = fig.add_subplot(gs[0])
+    librosa.display.waveshow(y, sr=sr, ax=ax, color='#888')
+    ax.set_xlim([0, duration])
+    ax.set_ylabel('Amplitude')
+    ax.set_title('Waveform', fontsize=12)
+
+    # ── Row 2: Mel Spectrogram ──
+    ax = fig.add_subplot(gs[1])
+    S_mel = librosa.feature.melspectrogram(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length)
+    S_db = librosa.power_to_db(S_mel, ref=np.max)
+    librosa.display.specshow(S_db, sr=sr, hop_length=hop_length, x_axis='time',
+                             y_axis='mel', ax=ax, cmap='magma')
+    ax.set_xlim([0, duration])
+    ax.set_title('Mel Spectrogram', fontsize=12)
+
+    # ── Row 3: Causal Flux + EMA + Foote's (dual-axis: chroma left, MFCC right) ──
+    # Matches the analysis overview novelty panel layout
+    ax = fig.add_subplot(gs[2])
+    nc = min(n, len(flux_chroma))
+    ax.plot(times[:nc], flux_chroma[:nc], color='#4DD0E1', linewidth=1.2, alpha=0.9, label='Chroma flux')
+    ax.plot(times[:nc], ema_chroma[:nc], color='#4DD0E1', linewidth=1.0, alpha=0.4, linestyle='--', label='Chroma EMA')
+    peaks_c, _ = find_peaks(flux_chroma[:nc], prominence=0.15, distance=peak_dist)
+    ax.scatter(times[peaks_c], flux_chroma[peaks_c], color='#4DD0E1', s=25, zorder=5, marker='v')
+    ax.set_xlim([0, duration])
+    ax.set_ylabel('Chroma novelty', color='#4DD0E1')
+    ax.tick_params(axis='y', labelcolor='#4DD0E1')
+    ax.grid(True, alpha=0.2)
+
+    ax2 = ax.twinx()
+    nm = min(n, len(flux_mfcc))
+    ax2.plot(times[:nm], flux_mfcc[:nm], color='#FF8A65', linewidth=1.2, alpha=0.9, label='MFCC flux')
+    ax2.plot(times[:nm], ema_mfcc[:nm], color='#FF8A65', linewidth=1.0, alpha=0.4, linestyle='--', label='MFCC EMA')
+    peaks_m, _ = find_peaks(flux_mfcc[:nm], prominence=0.15, distance=peak_dist)
+    ax2.scatter(times[peaks_m], flux_mfcc[peaks_m], color='#FF8A65', s=25, zorder=5, marker='v')
+    ax2.set_ylabel('MFCC novelty', color='#FF8A65')
+    ax2.tick_params(axis='y', labelcolor='#FF8A65')
+
+    ax.set_title('Causal Flux + EMA \u2014 chroma (teal, harmonic) + MFCC (coral, timbral)  '
+                 '[ONLINE \u00b7 O(1) \u00b7 ESP32 \u2713]', fontsize=11)
+    ax.legend(['Chroma flux', 'MFCC flux'], loc='upper right', framealpha=0.8, fontsize=8)
+
+    # ── Row 4: Foote's Checkerboard (both chroma + MFCC) ──
+    ax = fig.add_subplot(gs[3])
+    nfc = min(n, len(foote_chroma))
+    nfm = min(n, len(foote_mfcc))
+    ax.plot(times[:nfc], foote_chroma[:nfc], color='#4DD0E1', linewidth=1.5, alpha=0.9, label='Foote chroma')
+    ax.fill_between(times[:nfc], foote_chroma[:nfc], alpha=0.1, color='#4DD0E1')
+    peaks_fc, _ = find_peaks(foote_chroma[:nfc], prominence=0.15, distance=peak_dist)
+    ax.scatter(times[peaks_fc], foote_chroma[peaks_fc], color='#4DD0E1', s=25, zorder=5, marker='D')
+
+    ax.plot(times[:nfm], foote_mfcc[:nfm], color='#FFD740', linewidth=1.8, alpha=0.85, label='Foote MFCC')
+    ax.fill_between(times[:nfm], foote_mfcc[:nfm], alpha=0.1, color='#FFD740')
+    peaks_fm, _ = find_peaks(foote_mfcc[:nfm], prominence=0.15, distance=peak_dist)
+    ax.scatter(times[peaks_fm], foote_mfcc[peaks_fm], color='#FFD740', s=25, zorder=5, marker='D')
+
+    ax.set_xlim([0, duration])
+    ax.set_ylim([0, 1.1])
+    ax.set_ylabel('Novelty')
+    ax.set_title("Foote's Checkerboard \u2014 chroma (teal) + MFCC (gold)  "
+                 "[OFFLINE \u00b7 O(n\u00b2) \u00b7 ESP32 \u2717]", fontsize=11)
+    ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+    ax.grid(True, alpha=0.2)
+
+    # ── Row 5: Multi-scale EMA ──
+    ax = fig.add_subplot(gs[4])
+    ema_colors = ['#80DEEA', '#4DD0E1', '#00ACC1']
+    ema_labels = ['~3s (\u03b1=0.004)', '~1min (\u03b1=0.0002)', '~5min (\u03b1=0.00004)']
+    for i, (ema_sig, color, label) in enumerate(zip(ema_scales, ema_colors, ema_labels)):
+        ne = min(n, len(ema_sig))
+        ax.plot(times[:ne], ema_sig[:ne], color=color, linewidth=1.5 + i * 0.3,
+                label=label, alpha=0.9)
+        ax.fill_between(times[:ne], ema_sig[:ne], alpha=0.08, color=color)
+    ax.set_xlim([0, duration])
+    ax.set_ylim([0, 1.1])
+    ax.set_ylabel('Novelty')
+    ax.set_title('Multi-scale EMA Deviation \u2014 drift from context at 3 timescales  '
+                 '[ONLINE \u00b7 O(1) \u00b7 ESP32 \u2713]', fontsize=11)
+    ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+    ax.grid(True, alpha=0.2)
+
+    # ── Row 6: Cumulative Z-score ──
+    ax = fig.add_subplot(gs[5])
+    nz = min(n, len(zscore))
+    ax.plot(times[:nz], zscore[:nz], color='#B388FF', linewidth=1.5)
+    ax.fill_between(times[:nz], zscore[:nz], alpha=0.2, color='#B388FF')
+    ax.set_xlim([0, duration])
+    ax.set_ylim([0, 1.1])
+    ax.set_ylabel('Novelty')
+    ax.set_title('Cumulative Z-score \u2014 how unusual vs everything heard so far  '
+                 '[ONLINE \u00b7 O(1) \u00b7 ESP32 \u2713 \u00b7 dilutes over time]', fontsize=11)
+    ax.grid(True, alpha=0.2)
+
+    # ── Row 7: KNN Reservoir ──
+    ax = fig.add_subplot(gs[6])
+    nk = min(n, len(knn))
+    ax.plot(times[:nk], knn[:nk], color='#69F0AE', linewidth=1.5)
+    ax.fill_between(times[:nk], knn[:nk], alpha=0.2, color='#69F0AE')
+    peaks_k, _ = find_peaks(knn[:nk], prominence=0.15, distance=peak_dist)
+    ax.scatter(times[peaks_k], knn[peaks_k], color='#69F0AE', s=25, zorder=5, marker='D')
+    ax.set_xlim([0, duration])
+    ax.set_ylim([0, 1.1])
+    ax.set_ylabel('Novelty')
+    ax.set_xlabel('Time (s)')
+    ax.set_title("KNN Reservoir (K=5, N=500) \u2014 'have I heard this timbre before?'  "
+                 "[ONLINE \u00b7 O(N) \u00b7 ESP32 \u2713 at N\u2264500]", fontsize=11)
+    ax.grid(True, alpha=0.2)
+
+    filename = Path(filepath).name
+    fig.suptitle(f'{filename} \u2014 Novelty Lab', fontsize=14, fontweight='bold', y=0.995)
+    fig.subplots_adjust(top=0.975, bottom=0.02)
+    fig.canvas.draw()
+
+    ax0 = fig.axes[0]
+    x_left = ax0.transData.transform((0, 0))[0]
+    x_right = ax0.transData.transform((duration, 0))[0]
+    fig_width = fig.get_figwidth() * DPI
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=DPI, facecolor=fig.get_facecolor())
+    matplotlib.pyplot.close(fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
 
 
 def render_lab_mood(filepath):
@@ -3148,9 +3410,10 @@ def render_lab_timbral(filepath):
 
     # Causal novelty: flux + EMA deviation (O(n), no similarity matrix)
     fps = sr / hop_length
-    from viewer import _feature_flux, _ema_deviation
+    from viewer import _feature_flux, _ema_deviation, _foote_novelty
     novelty = _feature_flux(mfccs)
     ema_nov = _ema_deviation(mfccs, alpha=0.02)
+    foote_nov = _foote_novelty(mfccs)
 
     # Layout: heatmap + 4 individual coefficients + fine texture heatmap + novelty
     # Total 7 panels
@@ -3240,12 +3503,19 @@ def render_lab_timbral(filepath):
     peak_dist = max(1, int(fps * 1.5))
     peaks, _ = find_peaks(novelty[:n], prominence=0.15, distance=peak_dist)
     ax.scatter(times[peaks], novelty[peaks], color='#FF8A65', s=30, zorder=5, marker='v')
+    # Foote's offline novelty (gold standard reference)
+    n_f = min(len(times), len(foote_nov))
+    ax.plot(times[:n_f], foote_nov[:n_f], color='#FFD740', linewidth=1.8, alpha=0.85,
+            label="Foote's (offline)")
+    ax.fill_between(times[:n_f], foote_nov[:n_f], alpha=0.1, color='#FFD740')
+    peaks_f, _ = find_peaks(foote_nov[:n_f], prominence=0.15, distance=peak_dist)
+    ax.scatter(times[peaks_f], foote_nov[peaks_f], color='#FFD740', s=25, zorder=5, marker='D')
     ax.set_xlim([0, duration])
     ax.set_ylim([0, 1.1])
     ax.set_ylabel('Novelty')
     ax.set_xlabel('Time (s)')
-    ax.set_title('Timbral Shift — flux detects sharp edges, '
-                 'EMA deviation detects gradual drift (causal, O(n))', fontsize=11)
+    ax.set_title("Timbral Shift — causal flux (orange) vs Foote's checkerboard "
+                 "(gold, offline structural boundaries)", fontsize=11)
     ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
     ax.grid(True, alpha=0.2)
 
@@ -4080,6 +4350,50 @@ class ViewerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(result)
 
+    def _delete_annotation_layer(self, rel_path, layer):
+        """Delete an annotation layer from YAML file."""
+        import yaml
+
+        filepath = _resolve_audio_path(rel_path)
+        if filepath is None:
+            self.send_error(404, 'File not found')
+            return
+
+        ann_path = Path(filepath).with_suffix('.annotations.yaml')
+        if not ann_path.exists():
+            self.send_error(404, 'No annotations file')
+            return
+
+        with open(ann_path) as f:
+            annotations = yaml.safe_load(f) or {}
+
+        if layer not in annotations:
+            self.send_error(404, f'Layer "{layer}" not found')
+            return
+
+        del annotations[layer]
+
+        with open(ann_path, 'w') as f:
+            yaml.dump(annotations, f, default_flow_style=False, sort_keys=False)
+
+        print(f"[annotations] Deleted layer '{layer}' from {ann_path.name}")
+        print(f"  Remaining layers: {list(annotations.keys())}")
+
+        # Clear render caches
+        keys_to_clear = [k for k in _render_cache if k[0] == filepath]
+        for k in keys_to_clear:
+            del _render_cache[k]
+
+        global _file_list_cache
+        _file_list_cache = None
+
+        result = json.dumps({'ok': True, 'layer': layer, 'remaining': list(annotations.keys())}).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(result)))
+        self.end_headers()
+        self.wfile.write(result)
+
     def _serve_annotations(self, rel_path):
         """Serve annotation YAML as JSON for a given audio file."""
         import yaml
@@ -4109,6 +4423,26 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 self.end_headers()
             else:
                 self.send_error(404)
+        else:
+            self.send_error(404)
+
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        query = parse_qs(parsed.query)
+
+        # Block in public mode
+        if PUBLIC_MODE and path.startswith('/api/annotations/'):
+            self._json_response({'error': 'Not available'}, status=403)
+            return
+
+        if path.startswith('/api/annotations/'):
+            rel_path = path[len('/api/annotations/'):]
+            layer = query.get('layer', [''])[0]
+            if not layer:
+                self.send_error(400, 'Missing layer parameter')
+                return
+            self._delete_annotation_layer(rel_path, layer)
         else:
             self.send_error(404)
 

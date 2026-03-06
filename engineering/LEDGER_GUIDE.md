@@ -1,6 +1,6 @@
 # Engineering Ledger Guide
 
-The engineering ledger (`audio-reactive/engineering/ledger.yaml`) records hardware decisions,
+The engineering ledger (`engineering/ledger.yaml`) records hardware decisions,
 protocol designs, firmware fixes, and performance findings.
 
 This is the counterpart to the **research ledger** (`audio-reactive/research/ledger.yaml`),

@@ -2290,7 +2290,7 @@ entries:
 
   - id: rgb-color-gamut-limitations
     date: 2026-03-02
-    touched: 2026-03-02
+    touched: 2026-03-06
     title: "RGB LED color gamut is physically constrained — but fixable in layers"
     summary: >
       RGB LED strips have two stacked color problems: (1) no gamma correction
@@ -2298,12 +2298,12 @@ entries:
       are wrong; (2) 8-bit depth crushes low-brightness resolution after gamma
       correction (~28 values map to 0). Four complementary fixes exist, each
       adding a layer of quality.
-    status: spark
+    status: validated
     warmth: high
     confidence: high
     source: []
     tags: [hardware, perception, color, future]
-    relates_to: [gamma-height-curve, hue-shift-low-brightness]
+    relates_to: [gamma-height-curve, hue-shift-low-brightness, hybrid-gamma-brightness, ws2812b-channel-brightness]
     notes: >
       Excited about this direction — exploring at own pace.
 
@@ -2346,6 +2346,12 @@ entries:
       LUT + diffusion channel. Add temporal dithering if extreme low-brightness
       smoothness needed. These are corrections monitors have had for decades — LED
       strips just leave them up to you.
+
+      ## 2026-03-06 update: gamma brightness validated
+      Layer 1 (gamma LUT) is now implemented and tested on hardware. Adafruit's
+      gamma8 table (gamma=2.8) produces visibly smoother dimming than linear.
+      Combined with OKLCH rainbow via hybrid gamma — apply gamma to the brightness
+      multiplier, not per-channel. See hybrid-gamma-brightness for details.
 
       ## Connection to project
       Gamma correction for color is distinct from our gamma-height-curve (topology
@@ -2496,3 +2502,269 @@ entries:
       the wrong abstraction. This connects to the MOOD vector research
       (Brightness, Texture, Tension, Fullness) which may be more
       universally applicable than tempo across genres.
+
+  - id: oklch-perceptual-rainbow
+    date: 2026-03-05
+    touched: 2026-03-06
+    title: "OKLCH variable-L rainbow is the best color mapping for WS2812B strips"
+    summary: >
+      After testing 6 approaches (HSV+gamma, HSV raw, OKLCH constant chroma,
+      OKLCH per-hue max chroma at constant L, temporal dithering, binary POV),
+      OKLCH with variable lightness and per-hue max chroma wins decisively.
+      Hue-dependent L (red ~0.52, purple ~0.38, green/cyan/yellow 0.75) with
+      smooth cosine interpolation produces rich dark reds and purples while
+      keeping bright greens/cyans. 256-entry LUT, no runtime math.
+    status: validated
+    warmth: high
+    confidence: high
+    source: [festicorn/src/effects.cpp, festicorn/gen_oklch_varL_lut.py, firmware/tree/src/tree_rainbow_test.cpp]
+    tags: [color, perception, hardware, oklch, validated]
+    relates_to: [rgb-color-gamut-limitations, hue-shift-low-brightness]
+    notes: >
+      ## All experiments (chronological, side-by-side on 150-LED strip)
+
+      1. **HSV+gamma32 vs OKLCH constant chroma (C=0.127)**: OKLCH more uniform
+         but all colors muted — conservative chroma stays in gamut for ALL hues.
+      2. **HSV+gamma32 vs HSV raw (no gamma)**: No meaningful difference. Blue
+         dominates both. gamma32 doesn't help perceptual uniformity.
+      3. **HSV raw vs OKLCH per-hue max chroma (L=0.75, C=0.128–0.259)**: OKLCH
+         clearly better — hues distributed more evenly, colors vibrant. BUT dark
+         red and dark purple missing (L=0.75 too bright).
+      4. **16-bit gamma + temporal dithering**: Correct but only helps dim
+         gradients. Not visible at full brightness rainbow.
+      5. **Binary POV mixing (full on/off at ~700fps)**: Worked but unclear
+         perceptual difference from standard PWM.
+      6. **OKLCH constant-L vs OKLCH variable-L**: Variable-L wins. Dark reds
+         and purples now present and rich. User confirmed "basically perfect."
+
+      ## Winner: OKLCH variable-L with per-hue max chroma
+      - Lightness profile: cosine dips centered at OKLCH hue 30deg (red, depth
+        0.23 → L=0.52) and 300deg (purple, depth 0.37 → L=0.38), smooth taper
+        to L=0.75 for green/cyan/yellow.
+      - Per-hue max chroma via binary search at 98% gamut boundary.
+      - 256-entry precomputed LUT. Zero runtime cost vs HSV.
+      - Generator script: festicorn/gen_oklch_varL_lut.py
+
+      ## Root cause of HSV rainbow problems (three stacked)
+      1. HSV is perceptually non-uniform — blue/green dominate perceptual space
+      2. Per-channel gamma32 shifts mixed-channel hues toward primaries
+      3. WS2812B green LED is ~2x brighter than red, ~4x brighter than blue
+         (datasheet: G 1100-1400 mcd, R 550-700 mcd, B 200-400 mcd — see
+         ws2812b-channel-brightness). Dominant factor is photopic eye response,
+         not LED die efficiency.
+
+      ## Techniques NOT worth pursuing further
+      - **HSV+gamma**: gamma corrects brightness curve but doesn't fix hue
+        distribution. No perceptual improvement over raw HSV.
+      - **Temporal dithering**: only matters at low brightness, irrelevant for
+        rainbow effects at normal brightness.
+      - **Binary POV**: interesting but no clear win, much more complex.
+
+      ## Still on the table (not tested, hardware changes)
+      - **RGBW strips (SK6812)**: dedicated white channel for pastels/amber.
+        Would complement OKLCH for palette effects, not needed for rainbow.
+      - **Physical diffusion**: spatial averaging via opal acrylic. Complementary
+        to any color space choice.
+      - **Per-channel gamma**: fine-tune R/G/B independently. Could refine OKLCH
+        further but unlikely to be visible.
+
+  - id: ws2812b-channel-brightness
+    date: 2026-03-06
+    touched: 2026-03-06
+    title: "WS2812B channel brightness: three LED dies, not phosphors"
+    summary: >
+      WS2812B uses three separate LED dies (AlGaInP for red, InGaN for green
+      and blue), not phosphor conversion. Datasheet luminous intensity:
+      G 1100-1400 mcd, R 550-700 mcd, B 200-400 mcd. Green ~2x red, ~4x blue.
+      The dominant factor in perceived brightness difference is the human photopic
+      response curve (peak sensitivity at 555nm green), not LED die efficiency.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: [WS2812B-V5 datasheet, cpldcpu spectral measurements]
+    tags: [hardware, perception, color, ws2812b]
+    relates_to: [oklch-perceptual-rainbow, rgb-color-gamut-limitations]
+    notes: >
+      ## Corrects earlier assumption
+
+      Previous ledger entries referred to "phosphor brightness ratios" — this
+      was incorrect. WS2812B is NOT a phosphor-converted white LED with color
+      filters. It's three independent LED dies:
+      - **Red**: AlGaInP (aluminium gallium indium phosphide), ~625nm
+      - **Green**: InGaN (indium gallium nitride), ~525nm
+      - **Blue**: InGaN (indium gallium nitride), ~470nm
+
+      ## Why green appears brighter
+
+      Two compounding factors:
+      1. **LED die output**: Green die produces ~2x the luminous intensity of
+         red, ~4x blue (datasheet mcd values).
+      2. **Photopic response**: Human eyes are most sensitive at 555nm (green).
+         The photopic luminosity function V(λ) peaks at green and drops
+         sharply toward red and blue. This means even equal-power light
+         from all three dies would appear green-dominant.
+
+      Our OKLCH variable-L rainbow accounts for this by lowering L for greens
+      relative to a naive uniform rainbow — the cosine lightness profile was
+      tuned by visual A/B testing on actual strips.
+
+      ## Key sources
+      - WS2812B-V5 datasheet: electrical/optical characteristics table
+      - cpldcpu (Tim): spectral measurements with light sensor confirming
+        datasheet values are in the right ballpark
+      - J. Joseph: spectrometer measurements of WS2812B emission spectra
+
+  - id: ws2812b-perceptual-research-gap
+    date: 2026-03-06
+    touched: 2026-03-06
+    title: "No rigorous perceptual color research exists for WS2812B"
+    summary: >
+      Comprehensive survey of LED community projects found no published
+      perceptual color appearance research specific to WS2812B. FastLED, Adafruit,
+      WLED, and Fadecandy all use eyeballed or loosely scientific corrections.
+      Our OKLCH approach with hardware A/B testing is at least as rigorous as
+      anything published.
+    status: validated
+    warmth: high
+    confidence: high
+    source: [community survey 2026-03-06]
+    tags: [color, perception, research-gap, community]
+    relates_to: [oklch-perceptual-rainbow, ws2812b-channel-brightness]
+    notes: >
+      ## What each project actually does to RGB values
+
+      | Project | Correction | Method | Published Research |
+      |---------|-----------|--------|-------------------|
+      | FastLED | TypicalLEDStrip (0xFFB0F0) = scale G to 70%, B to 94% | "eyeballed" (Mark Kriegsman) | None |
+      | Adafruit | gamma8 LUT, gamma=2.8 | "not super-scientific" (Phil Burgess) | None |
+      | Fadecandy | gamma=2.5 + temporal dithering | "artistic judgment" (Micah Scott) | None |
+      | WLED | Uses FastLED color correction verbatim | Inherited, no independent validation | None |
+      | cpldcpu | Light sensor measurements | Closest to real research | Blog posts, not peer-reviewed |
+      | J. Joseph | Spectrometer measurements | Actual spectral data | Single blog post |
+
+      ## Our approach compared
+
+      We generate perceptually correct RGB values from scratch using OKLCH
+      (Björn Ottosson's perceptually uniform color space), with:
+      1. Per-hue maximum chroma at 98% sRGB gamut boundary
+      2. Hue-dependent lightness tuned by A/B testing on WS2812B strips
+      3. Separate gamma correction for brightness dimming (Adafruit gamma=2.8)
+
+      This is fundamentally different from the "correct bad RGB" approach
+      (FastLED/Adafruit) — we "generate correct RGB from scratch."
+
+      ## Why nobody has done real research
+
+      Likely because:
+      1. LED art community is maker-oriented, not academic
+      2. "Good enough" corrections work for most use cases
+      3. Perceptual testing requires careful methodology (dark adaptation,
+         viewing distance, reference comparisons)
+      4. Individual strip variation may exceed correction precision
+
+      Our contribution is modest but real: using a perceptually uniform color
+      space (OKLCH) with hardware-validated tuning is more principled than
+      anything else in the community, even if it's still ultimately eyeballed.
+
+  - id: hybrid-gamma-brightness
+    date: 2026-03-06
+    touched: 2026-03-06
+    title: "Hybrid gamma brightness: smooth dimming that reaches full brightness"
+    summary: >
+      Validated brightness control for OKLCH rainbow: apply Adafruit gamma8
+      (gamma=2.8) to the brightness multiplier (not per-channel), with linear
+      crossover ramp from 80% to 100% input so max brightness is achieved.
+      Gamma applied to brightness, not individual R/G/B channels.
+    status: validated
+    warmth: high
+    confidence: high
+    source: [firmware/tree/src/gamma_test.cpp]
+    tags: [color, perception, gamma, brightness, validated]
+    relates_to: [oklch-perceptual-rainbow, rgb-color-gamut-limitations]
+    notes: >
+      ## The key insight: gamma on brightness, not per-channel
+
+      Applying gamma correction per-channel (running each R, G, B value through
+      gamma8[]) destroys colors. A pixel with RGB (200, 3, 0) — a deep red with
+      a trace of green — becomes (137, 0, 0) because gamma8[3]=0. The slight
+      green warmth is crushed.
+
+      The correct approach: apply gamma to the scalar brightness multiplier,
+      then scale all three channels by that single value. This preserves hue
+      and saturation while correcting the brightness curve.
+
+      ## Hybrid crossover design
+
+      Pure gamma=2.8 maps input 255 to output ~255 but input 204 to output
+      137 — the top 20% of input covers 46% of output range. This is fine for
+      dimming but means the slider spends too long in dim territory.
+
+      Hybrid solution:
+      ```cpp
+      const uint8_t CROSSOVER = 204;  // 80% of 255
+      uint8_t gammaHybrid(uint8_t v) {
+          if (v <= CROSSOVER) return gamma8[v];
+          uint8_t base = gamma8[CROSSOVER];  // = 137
+          return base + (v - CROSSOVER) * (255 - base) / (255 - CROSSOVER);
+      }
+      ```
+
+      Below 80%: follow gamma curve (smooth, perceptually uniform dimming).
+      Above 80%: linear ramp from gamma8[204]=137 to 255 (reach full brightness).
+
+      ## Hardware validation
+
+      Tested on ESP32 + 150 WS2812B strip, folded in half for side-by-side
+      comparison. Two OKLCH rainbows cycling through brightness: left=hybrid
+      gamma, right=linear. User confirmed smooth dimming with no visible
+      discontinuity. At max brightness both sides produce identical RGB
+      (verified by serial dump of all 28 pixel pairs).
+
+      Reversed strip sides to confirm a slight visual difference at max
+      brightness was signal degradation on the wire, not algorithmic.
+
+  - id: oklch-color-solid-coverage
+    date: 2026-03-06
+    touched: 2026-03-06
+    title: "OKLCH color solid: 2 of 3 axes validated, chroma axis pending"
+    summary: >
+      The WS2812B-renderable color solid has three axes in OKLCH: Hue (H),
+      Lightness (L), and Chroma (C). We have validated two: hue via the OKLCH
+      variable-L rainbow LUT, and lightness via hybrid gamma brightness. The
+      chroma (saturation) axis is not yet addressed — desaturated/pastel colors
+      are unreachable with current effects.
+    status: spark
+    warmth: high
+    confidence: high
+    source: []
+    tags: [color, perception, oklch, roadmap]
+    relates_to: [oklch-perceptual-rainbow, hybrid-gamma-brightness, rgb-color-gamut-limitations]
+    notes: >
+      ## What the OKLCH rainbow covers
+
+      The rainbow LUT is a 1D slice through the 3D OKLCH color solid:
+      - **Hue (H)**: Full 360° sweep — all renderable hues present. ✓
+      - **Lightness (L)**: Hue-dependent via cosine profile (0.38–0.75). ✓
+      - **Chroma (C)**: Maximum per-hue at 98% gamut boundary — always
+        fully saturated. This means the rainbow CANNOT represent:
+        - Pastels (low chroma, high L)
+        - Earth tones (low chroma, mid L)
+        - Near-whites and near-blacks (very low chroma)
+        - "Dusty" or "muted" variants of any hue
+
+      ## Brightness axis adds the second dimension
+
+      The hybrid gamma brightness curve lets us dim the rainbow while
+      preserving color relationships. This covers the L axis independently
+      of hue. Combined with the rainbow's hue sweep, we can reach any
+      (H, L) pair — but always at maximum chroma.
+
+      ## What's needed for chroma (future work)
+
+      To access the full renderable color solid, we need a chroma control:
+      - A "saturation slider" that reduces C from max toward 0
+      - At C=0, all hues collapse to the same gray (at whatever L)
+      - Gradient palettes that vary C (e.g., deep blue → pastel blue → white)
+      - This is the natural next step for palette design
+
+      User has expressed interest in saturation gradients for future work.

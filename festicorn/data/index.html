@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Festicorn — Butterfly</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #1a1a2e; color: #e0e0e0;
+    min-height: 100vh; padding: 20px;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  h1 { font-size: 1.8em; margin-bottom: 4px; color: #fff; }
+  h2 { font-size: 1.1em; margin-bottom: 24px; color: #888; font-weight: 400; }
+  .section { width: 100%; max-width: 400px; margin-bottom: 20px; }
+  .section-label { font-size: 0.85em; color: #888; text-transform: uppercase;
+    letter-spacing: 1px; margin-bottom: 8px; }
+  .btn-group { display: flex; gap: 8px; }
+  .btn {
+    flex: 1; padding: 12px; border: 2px solid #333; border-radius: 8px;
+    background: #16213e; color: #e0e0e0; font-size: 1em; cursor: pointer;
+    transition: all 0.2s; text-align: center;
+  }
+  .btn:hover { border-color: #555; }
+  .btn.active { border-color: #e94560; }
+  .btn-effect.active { background: #e94560; color: #fff; }
+  .slider-container { display: flex; align-items: center; gap: 12px; }
+  .slider-container input[type=range] { flex: 1; accent-color: #e94560; }
+  .slider-val { min-width: 40px; text-align: right; font-variant-numeric: tabular-nums; }
+  .palette-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+  }
+  .palette-btn {
+    height: 48px; border-radius: 8px; border: 2px solid #333;
+    cursor: pointer; transition: all 0.2s;
+  }
+  .palette-btn.active { border-color: #e94560; box-shadow: 0 0 8px rgba(233,69,96,0.5); }
+  .palette-btn:hover { border-color: #555; }
+  .status {
+    margin-top: 20px; padding: 12px; background: #0f3460; border-radius: 8px;
+    font-size: 0.85em; text-align: center; width: 100%; max-width: 400px;
+  }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<h1>&#x1f984; Festicorn</h1>
+<h2>Butterfly</h2>
+
+<div class="section">
+  <div class="section-label">Effect</div>
+  <div class="btn-group">
+    <button class="btn btn-effect" id="btn-rainbow" onclick="setEffect('rainbow')">Rainbow</button>
+    <button class="btn btn-effect" id="btn-gradient" onclick="setEffect('gradient')">Gradient</button>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-label">Brightness</div>
+  <div class="slider-container">
+    <input type="range" id="brightness" min="0" max="255" value="128"
+      oninput="document.getElementById('br-val').textContent=this.value"
+      onchange="postVal('/brightness','brightness',this.value)">
+    <span class="slider-val" id="br-val">128</span>
+  </div>
+</div>
+
+<div class="section" id="sec-cycletime">
+  <div class="section-label">Cycle Time</div>
+  <div class="slider-container">
+    <input type="range" id="cycletime" min="0" max="1000" step="1" value="71"
+      oninput="document.getElementById('ct-val').textContent=fmtCycle(sliderToMs(this.value))"
+      onchange="postVal('/cycletime','cycletime',sliderToMs(this.value))">
+    <span class="slider-val" id="ct-val">8.0s</span>
+  </div>
+</div>
+
+<div class="section hidden" id="sec-palette">
+  <div class="section-label">Palette</div>
+  <div class="palette-grid" id="palette-grid"></div>
+</div>
+
+<div class="status" id="status">Connecting...</div>
+
+<script>
+var PALETTES = [
+  {id:'sap_flow',         css:'linear-gradient(90deg, rgb(0,40,0), rgb(0,70,0), rgb(10,110,10), rgb(34,180,34), rgb(80,255,80))'},
+  {id:'oklch_rainbow',    css:'linear-gradient(90deg, rgb(251,3,64), rgb(188,82,1), rgb(2,155,72), rgb(3,129,252), rgb(184,1,169))'},
+  {id:'blue_purple',      css:'linear-gradient(90deg, rgb(100,200,255), rgb(60,130,230), rgb(100,60,200), rgb(60,10,120))'},
+  {id:'lava',             css:'linear-gradient(90deg, rgb(0,0,0), rgb(120,0,0), rgb(220,60,0), rgb(255,160,20), rgb(255,255,180))'},
+  {id:'ocean_breeze',     css:'linear-gradient(90deg, rgb(0,220,180), rgb(0,150,200), rgb(0,80,180), rgb(0,20,100))'},
+  {id:'sunset_real',      css:'linear-gradient(90deg, rgb(120,0,0), rgb(255,80,0), rgb(255,200,40), rgb(180,40,120), rgb(20,0,80))'},
+  {id:'fire',             css:'linear-gradient(90deg, rgb(0,0,0), rgb(180,0,0), rgb(255,120,0), rgb(255,220,80), rgb(255,255,255))'},
+  {id:'magenta_evening',  css:'linear-gradient(90deg, rgb(30,0,50), rgb(180,0,140), rgb(255,60,200), rgb(180,0,140), rgb(30,0,50))'},
+  {id:'coral_reef',       css:'linear-gradient(90deg, rgb(0,240,220), rgb(0,180,200), rgb(255,100,80), rgb(0,40,140))'},
+  {id:'emerald_dragon',   css:'linear-gradient(90deg, rgb(160,255,20), rgb(40,200,40), rgb(0,120,30), rgb(0,40,10))'}
+];
+
+// Build palette buttons
+var grid = document.getElementById('palette-grid');
+PALETTES.forEach(function(p) {
+  var btn = document.createElement('button');
+  btn.className = 'palette-btn';
+  btn.id = 'btn-' + p.id;
+  btn.style.background = p.css;
+  btn.onclick = function() { setPalette(p.id); };
+  grid.appendChild(btn);
+});
+
+// Cycle time: slider 0-600 = linear 1s-60s, 600-1000 = exponential 1min-10min
+function sliderToMs(pos) {
+  pos = Number(pos);
+  if (pos <= 600) return Math.round(1000 + pos * (59000 / 600));
+  return Math.round(60000 * Math.pow(10, (pos - 600) / 400));
+}
+function msToSlider(ms) {
+  if (ms <= 60000) return Math.round((ms - 1000) * 600 / 59000);
+  return Math.round(600 + 400 * Math.log10(ms / 60000));
+}
+function fmtCycle(ms) {
+  var s = ms / 1000;
+  if (s < 60) return s.toFixed(1) + 's';
+  var m = Math.floor(s / 60), sec = Math.round(s % 60);
+  return m + ':' + (sec < 10 ? '0' : '') + sec;
+}
+function postVal(path, key, val) {
+  fetch(path, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body: key+'='+val});
+}
+function setEffect(e) {
+  fetch('/effect', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body: 'effect='+e}).then(function(){pollStatus()});
+}
+function setPalette(p) {
+  fetch('/palette', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body: 'palette='+p}).then(function(){pollStatus()});
+}
+function updateUI(s) {
+  document.getElementById('btn-rainbow').classList.toggle('active', s.effect==='rainbow');
+  document.getElementById('btn-gradient').classList.toggle('active', s.effect==='gradient');
+  document.getElementById('brightness').value = s.brightness;
+  document.getElementById('br-val').textContent = s.brightness;
+  document.getElementById('cycletime').value = msToSlider(s.cycleTime);
+  document.getElementById('ct-val').textContent = fmtCycle(s.cycleTime);
+  document.getElementById('sec-cycletime').classList.toggle('hidden', s.effect!=='rainbow');
+  document.getElementById('sec-palette').classList.toggle('hidden', s.effect!=='gradient');
+  PALETTES.forEach(function(p) {
+    var el = document.getElementById('btn-' + p.id);
+    if (el) el.classList.toggle('active', s.palette === p.id);
+  });
+  document.getElementById('status').textContent = 'IP: '+s.ip+' | Signal: '+s.rssi+' dBm';
+}
+function pollStatus() {
+  fetch('/status').then(function(r){return r.json()}).then(updateUI).catch(function(){
+    document.getElementById('status').textContent = 'Disconnected';
+  });
+}
+pollStatus();
+setInterval(pollStatus, 5000);
+</script>
+</body>
+</html>

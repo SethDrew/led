@@ -28,13 +28,13 @@ BANDS = [
     ('Treble', 6000, 8000),
 ]
 
-# Vibrant pulse colors
+# Green palette: dark green (low) → bright green (high)
 BAND_COLORS = np.array([
-    [200, 0, 0],       # Sub-bass: deep red
-    [255, 100, 0],     # Bass:     orange
-    [255, 140, 0],     # Mids:     orange (tuned for COB)
-    [0, 230, 118],     # High-mids: green
-    [0, 176, 255],     # Treble:   blue
+    [0, 60, 0],        # Sub-bass: deep forest green
+    [0, 110, 20],      # Bass:     dark green
+    [0, 170, 40],      # Mids:     medium green
+    [30, 220, 60],     # High-mids: bright green
+    [80, 255, 100],    # Treble:   light mint green
 ], dtype=np.float32)
 
 # Muted background variants — desaturated, shifted slightly from pulse colors
@@ -360,10 +360,8 @@ class BandZonePulseEffect(AudioReactiveEffect):
         self.bg_opacity[fade_in] += 0.07 * step
         np.clip(self.bg_opacity, 0.0, 1.0, out=self.bg_opacity)
 
-        # Composite: background at per-pixel opacity, pulse replaces where active
-        base_color = self.dominant_color * 0.10
-        frame = np.outer(self.bg_opacity, base_color).reshape(self.num_leds, 3).astype(np.float32)
-        frame[has_pulse] = pulse_frame[has_pulse]
+        # Pulses on black — no background
+        frame = pulse_frame
 
         return np.clip(frame, 0, 255).astype(np.uint8)
 

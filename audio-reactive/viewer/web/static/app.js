@@ -504,6 +504,7 @@ async function saveAnnotation() {
         await clearPanelCache(currentFile);
         // Re-render annotations tab to show saved data
         loadPanel();
+        loadAnnotationLayers();
     } else {
         alert('Save failed: ' + (await resp.text()));
     }
@@ -513,6 +514,59 @@ function discardAnnotation() {
     annotationTaps = [];
     updateAnnotationUI();
     drawTapMarkers();
+}
+
+async function loadAnnotationLayers() {
+    if (!currentFile) return;
+    const layerList = document.getElementById('annotationLayers');
+    if (!layerList) return;
+
+    try {
+        const resp = await fetch('/api/annotations/' + encodeURIComponent(currentFile));
+        const annotations = await resp.json();
+        const layers = Object.keys(annotations);
+
+        if (layers.length === 0) {
+            layerList.innerHTML = '<span style="color:#666; font-size:12px">No annotation layers</span>';
+            return;
+        }
+
+        layerList.innerHTML = layers.map(layer => {
+            const count = Array.isArray(annotations[layer]) ? annotations[layer].length : '—';
+            return `<div class="ann-layer-item" style="display:flex; align-items:center; gap:8px; padding:3px 0;">
+                <span style="color:#ccc; font-size:12px; flex:1">${layer} <span style="color:#666">(${count})</span></span>
+                <button onclick="deleteAnnotationLayer('${layer.replace(/'/g, "\\'")}')"
+                    style="background:none; border:1px solid rgba(233,69,96,0.3); color:#e94560;
+                    font-size:10px; padding:2px 6px; border-radius:3px; cursor:pointer;"
+                    onmouseover="this.style.background='rgba(233,69,96,0.15)'"
+                    onmouseout="this.style.background='none'">&times;</button>
+            </div>`;
+        }).join('');
+    } catch (e) {
+        layerList.innerHTML = '<span style="color:#666; font-size:12px">Failed to load layers</span>';
+    }
+}
+
+async function deleteAnnotationLayer(layer) {
+    if (!currentFile) return;
+    if (!confirm(`Delete layer "${layer}"?`)) return;
+
+    try {
+        const resp = await fetch('/api/annotations/' + encodeURIComponent(currentFile) + '?layer=' + encodeURIComponent(layer), {
+            method: 'DELETE'
+        });
+        if (resp.ok) {
+            // Clear cached panels so annotation render is fresh
+            await clearPanelCache(currentFile);
+            // Reload the panel and layer list
+            loadPanel();
+            loadAnnotationLayers();
+        } else {
+            alert('Delete failed: ' + (await resp.text()));
+        }
+    } catch (e) {
+        alert('Delete failed: ' + e.message);
+    }
 }
 
 function updateAnnotationUI() {
@@ -998,7 +1052,7 @@ filePicker.addEventListener('change', () => {
 
 // ── Tabs ─────────────────────────────────────────────────────────
 
-const analysisTabs = new Set(['analysis', 'band-analysis', 'calculus', 'annotate', 'stems', 'hpss', 'lab-repet', 'lab-nmf', 'lab-timbral', 'lab-misc', 'lab-onset', 'lab-mood', 'lab-tempo']);
+const analysisTabs = new Set(['analysis', 'band-analysis', 'calculus', 'annotate', 'stems', 'hpss', 'lab-repet', 'lab-nmf', 'lab-timbral', 'lab-misc', 'lab-onset', 'lab-mood', 'lab-tempo', 'lab-novelty']);
 const analysisDropdown = document.getElementById('analysisDropdown');
 const analysisToggle = document.getElementById('analysisDropdownToggle');
 
@@ -1147,6 +1201,7 @@ async function loadPanel() {
         'lab-onset': { label: 'Compute Onset + AbsInt', desc: 'Onset strength vs absolute integral — comparing two beat-detection signals', fn: () => loadLabVariant('onset-absint') },
         'lab-mood': { label: 'Compute MOOD Vectors', desc: 'Brightness, Texture, Tension, Fullness — 4D mood signal', fn: () => loadLabVariant('mood') },
         'lab-tempo': { label: 'Compute Tempo Compare', desc: 'OnsetTempoTracker vs AbsIntegral — side-by-side tempo detection', fn: () => loadLabVariant('tempo') },
+        'lab-novelty': { label: 'Compute Novelty Lab', desc: 'All novelty approaches side by side — flux, Foote, multi-scale EMA, z-score, KNN', fn: () => loadLabVariant('novelty') },
     };
 
     if (currentTab === 'annotate') {
@@ -1168,6 +1223,7 @@ async function loadPanel() {
             panelImg.src = URL.createObjectURL(result.blob);
             hideOverlay();
             cursorLine.style.display = 'block';
+            loadAnnotationLayers();
         } catch (e) {
             if (e.name === 'AbortError' || gen !== renderGen) return;
             showOverlay('Error: ' + e.message);
@@ -1342,6 +1398,7 @@ async function loadLabVariant(variant) {
         'onset-absint': 'Onset Strength &middot; AbsIntegral &middot; Overlay &middot; Difference',
         'mood': 'Brightness (slope) &middot; Texture (harmonic ratio) &middot; Tension (chroma entropy) &middot; Fullness (spread)',
         'tempo': 'Onset Tracker &middot; AbsIntegral &middot; BPM comparison',
+        'novelty': 'Flux &middot; Foote &middot; Multi-scale EMA &middot; Z-score &middot; KNN Reservoir',
     };
     showOverlay('Computing lab...');
     const hint = hintMap[variant] || '';

@@ -1,6 +1,6 @@
 # Engineering Ledger
 # Hardware decisions, protocol designs, firmware fixes, and performance findings.
-# Guide: audio-reactive/engineering/LEDGER_GUIDE.md
+# Guide: engineering/LEDGER_GUIDE.md
 
 entries:
 
@@ -49,6 +49,90 @@ entries:
 
       RAM impact: +7 bytes (state vars). Flash: ~+200 bytes. Well within Nano limits
       (27% RAM, 15% flash after fix).
+
+  - id: nano-uart-overflow-led-limit
+    date: 2026-03-04
+    touched: 2026-03-04
+    title: "Nano streaming capped at ~150 LEDs due to UART overflow during show()"
+    summary: >
+      strip.show() disables interrupts for N×30µs. At 300 LEDs that's 9ms, during
+      which ~900 bytes arrive at 1Mbps but the ATmega328 UART buffer is only 64 bytes.
+      Max safe baud for 300 LEDs = 57600 (52 bytes during show ≤ 64 buffer), giving
+      only ~6 FPS — unusable for audio-reactive. Nano streaming is practical up to
+      ~150 LEDs at 30fps. Use ESP32 (RMT, no interrupt blocking) for larger strips.
+    status: resolved
+    severity: high
+    scope: performance
+    source:
+      - firmware/strip/src/streaming_receiver.cpp
+      - firmware/strip/src/streaming_receiver_slim.cpp
+    tags: [nano, uart, neopixel, performance, ws2812b, root-cause]
+    relates_to: [serial-frame-sync-recovery, ws2812b-timing-architecture, esp32-hardware-selection-rationale]
+    notes: >
+      Formula: bytes_during_show = baud_rate / 10 × (N_LEDs × 30µs).
+      Must be ≤ 64 (ATmega328 UART hardware buffer).
+
+      Key data points:
+        80 LEDs, 1Mbps:  240 bytes during 2.4ms show → overflows, occasional drops
+        80 LEDs, 115200:  28 bytes during 2.4ms show → safe, ~47 FPS max
+       300 LEDs, 1Mbps:  900 bytes during 9ms show → catastrophic, nearly 0% valid frames
+       300 LEDs, 57600:   52 bytes during 9ms show → safe, but only ~6 FPS
+       150 LEDs, 1Mbps:  450 bytes during 4.5ms show → overflows, heavy drops
+       150 LEDs, 115200:  52 bytes during 4.5ms show → safe, ~25 FPS
+
+      Practical limit for audio-reactive (30fps): ~120 LEDs at 115200 baud, or ~80 LEDs
+      at 1Mbps with checksum-based drop recovery (current approach for diamond).
+
+      A "slim" receiver (streaming_receiver_slim.cpp) was built that writes directly
+      into the NeoPixel buffer to avoid double-buffering (300 LEDs × 3 × 2 = 1800 bytes
+      would exceed 2KB RAM). This solves RAM but not the UART overflow problem.
+
+      ESP32 avoids this entirely: RMT peripheral drives NeoPixels via DMA without
+      disabling interrupts, so UART reception is unaffected during show().
+
+  - id: eeprom-device-id-protocol
+    date: 2026-03-04
+    touched: 2026-03-04
+    title: "EEPROM device ID system for multi-controller auto-detection"
+    summary: >
+      Multiple Arduino Nano CH340 controllers share identical USB VID/PID (1a86:7523),
+      so macOS assigns arbitrary /dev/cu.usbserial-* ports that can swap on replug.
+      Built an EEPROM-based device ID protocol: firmware stores a unique ID in EEPROM,
+      Python queries each port with CMD_IDENTIFY (0xFE) to find the right controller.
+      CMD_SET_ID (0xFD) assigns IDs. Enables reliable multi-controller setups.
+    status: resolved
+    severity: medium
+    scope: protocol
+    source:
+      - firmware/strip/src/streaming_receiver.cpp
+      - audio-reactive/effects/runner.py
+      - audio-reactive/hardware/controllers.json
+    tags: [serial, protocol, nano, ch340, eeprom, design-decision, deployment]
+    relates_to: [serial-frame-sync-recovery, diamond-sculpture-hardware-spec]
+    notes: >
+      Root problem: CH340 USB-serial chips have no unique serial number. All Nano
+      clones enumerate as VID 1a86 PID 7523. When two or more are plugged in, macOS
+      assigns port names based on USB topology (hub port), not device identity. Unplug
+      and replug in different order → ports swap. The old approach of hardcoding
+      port_hint in controllers.json was fragile and broke every time the USB setup changed.
+
+      Protocol design:
+      - CMD_IDENTIFY (0xFE): Host sends single byte. Firmware responds with its EEPROM
+        device ID (1 byte). Default 0x00 = unassigned.
+      - CMD_SET_ID (0xFD): Host sends 0xFD followed by 1-byte ID. Firmware writes to
+        EEPROM and echoes back. Persists across power cycles.
+      - State machine integration: Added WAIT_SET_ID state to existing sync state machine.
+        CMD bytes are outside normal frame sync range (0xFF/0xAA) so no collision.
+
+      Python side (runner.py):
+      - identify_serial_port(): Opens each /dev/cu.usbserial-* port, sends CMD_IDENTIFY,
+        waits up to 2s for response (accounts for bootloader delay on Nano).
+      - find_serial_port(): Tries device_id lookup first, falls back to port_hint,
+        then first available. Graceful degradation for single-controller setups.
+
+      Deployment: After flashing a new Nano, run identify/set-ID once to assign it.
+      Then configure device_id in controllers.json. From that point, Python finds it
+      automatically regardless of USB port assignment.
 
   # ── WS2812B Hardware Constraints & Workarounds ──────────────────
 
@@ -221,6 +305,34 @@ entries:
       less deterministic than STM32 DMA, but this is irrelevant for 197 LEDs at
       30 FPS. If upgrading past ~500 LEDs on single controller, reconsider.
 
+  - id: nano-5v-power-required
+    date: 2026-03-04
+    touched: 2026-03-05
+    title: "Arduino Nano requires dedicated 5V power for flashing and runtime"
+    summary: >
+      Arduino Nano (CH340) crashes during firmware upload (avrdude fails) when
+      powered only through the computer's USB port. Needs a dedicated 5V supply
+      to the 5V pin for successful flashing and stable runtime. Without it:
+      flashing crashes mid-upload, runtime shows erratic behavior and serial corruption.
+    status: resolved
+    severity: high
+    scope: deployment
+    source: []
+    tags: [nano, ch340, power, hardware, deployment, flashing]
+    relates_to: [diamond-sculpture-hardware-spec, eeprom-device-id-protocol]
+    notes: >
+      The Nano draws significant current during firmware upload — the CH340
+      USB-serial chip, ATmega328 flash write cycles, and any connected LEDs
+      all compete for power. Computer USB ports (especially through hubs)
+      may not supply enough current, causing voltage drops that crash the
+      upload mid-way.
+
+      This is a hard blocker for deployment: you cannot flash new firmware
+      without dedicated 5V power. Always connect a separate 5V supply before
+      running pio run --target upload. This also affects EEPROM device ID
+      assignment (see eeprom-device-id-protocol) since that requires a
+      successful flash first.
+
   # ── Protocol & Timing Requirements ──────────────────────────────
 
   - id: tempo-startup-buffer-requirement
@@ -316,3 +428,44 @@ entries:
       Current status: No gamma LUT implemented yet. For now, we work around with
       brightness cutoffs (ws2812b-hue-shift-workaround) and avoid pastels. Gamma LUT
       should be added before considering RGBW upgrade.
+
+  - id: cob-strip-color-mixing-differs
+    date: 2026-03-05
+    touched: 2026-03-05
+    title: "COB strips need different gradient/color mixing approach than discrete LEDs"
+    summary: >
+      COB (Chip-on-Board) strips produce a continuous diffused light line rather than
+      discrete dots. Gradients and color transitions that look good on individual WS2812B
+      LEDs don't translate directly — COB's physical light blending between adjacent
+      pixels changes how color mixing and spatial gradients appear. Engineering gradient
+      rendering for COB needs its own tuning separate from discrete strip effects.
+    status: identified
+    severity: medium
+    scope: firmware
+    source:
+      - audio-reactive/hardware/sculptures.json
+    tags: [cob, ws2811, color, gradient, design-decision]
+    relates_to: [ws2812b-gamma-correction, ws2812b-hue-shift-workaround]
+    notes: >
+      COB strips (our sculpture uses WS2811 12V, 80 pixels) physically diffuse light
+      between adjacent pixel zones. This means:
+
+      1. **Spatial blending is free**: Adjacent pixels' colors physically mix in the
+         diffuser material. Sharp color boundaries in the data become soft gradients
+         on the strip. Effects that rely on crisp per-pixel color separation (e.g.
+         alternating colors) will look muddied on COB.
+
+      2. **Gradients need fewer steps**: Because hardware blending fills in between
+         pixels, software gradients can use wider color steps without visible banding.
+         Conversely, subtle per-pixel gradients that look smooth on discrete LEDs are
+         wasted on COB — the hardware blending already does the interpolation.
+
+      3. **Color mixing artifacts differ**: On discrete WS2812B, adjacent red and
+         blue pixels look like distinct dots. On COB, they physically blend to purple
+         in the gap. This changes which color palettes and transitions work well.
+         Warm-to-cool gradients may need wider pixel spacing on COB to maintain
+         distinct color zones.
+
+      Implication: Effects targeting the COB sculpture may need a separate color/gradient
+      tuning path. Can't assume what looks good on the diamond (discrete WS2812B) will
+      look good on the COB sculpture, or vice versa.

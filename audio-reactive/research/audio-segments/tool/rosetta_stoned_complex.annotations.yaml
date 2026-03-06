@@ -1,63 +1,58 @@
-# Rosetta Stoned 180-240s — Maximum metric complexity
-# Source: ToolNavy archive, community meter analysis
-# Confidence: community (lower — this section is notoriously hard to map)
-
 meter_map:
 - start: 0.0
   end: 5.0
-  time_sig: "8/8"
-  label: "opening phrase"
+  time_sig: 8/8
+  label: opening phrase
 - start: 5.0
   end: 10.0
-  time_sig: "5/4"
-  label: "expansion"
+  time_sig: 5/4
+  label: expansion
 - start: 10.0
   end: 15.0
-  time_sig: "8/8"
-  label: "return"
+  time_sig: 8/8
+  label: return
 - start: 15.0
   end: 20.0
-  time_sig: "5/4"
-  label: "alternation"
+  time_sig: 5/4
+  label: alternation
 - start: 20.0
   end: 25.0
-  time_sig: "10/4"
-  label: "extended bar"
+  time_sig: 10/4
+  label: extended bar
 - start: 25.0
   end: 30.0
-  time_sig: "9/8"
-  label: "odd grouping"
+  time_sig: 9/8
+  label: odd grouping
 - start: 30.0
   end: 35.0
-  time_sig: "6/8"
-  label: "compound"
+  time_sig: 6/8
+  label: compound
 - start: 35.0
   end: 40.0
-  time_sig: "11/4"
-  label: "prime meter"
+  time_sig: 11/4
+  label: prime meter
 - start: 40.0
   end: 48.0
-  time_sig: "12/8"
-  label: "compound duple"
+  time_sig: 12/8
+  label: compound duple
 - start: 48.0
   end: 53.0
-  time_sig: "15/8"
-  label: "asymmetric compound"
+  time_sig: 15/8
+  label: asymmetric compound
 - start: 53.0
   end: 60.0
-  time_sig: "7/8"
-  label: "final riff chugs"
-
+  time_sig: 7/8
+  label: final riff chugs
 segments:
 - start: 0.0
-  end: 40.0
-  label: instrumental
-- start: 40.0
   end: 60.0
-  label: verse
-
+  label: complex_section
+  note: Community timestamps unverified against this clip window — needs manual correction
 polyrhythm_zones:
 - start: 0.0
-  end: 40.0
-  ratio: "3:4:5"
-  description: "Danny plays 3/4 while implying 4/4 on right hand and 5/16 on bass drum"
+  end: 60.0
+  ratio: '3:4:5'
+  description: Danny plays 3/4 while implying 4/4 on right hand and 5/16 on bass drum
+  note: Zone boundaries approximate — needs verification against audio
+beat:
+- 55.417

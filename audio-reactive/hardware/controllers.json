@@ -1,4 +1,6 @@
 [
-  {"id": "sculpture", "name": "Sculpture COB", "vid": "1a86", "pid": "7523", "leds": 80},
-  {"id": "tree", "name": "LED Tree", "vid": "10c4", "pid": "ea60", "leds": 197}
+  {"id": "sculpture", "name": "Sculpture COB", "vid": "1a86", "pid": "7523", "leds": 80, "device_id": 1, "port_hint": "1230"},
+  {"id": "strip_300", "name": "300 Strip Nano", "vid": "1a86", "pid": "7523", "leds": 300, "device_id": 2, "port_hint": "1240"},
+  {"id": "tree", "name": "LED Tree", "vid": "10c4", "pid": "ea60", "leds": 197},
+  {"id": "aggregate", "name": "Aggregate ESP32", "vid": "10c4", "pid": "ea60", "leds": 300}
 ]

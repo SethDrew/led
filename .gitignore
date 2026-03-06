@@ -41,3 +41,6 @@ audio-reactive/research/audio-segments/separated/
 
 # Audio: user uploads (test files, temporary)
 audio-reactive/research/audio-segments/uploads/
+
+# Festicorn local credentials
+festicorn/src/wifi_credentials_local.h

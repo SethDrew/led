@@ -12,6 +12,15 @@
  */
 
 #include <Adafruit_NeoPixel.h>
+#include <EEPROM.h>
+
+// Device identity — stored in EEPROM address 0
+// Query: send 0xFE → responds [0xFE, id]
+// Set:   send 0xFD <id> → writes EEPROM, responds [0xFD, id]
+#define CMD_IDENTIFY 0xFE
+#define CMD_SET_ID   0xFD
+#define EEPROM_ID_ADDR 0
+uint8_t deviceId;
 
 #define LED_PIN 12
 
@@ -41,7 +50,7 @@ const uint8_t START_BYTE_2 = 0xAA;
 const uint16_t FRAME_BYTES = NUM_PIXELS * 3;
 
 // Receiver state machine — resilient sync recovery
-enum RxState { WAIT_SYNC1, WAIT_SYNC2, READ_FRAME };
+enum RxState { WAIT_SYNC1, WAIT_SYNC2, READ_FRAME, WAIT_SET_ID };
 RxState rxState = WAIT_SYNC1;
 uint16_t bytesRead = 0;
 uint8_t runningXor = 0;
@@ -79,6 +88,7 @@ void setup() {
 #else
   // STREAMING RECEIVER MODE
   Serial.begin(1000000);  // 1 Mbps
+  deviceId = EEPROM.read(EEPROM_ID_ADDR);
 
   strip.begin();
   strip.setBrightness(255);
@@ -115,8 +125,24 @@ void loop() {
 
     switch (rxState) {
       case WAIT_SYNC1:
-        if (b == START_BYTE_1) rxState = WAIT_SYNC2;
+        if (b == START_BYTE_1) {
+          rxState = WAIT_SYNC2;
+        } else if (b == CMD_IDENTIFY) {
+          Serial.write(CMD_IDENTIFY);
+          Serial.write(deviceId);
+        } else if (b == CMD_SET_ID) {
+          rxState = WAIT_SET_ID;
+        }
         break;
+
+      case WAIT_SET_ID: {
+        deviceId = b;
+        EEPROM.update(EEPROM_ID_ADDR, deviceId);
+        Serial.write(CMD_SET_ID);
+        Serial.write(deviceId);
+        rxState = WAIT_SYNC1;
+        break;
+      }
 
       case WAIT_SYNC2:
         if (b == START_BYTE_2) {
@@ -162,16 +188,19 @@ void loop() {
     framesDropped++;
   }
 
-  // Stats every 2s
+  // Stats every 2s — only print if actively receiving
+  // (keeps serial line quiet when idle, so avrdude can sync for uploads)
   if (millis() - lastStatsTime > 2000) {
-    unsigned long elapsed = millis() - lastStatsTime;
-    Serial.print("FPS: ");
-    Serial.print(framesReceived * 1000 / elapsed);
-    if (framesDropped > 0) {
-      Serial.print(" drop:");
-      Serial.print(framesDropped);
+    if (framesReceived > 0 || framesDropped > 0) {
+      unsigned long elapsed = millis() - lastStatsTime;
+      Serial.print("FPS: ");
+      Serial.print(framesReceived * 1000 / elapsed);
+      if (framesDropped > 0) {
+        Serial.print(" drop:");
+        Serial.print(framesDropped);
+      }
+      Serial.println();
     }
-    Serial.println();
     framesReceived = 0;
     framesDropped = 0;
     lastStatsTime = millis();

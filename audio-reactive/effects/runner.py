@@ -68,12 +68,63 @@ def find_blackhole_device():
     return None
 
 
-def find_serial_port():
-    """Auto-detect Arduino serial port."""
-    candidates = glob.glob('/dev/cu.usbserial-*')
-    if candidates:
-        return candidates[0]
+CMD_IDENTIFY = 0xFE
+CMD_SET_ID = 0xFD
+
+
+def identify_serial_port(port, baud=1000000, timeout=0.5):
+    """Query a serial port for its EEPROM device_id.
+
+    Returns device_id (int) or None if no response / not a streaming receiver.
+    Opening the port triggers Arduino reset (DTR), so we wait for the
+    bootloader to hand off to our firmware (~2s).
+    """
+    import serial
+    try:
+        ser = serial.Serial(port, baud, timeout=timeout)
+        time.sleep(2.0)  # bootloader timeout
+        ser.reset_input_buffer()
+        ser.write(bytes([CMD_IDENTIFY]))
+        resp = ser.read(2)
+        ser.close()
+        if len(resp) == 2 and resp[0] == CMD_IDENTIFY:
+            return resp[1]
+    except Exception:
+        pass
     return None
+
+
+def find_serial_port(controller=None):
+    """Auto-detect Arduino serial port.
+
+    If controller has a device_id, queries all CH340 ports to find the match.
+    Falls back to port_hint, then first available port.
+    """
+    candidates = glob.glob('/dev/cu.usbserial-*')
+    if not candidates:
+        return None
+
+    # If controller has EEPROM device_id, query each port
+    if controller and 'device_id' in controller:
+        target_id = controller['device_id']
+        for port in candidates:
+            dev_id = identify_serial_port(port)
+            if dev_id == target_id:
+                return port
+        # EEPROM query failed — fall through to port_hint
+
+    # Fallback: port_hint (USB location ID match)
+    if controller:
+        hint = controller.get('port_hint')
+        if hint:
+            matches = [p for p in candidates if hint in p]
+            if matches:
+                return matches[0]
+        # Specific controller requested but not found
+        return None
+
+    # No controller specified — return first available
+    return candidates[0]
 
 
 def load_sculpture(sculpture_id):
@@ -305,6 +356,13 @@ class SerialLEDOutput:
         """
         if self.ser:
             try:
+                # Pad or truncate to match expected LED count
+                if len(frame) < self.num_leds:
+                    padded = np.zeros((self.num_leds, 3), dtype=np.uint8)
+                    padded[:len(frame)] = frame
+                    frame = padded
+                elif len(frame) > self.num_leds:
+                    frame = frame[:self.num_leds]
                 rgb = frame.flatten()
                 checksum = int(np.bitwise_xor.reduce(rgb))
                 packet = bytearray([START_BYTE_1, START_BYTE_2])
@@ -797,19 +855,24 @@ def main():
         physical_leds = sculpture_def['physical_leds']
         # Use controller's port unless explicitly overridden
         if not args.port:
-            args.port = None  # will be auto-detected below
+            args.port = find_serial_port(controller)
         args.leds = physical_leds  # for SerialLEDOutput packet size
     else:
         logical_leds = args.leds
         physical_leds = args.leds
 
     # Create effect (with palette composition if signal)
-    # Effect renders to LOGICAL LED count
+    # Effect renders to LOGICAL LED count (unless it handles topology itself)
     try:
         effect = create_effect(args.effect, logical_leds, SAMPLE_RATE, args.palette)
     except ValueError as e:
         print(f"  Error: {e}")
         sys.exit(1)
+
+    # Effects with handles_topology render directly in physical space —
+    # skip runner's topology mapping but keep physical_leds for serial packet size
+    if getattr(effect, 'handles_topology', False) and sculpture_def:
+        sculpture_def = None  # don't apply topology again
 
     print(f"\n  Audio-Reactive Effect Runner")
     print(f"  {'='*40}")

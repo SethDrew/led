@@ -64,5 +64,85 @@
     "branches": [
       {"start": 0, "count": 197, "reverse": false}
     ]
+  },
+  {
+    "id": "aggregate_strip",
+    "name": "Aggregate Strip",
+    "controller": "strip_300",
+    "physical_leds": 300,
+    "branches": [
+      {"name": "main", "start": 0, "count": 185, "reverse": false}
+    ]
+  },
+  {
+    "id": "butterfly",
+    "name": "Butterfly Sculpture",
+    "controller": "strip_300",
+    "num_leds": 115,
+    "physical_leds": 300,
+    "mode": "branch",
+    "branches": [
+      {
+        "name": "ring",
+        "start": 185,
+        "count": 115,
+        "reverse": false,
+        "direction": "clockwise",
+        "xy_keyframes": [
+          [185, 0.0, 1.0],
+          [195, 0.5, 0.87],
+          [204, 0.87, 0.5],
+          [214, 1.0, 0.0],
+          [223, 0.87, -0.5],
+          [233, 0.5, -0.87],
+          [243, 0.0, -1.0],
+          [252, -0.5, -0.87],
+          [262, -0.87, -0.5],
+          [271, -1.0, 0.0],
+          [281, -0.87, 0.5],
+          [290, -0.5, 0.87],
+          [299, -0.09, 0.99]
+        ]
+      }
+    ],
+    "landmarks": {
+      "top": 185,
+      "right": 214,
+      "bottom": 243,
+      "left": 271
+    },
+    "notes": "115 LEDs in a circular loop. Last LED (114) physically adjacent to first LED (0). Part of 300-LED aggregate strip (starts at physical index 185)."
+  },
+  {
+    "id": "aggregate_300",
+    "name": "Aggregate 300 Strip + Butterfly",
+    "controller": "strip_300",
+    "num_leds": 300,
+    "branches": [
+      {"name": "strip", "start": 0, "count": 185, "reverse": false},
+      {
+        "name": "butterfly",
+        "start": 185,
+        "count": 115,
+        "reverse": false,
+        "direction": "clockwise",
+        "xy_keyframes": [
+          [185, 0.0, 1.0],
+          [195, 0.5, 0.87],
+          [204, 0.87, 0.5],
+          [214, 1.0, 0.0],
+          [223, 0.87, -0.5],
+          [233, 0.5, -0.87],
+          [243, 0.0, -1.0],
+          [252, -0.5, -0.87],
+          [262, -0.87, -0.5],
+          [271, -1.0, 0.0],
+          [281, -0.87, 0.5],
+          [290, -0.5, 0.87],
+          [299, -0.09, 0.99]
+        ]
+      }
+    ],
+    "notes": "300 LEDs on single data line (D33). First 185 = linear strip, last 115 = butterfly circle."
   }
 ]

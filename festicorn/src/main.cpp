@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ArduinoOTA.h>
+#include <ESPmDNS.h>
 #include <LittleFS.h>
 #include <Adafruit_NeoPixel.h>
 #include "effects.h"
@@ -84,14 +85,19 @@ void handleStatus() {
     switch (state.palette) {
         case SAP_FLOW:         palName = "sap_flow";         break;
         case OKLCH_RAINBOW:    palName = "oklch_rainbow";    break;
-        case BLUE_PURPLE:      palName = "blue_purple";      break;
-        case LAVA:             palName = "lava";             break;
-        case OCEAN_BREEZE:     palName = "ocean_breeze";     break;
-        case SUNSET_REAL:      palName = "sunset_real";      break;
-        case FIRE:             palName = "fire";             break;
-        case MAGENTA_EVENING:  palName = "magenta_evening";  break;
-        case CORAL_REEF:       palName = "coral_reef";       break;
-        case EMERALD_DRAGON:   palName = "emerald_dragon";   break;
+        // Category 2: Hue-arc gradients
+        case RED_BLUE:         palName = "red_blue";         break;
+        case CYAN_GOLD:        palName = "cyan_gold";        break;
+        case GREEN_PURPLE:     palName = "green_purple";     break;
+        case ORANGE_TEAL:      palName = "orange_teal";      break;
+        case MAGENTA_CYAN:     palName = "magenta_cyan";     break;
+        case SUNSET_SKY:       palName = "sunset_sky";       break;
+        // Chroma sweeps
+        case BLUE_WASH:        palName = "blue_wash";        break;
+        case RED_WASH:         palName = "red_wash";         break;
+        case GREEN_WASH:       palName = "green_wash";       break;
+        case PURPLE_WASH:      palName = "purple_wash";      break;
+        case GOLD_WASH:        palName = "gold_wash";        break;
         default:               palName = "sap_flow";         break;
     }
     json += "\"palette\":\"" + String(palName) + "\",";
@@ -131,14 +137,19 @@ void handleSetPalette() {
         String p = server.arg("palette");
         if (p == "sap_flow")              state.palette = SAP_FLOW;
         else if (p == "oklch_rainbow")    state.palette = OKLCH_RAINBOW;
-        else if (p == "blue_purple")      state.palette = BLUE_PURPLE;
-        else if (p == "lava")             state.palette = LAVA;
-        else if (p == "ocean_breeze")     state.palette = OCEAN_BREEZE;
-        else if (p == "sunset_real")      state.palette = SUNSET_REAL;
-        else if (p == "fire")             state.palette = FIRE;
-        else if (p == "magenta_evening")  state.palette = MAGENTA_EVENING;
-        else if (p == "coral_reef")       state.palette = CORAL_REEF;
-        else if (p == "emerald_dragon")   state.palette = EMERALD_DRAGON;
+        // Category 2: Hue-arc gradients
+        else if (p == "red_blue")         state.palette = RED_BLUE;
+        else if (p == "cyan_gold")        state.palette = CYAN_GOLD;
+        else if (p == "green_purple")     state.palette = GREEN_PURPLE;
+        else if (p == "orange_teal")      state.palette = ORANGE_TEAL;
+        else if (p == "magenta_cyan")     state.palette = MAGENTA_CYAN;
+        else if (p == "sunset_sky")       state.palette = SUNSET_SKY;
+        // Chroma sweeps
+        else if (p == "blue_wash")        state.palette = BLUE_WASH;
+        else if (p == "red_wash")         state.palette = RED_WASH;
+        else if (p == "green_wash")       state.palette = GREEN_WASH;
+        else if (p == "purple_wash")      state.palette = PURPLE_WASH;
+        else if (p == "gold_wash")        state.palette = GOLD_WASH;
     }
     server.send(200, "text/plain", "OK");
 }
@@ -148,7 +159,7 @@ void handleSetPalette() {
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    Serial.println("\n[Festicorn] Starting...");
+    Serial.println("\n[Butterfly] Starting...");
 
     // LittleFS
     if (!LittleFS.begin(true)) {
@@ -170,7 +181,7 @@ void setup() {
 
     // WiFi
     WiFi.mode(WIFI_STA);
-    WiFi.setHostname("festicorn");
+    WiFi.setHostname("butterfly");
 
     // Scan to see what's visible
     Serial.println("[WiFi] Scanning...");
@@ -190,8 +201,11 @@ void setup() {
     // Try relaxed security settings for WPA2/WPA3 transition routers
     WiFi.setMinSecurity(WIFI_AUTH_WPA_PSK);
 
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(false);
+
     Serial.printf("[WiFi] Connecting to '%s'...", WIFI_SSID);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD, 0, NULL, true);
     unsigned long wifiStart = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 20000) {
         delay(500);
@@ -205,7 +219,7 @@ void setup() {
         Serial.println("[WiFi] Retrying...");
         WiFi.disconnect();
         delay(1000);
-        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+        WiFi.begin(WIFI_SSID, WIFI_PASSWORD, 0, NULL, true);
         wifiStart = millis();
         while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 20000) {
             delay(500);
@@ -218,8 +232,12 @@ void setup() {
         }
     }
 
+    if (WiFi.status() == WL_CONNECTED) {
+        MDNS.begin("butterfly");
+    }
+
     // OTA
-    ArduinoOTA.setHostname("festicorn");
+    ArduinoOTA.setHostname("butterfly");
     ArduinoOTA.onStart([]() { Serial.println("[OTA] Start"); });
     ArduinoOTA.onEnd([]() { Serial.println("\n[OTA] Done"); });
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
@@ -247,11 +265,25 @@ void setup() {
 // --- Main loop ---
 
 void loop() {
+    // WiFi reconnect
+    if (WiFi.status() != WL_CONNECTED) {
+        static unsigned long lastReconnect = 0;
+        if (millis() - lastReconnect > 30000) {
+            Serial.println("[WiFi] Reconnecting...");
+            WiFi.disconnect();
+            WiFi.begin(WIFI_SSID, WIFI_PASSWORD, 0, NULL, true);
+            lastReconnect = millis();
+        }
+    }
+
     ArduinoOTA.handle();
     server.handleClient();
 
     for (uint8_t i = 0; i < NUM_STRIPS; i++) {
-        strips[i].setBrightness(state.brightness);
+        // Brightness is applied via gammaHybrid inside render functions
+        // (gamma on scalar brightness, not per-channel). Don't use
+        // NeoPixel setBrightness() which would double-dim.
+        strips[i].setBrightness(255);
 
         switch (state.effect) {
             case GRADIENT:

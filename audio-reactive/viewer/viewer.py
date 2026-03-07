@@ -1310,6 +1310,7 @@ class SyncedVisualizer:
             'band-integral': self._build_band_integral_panel,
             'mfcc': self._build_mfcc_panel,
             'novelty': self._build_novelty_panel,
+            'foote': self._build_foote_panel,
             'band-deviation': self._build_band_deviation_panel,
             'event-drops': self._build_event_drops_panel,
             'event-risers': self._build_event_risers_panel,
@@ -1336,7 +1337,7 @@ class SyncedVisualizer:
             n_panels = len(builders)
             height_map = {'waveform': 1, 'spectrogram': 2, 'bands': 1, 'bands-aw': 1,
                           'rms-derivative': 1, 'centroid': 1, 'centroid-derivative': 1,
-                          'band-derivative': 1, 'mfcc': 1.5, 'novelty': 1.5,
+                          'band-derivative': 1, 'mfcc': 1.5, 'novelty': 1.5, 'foote': 1.5,
                           'band-deviation': 1.5, 'annotations': None,
                           'event-drops': 1.0, 'event-risers': 0.5,
                           'event-dropouts': 1.0, 'event-harmonic': 1.0,
@@ -1617,6 +1618,42 @@ class SyncedVisualizer:
             self.feature_keys = {}
         self.feature_toggle['events'] = {'artists': [], 'visible': False}
         self.feature_keys['v'] = 'events'
+
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_foote_panel(self, ax):
+        """Foote's checkerboard novelty — chroma (teal) + MFCC (gold), offline reference."""
+        from scipy.signal import find_peaks
+
+        t = self.times
+        n = len(t)
+        foote_m = self.foote_mfcc[:n]
+        foote_c = self.foote_chroma[:n]
+
+        fps = self.sr / self.hop_length
+        peak_dist = max(1, int(fps * 1.5))
+
+        # Chroma Foote
+        ax.plot(t, foote_c, color='#4DD0E1', linewidth=1.5, alpha=0.9, label='Foote chroma')
+        ax.fill_between(t, foote_c, alpha=0.1, color='#4DD0E1')
+        peaks_c, _ = find_peaks(foote_c, prominence=0.15, distance=peak_dist)
+        ax.scatter(t[peaks_c], foote_c[peaks_c], color='#4DD0E1', s=25, zorder=5, marker='D')
+
+        # MFCC Foote
+        ax.plot(t, foote_m, color='#FFD740', linewidth=1.8, alpha=0.85, label='Foote MFCC')
+        ax.fill_between(t, foote_m, alpha=0.1, color='#FFD740')
+        peaks_m, _ = find_peaks(foote_m, prominence=0.15, distance=peak_dist)
+        ax.scatter(t[peaks_m], foote_m[peaks_m], color='#FFD740', s=25, zorder=5, marker='D')
+
+        ax.set_xlim([0, self.duration])
+        ax.set_ylim([0, 1.1])
+        ax.set_ylabel('Novelty')
+        ax.set_title("Foote's Checkerboard — chroma (teal, harmonic) + MFCC (gold, timbral)  "
+                     "[OFFLINE · O(n²)]", fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
 
         if not hasattr(self, 'axes'):
             self.axes = []

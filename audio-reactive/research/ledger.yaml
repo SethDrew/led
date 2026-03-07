@@ -2581,7 +2581,7 @@ entries:
     status: validated
     warmth: medium
     confidence: high
-    source: [WS2812B-V5 datasheet, cpldcpu spectral measurements]
+    source: [WS2812B-V5 datasheet (Worldsemi), cpldcpu intensity measurements]
     tags: [hardware, perception, color, ws2812b]
     relates_to: [oklch-perceptual-rainbow, rgb-color-gamut-limitations]
     notes: >
@@ -2609,10 +2609,10 @@ entries:
       tuned by visual A/B testing on actual strips.
 
       ## Key sources
-      - WS2812B-V5 datasheet: electrical/optical characteristics table
-      - cpldcpu (Tim): spectral measurements with light sensor confirming
-        datasheet values are in the right ballpark
-      - J. Joseph: spectrometer measurements of WS2812B emission spectra
+      - WS2812B-V5 datasheet (Worldsemi): electrical/optical characteristics table
+      - cpldcpu (Tim): intensity measurements with BH1750 light sensor confirming
+        datasheet values (blog, 2022). Note: these are luminance measurements,
+        not spectral — no spectrometer was used.
 
   - id: ws2812b-perceptual-research-gap
     date: 2026-03-06
@@ -2631,40 +2631,37 @@ entries:
     tags: [color, perception, research-gap, community]
     relates_to: [oklch-perceptual-rainbow, ws2812b-channel-brightness]
     notes: >
-      ## What each project actually does to RGB values
+      ## What each project does
 
-      | Project | Correction | Method | Published Research |
-      |---------|-----------|--------|-------------------|
-      | FastLED | TypicalLEDStrip (0xFFB0F0) = scale G to 70%, B to 94% | "eyeballed" (Mark Kriegsman) | None |
-      | Adafruit | gamma8 LUT, gamma=2.8 | "not super-scientific" (Phil Burgess) | None |
-      | Fadecandy | gamma=2.5 + temporal dithering | "artistic judgment" (Micah Scott) | None |
-      | WLED | Uses FastLED color correction verbatim | Inherited, no independent validation | None |
-      | cpldcpu | Light sensor measurements | Closest to real research | Blog posts, not peer-reviewed |
-      | J. Joseph | Spectrometer measurements | Actual spectral data | Single blog post |
+      | Project | Correction | Published Research |
+      |---------|-----------|-------------------|
+      | FastLED | TypicalLEDStrip (0xFFB0F0) = scale G to 70%, B to 94% | None |
+      | Adafruit | gamma8 LUT, gamma=2.8 | None |
+      | Fadecandy | gamma=2.5 + temporal dithering | None |
+      | WLED | FastLED-derived color handling | None |
+      | cpldcpu | Intensity measurements with light sensor | Blog posts, not peer-reviewed |
 
-      ## Our approach compared
+      No project has published perceptual appearance research for WS2812B.
+      All corrections are approximated without controlled testing methodology.
 
-      We generate perceptually correct RGB values from scratch using OKLCH
+      ## Our approach
+
+      We generate perceptually correct RGB from scratch using OKLCH
       (Björn Ottosson's perceptually uniform color space), with:
       1. Per-hue maximum chroma at 98% sRGB gamut boundary
       2. Hue-dependent lightness tuned by A/B testing on WS2812B strips
-      3. Separate gamma correction for brightness dimming (Adafruit gamma=2.8)
+      3. Separate gamma correction for brightness dimming (gamma=2.8)
 
-      This is fundamentally different from the "correct bad RGB" approach
-      (FastLED/Adafruit) — we "generate correct RGB from scratch."
+      This is fundamentally different from the "correct bad RGB" approach —
+      we generate correct RGB from scratch.
 
-      ## Why nobody has done real research
+      ## Why no prior research exists
 
-      Likely because:
-      1. LED art community is maker-oriented, not academic
-      2. "Good enough" corrections work for most use cases
-      3. Perceptual testing requires careful methodology (dark adaptation,
-         viewing distance, reference comparisons)
-      4. Individual strip variation may exceed correction precision
-
-      Our contribution is modest but real: using a perceptually uniform color
-      space (OKLCH) with hardware-validated tuning is more principled than
-      anything else in the community, even if it's still ultimately eyeballed.
+      The LED art community is maker-oriented, not academic. Approximate
+      corrections work for most use cases, and perceptual testing requires
+      careful methodology (dark adaptation, viewing distance, controlled
+      comparisons). Individual strip variation may also exceed correction
+      precision.
 
   - id: hybrid-gamma-brightness
     date: 2026-03-06

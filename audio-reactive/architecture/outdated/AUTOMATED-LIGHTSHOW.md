@@ -268,7 +268,6 @@ Entities age. Born, grow, mature, weaken, die. Neighboring entities influence li
 | **Synchronization** | phase, natural frequency | O(n^2) for full Kuramoto, O(n) with spatial cutoff | Feasible (<30 oscillators) |
 | **Inheritance** | all parent properties | O(1) per spawn event | Feasible |
 | **Decay/Growth** | age, health, neighbors | O(n) per frame | Feasible |
-
 #### Entity Interaction Cheat Sheet
 
 For quick reference when designing a new effect with multiple entities:

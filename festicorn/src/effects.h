@@ -7,16 +7,16 @@ enum Effect {
 };
 
 enum Palette {
-    // Legacy
+    // Gradients
     SAP_FLOW,
     OKLCH_RAINBOW,
-    // Category 2: OKLCH hue-arc gradients
     RED_BLUE,
     CYAN_GOLD,
     GREEN_PURPLE,
     ORANGE_TEAL,
     MAGENTA_CYAN,
-    // Category 3: OKLCH chroma sweeps
+    SUNSET_SKY,
+    // Chroma sweeps
     BLUE_WASH,
     RED_WASH,
     GREEN_WASH,

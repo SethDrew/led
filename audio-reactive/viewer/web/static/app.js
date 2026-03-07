@@ -1052,7 +1052,7 @@ filePicker.addEventListener('change', () => {
 
 // ── Tabs ─────────────────────────────────────────────────────────
 
-const analysisTabs = new Set(['analysis', 'band-analysis', 'calculus', 'annotate', 'stems', 'hpss', 'lab-repet', 'lab-nmf', 'lab-timbral', 'lab-misc', 'lab-onset', 'lab-mood', 'lab-tempo', 'lab-novelty']);
+const analysisTabs = new Set(['analysis', 'band-analysis', 'calculus', 'annotate', 'stems', 'hpss', 'lab-repet', 'lab-nmf', 'lab-timbral', 'lab-misc', 'lab-onset', 'lab-mood', 'lab-tempo', 'lab-novelty', 'spectro-color']);
 const analysisDropdown = document.getElementById('analysisDropdown');
 const analysisToggle = document.getElementById('analysisDropdownToggle');
 
@@ -1202,6 +1202,7 @@ async function loadPanel() {
         'lab-mood': { label: 'Compute MOOD Vectors', desc: 'Brightness, Texture, Tension, Fullness — 4D mood signal', fn: () => loadLabVariant('mood') },
         'lab-tempo': { label: 'Compute Tempo Compare', desc: 'OnsetTempoTracker vs AbsIntegral — side-by-side tempo detection', fn: () => loadLabVariant('tempo') },
         'lab-novelty': { label: 'Compute Novelty Lab', desc: 'All novelty approaches side by side — flux, Foote, multi-scale EMA, z-score, KNN', fn: () => loadLabVariant('novelty') },
+        'spectro-color': { label: 'Compute Spectro-Color', desc: 'Spectrum-to-LED color mapping — mel spectrogram, MFCC, and LED strip previews', fn: () => loadLabVariant('spectro-color') },
     };
 
     if (currentTab === 'annotate') {
@@ -1399,6 +1400,7 @@ async function loadLabVariant(variant) {
         'mood': 'Brightness (slope) &middot; Texture (harmonic ratio) &middot; Tension (chroma entropy) &middot; Fullness (spread)',
         'tempo': 'Onset Tracker &middot; AbsIntegral &middot; BPM comparison',
         'novelty': 'Flux &middot; Foote &middot; Multi-scale EMA &middot; Z-score &middot; KNN Reservoir',
+        'spectro-color': 'Mel Spectrogram &middot; MFCC &middot; Uniform &middot; Freq-Position &middot; Waterfall &middot; MFCC-RGB',
     };
     showOverlay('Computing lab...');
     const hint = hintMap[variant] || '';

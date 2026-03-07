@@ -1,199 +1,149 @@
 # Engineering Ledger
-# Hardware decisions, protocol designs, firmware fixes, and performance findings.
+# Physical facts about our hardware: LEDs, controllers, chips, electricity, protocols on the wire.
 # Guide: engineering/LEDGER_GUIDE.md
 
 entries:
 
-  # ── Serial Protocol & Firmware Reliability ──────────────────────
+  # ── Hardware Constraints: Serial & UART ──────────────────────────
 
-  - id: serial-frame-sync-recovery
+  - id: nano-uart-interrupt-collision
     date: 2026-03-03
     touched: 2026-03-03
-    title: "Serial streaming glitch: interrupt collision during strip.show()"
+    title: "ATmega328 UART overflows during strip.show() interrupt blackout"
     summary: >
-      Arduino Nano streaming receiver glitches every 30-60s because strip.show()
-      disables interrupts for ~2-4ms (73 LEDs), causing UART buffer overflow
-      (64 bytes hardware limit at 1Mbps). Lost bytes misalign frame boundaries,
-      and the old receiver had no resync logic — corruption cascaded until
-      accidental realignment.
+      ATmega328 has a 64-byte UART hardware buffer. strip.show() disables interrupts
+      for N_LEDs × 30µs (e.g. ~2.2ms for 73 LEDs). At 1Mbps, ~100 bytes/ms arrive
+      during the blackout, overflowing the buffer. Lost bytes corrupt frame boundaries.
     status: resolved
     severity: high
-    scope: firmware
-    source:
-      - firmware/strip/src/streaming_receiver.cpp
-      - firmware/tree/src/diamond_receiver.cpp
-      - audio-reactive/effects/runner.py
-    tags: [serial, protocol, neopixel, nano, uart, root-cause, reliability]
-    relates_to: []
+    scope: hardware
+    source: []
+    tags: [nano, uart, neopixel, ws2812b, constraint, timing]
+    relates_to: [nano-uart-overflow-led-limit, ws2812b-timing-architecture]
     notes: >
-      Root cause: ATmega328 has 64-byte UART hardware buffer. At 1Mbps, ~100 bytes/ms
-      arrive. strip.show() disables interrupts for N_LEDs * 30us (~2.2ms for 73 LEDs).
-      If a frame boundary lands during show(), bytes overflow and the receiver's
-      byte-count-based reader consumes data from the wrong frame.
+      The collision is between two hardware facts:
+      1. WS2812B bit-banging requires interrupts disabled for the entire strip.show() duration
+      2. ATmega328 UART has only 64 bytes of hardware FIFO — no DMA, no deeper buffer
 
-      Fix (three parts):
-      1. State machine sync: byte-at-a-time processing through WAIT_SYNC1 -> WAIT_SYNC2
-         -> READ_FRAME. Handles consecutive 0xFF correctly (stays in WAIT_SYNC2).
-         Single corrupted byte cannot cascade.
-      2. XOR checksum: computed on-the-fly as bytes arrive (zero extra RAM). Invalid
-         frames silently dropped — strip holds last good display.
-      3. Frame timeout: 50ms. Abandons incomplete frames and returns to sync scan.
+      At 1Mbps with 73 LEDs: 2.2ms blackout × 100 bytes/ms = 220 bytes arriving,
+      but only 64 can be buffered. The rest are silently dropped by hardware.
 
-      Protocol changed from [0xFF][0xAA][RGB data] to [0xFF][0xAA][RGB data][XOR].
-      Python sender (runner.py send_frame) updated to append checksum byte.
-      Both sides must be updated together.
-
-      ESP32 largely avoids this because RMT peripheral drives NeoPixels without
-      disabling interrupts, and UART hardware FIFO is deeper (128+ bytes).
-      But the state machine + checksum are still good practice for any receiver.
-
-      RAM impact: +7 bytes (state vars). Flash: ~+200 bytes. Well within Nano limits
-      (27% RAM, 15% flash after fix).
+      ESP32 avoids this: RMT peripheral drives NeoPixels without disabling interrupts,
+      and UART FIFO is deeper (128+ bytes).
 
   - id: nano-uart-overflow-led-limit
     date: 2026-03-04
     touched: 2026-03-04
-    title: "Nano streaming capped at ~150 LEDs due to UART overflow during show()"
+    title: "ATmega328 streaming capped at ~150 LEDs due to UART overflow"
     summary: >
-      strip.show() disables interrupts for N×30µs. At 300 LEDs that's 9ms, during
-      which ~900 bytes arrive at 1Mbps but the ATmega328 UART buffer is only 64 bytes.
-      Max safe baud for 300 LEDs = 57600 (52 bytes during show ≤ 64 buffer), giving
-      only ~6 FPS — unusable for audio-reactive. Nano streaming is practical up to
-      ~150 LEDs at 30fps. Use ESP32 (RMT, no interrupt blocking) for larger strips.
+      strip.show() disables interrupts for N×30µs. Combined with 64-byte UART buffer,
+      this limits how many LEDs a Nano can drive while receiving serial data.
+      At 1Mbps: ~80 LEDs practical (with frame drops). At 115200: ~120 LEDs at 30fps.
+      Beyond ~150 LEDs, use ESP32 (RMT, no interrupt blocking).
     status: resolved
     severity: high
-    scope: performance
-    source:
-      - firmware/strip/src/streaming_receiver.cpp
-      - firmware/strip/src/streaming_receiver_slim.cpp
-    tags: [nano, uart, neopixel, performance, ws2812b, root-cause]
-    relates_to: [serial-frame-sync-recovery, ws2812b-timing-architecture, esp32-hardware-selection-rationale]
+    scope: hardware
+    source: []
+    tags: [nano, uart, neopixel, ws2812b, constraint, measurement]
+    relates_to: [nano-uart-interrupt-collision, ws2812b-timing-architecture, esp32-hardware-selection-rationale]
     notes: >
       Formula: bytes_during_show = baud_rate / 10 × (N_LEDs × 30µs).
       Must be ≤ 64 (ATmega328 UART hardware buffer).
 
-      Key data points:
+      Measured data points:
         80 LEDs, 1Mbps:  240 bytes during 2.4ms show → overflows, occasional drops
         80 LEDs, 115200:  28 bytes during 2.4ms show → safe, ~47 FPS max
-       300 LEDs, 1Mbps:  900 bytes during 9ms show → catastrophic, nearly 0% valid frames
+       300 LEDs, 1Mbps:  900 bytes during 9ms show → catastrophic, nearly 0% valid
        300 LEDs, 57600:   52 bytes during 9ms show → safe, but only ~6 FPS
        150 LEDs, 1Mbps:  450 bytes during 4.5ms show → overflows, heavy drops
        150 LEDs, 115200:  52 bytes during 4.5ms show → safe, ~25 FPS
 
-      Practical limit for audio-reactive (30fps): ~120 LEDs at 115200 baud, or ~80 LEDs
-      at 1Mbps with checksum-based drop recovery (current approach for diamond).
+      ATmega328 also has only 2KB RAM. 300 LEDs × 3 bytes × 2 (double buffer) =
+      1800 bytes, leaving almost nothing for stack/variables.
 
-      A "slim" receiver (streaming_receiver_slim.cpp) was built that writes directly
-      into the NeoPixel buffer to avoid double-buffering (300 LEDs × 3 × 2 = 1800 bytes
-      would exceed 2KB RAM). This solves RAM but not the UART overflow problem.
+      ESP32 avoids both problems: RMT peripheral (no interrupt blocking), 320KB RAM.
 
-      ESP32 avoids this entirely: RMT peripheral drives NeoPixels via DMA without
-      disabling interrupts, so UART reception is unaffected during show().
-
-  - id: eeprom-device-id-protocol
+  - id: ch340-no-unique-serial
     date: 2026-03-04
     touched: 2026-03-04
-    title: "EEPROM device ID system for multi-controller auto-detection"
+    title: "CH340 USB-serial chips have no unique serial number"
     summary: >
-      Multiple Arduino Nano CH340 controllers share identical USB VID/PID (1a86:7523),
-      so macOS assigns arbitrary /dev/cu.usbserial-* ports that can swap on replug.
-      Built an EEPROM-based device ID protocol: firmware stores a unique ID in EEPROM,
-      Python queries each port with CMD_IDENTIFY (0xFE) to find the right controller.
-      CMD_SET_ID (0xFD) assigns IDs. Enables reliable multi-controller setups.
+      All Arduino Nano CH340 clones enumerate as VID 1a86 PID 7523 with no unique
+      serial. When multiple are plugged in, macOS assigns /dev/cu.usbserial-* ports
+      based on USB topology (hub port), not device identity. Unplugging and replugging
+      in different order swaps port assignments. EEPROM-based device ID protocol
+      works around this.
     status: resolved
     severity: medium
-    scope: protocol
-    source:
-      - firmware/strip/src/streaming_receiver.cpp
-      - audio-reactive/effects/runner.py
-      - audio-reactive/hardware/controllers.json
-    tags: [serial, protocol, nano, ch340, eeprom, design-decision, deployment]
-    relates_to: [serial-frame-sync-recovery, diamond-sculpture-hardware-spec]
+    scope: hardware
+    source: []
+    tags: [nano, ch340, constraint, deployment]
+    relates_to: [diamond-sculpture-hardware-spec]
     notes: >
-      Root problem: CH340 USB-serial chips have no unique serial number. All Nano
-      clones enumerate as VID 1a86 PID 7523. When two or more are plugged in, macOS
-      assigns port names based on USB topology (hub port), not device identity. Unplug
-      and replug in different order → ports swap. The old approach of hardcoding
-      port_hint in controllers.json was fragile and broke every time the USB setup changed.
+      CH340 is a cheap USB-serial bridge with no unique identifier in its USB descriptor.
+      FTDI chips have unique serial numbers; CH340 does not. This is a hardware limitation
+      of the chip itself — no firmware or driver change can add one.
 
-      Protocol design:
-      - CMD_IDENTIFY (0xFE): Host sends single byte. Firmware responds with its EEPROM
-        device ID (1 byte). Default 0x00 = unassigned.
-      - CMD_SET_ID (0xFD): Host sends 0xFD followed by 1-byte ID. Firmware writes to
-        EEPROM and echoes back. Persists across power cycles.
-      - State machine integration: Added WAIT_SET_ID state to existing sync state machine.
-        CMD bytes are outside normal frame sync range (0xFF/0xAA) so no collision.
+      Impact: any multi-controller setup using CH340 Nanos cannot reliably identify
+      which physical device is on which port. Port assignments are unstable across
+      plug/unplug cycles.
 
-      Python side (runner.py):
-      - identify_serial_port(): Opens each /dev/cu.usbserial-* port, sends CMD_IDENTIFY,
-        waits up to 2s for response (accounts for bootloader delay on Nano).
-      - find_serial_port(): Tries device_id lookup first, falls back to port_hint,
-        then first available. Graceful degradation for single-controller setups.
+      Workaround: store a device ID in ATmega328 EEPROM (1 byte, persists across power
+      cycles). Query each port at startup to match device to port. This uses the
+      ATmega328's 1KB EEPROM, not the CH340 itself.
 
-      Deployment: After flashing a new Nano, run identify/set-ID once to assign it.
-      Then configure device_id in controllers.json. From that point, Python finds it
-      automatically regardless of USB port assignment.
-
-  # ── WS2812B Hardware Constraints & Workarounds ──────────────────
+  # ── WS2812B Protocol & Timing ────────────────────────────────────
 
   - id: ws2812b-timing-architecture
     date: 2026-03-03
     touched: 2026-03-03
-    title: "WS2812B timing requirement defines pipeline architecture"
+    title: "WS2812B requires precise bit-level timing during transmission"
     summary: >
-      WS2812B requires precise bit-level timing during data transmission, forcing
-      a non-negotiable architecture: audio callback stores state → fixed-rate
-      main loop reads state and renders → serial flush to strip. Cannot merge
-      audio processing and LED output in same thread.
+      WS2812B protocol requires 800kHz bit-level timing (1.25µs per bit, 30µs per LED).
+      On ATmega328, this forces interrupts disabled for the entire strip.show() duration.
+      ESP32 RMT peripheral handles this in hardware without blocking the CPU.
     status: resolved
     severity: high
-    scope: firmware
-    source:
-      - audio-reactive/effects/runner.py
-      - firmware/strip/src/streaming_receiver.cpp
-    tags: [ws2812b, architecture, timing, neopixel, design-decision]
-    relates_to: [nebula-pipeline-foundation]
+    scope: hardware
+    source: []
+    tags: [ws2812b, timing, neopixel, constraint]
+    relates_to: [nano-uart-interrupt-collision]
     notes: >
-      WS2812B protocol requires 800kHz bit-level timing (1.25us per bit, 30us per
-      LED). On Arduino Nano, strip.show() must disable interrupts for N_LEDs * 30us
-      (~2.2ms for 73 LEDs) to maintain timing precision. This blocks UART reception.
+      WS2812B is a one-wire protocol with strict timing tolerances. Each bit is
+      encoded as a high pulse of either 0.4µs (0) or 0.8µs (1), followed by low.
+      Total 1.25µs per bit, 30µs per LED (24 bits RGB).
 
-      ESP32 mostly avoids interrupt disabling via RMT peripheral, but architecture
-      pattern still holds: audio callback (ISR context or high-priority task) must
-      not block on LED transmission. Decoupling via state buffer is mandatory.
+      On ATmega328 (Arduino Nano): no hardware peripheral for this — bit-banging
+      in a tight loop with interrupts disabled. Any interrupt during transmission
+      corrupts the timing and causes visual glitches.
 
-      All effects must respect this callback/render split. Audio processing happens
-      in callback context, LED rendering happens in fixed-rate loop. No exceptions.
+      On ESP32: RMT (Remote Control) peripheral generates the waveform in hardware
+      via DMA. CPU is free during transmission. This is why ESP32 can drive LEDs
+      and receive serial simultaneously without conflicts.
 
-  - id: ws2812b-hue-shift-workaround
+  - id: ws2812b-hue-shift-low-brightness
     date: 2026-03-03
     touched: 2026-03-03
-    title: "WS2812B hue shift at low brightness due to uint8 quantization"
+    title: "WS2812B shifts hue at low brightness due to 8-bit quantization"
     summary: >
       Colors with unequal RGB ratios (e.g. orange R255 G140 B0) shift hue during
       fade-out because smaller channels round to 0 before larger ones in uint8.
-      Fix: clamp non-zero color channels to minimum 1, use brightness cutoff >= 0.04.
+      This is intrinsic to 8-bit PWM — 256 steps per channel.
     status: resolved
     severity: medium
-    scope: firmware
-    source:
-      - audio-reactive/effects/band_zone_pulse.py
-    tags: [ws2812b, color, quantization, workaround]
-    relates_to: [hue-shift-low-brightness, ws2812b-gamma-correction]
+    scope: hardware
+    source: []
+    tags: [ws2812b, color, quantization, constraint]
+    relates_to: [ws2812b-gamma-correction]
     notes: >
-      Root cause: uint8 quantization. Example: orange fading at brightness=0.02
-      becomes R5 G3 B0 → R3 G1 B0 → R1 G0 B0 (now red) → R0 G0 B0 (black).
-      The green channel disappears before red, shifting apparent hue.
+      Example: orange fading at brightness 0.02 → R5 G3 B0 → R3 G1 B0 →
+      R1 G0 B0 (now red) → R0 G0 B0 (black). The green channel disappears
+      before red, shifting the apparent hue toward red before going dark.
 
-      Two-part fix:
-      1. During compositing, clamp each non-zero RGB channel to minimum 1.0 before
-         uint8 conversion. Prevents channels from dropping out prematurely.
-      2. Use higher brightness cutoff threshold (>= 0.04) to skip extremely dim
-         values where quantization dominates.
-
-      This is a fundamental WS2812B limitation — 8-bit PWM has only 256 steps.
-      Gamma correction (ws2812b-gamma-correction) helps but doesn't eliminate the
-      issue. For high color fidelity, consider SK6812 RGBW or temporal dithering.
+      This is a fundamental limitation of 8-bit PWM. Every mixed color will
+      shift hue during fade-out because RGB channels can't maintain their ratio
+      with only 256 integer steps. Hardware alternatives: SK6812 RGBW (4th
+      channel), or temporal dithering for effective 16-bit resolution.
 
   # ── Hardware Specifications & Deployment ────────────────────────
 
@@ -333,101 +283,41 @@ entries:
       assignment (see eeprom-device-id-protocol) since that requires a
       successful flash first.
 
-  # ── Protocol & Timing Requirements ──────────────────────────────
-
-  - id: tempo-startup-buffer-requirement
-    date: 2026-03-03
-    touched: 2026-03-03
-    title: "Autocorrelation requires full buffer before first tempo estimate"
-    summary: >
-      Running autocorrelation on partially-filled ring buffer produces garbage tempo
-      estimate that permanently poisons the 80/20 period smoother. Smoother rejects
-      correct tempo forever because correct/garbage ratio falls outside correction
-      windows. Must wait ~5s for full buffer before first estimate.
-    status: resolved
-    severity: high
-    scope: protocol
-    source:
-      - audio-reactive/effects/signals.py
-    tags: [beat-detection, tempo, autocorrelation, protocol, root-cause]
-    relates_to: [ac-buffer-must-fill]
-    notes: >
-      Root cause: Non-obvious interaction between autocorrelation and period smoother.
-
-      Autocorrelation finds repeating patterns in onset envelope. If buffer is only
-      40% full, autocorrelation may lock onto buffer boundaries or partial patterns,
-      producing tempo estimate that is wildly wrong (e.g. 300 BPM instead of 120 BPM).
-
-      The 80/20 period smoother accepts new estimates only if they fall within
-      correction windows around current value. Once initialized with garbage (300 BPM),
-      correct values (120 BPM) fall outside all windows and are permanently rejected.
-      The estimate never recovers.
-
-      Fix: Add buffer fill check before first autocorrelation. Wait for
-      onset_buffer.is_full() before calling autocorrelation_tempo(). At 44.1kHz with
-      512-sample hop, this is ~5s warmup period. Display "waiting for buffer" state
-      in UI during startup.
-
-      Deployment gotcha: If controller reboots mid-song (power glitch, crash), tempo
-      will be wrong for 5s until buffer refills. For critical installations, consider
-      persisting last-known-good tempo to EEPROM and using as initial estimate.
-
-  # ── WS2812B Color & Gamma Correction ────────────────────────────
+  # ── WS2812B Color & Gamma ────────────────────────────────────────
 
   - id: ws2812b-gamma-correction
     date: 2026-03-03
-    touched: 2026-03-03
+    touched: 2026-03-06
     title: "WS2812B lacks hardware gamma correction"
     summary: >
-      WS2812B uses linear PWM but human vision is logarithmic. No hardware gamma
-      correction means colors look wrong (orange appears yellow, warm tones off).
-      8-bit quantization crushes low-brightness resolution after software gamma
-      (~28 values map to 0). Solutions: software gamma LUT, dithering, or SK6812 RGBW.
-    status: identified
+      WS2812B driver ICs use linear PWM with no hardware gamma correction.
+      Human vision is logarithmic, so colors look wrong without software gamma.
+      8-bit quantization compounds the problem: after gamma correction, the first
+      ~28 input values all map to output 0 (dead zone).
+    status: resolved
     severity: medium
     scope: hardware
     source: []
-    tags: [ws2812b, gamma, color, perception, quantization]
-    relates_to: [rgb-color-gamut-limitations, ws2812b-hue-shift-workaround]
+    tags: [ws2812b, gamma, color, quantization, constraint]
+    relates_to: [ws2812b-hue-shift-low-brightness, cob-strip-color-mixing-differs]
     notes: >
-      Two stacked problems:
+      Two stacked hardware limitations:
 
-      1. **No gamma correction**: LED driver ICs use linear PWM, but eyes perceive
-         brightness logarithmically. Monitors/OS handle this transparently; WS2812B
-         doesn't. Result: color mixing is wrong, orange looks yellow, warm tones off.
-         Fix: Apply per-channel gamma LUT (exponent ~2.5-2.7) in software before
-         sending to strip. Adafruit has full guide. We already use gamma for height
-         mapping (gamma-topology-compensation) — same concept for color.
+      1. **No gamma correction**: LED driver ICs apply PWM linearly. Monitors/OS
+         handle gamma transparently; WS2812B doesn't. Result: color mixing is wrong
+         at the hardware level — orange appears yellow, warm tones are off.
 
-      2. **8-bit quantization at low brightness**: After gamma correction, first ~28
-         input values all map to 0 output. Pastels and subtle warm tones destroyed.
-         This is intrinsic to 8-bit PWM — you can't fix it in software alone.
+      2. **8-bit PWM quantization**: Only 256 brightness steps per channel. After
+         applying gamma correction (exponent ~2.8), the first ~28 input values all
+         map to 0 output. Values 28-40 map to 1, which in integer math
+         (color * 1 / 255) produces 0 — extending the dead zone to ~16% of the
+         brightness range. Pastels and subtle warm tones are destroyed.
 
-      Solution layers (cumulative, in order of effort):
-
-      1. **Software gamma LUT (free)**: Implement in runner.py before send_frame().
-         Fixes most color mixing issues. Step one regardless of anything else.
-
-      2. **SK6812 RGBW strips (hardware swap)**: Adds dedicated white channel (3000K
-         warm / 4000K neutral / 6000K cool). Fourth mixing dimension helps enormously
-         with pastels, skin tones, amber. Warm-white variant fills spectral gaps that
-         make orange/warm hard with pure RGB. Drop-in compatible with WS2812B code
-         (just needs 4-channel support in FastLED/WLED).
-
-      3. **Temporal dithering (complex)**: Delta-sigma modulation — rapidly wiggle
-         each pixel ±1 at ~400Hz for effective 16-bit resolution. Powerful for
-         low-brightness colors and smooth gradients. Tradeoff: max ~64 LEDs per line
-         due to high refresh rate. Fadecandy project (now abandoned) pioneered this.
-         Implementable on ESP32 with DMA. WLED community has discussed adding it.
-
-      4. **Physical diffusion (environmental)**: Milky/opal acrylic diffuser in
-         aluminum channel. Distance matters more than material — spatially averages
-         adjacent pixels = free spatial dithering. Combined with temporal dithering,
-         larger/diffuse sculptures get even higher low-brightness precision.
-
-      Current status: No gamma LUT implemented yet. For now, we work around with
-      brightness cutoffs (ws2812b-hue-shift-workaround) and avoid pastels. Gamma LUT
-      should be added before considering RGBW upgrade.
+      These are intrinsic to the WS2812B IC. Hardware alternatives:
+      - **SK6812 RGBW**: Adds 4th white channel (3000K/4000K/6000K), helps with
+        pastels and warm tones. Drop-in compatible wiring.
+      - **Physical diffusion**: Milky acrylic diffuser spatially averages adjacent
+        pixels, providing free spatial dithering for smoother gradients.
 
   - id: cob-strip-color-mixing-differs
     date: 2026-03-05
@@ -441,11 +331,11 @@ entries:
       rendering for COB needs its own tuning separate from discrete strip effects.
     status: identified
     severity: medium
-    scope: firmware
+    scope: hardware
     source:
       - audio-reactive/hardware/sculptures.json
-    tags: [cob, ws2811, color, gradient, design-decision]
-    relates_to: [ws2812b-gamma-correction, ws2812b-hue-shift-workaround]
+    tags: [cob, ws2811, color, constraint]
+    relates_to: [ws2812b-gamma-correction, ws2812b-hue-shift-low-brightness]
     notes: >
       COB strips (our sculpture uses WS2811 12V, 80 pixels) physically diffuse light
       between adjacent pixel zones. This means:
@@ -466,6 +356,5 @@ entries:
          Warm-to-cool gradients may need wider pixel spacing on COB to maintain
          distinct color zones.
 
-      Implication: Effects targeting the COB sculpture may need a separate color/gradient
-      tuning path. Can't assume what looks good on the diamond (discrete WS2812B) will
-      look good on the COB sculpture, or vice versa.
+      Implication: what looks good on discrete WS2812B (diamond) won't necessarily
+      look the same on COB. Different physical light behavior.

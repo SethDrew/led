@@ -852,7 +852,7 @@ def render_annotate(filepath):
 
 
 ANALYSIS_PANELS = ('waveform', 'spectrogram', 'bands', 'rms-derivative',
-                    'centroid', 'novelty', 'annotations')
+                    'centroid', 'foote', 'annotations')
 
 BAND_ANALYSIS_PANELS = ('band-rt', 'band-integral')
 
@@ -1521,6 +1521,8 @@ def render_lab(filepath, variant='timbral'):
         return render_lab_tempo(filepath)
     if variant == 'novelty':
         return render_lab_novelty(filepath)
+    if variant == 'spectro-color':
+        return render_lab_spectro_color(filepath)
     return render_lab_timbral(filepath)
 
 

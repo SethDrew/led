@@ -106,7 +106,8 @@ def hue_arc_stops(h_start, h_end, n_stops=16):
 # Define gradients: (name, c_name, h_start, h_end)
 # Arc direction: positive (CCW through OKLCH hue wheel)
 GRADIENTS = [
-    ("Red -> Blue",      "redBlue",      0,   270),  # warm-to-cool via magenta/purple
+    # Red -> Blue uses custom non-uniform hue stops (see hue_arc_red_blue())
+    # ("Red -> Blue",      "redBlue",      0,   270),  # replaced with non-uniform version
     ("Cyan -> Gold",     "cyanGold",     195,  90),  # cool-to-warm
     ("Green -> Purple",  "greenPurple",  145, 310),  # complementary
     ("Orange -> Teal",   "orangeTeal",    50, 180),  # fire-to-ice

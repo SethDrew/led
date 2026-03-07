@@ -3,7 +3,8 @@
 
 enum Effect {
     RAINBOW,
-    GRADIENT
+    GRADIENT,
+    DEV_COLOR
 };
 
 enum Palette {
@@ -31,6 +32,10 @@ struct EffectState {
     Palette palette = SAP_FLOW;
 };
 
+extern uint8_t devColorBuf[NUM_PIXELS * 3];
+extern bool devColorFresh;
+
 void renderRainbow(Adafruit_NeoPixel &strip, const EffectState &state);
 void renderGradient(Adafruit_NeoPixel &strip, const EffectState &state);
+void renderDevColor(Adafruit_NeoPixel &strip, const EffectState &state);
 uint8_t gammaHybrid(uint8_t v);

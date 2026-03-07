@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gradient Design Tool</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #1a1a2e; color: #e0e0e0;
+    min-height: 100vh; padding: 20px;
+    display: flex; flex-direction: column; align-items: center;
+    user-select: none;
+  }
+  h1 { font-size: 1.8em; margin-bottom: 4px; color: #fff; }
+  h2 { font-size: 1.1em; margin-bottom: 24px; color: #888; font-weight: 400; }
+
+  .section {
+    width: 100%; max-width: 800px; margin-bottom: 20px;
+    background: #16213e; border-radius: 8px; padding: 16px;
+  }
+  .section-label {
+    font-size: 0.85em; color: #888; text-transform: uppercase;
+    letter-spacing: 1px; margin-bottom: 10px;
+  }
+
+  /* Gradient bar */
+  .gradient-wrap { position: relative; width: 100%; height: 48px; cursor: crosshair; }
+  #gradientCanvas {
+    width: 100%; height: 48px; border-radius: 6px; display: block;
+  }
+  .stop-handle {
+    position: absolute; top: -4px; width: 14px; height: 56px;
+    border: 2px solid #fff; border-radius: 4px; cursor: grab;
+    transform: translateX(-7px);
+    box-shadow: 0 0 4px rgba(0,0,0,0.6);
+  }
+  .stop-handle.selected { border-color: #e94560; box-shadow: 0 0 8px rgba(233,69,96,0.7); }
+  .stop-handle:hover { border-color: #e94560; }
+
+  /* Strip preview */
+  #stripCanvas {
+    width: 100%; height: 32px; border-radius: 4px; display: block;
+    image-rendering: pixelated;
+  }
+
+  /* Stop editor */
+  .editor-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .editor-row label { min-width: 24px; font-size: 0.85em; color: #888; }
+  .editor-row input[type=range] { flex: 1; accent-color: #e94560; }
+  .editor-row .val { min-width: 50px; text-align: right; font-variant-numeric: tabular-nums; font-size: 0.9em; }
+  .swatch {
+    width: 48px; height: 48px; border-radius: 6px; border: 2px solid #333;
+    flex-shrink: 0;
+  }
+  .editor-grid { display: flex; gap: 16px; align-items: flex-start; }
+  .editor-sliders { flex: 1; }
+  .editor-info { font-size: 0.8em; color: #666; margin-top: 4px; }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+  .checkbox-row input[type=checkbox] { accent-color: #e94560; }
+  .checkbox-row label { font-size: 0.8em; color: #888; cursor: pointer; }
+
+  /* Presets */
+  .preset-group-label {
+    font-size: 0.75em; color: #666; text-transform: uppercase;
+    letter-spacing: 1px; margin: 10px 0 4px 0;
+  }
+  .preset-group-label:first-child { margin-top: 0; }
+  .preset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .preset-btn {
+    height: 40px; border-radius: 6px; border: 2px solid #333;
+    cursor: pointer; transition: border-color 0.2s; background: transparent;
+    position: relative; overflow: hidden;
+  }
+  .preset-btn:hover { border-color: #555; }
+  .preset-btn .preset-label {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; font-size: 0.7em; color: #fff;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.8); pointer-events: none;
+  }
+
+  /* Connection */
+  .conn-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .conn-row input[type=text] {
+    background: #0f3460; border: 1px solid #333; color: #e0e0e0;
+    padding: 8px 12px; border-radius: 6px; font-size: 0.9em; width: 160px;
+  }
+  .conn-row input[type=text]:focus { outline: none; border-color: #e94560; }
+  .btn {
+    padding: 8px 16px; border: 2px solid #333; border-radius: 6px;
+    background: #16213e; color: #e0e0e0; font-size: 0.85em; cursor: pointer;
+    transition: all 0.2s; white-space: nowrap;
+  }
+  .btn:hover { border-color: #555; }
+  .btn.primary { border-color: #e94560; background: #e94560; color: #fff; }
+  .btn.primary:hover { background: #c73a50; }
+  .status-dot {
+    width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+  }
+  .status-dot.ok { background: #4ade80; }
+  .status-dot.err { background: #ef4444; }
+  .status-text { font-size: 0.8em; color: #666; }
+
+  /* Export */
+  .export-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .export-row select {
+    background: #0f3460; border: 1px solid #333; color: #e0e0e0;
+    padding: 6px 10px; border-radius: 6px; font-size: 0.85em;
+  }
+  .export-row select:focus { outline: none; border-color: #e94560; }
+  .copy-feedback {
+    font-size: 0.8em; color: #4ade80; opacity: 0;
+    transition: opacity 0.3s;
+  }
+  .copy-feedback.show { opacity: 1; }
+
+  /* Pixel count */
+  .pixel-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .pixel-row label { font-size: 0.85em; color: #888; }
+  .pixel-row input[type=number] {
+    background: #0f3460; border: 1px solid #333; color: #e0e0e0;
+    padding: 6px 10px; border-radius: 6px; width: 70px; font-size: 0.85em;
+  }
+  .pixel-row input[type=number]:focus { outline: none; border-color: #e94560; }
+
+  .hint { font-size: 0.75em; color: #555; margin-top: 6px; }
+</style>
+</head>
+<body>
+
+<h1>Gradient Design Tool</h1>
+<h2>OKLCH color space with ESP32 live preview</h2>
+
+<!-- Gradient bar -->
+<div class="section">
+  <div class="section-label">Gradient</div>
+  <div class="gradient-wrap" id="gradientWrap">
+    <canvas id="gradientCanvas" height="48"></canvas>
+  </div>
+  <div class="hint">Click to add stop. Right-click or Delete to remove. Drag to reposition.</div>
+</div>
+
+<!-- Strip preview -->
+<div class="section">
+  <div class="section-label">Strip Preview</div>
+  <div class="pixel-row">
+    <label>Pixels:</label>
+    <input type="number" id="pixelCount" value="150" min="1" max="1000">
+  </div>
+  <canvas id="stripCanvas" height="32"></canvas>
+</div>
+
+<!-- Stop editor -->
+<div class="section" id="editorSection" style="display:none">
+  <div class="section-label">Stop Editor</div>
+  <div class="editor-grid">
+    <div class="editor-sliders">
+      <div class="editor-row">
+        <label>H</label>
+        <input type="range" id="sliderH" min="0" max="360" step="1" value="0">
+        <span class="val" id="valH">0</span>
+      </div>
+      <div class="editor-row">
+        <label>L</label>
+        <input type="range" id="sliderL" min="0" max="100" step="1" value="75">
+        <span class="val" id="valL">0.75</span>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="autoL" checked>
+        <label for="autoL">Auto lightness (hue-dependent curve)</label>
+      </div>
+      <div class="editor-row" style="margin-top:8px">
+        <label>C</label>
+        <input type="range" id="sliderC" min="0" max="100" step="1" value="100">
+        <span class="val" id="valC">0.200</span>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="autoC" checked>
+        <label for="autoC">Auto chroma (max gamut)</label>
+      </div>
+    </div>
+    <div class="swatch" id="stopSwatch"></div>
+  </div>
+  <div class="editor-info" id="editorInfo"></div>
+</div>
+
+<!-- Presets -->
+<div class="section">
+  <div class="section-label">Presets</div>
+  <div id="presetContainer"></div>
+</div>
+
+<!-- ESP32 Connection -->
+<div class="section">
+  <div class="section-label">ESP32 Connection</div>
+  <div class="conn-row">
+    <input type="text" id="espIp" placeholder="192.168.x.x">
+    <button class="btn" onclick="connectEsp()">Connect</button>
+    <span class="status-dot err" id="statusDot"></span>
+    <span class="status-text" id="statusText">Not connected</span>
+  </div>
+  <div class="conn-row" style="margin-top:8px">
+    <button class="btn primary" onclick="sendToStrip()">Send to Strip</button>
+    <div class="checkbox-row">
+      <input type="checkbox" id="autoPush">
+      <label for="autoPush">Auto-push on edit</label>
+    </div>
+  </div>
+</div>
+
+<!-- Export -->
+<div class="section">
+  <div class="section-label">Export</div>
+  <div class="export-row">
+    <label style="font-size:0.85em;color:#888">Stops:</label>
+    <select id="exportStops">
+      <option value="8">8</option>
+      <option value="16" selected>16</option>
+      <option value="32">32</option>
+    </select>
+    <button class="btn" onclick="copyC()">Copy C Array</button>
+    <button class="btn" onclick="copyHex()">Copy Hex</button>
+    <span class="copy-feedback" id="copyFeedback">Copied!</span>
+  </div>
+</div>
+
+<script>
+// ── OKLCH Color Math (ported from gen_palettes.py) ──────────────────
+
+function oklch_to_oklab(L, C, h_deg) {
+  var h = h_deg * Math.PI / 180;
+  return [L, C * Math.cos(h), C * Math.sin(h)];
+}
+
+function oklab_to_linear_srgb(L, a, b) {
+  var l_ = L + 0.3963377774 * a + 0.2158037573 * b;
+  var m_ = L - 0.1055613458 * a - 0.0638541728 * b;
+  var s_ = L - 0.0894841775 * a - 1.2914855480 * b;
+  var l = l_ * l_ * l_;
+  var m = m_ * m_ * m_;
+  var s = s_ * s_ * s_;
+  var r = +4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
+  var g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
+  var b_out = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s;
+  return [r, g, b_out];
+}
+
+function in_srgb_gamut(L, C, h_deg, margin) {
+  if (margin === undefined) margin = 0.02;
+  var lab = oklch_to_oklab(L, C, h_deg);
+  var rgb = oklab_to_linear_srgb(lab[0], lab[1], lab[2]);
+  var lo = -margin, hi = 1.0 + margin;
+  return rgb[0] >= lo && rgb[0] <= hi && rgb[1] >= lo && rgb[1] <= hi && rgb[2] >= lo && rgb[2] <= hi;
+}
+
+function max_chroma_for(L, h_deg, target_fraction) {
+  if (target_fraction === undefined) target_fraction = 0.98;
+  var lo = 0.0, hi = 0.4;
+  for (var i = 0; i < 40; i++) {
+    var mid = (lo + hi) / 2.0;
+    if (in_srgb_gamut(L, mid, h_deg, 0.001)) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo * target_fraction;
+}
+
+function oklch_to_srgb8(L, C, h_deg) {
+  var lab = oklch_to_oklab(L, C, h_deg);
+  var rgb = oklab_to_linear_srgb(lab[0], lab[1], lab[2]);
+  var r = Math.max(0.0, Math.min(1.0, rgb[0]));
+  var g = Math.max(0.0, Math.min(1.0, rgb[1]));
+  var b = Math.max(0.0, Math.min(1.0, rgb[2]));
+  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+}
+
+function lightness_for_hue(h_deg) {
+  var L_base = 0.75;
+  var red_center = 30.0, red_depth = 0.23, red_width = 55.0;
+  var purple_center = 300.0, purple_depth = 0.37, purple_width = 50.0;
+  function cosine_bump(h, center, depth, half_width) {
+    var diff = ((h - center + 180) % 360 + 360) % 360 - 180;
+    if (Math.abs(diff) >= half_width) return 0.0;
+    return depth * 0.5 * (1.0 + Math.cos(Math.PI * diff / half_width));
+  }
+  var dip = cosine_bump(h_deg, red_center, red_depth, red_width);
+  dip += cosine_bump(h_deg, purple_center, purple_depth, purple_width);
+  return L_base - dip;
+}
+
+
+// ── Gradient State ──────────────────────────────────────────────────
+
+var stops = [
+  { pos: 0.0, h: 0, L: null, C: null, autoL: true, autoC: true },
+  { pos: 1.0, h: 240, L: null, C: null, autoL: true, autoC: true }
+];
+var selectedStop = 0;
+
+function resolveStop(s) {
+  var L = s.autoL ? lightness_for_hue(s.h) : s.L;
+  var C = s.autoC ? max_chroma_for(L, s.h) : s.C;
+  return { h: s.h, L: L, C: C };
+}
+
+// ── Interpolation ───────────────────────────────────────────────────
+
+function lerpAngle(a, b, t) {
+  // Shortest arc hue interpolation
+  var diff = ((b - a + 180) % 360 + 360) % 360 - 180;
+  return ((a + diff * t) % 360 + 360) % 360;
+}
+
+function gradientColorAt(pos) {
+  if (stops.length === 0) return [0, 0, 0];
+  var sorted = stops.slice().sort(function(a, b) { return a.pos - b.pos; });
+  if (pos <= sorted[0].pos) {
+    var r = resolveStop(sorted[0]);
+    return oklch_to_srgb8(r.L, r.C, r.h);
+  }
+  if (pos >= sorted[sorted.length - 1].pos) {
+    var r = resolveStop(sorted[sorted.length - 1]);
+    return oklch_to_srgb8(r.L, r.C, r.h);
+  }
+  for (var i = 0; i < sorted.length - 1; i++) {
+    if (pos >= sorted[i].pos && pos <= sorted[i + 1].pos) {
+      var t = (pos - sorted[i].pos) / (sorted[i + 1].pos - sorted[i].pos);
+      var a = resolveStop(sorted[i]);
+      var b = resolveStop(sorted[i + 1]);
+      var L = a.L + (b.L - a.L) * t;
+      var C = a.C + (b.C - a.C) * t;
+      var H = lerpAngle(a.h, b.h, t);
+      return oklch_to_srgb8(L, C, H);
+    }
+  }
+  return [0, 0, 0];
+}
+
+
+// ── Rendering ───────────────────────────────────────────────────────
+
+var gradCanvas = document.getElementById('gradientCanvas');
+var gradCtx = gradCanvas.getContext('2d');
+var stripCanvas = document.getElementById('stripCanvas');
+var stripCtx = stripCanvas.getContext('2d');
+var gradWrap = document.getElementById('gradientWrap');
+
+function resizeCanvases() {
+  var w = gradWrap.clientWidth;
+  gradCanvas.width = w;
+  gradCanvas.height = 48;
+  stripCanvas.width = w;
+  stripCanvas.height = 32;
+}
+
+function renderGradient() {
+  resizeCanvases();
+  var w = gradCanvas.width;
+  var imgData = gradCtx.createImageData(w, 48);
+  for (var x = 0; x < w; x++) {
+    var pos = x / (w - 1);
+    var rgb = gradientColorAt(pos);
+    for (var y = 0; y < 48; y++) {
+      var idx = (y * w + x) * 4;
+      imgData.data[idx] = rgb[0];
+      imgData.data[idx + 1] = rgb[1];
+      imgData.data[idx + 2] = rgb[2];
+      imgData.data[idx + 3] = 255;
+    }
+  }
+  gradCtx.putImageData(imgData, 0, 0);
+  renderStopHandles();
+  renderStrip();
+}
+
+function renderStopHandles() {
+  // Remove old handles
+  var old = gradWrap.querySelectorAll('.stop-handle');
+  for (var i = 0; i < old.length; i++) old[i].remove();
+
+  stops.forEach(function(s, idx) {
+    var el = document.createElement('div');
+    el.className = 'stop-handle' + (idx === selectedStop ? ' selected' : '');
+    var r = resolveStop(s);
+    var rgb = oklch_to_srgb8(r.L, r.C, r.h);
+    el.style.left = (s.pos * 100) + '%';
+    el.style.background = 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
+    el.dataset.idx = idx;
+    gradWrap.appendChild(el);
+  });
+}
+
+function renderStrip() {
+  var n = parseInt(document.getElementById('pixelCount').value) || 150;
+  var w = stripCanvas.width;
+  var h = stripCanvas.height;
+  stripCtx.fillStyle = '#000';
+  stripCtx.fillRect(0, 0, w, h);
+  var pixW = w / n;
+  for (var i = 0; i < n; i++) {
+    var pos = n === 1 ? 0 : i / (n - 1);
+    var rgb = gradientColorAt(pos);
+    stripCtx.fillStyle = 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
+    var x = Math.round(i * pixW);
+    var xEnd = Math.round((i + 1) * pixW);
+    // Leave 1px gap for LED simulation if pixels are wide enough
+    var gap = pixW > 4 ? 1 : 0;
+    stripCtx.fillRect(x, 2, xEnd - x - gap, h - 4);
+  }
+}
+
+
+// ── Stop Editor ─────────────────────────────────────────────────────
+
+var sliderH = document.getElementById('sliderH');
+var sliderL = document.getElementById('sliderL');
+var sliderC = document.getElementById('sliderC');
+var autoLCheck = document.getElementById('autoL');
+var autoCCheck = document.getElementById('autoC');
+var editorSection = document.getElementById('editorSection');
+
+function showEditor() {
+  if (selectedStop < 0 || selectedStop >= stops.length) {
+    editorSection.style.display = 'none';
+    return;
+  }
+  editorSection.style.display = '';
+  var s = stops[selectedStop];
+  sliderH.value = s.h;
+  document.getElementById('valH').textContent = s.h;
+
+  autoLCheck.checked = s.autoL;
+  autoCCheck.checked = s.autoC;
+  sliderL.disabled = s.autoL;
+  sliderC.disabled = s.autoC;
+
+  var resolved = resolveStop(s);
+  sliderL.value = Math.round(resolved.L * 100);
+  document.getElementById('valL').textContent = resolved.L.toFixed(3);
+  sliderC.value = Math.round((resolved.C / 0.4) * 100);
+  document.getElementById('valC').textContent = resolved.C.toFixed(3);
+
+  var rgb = oklch_to_srgb8(resolved.L, resolved.C, resolved.h);
+  document.getElementById('stopSwatch').style.background =
+    'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
+  document.getElementById('editorInfo').textContent =
+    'RGB(' + rgb[0] + ', ' + rgb[1] + ', ' + rgb[2] + ') | ' +
+    'OKLCH(' + resolved.L.toFixed(3) + ', ' + resolved.C.toFixed(3) + ', ' + resolved.h + ')';
+}
+
+sliderH.addEventListener('input', function() {
+  if (selectedStop < 0 || selectedStop >= stops.length) return;
+  var s = stops[selectedStop];
+  s.h = parseInt(this.value);
+  // If auto modes, recompute L and C
+  onStopEdited();
+});
+
+sliderL.addEventListener('input', function() {
+  if (selectedStop < 0 || selectedStop >= stops.length) return;
+  var s = stops[selectedStop];
+  s.L = parseInt(this.value) / 100;
+  onStopEdited();
+});
+
+sliderC.addEventListener('input', function() {
+  if (selectedStop < 0 || selectedStop >= stops.length) return;
+  var s = stops[selectedStop];
+  var resolved = resolveStop(s);
+  var maxC = max_chroma_for(resolved.L, s.h);
+  s.C = (parseInt(this.value) / 100) * 0.4;
+  onStopEdited();
+});
+
+autoLCheck.addEventListener('change', function() {
+  if (selectedStop < 0 || selectedStop >= stops.length) return;
+  stops[selectedStop].autoL = this.checked;
+  if (!this.checked) {
+    stops[selectedStop].L = lightness_for_hue(stops[selectedStop].h);
+  }
+  onStopEdited();
+});
+
+autoCCheck.addEventListener('change', function() {
+  if (selectedStop < 0 || selectedStop >= stops.length) return;
+  stops[selectedStop].autoC = this.checked;
+  if (!this.checked) {
+    var resolved = resolveStop(stops[selectedStop]);
+    stops[selectedStop].C = resolved.C;
+  }
+  onStopEdited();
+});
+
+function onStopEdited() {
+  showEditor();
+  renderGradient();
+  schedulePush();
+}
+
+document.getElementById('pixelCount').addEventListener('input', function() {
+  renderStrip();
+});
+
+
+// ── Drag & Drop / Click Interaction ─────────────────────────────────
+
+var dragging = -1;
+
+gradWrap.addEventListener('mousedown', function(e) {
+  if (e.button === 2) return; // handle in contextmenu
+  var target = e.target;
+  if (target.classList.contains('stop-handle')) {
+    var idx = parseInt(target.dataset.idx);
+    selectedStop = idx;
+    dragging = idx;
+    showEditor();
+    renderGradient();
+    e.preventDefault();
+    return;
+  }
+  // Click on empty space: add a stop
+  var rect = gradCanvas.getBoundingClientRect();
+  var pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  // Determine hue by interpolating from neighbors
+  var rgb = gradientColorAt(pos);
+  // Approximate hue from the gradient position — use midpoint hue of neighbors
+  var sorted = stops.slice().sort(function(a, b) { return a.pos - b.pos; });
+  var newH = 0;
+  if (sorted.length === 0) {
+    newH = 0;
+  } else if (pos <= sorted[0].pos) {
+    newH = sorted[0].h;
+  } else if (pos >= sorted[sorted.length - 1].pos) {
+    newH = sorted[sorted.length - 1].h;
+  } else {
+    for (var i = 0; i < sorted.length - 1; i++) {
+      if (pos >= sorted[i].pos && pos <= sorted[i + 1].pos) {
+        var t = (pos - sorted[i].pos) / (sorted[i + 1].pos - sorted[i].pos);
+        newH = Math.round(lerpAngle(sorted[i].h, sorted[i + 1].h, t));
+        break;
+      }
+    }
+  }
+  stops.push({ pos: pos, h: newH, L: null, C: null, autoL: true, autoC: true });
+  selectedStop = stops.length - 1;
+  dragging = selectedStop;
+  showEditor();
+  renderGradient();
+  schedulePush();
+});
+
+document.addEventListener('mousemove', function(e) {
+  if (dragging < 0) return;
+  var rect = gradCanvas.getBoundingClientRect();
+  var pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  stops[dragging].pos = pos;
+  renderGradient();
+});
+
+document.addEventListener('mouseup', function() {
+  if (dragging >= 0) {
+    dragging = -1;
+    schedulePush();
+  }
+});
+
+gradWrap.addEventListener('contextmenu', function(e) {
+  e.preventDefault();
+  var target = e.target;
+  if (target.classList.contains('stop-handle')) {
+    var idx = parseInt(target.dataset.idx);
+    if (stops.length > 2) {
+      stops.splice(idx, 1);
+      if (selectedStop >= stops.length) selectedStop = stops.length - 1;
+      showEditor();
+      renderGradient();
+      schedulePush();
+    }
+  }
+});
+
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    // Don't delete if focus is on an input
+    if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'SELECT')) return;
+    if (selectedStop >= 0 && selectedStop < stops.length && stops.length > 2) {
+      stops.splice(selectedStop, 1);
+      if (selectedStop >= stops.length) selectedStop = stops.length - 1;
+      showEditor();
+      renderGradient();
+      schedulePush();
+    }
+  }
+});
+
+
+// ── Presets ──────────────────────────────────────────────────────────
+
+var PRESETS = [
+  {
+    name: 'Sap Flow',
+    colors: [[0,40,0],[0,70,0],[10,110,10],[34,180,34],[80,255,80]]
+  },
+  {
+    name: 'OKLCH Rainbow',
+    colors: [[251,3,64],[188,82,1],[2,155,72],[3,129,252],[184,1,169]]
+  },
+  {
+    name: 'Red-Blue',
+    colors: [[251,3,64],[252,30,140],[126,1,145],[29,0,79],[26,48,250]]
+  },
+  {
+    name: 'Cyan-Gold',
+    colors: [[2,144,145],[29,118,252],[53,0,97],[150,1,7],[166,100,1]]
+  },
+  {
+    name: 'Green-Purple',
+    colors: [[2,163,12],[2,149,108],[2,135,212],[30,67,251],[40,0,86]]
+  },
+  {
+    name: 'Orange-Teal',
+    colors: [[137,27,0],[188,82,1],[116,119,1],[2,163,14],[2,149,112]]
+  },
+  {
+    name: 'Magenta-Cyan',
+    colors: [[252,20,162],[148,1,6],[186,90,1],[26,155,1],[2,144,145]]
+  },
+  {
+    name: 'Sunset Sky',
+    colors: [[50,40,130],[125,50,115],[210,60,55],[175,60,5],[210,110,15]]
+  }
+];
+
+// Convert an RGB triplet to approximate OKLCH hue
+function rgbToApproxHue(r, g, b) {
+  // Linearize sRGB
+  function toLinear(v) {
+    v = v / 255;
+    return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }
+  var lr = toLinear(r), lg = toLinear(g), lb = toLinear(b);
+  // Linear sRGB to OKLab (inverse of our matrix path)
+  var l = 0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb;
+  var m = 0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb;
+  var s = 0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb;
+  var l_ = Math.cbrt(l), m_ = Math.cbrt(m), s_ = Math.cbrt(s);
+  var Lab_L = 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_;
+  var Lab_a = 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_;
+  var Lab_b = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_;
+  var C = Math.sqrt(Lab_a * Lab_a + Lab_b * Lab_b);
+  var h = Math.atan2(Lab_b, Lab_a) * 180 / Math.PI;
+  if (h < 0) h += 360;
+  return { L: Lab_L, C: C, h: h };
+}
+
+function loadPreset(preset) {
+  stops = [];
+  var colors = preset.colors;
+  for (var i = 0; i < colors.length; i++) {
+    var pos = i / (colors.length - 1);
+    var oklch = rgbToApproxHue(colors[i][0], colors[i][1], colors[i][2]);
+    stops.push({
+      pos: pos,
+      h: Math.round(oklch.h),
+      L: oklch.L,
+      C: oklch.C,
+      autoL: false,
+      autoC: false
+    });
+  }
+  selectedStop = 0;
+  showEditor();
+  renderGradient();
+  schedulePush();
+}
+
+// Build preset buttons
+(function() {
+  var container = document.getElementById('presetContainer');
+  var grid = document.createElement('div');
+  grid.className = 'preset-grid';
+  PRESETS.forEach(function(p) {
+    var btn = document.createElement('button');
+    btn.className = 'preset-btn';
+    var colors = p.colors.map(function(c) { return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')'; });
+    btn.style.background = 'linear-gradient(90deg, ' + colors.join(', ') + ')';
+    btn.onclick = function() { loadPreset(p); };
+    var lbl = document.createElement('span');
+    lbl.className = 'preset-label';
+    lbl.textContent = p.name;
+    btn.appendChild(lbl);
+    grid.appendChild(btn);
+  });
+  container.appendChild(grid);
+})();
+
+
+// ── ESP32 Connection ────────────────────────────────────────────────
+
+var espConnected = false;
+var espBase = '';
+var pushTimer = null;
+
+function connectEsp() {
+  var ip = document.getElementById('espIp').value.trim();
+  if (!ip) return;
+  espBase = 'http://' + ip;
+  var dot = document.getElementById('statusDot');
+  var txt = document.getElementById('statusText');
+  dot.className = 'status-dot err';
+  txt.textContent = 'Connecting...';
+
+  fetch(espBase + '/status', { signal: AbortSignal.timeout(3000) })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      espConnected = true;
+      dot.className = 'status-dot ok';
+      var info = 'Connected';
+      if (data.brightness !== undefined) info += ' | Brightness: ' + data.brightness;
+      if (data.rssi !== undefined) info += ' | RSSI: ' + data.rssi + ' dBm';
+      txt.textContent = info;
+    })
+    .catch(function() {
+      espConnected = false;
+      dot.className = 'status-dot err';
+      txt.textContent = 'Connection failed';
+    });
+}
+
+function generateHexString(nPixels) {
+  var hex = '';
+  for (var i = 0; i < nPixels; i++) {
+    var pos = nPixels === 1 ? 0 : i / (nPixels - 1);
+    var rgb = gradientColorAt(pos);
+    hex += ('0' + rgb[0].toString(16)).slice(-2);
+    hex += ('0' + rgb[1].toString(16)).slice(-2);
+    hex += ('0' + rgb[2].toString(16)).slice(-2);
+  }
+  return hex;
+}
+
+function sendToStrip() {
+  if (!espConnected) { connectEsp(); return; }
+  var n = parseInt(document.getElementById('pixelCount').value) || 150;
+  var hex = generateHexString(n);
+  fetch(espBase + '/devcolor', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'data=' + hex
+  }).catch(function(e) {
+    document.getElementById('statusText').textContent = 'Send failed: ' + e.message;
+  });
+}
+
+function schedulePush() {
+  if (!document.getElementById('autoPush').checked || !espConnected) return;
+  if (pushTimer) clearTimeout(pushTimer);
+  pushTimer = setTimeout(function() {
+    sendToStrip();
+    pushTimer = null;
+  }, 100);
+}
+
+
+// ── Export ───────────────────────────────────────────────────────────
+
+function sampleGradient(nStops) {
+  var result = [];
+  for (var i = 0; i < nStops; i++) {
+    var pos = nStops === 1 ? 0 : i / (nStops - 1);
+    result.push(gradientColorAt(pos));
+  }
+  return result;
+}
+
+function copyC() {
+  var n = parseInt(document.getElementById('exportStops').value);
+  var samples = sampleGradient(n);
+  var lines = ['static const RGB gradient[] = {'];
+  for (var i = 0; i < samples.length; i++) {
+    var s = samples[i];
+    var comma = i < samples.length - 1 ? ',' : '';
+    lines.push('    {' + pad3(s[0]) + ', ' + pad3(s[1]) + ', ' + pad3(s[2]) + '}' + comma);
+  }
+  lines.push('};');
+  lines.push('static const uint8_t gradientCount = sizeof(gradient) / sizeof(gradient[0]);');
+  copyText(lines.join('\n'));
+}
+
+function pad3(v) {
+  var s = '' + v;
+  while (s.length < 3) s = ' ' + s;
+  return s;
+}
+
+function copyHex() {
+  var n = parseInt(document.getElementById('exportStops').value);
+  var samples = sampleGradient(n);
+  var hex = '';
+  for (var i = 0; i < samples.length; i++) {
+    hex += ('0' + samples[i][0].toString(16)).slice(-2);
+    hex += ('0' + samples[i][1].toString(16)).slice(-2);
+    hex += ('0' + samples[i][2].toString(16)).slice(-2);
+  }
+  copyText(hex);
+}
+
+function copyText(text) {
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(text);
+  } else {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  }
+  var fb = document.getElementById('copyFeedback');
+  fb.classList.add('show');
+  setTimeout(function() { fb.classList.remove('show'); }, 1500);
+}
+
+
+// ── Init ────────────────────────────────────────────────────────────
+
+renderGradient();
+showEditor();
+
+window.addEventListener('resize', function() { renderGradient(); });
+</script>
+</body>
+</html>

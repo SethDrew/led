@@ -4,6 +4,9 @@
 #define LED_OFFSET 0
 #endif
 
+uint8_t devColorBuf[NUM_PIXELS * 3] = {0};
+bool devColorFresh = false;
+
 // ── Adafruit gamma8 table (gamma=2.8) ──────────────────────────────
 static const uint8_t gamma8[256] = {
     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
@@ -483,6 +486,27 @@ void renderGradient(Adafruit_NeoPixel &strip, const EffectState &state) {
         uint8_t r = (uint16_t)((c >> 16) & 0xFF) * br / 255;
         uint8_t g = (uint16_t)((c >> 8) & 0xFF) * br / 255;
         uint8_t b = (uint16_t)(c & 0xFF) * br / 255;
+        strip.setPixelColor(i + LED_OFFSET, r, g, b);
+    }
+}
+
+// ── Dev Color (external preview buffer) ──────────────────────────
+void renderDevColor(Adafruit_NeoPixel &strip, const EffectState &state) {
+    uint16_t n = strip.numPixels();
+
+    // Hybrid gamma on brightness scalar (not per-channel)
+    uint8_t br = gammaHybrid(state.brightness);
+
+    // Clear unused leading pixels
+    for (uint16_t i = 0; i < LED_OFFSET && i < n; i++) {
+        strip.setPixelColor(i, 0);
+    }
+
+    uint16_t visible = n - LED_OFFSET;
+    for (uint16_t i = 0; i < visible; i++) {
+        uint8_t r = (uint16_t)devColorBuf[i * 3 + 0] * br / 255;
+        uint8_t g = (uint16_t)devColorBuf[i * 3 + 1] * br / 255;
+        uint8_t b = (uint16_t)devColorBuf[i * 3 + 2] * br / 255;
         strip.setPixelColor(i + LED_OFFSET, r, g, b);
     }
 }

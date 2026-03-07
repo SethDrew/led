@@ -10,7 +10,7 @@
 #include "wifi_credentials_local.h"
 
 // All output pins
-static const uint8_t PINS[] = {1, 5, 6, 7, 8, 9, 10, 20, 21};
+static const uint8_t PINS[] = {5};
 static const uint8_t NUM_STRIPS = sizeof(PINS) / sizeof(PINS[0]);
 Adafruit_NeoPixel strips[NUM_STRIPS];
 Adafruit_NeoPixel &strip = strips[0]; // web API controls brightness via first strip
@@ -76,9 +76,34 @@ void handleUploadData() {
     }
 }
 
+void handleDevColor() {
+    if (server.hasArg("data")) {
+        String hex = server.arg("data");
+        uint16_t len = hex.length() / 2;
+        if (len > NUM_PIXELS * 3) len = NUM_PIXELS * 3;
+        for (uint16_t i = 0; i < len; i++) {
+            char hi = hex.charAt(i * 2);
+            char lo = hex.charAt(i * 2 + 1);
+            uint8_t nib_hi = (hi >= 'a') ? (hi - 'a' + 10) : (hi >= 'A') ? (hi - 'A' + 10) : (hi - '0');
+            uint8_t nib_lo = (lo >= 'a') ? (lo - 'a' + 10) : (lo >= 'A') ? (lo - 'A' + 10) : (lo - '0');
+            devColorBuf[i] = (nib_hi << 4) | nib_lo;
+        }
+        state.effect = DEV_COLOR;
+        devColorFresh = true;
+    }
+    server.send(200, "text/plain", "OK");
+}
+
 void handleStatus() {
+    const char *effectName;
+    switch (state.effect) {
+        case RAINBOW:   effectName = "rainbow";   break;
+        case GRADIENT:  effectName = "gradient";   break;
+        case DEV_COLOR: effectName = "dev_color";  break;
+        default:        effectName = "rainbow";    break;
+    }
     String json = "{";
-    json += "\"effect\":\"" + String(state.effect == RAINBOW ? "rainbow" : "gradient") + "\",";
+    json += "\"effect\":\"" + String(effectName) + "\",";
     json += "\"brightness\":" + String(state.brightness) + ",";
     json += "\"cycleTime\":" + String(state.cycleTimeMs) + ",";
     const char *palName;
@@ -112,6 +137,7 @@ void handleSetEffect() {
         String e = server.arg("effect");
         if (e == "rainbow") state.effect = RAINBOW;
         else if (e == "gradient") state.effect = GRADIENT;
+        else if (e == "dev_color") state.effect = DEV_COLOR;
     }
     server.send(200, "text/plain", "OK");
 }
@@ -258,6 +284,8 @@ void setup() {
     server.on("/brightness", HTTP_POST, handleSetBrightness);
     server.on("/cycletime", HTTP_POST, handleSetCycleTime);
     server.on("/palette", HTTP_POST, handleSetPalette);
+    server.on("/devcolor", HTTP_POST, handleDevColor);
+    server.enableCORS(true);
     server.begin();
     Serial.println("[Web] Server started on port 80");
 }
@@ -288,6 +316,9 @@ void loop() {
         switch (state.effect) {
             case GRADIENT:
                 renderGradient(strips[i], state);
+                break;
+            case DEV_COLOR:
+                renderDevColor(strips[i], state);
                 break;
             default: // RAINBOW
                 renderRainbow(strips[i], state);

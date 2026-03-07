@@ -56,6 +56,7 @@
   <div class="btn-group">
     <button class="btn btn-effect" id="btn-rainbow" onclick="setEffect('rainbow')">Rainbow</button>
     <button class="btn btn-effect" id="btn-gradient" onclick="setEffect('gradient')">Gradient</button>
+    <button class="btn btn-effect" id="btn-devcolor" onclick="setEffect('dev_color')">Dev Color</button>
   </div>
 </div>
 
@@ -82,6 +83,10 @@
 <div class="section hidden" id="sec-palette">
   <div class="section-label">Palette</div>
   <div id="palette-container"></div>
+</div>
+
+<div class="section hidden" id="sec-devcolor">
+  <div class="section-label" style="color:#e94560;">Receiving from design tool</div>
 </div>
 
 <div class="status" id="status">Connecting...</div>
@@ -162,12 +167,14 @@ function setPalette(p) {
 function updateUI(s) {
   document.getElementById('btn-rainbow').classList.toggle('active', s.effect==='rainbow');
   document.getElementById('btn-gradient').classList.toggle('active', s.effect==='gradient');
+  document.getElementById('btn-devcolor').classList.toggle('active', s.effect==='dev_color');
   document.getElementById('brightness').value = s.brightness;
   document.getElementById('br-val').textContent = s.brightness;
   document.getElementById('cycletime').value = msToSlider(s.cycleTime);
   document.getElementById('ct-val').textContent = fmtCycle(s.cycleTime);
   document.getElementById('sec-cycletime').classList.toggle('hidden', s.effect!=='rainbow');
   document.getElementById('sec-palette').classList.toggle('hidden', s.effect!=='gradient');
+  document.getElementById('sec-devcolor').classList.toggle('hidden', s.effect!=='dev_color');
   allPaletteIds.forEach(function(pid) {
     var el = document.getElementById('btn-' + pid);
     if (el) el.classList.toggle('active', s.palette === pid);

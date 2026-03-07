@@ -1789,7 +1789,7 @@ entries:
     confidence: low
     source:
       - audio-reactive/research/landscape/RESEARCH_AUDIO_VISUAL_MAPPING.md
-      - audio-reactive/library/VJ_AUDIO_VISUAL_MAPPING.md
+      - library/VJ_AUDIO_VISUAL_MAPPING.md
     tags: [architecture, philosophy, future]
     relates_to: [two-quality-axes, wled-sr-reimplemented, fluora-pixelair-prior-art, zcr-redundant-with-fft]
     notes: >
@@ -1814,7 +1814,7 @@ entries:
     status: validated
     warmth: low
     confidence: high
-    source: audio-reactive/library/VJ_AUDIO_VISUAL_MAPPING.md
+    source: library/VJ_AUDIO_VISUAL_MAPPING.md
     tags: [audio-features, dead-end]
     relates_to: [vj-conventions-reuse-question, two-quality-axes]
     notes: >
@@ -1834,7 +1834,7 @@ entries:
       Deleted analysis/scripts/ (32 scripts, ~12K LOC), analysis/taste/ (13 reports),
       analysis/algorithms/ (11 reports), analysis/harmonix/ (9 reports). All conclusions
       already captured in ledger entries. Three reference docs moved to
-      audio-reactive/library/ (see INDEX.md there).
+      library/ (see INDEX.md there).
     status: integrated
     warmth: low
     confidence: high

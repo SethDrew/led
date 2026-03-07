@@ -32,7 +32,7 @@ What happens in music that LEDs should respond to.
 
 ### Axis 3: Audio Features
 
-What we can compute. Two key principles; full catalog in `library/AUDIO_FEATURES.md`.
+What we can compute. Two key principles; full catalog in `AUDIO_FEATURES.md` (library).
 
 **Derivatives over absolutes:** Build vs climax has identical static features (RMS +/-0.5%) but climax brightens 58x faster. The derivative is the signal, not position. (Ledger: `derivatives-over-absolutes`)
 
@@ -44,7 +44,7 @@ The visual vocabulary, independent of what triggers them. Three categories: fore
 
 Foreground vs background is a composition decision, not a behavior property. The C++ `Effect.h` formalizes this: `BackgroundEffect` uses REPLACE, `ForegroundEffect` uses ADD.
 
-See `library/GENERATIVE_PATTERNS_CATALOG.md` for the full visual pattern catalog.
+Full visual pattern catalog in `MATHY_EFFECTS_CATALOG.md` (library).
 
 ### Axis 5: Temporal Scope
 
@@ -86,7 +86,7 @@ The bridge between audio features and visual parameters.
 | Frequency band | Spatial position | Bass at base, treble at tips |
 | Onset strength | Flash intensity | Harder hit -> brighter flash (x^0.9) |
 
-See `library/VJ_AUDIO_VISUAL_MAPPING.md` for VJ prior art and proven constants. See `library/COLOR_ON_WS2812B.md` for perceptual color on hardware.
+VJ prior art and proven constants in `VJ_AUDIO_VISUAL_MAPPING.md` (library). Perceptual color on hardware in `COLOR_ENGINEERING.md` (library).
 
 ---
 
@@ -181,7 +181,7 @@ Effects declare abstract input roles, not specific signals. The same role can be
 - **E: Space + Position + Phase** (spatial animation) -- spatially-distributed animation with cyclic motion.
 - **F: Intensity + Texture + Mood** (ambient character) -- continuous ambient texture with no discrete events.
 
-See `library/INPUT_ROLE_MATRIX.md` for the full P/S mapping table across all effects.
+Full P/S mapping table across all effects in `INPUT_ROLE_MATRIX.md` (library).
 
 ---
 
@@ -197,7 +197,7 @@ Sculptures have three distinct coordinate systems. Confusing them leads to wrong
 
 **What 3D coordinates unlock:** World-space rendering correct from every viewing angle. Perlin noise, plasma, voronoi, metaballs, ripple, reaction-diffusion all become significantly better. **Practical path:** photograph sculpture with ruler, annotate key LEDs, interpolate, store as `"positions": [[x,y,z], ...]` in `sculptures.json`. Even approximate coordinates (within 1-2cm) suffice.
 
-See `library/TOPOLOGY_NATIVE_EFFECTS.md` for topology-aware idioms and 3D-dependent effects.
+Topology-aware idioms and 3D-dependent effects in `NATURE_TOPOLOGY_EFFECTS_CATALOG.md` (library).
 
 ---
 
@@ -248,4 +248,4 @@ Audio Features --> [ Section Detector: Build/Drop/Break state, boundaries ]
 - **Spatial rotation** -- alternate between topology modes (full-strip, zoned, height-mapped, branch-independent).
 - **Novelty injection** -- periodically introduce a rare effect; surprise prevents habituation.
 
-See `library/ENTITY_INTERACTIONS.md` for multi-entity interaction types that create visual complexity.
+Multi-entity interaction types in `ENTITY_INTERACTIONS.md` (library).

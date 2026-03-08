@@ -342,4 +342,4 @@ The effect would become richer without becoming more complex — each dimension 
 - McAdams (2019) "Timbre as a Structuring Force in Music" — timbral dimensions: brightness, roughness, attack time, spectral flux
 - Alluri & Toiviainen — found 50-57% of valence/arousal variance predicted by ratio of high/low frequency energy, attack slope, spectral regularity
 - Spotify audio features — valence computation uses undisclosed combination of spectral, harmonic, and tonal features; validates that single-scalar mood requires multi-feature input
-- Project ledger entries: `centroid-position-clustering`, `feelings-are-contextual`, `airiness-context-deviation`, `derivatives-over-absolutes`
+- Project ledger entries: `centroid-position-clustering`, `feelings-are-contextual`, `derivatives-over-absolutes`

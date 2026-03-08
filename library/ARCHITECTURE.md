@@ -36,7 +36,7 @@ What we can compute. Two key principles; full catalog in `AUDIO_FEATURES.md` (li
 
 **Derivatives over absolutes:** Build vs climax has identical static features (RMS +/-0.5%) but climax brightens 58x faster. The derivative is the signal, not position. (Ledger: `derivatives-over-absolutes`)
 
-**Context deviation:** All features are relative to a running baseline. The adaptation time constant IS the temporal scope. A subjective quality is not a fixed spectral shape -- it's deviation from the surrounding context's norm. (Ledger: `airiness-context-deviation`)
+**Context deviation:** All features are relative to a running baseline. The adaptation time constant IS the temporal scope. A subjective quality is not a fixed spectral shape -- it's deviation from the surrounding context's norm. (Ledger: `feelings-are-contextual`)
 
 ### Axis 4: LED Behaviors
 
@@ -99,7 +99,7 @@ Precise definitions for terms used throughout the project. Prevents re-deriving 
 - **Groove effect:** Responds to continuous rhythmic feel. Dense percussion. `tempo_pulse`, `rap_pulse`. (`accent-vs-groove-effects`)
 - **Foreground / Background / Standalone:** Foreground = transient, ADD blend. Background = persistent, REPLACE blend. Standalone = self-contained composition.
 - **Derivatives vs absolutes:** Rate-of-change is the signal. Build vs climax have identical RMS but climax brightens 58x faster. (`derivatives-over-absolutes`)
-- **Context deviation:** Feelings are relative to surrounding context, not absolute values. Use deviation-from-running-average. (`airiness-context-deviation`)
+- **Context deviation:** Feelings are relative to surrounding context, not absolute values. Use deviation-from-running-average. (`feelings-are-contextual`)
 - **The two quality axes:** Audio decomposition and LED mapping quality are independent. WLED proves crude audio + great visuals = great product. (`two-quality-axes`)
 - **Flourish ratio:** Off-grid vs on-grid tap ratio. Ambient (>70%), accent (30-70%), groove (<30%). (`flourish-ratio`)
 - **Absint:** |d(RMS)/dt| integrated over 150ms. Measures how much loudness is *changing*. Primary beat detection for non-dense music.
@@ -181,7 +181,7 @@ Effects declare abstract input roles, not specific signals. The same role can be
 - **E: Space + Position + Phase** (spatial animation) -- spatially-distributed animation with cyclic motion.
 - **F: Intensity + Texture + Mood** (ambient character) -- continuous ambient texture with no discrete events.
 
-Full P/S mapping table across all effects in `INPUT_ROLE_MATRIX.md` (library).
+Full P/S mapping table across all effects in `INPUT_ROLE_MATRIX.md` (library). Per-band peak-decay normalization — the shared preprocessing that puts all INTENSITY sources on a 0-1 scale — in `PER_BAND_NORMALIZATION.md` (library).
 
 ---
 

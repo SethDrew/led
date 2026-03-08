@@ -20,7 +20,7 @@ Equal-loudness curves (A/C-weighting, ISO 226) applied to mastered music **doubl
 
 Raw bass energy is ~100x treble energy. Without normalization, bass always dominates. Normalizing each band against its own recent history puts all bands on a 0-1 scale where 1.0 = "loud for this band right now."
 
-This matches the "context deviation" principle — what matters is deviation from a band's own recent context, not absolute energy levels (ledger: `context-deviation`, originally `airiness-context-deviation`).
+This matches the "context deviation" principle — what matters is deviation from a band's own recent context, not absolute energy levels (ledger: `feelings-are-contextual`).
 
 ---
 
@@ -140,6 +140,6 @@ These belong in downstream consumers (events layer, temporal scope), not in norm
 |-------|-----------|
 | `per-band-normalization-with-dropout-handling` | Original design (dropout handling now deferred to events layer) |
 | `equal-loudness-weighting-dead-end` | Why we rejected perceptual weighting curves |
-| `airiness-context-deviation` | Philosophical foundation: feelings = context deviation |
+| `feelings-are-contextual` | Philosophical foundation: feelings = context deviation |
 | `adaptation-time-constant-is-temporal-scope` | Decay factor = temporal scope of normalization |
 | `normalization-prior-art-audit` | Confirmed this matches industry standard |

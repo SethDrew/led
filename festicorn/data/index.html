@@ -64,8 +64,7 @@
   <div class="section-label">Brightness</div>
   <div class="slider-container">
     <input type="range" id="brightness" min="0" max="255" value="128"
-      oninput="document.getElementById('br-val').textContent=this.value"
-      onchange="postVal('/brightness','brightness',this.value)">
+      oninput="document.getElementById('br-val').textContent=this.value; postValDebounced('/brightness','brightness',this.value)">
     <span class="slider-val" id="br-val">128</span>
   </div>
 </div>
@@ -74,8 +73,7 @@
   <div class="section-label">Cycle Time</div>
   <div class="slider-container">
     <input type="range" id="cycletime" min="0" max="1000" step="1" value="71"
-      oninput="document.getElementById('ct-val').textContent=fmtCycle(sliderToMs(this.value))"
-      onchange="postVal('/cycletime','cycletime',sliderToMs(this.value))">
+      oninput="document.getElementById('ct-val').textContent=fmtCycle(sliderToMs(this.value)); postValDebounced('/cycletime','cycletime',sliderToMs(this.value))">
     <span class="slider-val" id="ct-val">8.0s</span>
   </div>
 </div>
@@ -156,6 +154,12 @@ function postVal(path, key, val) {
   fetch(path, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body: key+'='+val});
 }
+var _debounceTimers = {};
+function postValDebounced(path, key, val, delay) {
+  if (!delay) delay = 50;
+  if (_debounceTimers[path]) clearTimeout(_debounceTimers[path]);
+  _debounceTimers[path] = setTimeout(function() { postVal(path, key, val); }, delay);
+}
 function setEffect(e) {
   fetch('/effect', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body: 'effect='+e}).then(function(){pollStatus()});
@@ -172,7 +176,7 @@ function updateUI(s) {
   document.getElementById('br-val').textContent = s.brightness;
   document.getElementById('cycletime').value = msToSlider(s.cycleTime);
   document.getElementById('ct-val').textContent = fmtCycle(s.cycleTime);
-  document.getElementById('sec-cycletime').classList.toggle('hidden', s.effect!=='rainbow');
+  document.getElementById('sec-cycletime').classList.toggle('hidden', s.effect==='dev_color');
   document.getElementById('sec-palette').classList.toggle('hidden', s.effect!=='gradient');
   document.getElementById('sec-devcolor').classList.toggle('hidden', s.effect!=='dev_color');
   allPaletteIds.forEach(function(pid) {

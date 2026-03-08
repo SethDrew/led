@@ -47,6 +47,8 @@
 
   /* Stop editor */
   .editor-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .editor-row-title { font-size: 0.8em; color: #888; margin-bottom: 2px; margin-top: 10px; }
+  .editor-row-title:first-child { margin-top: 0; }
   .editor-row label { min-width: 24px; font-size: 0.85em; color: #888; }
   .editor-row input[type=range] { flex: 1; accent-color: #e94560; }
   .editor-row .val { min-width: 50px; text-align: right; font-variant-numeric: tabular-nums; font-size: 0.9em; }
@@ -156,28 +158,28 @@
   <div class="section-label">Stop Editor</div>
   <div class="editor-grid">
     <div class="editor-sliders">
+      <div class="editor-row-title">Hue</div>
       <div class="editor-row">
-        <label>H</label>
         <input type="range" id="sliderH" min="0" max="360" step="1" value="0">
         <span class="val" id="valH">0</span>
       </div>
+      <div class="editor-row-title">Brightness</div>
       <div class="editor-row">
-        <label>L</label>
         <input type="range" id="sliderL" min="0" max="100" step="1" value="75">
         <span class="val" id="valL">0.75</span>
       </div>
       <div class="checkbox-row">
         <input type="checkbox" id="autoL" checked>
-        <label for="autoL">Auto lightness (hue-dependent curve)</label>
+        <label for="autoL">Auto &mdash; follows perceptual curve so each hue looks equally bright on LEDs</label>
       </div>
-      <div class="editor-row" style="margin-top:8px">
-        <label>C</label>
+      <div class="editor-row-title">Chroma</div>
+      <div class="editor-row">
         <input type="range" id="sliderC" min="0" max="100" step="1" value="100">
         <span class="val" id="valC">0.200</span>
       </div>
       <div class="checkbox-row">
         <input type="checkbox" id="autoC" checked>
-        <label for="autoC">Auto chroma (max gamut)</label>
+        <label for="autoC">Auto &mdash; pushes to the most saturated color the LEDs can show for this hue</label>
       </div>
     </div>
     <div class="swatch" id="stopSwatch"></div>

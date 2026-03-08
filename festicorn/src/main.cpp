@@ -307,6 +307,17 @@ void loop() {
     ArduinoOTA.handle();
     server.handleClient();
 
+    // Phase accumulator for smooth animation
+    static uint32_t lastFrameMs = 0;
+    uint32_t now = millis();
+    if (lastFrameMs == 0) lastFrameMs = now;
+    uint32_t dt = now - lastFrameMs;
+    lastFrameMs = now;
+    if (state.cycleTimeMs > 0) {
+        effectPhase += (float)dt / state.cycleTimeMs;
+        if (effectPhase >= 1.0f) effectPhase -= (int)effectPhase;
+    }
+
     for (uint8_t i = 0; i < NUM_STRIPS; i++) {
         // Brightness is applied via gammaHybrid inside render functions
         // (gamma on scalar brightness, not per-channel). Don't use

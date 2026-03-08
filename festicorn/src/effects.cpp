@@ -6,6 +6,7 @@
 
 uint8_t devColorBuf[NUM_PIXELS * 3] = {0};
 bool devColorFresh = false;
+float effectPhase = 0.0f;
 
 // ── Adafruit gamma8 table (gamma=2.8) ──────────────────────────────
 static const uint8_t gamma8[256] = {
@@ -188,7 +189,6 @@ static const uint8_t oklchVarL[256][3] = {
 
 // ── Rainbow Cycle (OKLCH variable-L, full strip) ───────────────────
 void renderRainbow(Adafruit_NeoPixel &strip, const EffectState &state) {
-    uint32_t ms = millis();
     uint16_t n = strip.numPixels();
 
     // Hybrid gamma on brightness scalar (not per-channel)
@@ -200,7 +200,7 @@ void renderRainbow(Adafruit_NeoPixel &strip, const EffectState &state) {
     }
 
     uint16_t visible = n - LED_OFFSET;
-    uint16_t baseHue = (uint16_t)((uint64_t)(ms % state.cycleTimeMs) * 65536ULL / state.cycleTimeMs);
+    uint16_t baseHue = (uint16_t)(effectPhase * 65536.0f);
 
     for (uint16_t i = 0; i < visible; i++) {
         uint16_t hue = baseHue + (i * 65536UL / visible);
@@ -479,9 +479,13 @@ void renderGradient(Adafruit_NeoPixel &strip, const EffectState &state) {
         strip.setPixelColor(i, 0);
     }
 
+    float offset = effectPhase;
+
     uint16_t visible = n - LED_OFFSET;
     for (uint16_t i = 0; i < visible; i++) {
         float t = (float)i / (visible - 1);
+        t = t + offset;
+        if (t >= 1.0f) t -= 1.0f;
         uint32_t c = lerpPalette(pal, count, t);
         uint8_t r = (uint16_t)((c >> 16) & 0xFF) * br / 255;
         uint8_t g = (uint16_t)((c >> 8) & 0xFF) * br / 255;

@@ -709,7 +709,7 @@ entries:
     status: spark
     warmth: low
     confidence: high
-    source: research/docs/HETZNER_SETUP.md
+    source: []  # HETZNER_SETUP.md deleted in library reorg
     tags: [infrastructure, development, future]
     relates_to: []
     notes: >
@@ -759,7 +759,7 @@ entries:
     status: validated
     warmth: medium
     confidence: high
-    source: audio-reactive/research/analysis/compare_hpss_vs_flux.py
+    source: audio-reactive/research/ledger-research-scripts/compare_hpss_vs_flux.py
     tags: [source-separation, hpss, feature-extraction, experiments]
     relates_to: [hpss-for-realtime, band-zone-pulse-effect, flux-4frame-avg]
     notes: >
@@ -1626,7 +1626,7 @@ entries:
     status: exploring
     warmth: high
     confidence: high
-    source: audio-reactive/algorithms/per_band_normalization.md
+    source: library/arch-impl/axis6-composition/PER_BAND_NORMALIZATION.md
     tags: [feature-extraction, effects, architecture, perception]
     relates_to: [equal-loudness-weighting-dead-end, rolling-integral-sustained-energy, feelings-are-contextual, accent-vs-groove-effects, normalization-prior-art-audit]
     notes: >
@@ -1657,7 +1657,7 @@ entries:
     status: validated
     warmth: medium
     confidence: high
-    source: audio-reactive/ARCHITECTURE.md
+    source: library/ARCHITECTURE.md
     tags: [architecture, feature-extraction, philosophy]
     relates_to: [accent-vs-groove-effects, flourish-ratio, two-quality-axes]
     notes: >
@@ -1682,7 +1682,7 @@ entries:
     status: exploring
     warmth: medium
     confidence: medium
-    source: audio-reactive/ARCHITECTURE.md
+    source: library/ARCHITECTURE.md
     tags: [feature-extraction, architecture, future]
     relates_to: [band-zone-pulse-effect, onset-vs-absint-comparison, signal-processing-tree]
     notes: >
@@ -1737,7 +1737,7 @@ entries:
     status: validated
     warmth: high
     confidence: high
-    source: [audio-reactive/ARCHITECTURE.md, audio-reactive/effects/energy_color.py]
+    source: [library/ARCHITECTURE.md, audio-reactive/effects/energy_color.py]
     tags: [architecture, feature-extraction, perception]
     relates_to: [feelings-are-contextual, per-band-normalization-with-dropout-handling, rolling-integral-sustained-energy, normalization-events-separation, peak-decay-demand-charge-analogy]
     notes: >
@@ -1788,8 +1788,8 @@ entries:
     warmth: medium
     confidence: low
     source:
-      - audio-reactive/research/landscape/RESEARCH_AUDIO_VISUAL_MAPPING.md
-      - library/VJ_AUDIO_VISUAL_MAPPING.md
+      - library/arch-impl/axis7-perceptual/AUDIO_VISUAL_MAPPING_PATTERNS.md
+      - library/arch-impl/axis7-perceptual/VJ_AUDIO_VISUAL_MAPPING.md
     tags: [architecture, philosophy, future]
     relates_to: [two-quality-axes, wled-sr-reimplemented, fluora-pixelair-prior-art, zcr-redundant-with-fft]
     notes: >
@@ -1814,7 +1814,7 @@ entries:
     status: validated
     warmth: low
     confidence: high
-    source: library/VJ_AUDIO_VISUAL_MAPPING.md
+    source: library/arch-impl/axis7-perceptual/VJ_AUDIO_VISUAL_MAPPING.md
     tags: [audio-features, dead-end]
     relates_to: [vj-conventions-reuse-question, two-quality-axes]
     notes: >
@@ -2005,7 +2005,7 @@ entries:
     status: resonates
     warmth: high
     confidence: medium
-    source: architecture/AUTOMATED-LIGHTSHOW.md
+    source: library/arch-impl/axis6-composition/SHOW_AUTOMATION.md
     tags: [visual-design, topology, effects, art, philosophy]
     relates_to: [two-quality-axes, wled-sr-reimplemented]
     notes: >
@@ -2032,7 +2032,7 @@ entries:
     status: exploring
     warmth: high
     confidence: medium
-    source: [architecture/AUTOMATED-LIGHTSHOW.md, web research (SoundSwitch, MaestroDMX, Engine Lighting, BeatNet, BEAST, ISMIR papers, madmom, librosa, essentia)]
+    source: [library/arch-impl/axis6-composition/SHOW_AUTOMATION.md, web research (SoundSwitch, MaestroDMX, Engine Lighting, BeatNet, BEAST, ISMIR papers, madmom, librosa, essentia)]
     tags: [architecture, feature-extraction, future, phrase-detection]
     relates_to: [event-detection-viewer-only, d2-spike-drop-detector, perception-is-layered-by-timescale, normalization-events-separation, rolling-integral-sustained-energy]
     notes: >
@@ -2371,7 +2371,7 @@ entries:
     status: validated
     warmth: medium
     confidence: high
-    source: effects/test_tempo_3way.py, research/tempo_3way_results.json
+    source: effects/test_tempo_3way.py  # tempo_3way_results.json deleted in library reorg
     tags: [tempo, onset, fusion, autocorrelation, benchmark]
     relates_to: [onset-vs-absint-comparison, onset-envelope-for-tempo]
     notes: >

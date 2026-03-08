@@ -34,6 +34,7 @@ struct EffectState {
 
 extern uint8_t devColorBuf[NUM_PIXELS * 3];
 extern bool devColorFresh;
+extern float effectPhase;  // 0.0 to 1.0, accumulated in main loop
 
 void renderRainbow(Adafruit_NeoPixel &strip, const EffectState &state);
 void renderGradient(Adafruit_NeoPixel &strip, const EffectState &state);

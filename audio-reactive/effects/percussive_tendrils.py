@@ -143,8 +143,7 @@ class PercussiveTendrilsEffect(AudioReactiveEffect):
         """Map pot 0-1023 to tendril length scale 0.5x-8.0x and decay 0.78-0.96."""
         t = raw / 1023.0
         self._pot_scale = 0.5 + t * 7.5
-        # Higher pot = slower decay (tendrils linger longer)
-        self._pot_decay = 0.78 + t * 0.18  # 0.78 (fast fade) → 0.96 (slow fade)
+        self._pot_decay = 0.78 + t * 0.18
 
     # ── Wire-path adjacency ─────────────────────────────────────────
 
@@ -375,7 +374,7 @@ class PercussiveTendrilsEffect(AudioReactiveEffect):
         # Tendril length scales with strength × pot multiplier
         base_len = TENDRIL_MIN_LENGTH + strength * (TENDRIL_MAX_LENGTH - TENDRIL_MIN_LENGTH)
         max_len = int(base_len * self._pot_scale)
-        max_len = max(2, min(max_len, self.num_leds))  # clamp to sane range
+        max_len = max(2, min(max_len, self.num_leds))
 
         # Pre-compute BFS path
         path = self._bfs_path(origin, max_len)

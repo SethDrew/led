@@ -208,7 +208,14 @@ def _build_output_targets(sculptures, controllers):
 
     for s in sculptures:
         ctrl = next((c for c in controllers if c['id'] == s['controller']), None)
-        logical_leds = sum(b['count'] for b in s['branches'])
+        if 'num_leds' in s:
+            logical_leds = s['num_leds']
+        elif 'branches' in s:
+            logical_leds = sum(b['count'] for b in s['branches'])
+        elif 'strips' in s:
+            logical_leds = sum(st['count'] for st in s['strips'])
+        else:
+            logical_leds = 0
         targets.append({
             'id': s['id'],
             'name': s['name'],

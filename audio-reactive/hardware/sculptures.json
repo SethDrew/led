@@ -144,5 +144,17 @@
       }
     ],
     "notes": "300 LEDs on single data line (D33). First 185 = linear strip, last 115 = butterfly circle."
+  },
+  {
+    "id": "diffuser_stick",
+    "name": "Diffuser Stick",
+    "controller": "diffuser_stick",
+    "num_leds": 23,
+    "mode": "straight",
+    "strips": [
+      {"name": "A", "pin": 32, "count": 12},
+      {"name": "B", "pin": 12, "count": 11}
+    ],
+    "notes": "Two straight strips on separate data pins. Strip A (pin 32): 12 LEDs, indices 0-11. Strip B (pin 12): 11 LEDs, indices 0-10."
   }
 ]

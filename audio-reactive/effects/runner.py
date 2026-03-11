@@ -328,9 +328,12 @@ class MultiEffect(AudioReactiveEffect):
 class SerialLEDOutput:
     """Sends RGB frames to Arduino via serial."""
 
+    CMD_POT = 0xFC
+
     def __init__(self, port, num_leds, baud_rate=BAUD_RATE):
         self.num_leds = num_leds
         self.ser = None
+        self.pot_value = 512  # default mid-position (0-1023)
 
         if port:
             try:
@@ -340,12 +343,29 @@ class SerialLEDOutput:
                 else:
                     self.ser = serial.Serial(port, baud_rate, timeout=1)
                     time.sleep(2)  # Arduino reset
-                while self.ser.in_waiting:
-                    self.ser.readline()
+                if self.ser.in_waiting:
+                    self.ser.read(self.ser.in_waiting)
                 print(f"  LED output: {port} ({num_leds} LEDs)")
             except Exception as e:
                 print(f"  Serial connection failed: {e}")
                 self.ser = None
+
+    def _drain_and_parse(self):
+        """Read incoming serial data, parsing pot messages (0xFC)."""
+        if not self.ser or not self.ser.in_waiting:
+            return
+        try:
+            data = self.ser.read(self.ser.in_waiting)
+            # Scan for 0xFC pot messages (3 bytes: 0xFC, hi, lo)
+            i = 0
+            while i < len(data) - 2:
+                if data[i] == self.CMD_POT:
+                    self.pot_value = (data[i + 1] << 8) | data[i + 2]
+                    i += 3
+                else:
+                    i += 1
+        except Exception:
+            pass
 
     def send_frame(self, frame):
         """Send RGB frame. frame shape: (num_leds, 3), dtype uint8.
@@ -370,10 +390,8 @@ class SerialLEDOutput:
                 packet.append(checksum)
                 self.ser.write(packet)
                 self.ser.flush()
-                # Drain any Arduino responses (FPS stats, ready signals)
-                # to prevent RX buffer buildup
-                if self.ser.in_waiting:
-                    self.ser.read(self.ser.in_waiting)
+                # Parse incoming data (pot values, stats)
+                self._drain_and_parse()
             except Exception:
                 pass
 
@@ -470,6 +488,10 @@ def run_live(effect, led_output, device_id, brightness_cap=BRIGHTNESS_CAP,
 
             # Send to hardware at fixed rate
             led_output.send_frame(frame)
+
+            # Pass pot value to effect if it supports it
+            if hasattr(effect, 'set_pot_value'):
+                effect.set_pot_value(led_output.pot_value)
 
             # Terminal display
             print_diagnostics(effect, frame_num)

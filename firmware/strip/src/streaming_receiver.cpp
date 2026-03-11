@@ -19,10 +19,17 @@
 // Set:   send 0xFD <id> → writes EEPROM, responds [0xFD, id]
 #define CMD_IDENTIFY 0xFE
 #define CMD_SET_ID   0xFD
+#define CMD_POT      0xFC
 #define EEPROM_ID_ADDR 0
 uint8_t deviceId;
 
 #define LED_PIN 12
+#define POT_PIN A5
+
+// Pot smoothing
+float potSmoothed = 0;
+unsigned long lastPotTime = 0;
+#define POT_INTERVAL_MS 100  // send pot value every 100ms
 
 // NUM_PIXELS set by build flag
 #ifndef NUM_PIXELS
@@ -102,6 +109,9 @@ void setup() {
   strip.clear();
   strip.show();
   delay(100);
+
+  // Init pot smoothing
+  potSmoothed = analogRead(POT_PIN);
 
   Serial.println("LED Streaming Receiver Ready");
   Serial.print("Waiting for frames (");
@@ -186,6 +196,16 @@ void loop() {
   if (rxState == READ_FRAME && (millis() - frameStartTime) > 50) {
     rxState = WAIT_SYNC1;
     framesDropped++;
+  }
+
+  // Send pot value upstream every POT_INTERVAL_MS
+  if (millis() - lastPotTime >= POT_INTERVAL_MS) {
+    potSmoothed += (analogRead(POT_PIN) - potSmoothed) * 0.3;
+    uint16_t potVal = (uint16_t)(potSmoothed + 0.5);
+    Serial.write(CMD_POT);
+    Serial.write((uint8_t)(potVal >> 8));   // high byte
+    Serial.write((uint8_t)(potVal & 0xFF)); // low byte
+    lastPotTime = millis();
   }
 
   // Stats every 2s — only print if actively receiving

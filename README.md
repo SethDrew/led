@@ -1,70 +1,24 @@
-# Audio Explorer
+# LED
 
-An interactive audio visualization and audio interactivity research testbed. It's configured to require no user accounts. It allows you to upload or record and analyze any audio you would like. This audio is stored on your machine only for copyright reasons.
+Interactive LED installation development. Work is ongoing across seven axes of design:
 
-**Live demo:** [audio.sethdrew.com](https://audio.sethdrew.com)
+1. **Topologies** — sculpture shapes and spatial mapping
+2. **Musical Events** — what happens in music that LEDs should respond to
+3. **Audio Features** — what we can compute from audio in real time
+4. **LED Behaviors** — the visual vocabulary (sparkle, pulse, flow, growth...)
+5. **Temporal Scope** — frame-level transients to song-level arcs
+6. **Composition** — how effects layer, blend, and transition
+7. **Perceptual Mapping** — bridging audio features to visual parameters
 
-## What it does
+Commits are welcome across any of these.
 
-- **Waveform + mel spectrogram + band energy** — core audio visualization with cursor sync
-- **Tap annotations** — record what you feel while listening, compare against algorithms
-- **Source separation** — Demucs (deep learning, 4-stem), HPSS (real-time, harmonic/percussive)
-- **Lab experiments** — NMF decomposition, REPET pattern extraction, spectral features
-- **Browser recording** — record system audio via BlackHole or microphone, no install needed
-- **Audio-reactive LED effects** — drive WS2812B LEDs from audio analysis (local only)
+## Active Projects
 
-## Your data
+**Audio Viewer** — browser-based audio analysis and visualization testbed. Waveform, mel spectrogram, tap annotations, source separation (Demucs, HPSS), and real-time LED effect preview. Used for research and effect development.
 
-All uploaded and recorded audio is cached in your browser's **IndexedDB** storage. You can manage your files from the **Record** tab in the app, or clear everything manually:
+**Festicorn** — ESP32-C3 firmware for finalized sculpture installations. Drives WS2812B strips with OKLCH color palettes, gamma-corrected output, OTA updates, and a wireless web UI for live control.
 
-- **Chrome/Edge:** Settings → Privacy → Site Data → `audio.sethdrew.com` → Remove
-- **Firefox:** Settings → Privacy → Manage Data → `audio.sethdrew.com` → Remove
-- **Safari:** Settings → Privacy → Manage Website Data → `audio.sethdrew.com` → Remove
-
-Analysis results (spectrograms, stems, etc.) are also cached locally so repeat visits are instant.
-
-## Run locally with Docker
-
-Docker gives you the full application including Demucs source separation, which requires more resources than the public demo server provides.
-
-### Quick start
-
-```bash
-docker run -p 8080:8080 -v ~/Music:/app/audio-reactive/research/audio-segments ghcr.io/sethdrew/led-viewer
-```
-
-Then open [http://localhost:8080](http://localhost:8080).
-
-The `-v ~/Music:/app/...` flag mounts your music folder into the viewer. Change `~/Music` to wherever your WAV files are.
-
-### Build from source
-
-```bash
-git clone https://github.com/SethDrew/led.git
-cd led
-docker build -t led-viewer .
-docker run -p 8080:8080 -v ~/Music:/app/audio-reactive/research/audio-segments led-viewer
-```
-
-### Requirements
-
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Mac, Windows, Linux)
-- WAV files to analyze (the viewer works with `.wav` format)
-
-### What's included
-
-| Feature | Docker (local) | Public site |
-|---------|---------------|-------------|
-| Analysis + spectrogram | Yes | Yes |
-| Tap annotations | Yes | Yes |
-| Upload / record audio | Yes | Yes |
-| Demucs (4-stem separation) | Yes | No (needs ~4GB RAM) |
-| HPSS (harmonic/percussive) | Yes | Yes |
-| Lab (NMF, REPET, features) | Yes | Yes |
-| Browser recording | Yes | Yes |
-| LED effects | Yes (with hardware) | No |
-
-## Run without Docker
+## Local Setup
 
 ```bash
 git clone https://github.com/SethDrew/led.git
@@ -72,38 +26,19 @@ cd led
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-pip install demucs  # optional, for source separation
+```
+
+Run the viewer:
+```bash
 cd audio-reactive/viewer
 python explore.py
 ```
 
-### Record system audio (macOS)
-
-To record what's playing on your computer, install [BlackHole](https://existential.audio/blackhole/) (free virtual audio driver):
-
-1. Install BlackHole 2ch
-2. Set BlackHole 2ch as your system sound output
-3. Use the Record tab in the viewer
-
-To hear the audio while recording, create a **Multi-Output Device** in Audio MIDI Setup that includes both your speakers and BlackHole, and set that as your output instead.
-
-## Project structure
-
+Optionally install Demucs for 4-stem source separation:
+```bash
+pip install demucs
 ```
-audio-reactive/           — synchronicity-led project
-  viewer/                 — explore.py CLI, viewer.py, web/ (deprecated)
-  effects/                — audio-reactive LED effects
-  hardware/               — sculptures.json, controllers.json
-  research/               — analysis scripts, ledger, datasets
-  ARCHITECTURE.md         — design space framework
-firmware/                 — Arduino/ESP32 LED controller firmware
-static-animations/        — non-audio-reactive LED effects
-```
-
-## Contact
-
-Questions, ideas, or improvements — reach out to seth at sethdrew dot com.
 
 ## License
 
-MIT License.
+MIT

@@ -187,3 +187,143 @@
   id: hard_Track
   recorded: 2026-03-10 20:46
   sample_rate: 44100
+- artist: Subtronics & Rezz
+  channels: 2
+  duration_seconds: 260.0
+  filename: nathaniel/black_ice.wav
+  genre: Bass
+  id: nathaniel_black_ice
+  notes: Heavy halftime bass. Clear event moments, good for drop detection and intensity
+    scaling.
+  recorded: '2026-03-11'
+  sample_rate: 48000
+  song: Black Ice
+- annotations: nathaniel/retrograde.annotations.yaml
+  artist: James Blake
+  channels: 2
+  duration_seconds: 242.0
+  filename: nathaniel/retrograde.wav
+  genre: Electronic / Art Pop
+  id: nathaniel_retrograde
+  notes: Slow harmonic drift. Synth section 1:30-3:30 tests timbral sensitivity over
+    transient detection.
+  recorded: '2026-03-11'
+  sample_rate: 48000
+  song: Retrograde
+- annotations: nathaniel/i_never_learnt_to_share.annotations.yaml
+  artist: James Blake
+  channels: 2
+  duration_seconds: 291.5
+  filename: nathaniel/i_never_learnt_to_share.wav
+  genre: Electronic / Art Pop
+  id: nathaniel_i_never_learnt_to_share
+  notes: "Emotional minimal. From 2:00 on is the key section \u2014 can lights feel\
+    \ sad?"
+  recorded: '2026-03-11'
+  sample_rate: 48000
+  song: I Never Learnt to Share
+- artist: The Blaze
+  channels: 2
+  duration_seconds: 286.0
+  filename: nathaniel/breath_live_rah.wav
+  genre: Electronic
+  id: nathaniel_breath_live_rah
+  notes: "Live at Royal Albert Hall. Simple four-on-the-floor with emotional vocals.\
+    \ Good for foundational light reactive skills \u2014 beats not complex."
+  recorded: '2026-03-11'
+  sample_rate: 48000
+  song: Breath (Live at RAH)
+- artist: The Blaze
+  channels: 2
+  duration_seconds: 337.6
+  filename: nathaniel/territory.wav
+  genre: Electronic
+  id: nathaniel_territory
+  notes: Emotional electronic with straightforward rhythm. Similar energy to Breath.
+  recorded: '2026-03-11'
+  sample_rate: 48000
+  song: Territory
+- artist: CloZee & Dirtwire
+  channels: 2
+  duration_seconds: 230.2
+  filename: nathaniel/ankaa.wav
+  genre: World Bass / Organic Electronic
+  id: nathaniel_ankaa
+  notes: Organic textures over accessible rhythms. Tests response to layered world
+    music elements.
+  recorded: '2026-03-11'
+  sample_rate: 48000
+  song: Ankaa
+- artist: Rawayana feat. Apache
+  channels: 2
+  duration_seconds: 286.2
+  filename: nathaniel/high.wav
+  genre: Latin / Reggae
+  id: nathaniel_high
+  notes: Upbeat latino register. Tests groove and swing response.
+  recorded: '2026-03-11'
+  sample_rate: 48000
+  song: High
+- artist: Becky G & El Alfa
+  channels: 2
+  duration_seconds: 165.7
+  filename: nathaniel/fulanito.wav
+  genre: Reggaeton
+  id: nathaniel_fulanito
+  notes: Latin pop / reggaeton energy. Different rhythmic palette from the electronic
+    tracks.
+  recorded: '2026-03-11'
+  sample_rate: 44100
+  song: Fulanito
+- artist: Ca7riel & Paco Amoroso
+  channels: 2
+  duration_seconds: 151.9
+  filename: nathaniel/dumbai.wav
+  genre: Latin Trap / Experimental
+  id: nathaniel_dumbai
+  notes: "Buenos Aires experimental energy. Wild card \u2014 its own thing."
+  recorded: '2026-03-11'
+  sample_rate: 48000
+  song: DUMBAI
+- artist: CARV
+  channels: 2
+  duration_seconds: 385.3
+  filename: nathaniel/xray.wav
+  genre: Industrial Techno
+  id: nathaniel_xray
+  notes: "Fast industrial techno. Light reactive skills on hard mode \u2014 high transient\
+    \ density, must distinguish relentless energy from structural changes."
+  recorded: '2026-03-11'
+  sample_rate: 48000
+  song: XRay
+- artist: Indira Paganotto
+  channels: 2
+  duration_seconds: 215.7
+  filename: nathaniel/blackbird_sr71.wav
+  genre: Techno
+  id: nathaniel_blackbird_sr71
+  notes: Hard techno with clear sections even at high BPM. Tests temporal resolution.
+  recorded: '2026-03-11'
+  sample_rate: 48000
+  song: Blackbird SR-71
+- annotations: nathaniel/dune.annotations.yaml
+  artist: Indira Paganotto
+  channels: 2
+  duration_seconds: 276.9
+  filename: nathaniel/dune.wav
+  genre: Techno
+  id: nathaniel_dune
+  notes: Techno with Hindu/yogic chant. Interesting texture layer over driving rhythm.
+  recorded: '2026-03-11'
+  sample_rate: 48000
+  song: Dune
+- duration_seconds: 30.3
+  filename: ambient_waves.wav
+  id: ambient_waves
+  recorded: 2026-03-11 21:27
+  sample_rate: 44100
+- duration_seconds: 144.8
+  filename: la10_ambient_waves2.wav
+  id: la10_ambient_waves2
+  recorded: 2026-03-11 21:31
+  sample_rate: 44100

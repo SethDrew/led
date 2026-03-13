@@ -2183,27 +2183,6 @@ function buildSelector(panel) {
     panel.appendChild(container);
 }
 
-// Reference data keyed by registry name: [signal, threshold, envelope, tempo]
-const EFFECT_REF = {
-    'impulse':           ['abs-integral 150ms', '0.30, 250ms cd',  'snap-on, decay 0.85', '\u2014'],
-    'impulse_glow':      ['abs-integral 150ms', 'proportional',    'atk 0.6, decay 0.85', '\u2014'],
-    'impulse_predict':   ['abs-integral 150ms', '0.30, 250ms cd',  'snap-on, decay 0.85', 'autocorr 5s'],
-    'impulse_downbeat':  ['abs-integral 150ms', '0.30, 200ms cd',  'full/30% ticks',      '\u2014'],
-    'impulse_breathe':   ['abs-integral 150ms', 'proportional',    'symmetric 0.74',      '\u2014'],
-    'impulse_sections':  ['abs-integral 150ms', 'proportional',    'atk 0.6, decay 0.85', '\u2014'],
-    'impulse_meter':     ['abs-integral 150ms', 'proportional',    'atk 0.6, decay 0.85', '\u2014'],
-    'bass_pulse':        ['bass flux 20-250Hz', '0.55, 180ms cd',  'snap-on, decay 0.82', '\u2014'],
-    'tempo_pulse':       ['RMS + autocorr',     'oscillator',      'raised cosine',       'autocorr 30s'],
-    'rms_meter':         ['RMS raw',            'proportional',    'peak decay 0.9998',   '\u2014'],
-    'longint_sections':  ['80% long RMS + 20% bass', 'proportional', '10s rolling avg',  '\u2014'],
-    'impulse_snake':     ['abs-int + predict',  '0.30',            'traveling pulse',     'autocorr 5s'],
-    'impulse_bands':     ['3-band abs-integral','per-band 0.30',   'Gaussian \u03c3=3\u21928', '\u2014'],
-    'band_prop':         ['3-band abs-integral','proportional',    'per-band a/d',        '\u2014'],
-    'band_sparkles':     ['5-band FFT',         'proportional',    '5s rolling int',      '\u2014'],
-    'band_tempo_sparkles': ['abs-int + 5-band', '0.30',            'sparkle fade',        'autocorr 5s'],
-    'three_voices':      ['streaming HPSS',     'proportional',    'per-voice',           '\u2014'],
-    'basic_sparkles':    ['none (visual)',       '\u2014',          'random twinkle',      '\u2014'],
-};
 
 // ── Feature colors/labels (used by analyze sparklines) ──────────
 
@@ -2283,7 +2262,7 @@ function renderEffectsCards() {
     buildControllerBar(listWrap);
     buildSelector(listWrap);
 
-    const REF_COLS = ['Signal', 'Threshold', 'Envelope', 'Tempo'];
+    const REF_COLS = ['Pattern', 'Scope', 'Input'];
     const wrap = document.createElement('div');
     wrap.className = 'effect-ref-wrap';
 
@@ -2435,11 +2414,11 @@ function renderEffectsCards() {
         tr.appendChild(sepTd);
 
         // Reference data columns
-        const ref = EFFECT_REF[eff.name];
+        const refVals = [eff.ref_pattern || '\u2014', eff.ref_scope || '\u2014', eff.ref_input || '\u2014'];
         REF_COLS.forEach((_, ci) => {
             const td = document.createElement('td');
             td.className = 'ref-data';
-            td.textContent = ref ? ref[ci] : '\u2014';
+            td.textContent = refVals[ci];
             tr.appendChild(td);
         });
 

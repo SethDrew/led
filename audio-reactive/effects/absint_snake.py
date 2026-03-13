@@ -22,6 +22,9 @@ class AbsIntSnakeEffect(AudioReactiveEffect):
     """Beat-triggered traveling pulses with size proportional to beat strength."""
 
     registry_name = 'impulse_snake'
+    ref_pattern = 'accent'
+    ref_scope = 'beat'
+    ref_input = 'abs-integral + beat predict'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

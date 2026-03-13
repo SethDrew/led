@@ -48,6 +48,9 @@ class CentroidColorEffect(AudioReactiveEffect):
     """Color temperature shifts with spectral centroid; brightness from RMS."""
 
     registry_name = 'centroid_color'
+    ref_pattern = 'ambient'
+    ref_scope = 'phrase'
+    ref_input = 'spectral centroid'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

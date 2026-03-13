@@ -53,6 +53,9 @@ class BandZonePulseEffect(AudioReactiveEffect):
     """Frequency-zoned percussive pulses via streaming HPSS."""
 
     registry_name = 'band_zone_pulse'
+    ref_pattern = 'accent'
+    ref_scope = 'beat'
+    ref_input = '5-band FFT energy'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

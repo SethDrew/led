@@ -24,6 +24,9 @@ class BassPulseEffect(ScalarSignalEffect):
 
     registry_name = 'bass_pulse'
     default_palette = 'amber'
+    ref_pattern = 'accent'
+    ref_scope = 'beat'
+    ref_input = 'bass flux 20-250Hz'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

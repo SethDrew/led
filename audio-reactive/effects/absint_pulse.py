@@ -20,6 +20,9 @@ class AbsIntPulseEffect(ScalarSignalEffect):
 
     registry_name = 'impulse'
     default_palette = 'amber'
+    ref_pattern = 'accent'
+    ref_scope = 'beat'
+    ref_input = 'abs-integral 150ms'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

@@ -749,6 +749,9 @@ def list_json():
                 'description': e.description,
                 'default_palette': e.default_palette,
                 'is_signal': True,
+                'ref_pattern': getattr(cls, 'ref_pattern', ''),
+                'ref_scope': getattr(cls, 'ref_scope', ''),
+                'ref_input': getattr(cls, 'ref_input', ''),
             })
         except Exception:
             pass
@@ -762,6 +765,9 @@ def list_json():
                 'display_name': e.name,
                 'description': e.description,
                 'is_signal': False,
+                'ref_pattern': getattr(cls, 'ref_pattern', ''),
+                'ref_scope': getattr(cls, 'ref_scope', ''),
+                'ref_input': getattr(cls, 'ref_input', ''),
             })
         except Exception:
             pass

@@ -43,6 +43,9 @@ class BandTempoSparklesEffect(AudioReactiveEffect):
     """Beat-triggered wide sparkles colored by the dominant frequency band."""
 
     registry_name = 'band_tempo_sparkles'
+    ref_pattern = 'accent'
+    ref_scope = 'phrase'
+    ref_input = 'abs-integral + 5-band FFT'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

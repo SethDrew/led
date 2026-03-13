@@ -67,6 +67,9 @@ class AutoLightshowEffect(AudioReactiveEffect):
     """Section-aware lightshow for whole-song playback on diamond sculpture."""
 
     registry_name = 'auto_lightshow'
+    ref_pattern = 'composite'
+    ref_scope = 'song'
+    ref_input = 'energy + slope + bass + onset density'
 
     # ── Section states ──
     BREAKDOWN = 0

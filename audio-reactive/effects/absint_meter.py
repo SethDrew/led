@@ -18,6 +18,9 @@ class AbsIntMeterEffect(AudioReactiveEffect):
     """Volume meter: lit LED count proportional to abs-integral."""
 
     registry_name = 'impulse_meter'
+    ref_pattern = 'proportional'
+    ref_scope = 'beat'
+    ref_input = 'abs-integral 150ms'
 
     # Gradient colors from base to tip
     COLORS = np.array([

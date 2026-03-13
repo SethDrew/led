@@ -14,6 +14,9 @@ class BasicSparklesEffect(AudioReactiveEffect):
     """Dim red-magenta base with single-LED twinkles fading in and out."""
 
     registry_name = 'basic_sparkles'
+    ref_pattern = 'ambient'
+    ref_scope = 'beat'
+    ref_input = 'none (visual only)'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

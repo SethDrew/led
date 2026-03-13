@@ -55,6 +55,9 @@ class ThreeVoicesEffect(AudioReactiveEffect):
     """Three-layer depth-mapped effect: bass foundation + harmonic body + percussive flash."""
 
     registry_name = 'hpss_voices'
+    ref_pattern = 'composite'
+    ref_scope = 'beat'
+    ref_input = 'streaming HPSS 3-voice'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

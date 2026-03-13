@@ -29,6 +29,9 @@ class EnergyColorEffect(ScalarSignalEffect):
 
     registry_name = 'energy_color'
     default_palette = 'energy_bloom'
+    ref_pattern = 'ambient'
+    ref_scope = 'phrase'
+    ref_input = 'rolling RMS integral 10s'
 
     source_features = [
         {'id': 'rms_integral', 'label': 'RMS Integral (10s)', 'color': '#e94560'},

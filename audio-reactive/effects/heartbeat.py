@@ -51,6 +51,9 @@ def octave_nearest(period, target):
 class HeartbeatEffect(AudioReactiveEffect):
     registry_name = 'heartbeat'
     handles_topology = True  # renders in physical LED space via its own topology
+    ref_pattern = 'groove'
+    ref_scope = 'beat'
+    ref_input = 'pulse pattern generator'
 
     COLOR = np.array([140, 0, 0], dtype=np.float64)
 

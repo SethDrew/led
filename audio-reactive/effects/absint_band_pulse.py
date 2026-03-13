@@ -44,6 +44,9 @@ class AbsIntBandPulseEffect(AudioReactiveEffect):
     """Multi-band Gaussian glow pulses triggered by per-band beat detection."""
 
     registry_name = 'impulse_bands'
+    ref_pattern = 'accent'
+    ref_scope = 'beat'
+    ref_input = '3-band abs-integral'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

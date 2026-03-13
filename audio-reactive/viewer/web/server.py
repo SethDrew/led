@@ -372,12 +372,18 @@ def _discover_effects():
                 'description': sig.get('description', ''),
                 'is_signal': True,
                 'default_palette': sig.get('default_palette', 'amber'),
+                'ref_pattern': sig.get('ref_pattern', ''),
+                'ref_scope': sig.get('ref_scope', ''),
+                'ref_input': sig.get('ref_input', ''),
             })
         for eff in data.get('effects', []):
             entries.append({
                 'name': eff['name'],
                 'description': eff.get('description', ''),
                 'is_signal': False,
+                'ref_pattern': eff.get('ref_pattern', ''),
+                'ref_scope': eff.get('ref_scope', ''),
+                'ref_input': eff.get('ref_input', ''),
             })
         return entries, data.get('palettes', [])
     except Exception as e:
@@ -456,6 +462,9 @@ def _get_effects_list():
             'description': desc,
             'order': p.get('order', 999),
             'rating': p.get('rating', 0),
+            'ref_pattern': entry.get('ref_pattern', '') if isinstance(entry, dict) else '',
+            'ref_scope': entry.get('ref_scope', '') if isinstance(entry, dict) else '',
+            'ref_input': entry.get('ref_input', '') if isinstance(entry, dict) else '',
         }
         if p.get('display_name'):
             e['display_name'] = p['display_name']
@@ -647,7 +656,7 @@ def _get_all_palettes_list():
 # ── File Discovery ────────────────────────────────────────────────────
 
 def discover_files():
-    """Scan audio-segments/ and harmonix/ for WAV files."""
+    """Scan audio-segments/ and all subdirectories for WAV files."""
     global _file_list_cache
     if _file_list_cache is not None:
         return _file_list_cache
@@ -655,7 +664,7 @@ def discover_files():
     files = []
     segments_path = Path(SEGMENTS_DIR)
 
-    # User clips
+    # Root-level clips
     for wav in sorted(segments_path.glob('*.wav')):
         ann_path = wav.with_suffix('.annotations.yaml')
         dur = _get_wav_duration(str(wav))
@@ -667,62 +676,20 @@ def discover_files():
             'group': 'user clips',
         })
 
-    # Harmonix clips
-    harmonix_dir = segments_path / 'harmonix'
-    if harmonix_dir.exists():
-        for wav in sorted(harmonix_dir.glob('*.wav')):
-            ann_path = wav.with_suffix('.annotations.yaml')
-            dur = _get_wav_duration(str(wav))
-            files.append({
-                'name': wav.name,
-                'path': f'harmonix/{wav.name}',
-                'duration': dur,
-                'has_annotations': ann_path.exists(),
-                'group': 'harmonix',
-            })
-
-    # Uploaded files
-    uploads_dir = segments_path / 'uploads'
-    if uploads_dir.exists():
-        for wav in sorted(uploads_dir.glob('*.wav')):
+    # Auto-discover all subdirectories
+    for subdir in sorted(segments_path.iterdir()):
+        if not subdir.is_dir():
+            continue
+        for wav in sorted(subdir.glob('*.wav')):
             dur = _get_wav_duration(str(wav))
             ann_path = wav.with_suffix('.annotations.yaml')
             files.append({
                 'name': wav.name,
-                'path': f'uploads/{wav.name}',
+                'path': f'{subdir.name}/{wav.name}',
                 'duration': dur,
                 'has_annotations': ann_path.exists(),
-                'group': 'uploads',
+                'group': subdir.name,
             })
-
-    # FMA folk clips
-    fma_folk_dir = segments_path / 'fma-folk'
-    if fma_folk_dir.exists():
-        for wav in sorted(fma_folk_dir.glob('*.wav')):
-            ann_path = wav.with_suffix('.annotations.yaml')
-            dur = _get_wav_duration(str(wav))
-            files.append({
-                'name': wav.name,
-                'path': f'fma-folk/{wav.name}',
-                'duration': dur,
-                'has_annotations': ann_path.exists(),
-                'group': 'fma-folk',
-            })
-
-    # YouTube sets
-    for subdir_name in ('chase-status', '90s-hiphop', 'solomun', 'tool'):
-        subdir = segments_path / subdir_name
-        if subdir.exists():
-            for wav in sorted(subdir.glob('*.wav')):
-                dur = _get_wav_duration(str(wav))
-                ann_path = wav.with_suffix('.annotations.yaml')
-                files.append({
-                    'name': wav.name,
-                    'path': f'{subdir_name}/{wav.name}',
-                    'duration': dur,
-                    'has_annotations': ann_path.exists(),
-                    'group': subdir_name,
-                })
 
     _file_list_cache = files
     return files

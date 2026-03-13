@@ -38,6 +38,9 @@ class BandSparkleFluxEffect(AudioReactiveEffect):
     """Spectral flux variant: raw band energy for background, per-band flux for sparkles."""
 
     registry_name = 'band_sparkle_flux'
+    ref_pattern = 'accent'
+    ref_scope = 'beat'
+    ref_input = 'HPSS per-band spectral flux'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

@@ -17,6 +17,9 @@ class RMSMeterEffect(AudioReactiveEffect):
     """Volume meter: lit LED count proportional to RMS amplitude."""
 
     registry_name = 'rms_meter'
+    ref_pattern = 'proportional'
+    ref_scope = 'beat'
+    ref_input = 'raw RMS'
 
     # Gradient colors from base to tip
     COLORS = np.array([

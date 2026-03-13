@@ -51,6 +51,9 @@ def octave_nearest(period, target):
 class HeartbeatTempoEffect(AudioReactiveEffect):
     registry_name = 'heartbeat_tempo'
     handles_topology = True  # renders in physical LED space via its own topology
+    ref_pattern = 'groove'
+    ref_scope = 'phrase'
+    ref_input = 'tempo-locked heartbeat'
 
     COLOR = np.array([140, 0, 0], dtype=np.float64)
 

@@ -43,6 +43,9 @@ class BandSparklesEffect(AudioReactiveEffect):
     """Twinkles over a slowly-shifting band-dominant base color."""
 
     registry_name = 'band_sparkles'
+    ref_pattern = 'ambient'
+    ref_scope = 'phrase'
+    ref_input = '5-band FFT energy'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

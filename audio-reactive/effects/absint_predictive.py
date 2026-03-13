@@ -25,6 +25,9 @@ class AbsIntPredictiveEffect(ScalarSignalEffect):
 
     registry_name = 'impulse_predict'
     default_palette = 'reds'
+    ref_pattern = 'accent'
+    ref_scope = 'beat'
+    ref_input = 'abs-integral + autocorr 5s'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

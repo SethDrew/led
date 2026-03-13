@@ -27,6 +27,9 @@ class TempoPulseEffect(ScalarSignalEffect):
 
     registry_name = 'tempo_pulse'
     default_palette = 'reds'
+    ref_pattern = 'groove'
+    ref_scope = 'phrase'
+    ref_input = 'RMS + autocorrelation 30s'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

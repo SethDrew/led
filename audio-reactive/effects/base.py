@@ -27,6 +27,10 @@ class AudioReactiveEffect(ABC):
     # Override in subclass to declare what drives the effect.
     source_features = []
 
+    ref_pattern = ''   # accent | groove | section | ambient | proportional | composite
+    ref_scope = ''     # beat | phrase | song
+    ref_input = ''     # human-readable audio input description
+
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         self.num_leds = num_leds
         self.sample_rate = sample_rate

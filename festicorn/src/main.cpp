@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WebServer.h>
-#include <ArduinoOTA.h>
+#include <ESPAsyncWebServer.h>
+#include <ElegantOTA.h>
 #include <ESPmDNS.h>
 #include <LittleFS.h>
 #include <Adafruit_NeoPixel.h>
@@ -14,71 +14,79 @@ static const uint8_t PINS[] = {5};
 static const uint8_t NUM_STRIPS = sizeof(PINS) / sizeof(PINS[0]);
 Adafruit_NeoPixel strips[NUM_STRIPS];
 Adafruit_NeoPixel &strip = strips[0]; // web API controls brightness via first strip
-WebServer server(80);
+AsyncWebServer server(80);
 EffectState state;
 
-// --- File upload state ---
-File uploadFile;
-bool uploadOk = false;
+// Cache index.html in RAM to avoid LittleFS blocking the render loop
+// (ESP32-C3 is single-core — flash reads stall everything)
+String cachedIndexHtml;
 
-// --- Web handlers ---
+// --- Web handlers (async) ---
 
-void handleRoot() {
-    File f = LittleFS.open("/index.html", "r");
-    if (f) {
-        server.streamFile(f, "text/html");
-        f.close();
+void handleRoot(AsyncWebServerRequest *request) {
+    if (cachedIndexHtml.length() > 0) {
+        request->send(200, "text/html", cachedIndexHtml);
     } else {
-        // No UI on flash yet — serve PROGMEM fallback (which is the upload page)
-        server.send(200, "text/html", UPLOAD_PAGE);
+        request->send(200, "text/html", UPLOAD_PAGE);
     }
 }
 
-void handleUploadPage() {
-    server.send(200, "text/html", UPLOAD_PAGE);
+void handleUploadPage(AsyncWebServerRequest *request) {
+    request->send(200, "text/html", UPLOAD_PAGE);
 }
 
-void handleSource() {
+void handleSource(AsyncWebServerRequest *request) {
     File f = LittleFS.open("/index.html", "r");
     if (f) {
-        server.streamFile(f, "text/plain");
+        String content = f.readString();
         f.close();
+        request->send(200, "text/plain", content);
     } else {
-        server.send(404, "text/plain", "No UI uploaded yet");
+        request->send(404, "text/plain", "No UI uploaded yet");
     }
 }
 
-void handleUploadComplete() {
+// --- File upload (async) ---
+static File uploadFile;
+static bool uploadOk = false;
+
+void handleUploadComplete(AsyncWebServerRequest *request) {
     if (uploadOk) {
-        server.sendHeader("Location", "/upload?ok=1");
+        request->redirect("/upload?ok=1");
     } else {
-        server.sendHeader("Location", "/upload?err=write+failed");
+        request->redirect("/upload?err=write+failed");
     }
-    server.send(303);
 }
 
-void handleUploadData() {
-    HTTPUpload& upload = server.upload();
-    if (upload.status == UPLOAD_FILE_START) {
-        Serial.printf("[Upload] Start: %s\n", upload.filename.c_str());
+void handleUploadData(AsyncWebServerRequest *request, const String& filename,
+                      size_t index, uint8_t *data, size_t len, bool final) {
+    if (index == 0) {
+        Serial.printf("[Upload] Start: %s\n", filename.c_str());
         uploadFile = LittleFS.open("/index.html", "w");
         uploadOk = false;
-    } else if (upload.status == UPLOAD_FILE_WRITE) {
-        if (uploadFile) {
-            uploadFile.write(upload.buf, upload.currentSize);
-        }
-    } else if (upload.status == UPLOAD_FILE_END) {
+    }
+    if (uploadFile) {
+        uploadFile.write(data, len);
+    }
+    if (final) {
         if (uploadFile) {
             uploadFile.close();
             uploadOk = true;
-            Serial.printf("[Upload] Done: %u bytes\n", upload.totalSize);
+            Serial.printf("[Upload] Done: %u bytes\n", index + len);
+            // Refresh RAM cache
+            File f = LittleFS.open("/index.html", "r");
+            if (f) {
+                cachedIndexHtml = f.readString();
+                f.close();
+                Serial.printf("[FS] Recached: %u bytes\n", cachedIndexHtml.length());
+            }
         }
     }
 }
 
-void handleDevColor() {
-    if (server.hasArg("data")) {
-        String hex = server.arg("data");
+void handleDevColor(AsyncWebServerRequest *request) {
+    if (request->hasParam("data", true)) {
+        String hex = request->getParam("data", true)->value();
         uint16_t len = hex.length() / 2;
         if (len > NUM_PIXELS * 3) len = NUM_PIXELS * 3;
         for (uint16_t i = 0; i < len; i++) {
@@ -91,10 +99,10 @@ void handleDevColor() {
         state.effect = DEV_COLOR;
         devColorFresh = true;
     }
-    server.send(200, "text/plain", "OK");
+    request->send(200, "text/plain", "OK");
 }
 
-void handleStatus() {
+void handleStatus(AsyncWebServerRequest *request) {
     const char *effectName;
     switch (state.effect) {
         case RAINBOW:   effectName = "rainbow";   break;
@@ -129,38 +137,38 @@ void handleStatus() {
     json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
     json += "\"ip\":\"" + WiFi.localIP().toString() + "\"";
     json += "}";
-    server.send(200, "application/json", json);
+    request->send(200, "application/json", json);
 }
 
-void handleSetEffect() {
-    if (server.hasArg("effect")) {
-        String e = server.arg("effect");
+void handleSetEffect(AsyncWebServerRequest *request) {
+    if (request->hasParam("effect", true)) {
+        String e = request->getParam("effect", true)->value();
         if (e == "rainbow") state.effect = RAINBOW;
         else if (e == "gradient") state.effect = GRADIENT;
         else if (e == "dev_color") state.effect = DEV_COLOR;
     }
-    server.send(200, "text/plain", "OK");
+    request->send(200, "text/plain", "OK");
 }
 
-void handleSetBrightness() {
-    if (server.hasArg("brightness")) {
-        int b = server.arg("brightness").toInt();
+void handleSetBrightness(AsyncWebServerRequest *request) {
+    if (request->hasParam("brightness", true)) {
+        int b = request->getParam("brightness", true)->value().toInt();
         if (b >= 0 && b <= 255) state.brightness = b;
     }
-    server.send(200, "text/plain", "OK");
+    request->send(200, "text/plain", "OK");
 }
 
-void handleSetCycleTime() {
-    if (server.hasArg("cycletime")) {
-        long ct = server.arg("cycletime").toInt();
+void handleSetCycleTime(AsyncWebServerRequest *request) {
+    if (request->hasParam("cycletime", true)) {
+        long ct = request->getParam("cycletime", true)->value().toInt();
         if (ct >= 1000 && ct <= 600000) state.cycleTimeMs = ct;
     }
-    server.send(200, "text/plain", "OK");
+    request->send(200, "text/plain", "OK");
 }
 
-void handleSetPalette() {
-    if (server.hasArg("palette")) {
-        String p = server.arg("palette");
+void handleSetPalette(AsyncWebServerRequest *request) {
+    if (request->hasParam("palette", true)) {
+        String p = request->getParam("palette", true)->value();
         if (p == "sap_flow")              state.palette = SAP_FLOW;
         else if (p == "oklch_rainbow")    state.palette = OKLCH_RAINBOW;
         // Category 2: Hue-arc gradients
@@ -177,7 +185,7 @@ void handleSetPalette() {
         else if (p == "purple_wash")      state.palette = PURPLE_WASH;
         else if (p == "gold_wash")        state.palette = GOLD_WASH;
     }
-    server.send(200, "text/plain", "OK");
+    request->send(200, "text/plain", "OK");
 }
 
 // --- Setup ---
@@ -192,6 +200,12 @@ void setup() {
         Serial.println("[FS] LittleFS mount failed");
     } else {
         Serial.println("[FS] LittleFS mounted");
+        File f = LittleFS.open("/index.html", "r");
+        if (f) {
+            cachedIndexHtml = f.readString();
+            f.close();
+            Serial.printf("[FS] Cached index.html: %u bytes\n", cachedIndexHtml.length());
+        }
     }
 
     // LED strips — all pins
@@ -262,19 +276,8 @@ void setup() {
         MDNS.begin("butterfly");
     }
 
-    // OTA
-    ArduinoOTA.setHostname("butterfly");
-    ArduinoOTA.onStart([]() { Serial.println("[OTA] Start"); });
-    ArduinoOTA.onEnd([]() { Serial.println("\n[OTA] Done"); });
-    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-        Serial.printf("[OTA] %u%%\r", progress * 100 / total);
-    });
-    ArduinoOTA.onError([](ota_error_t error) {
-        Serial.printf("[OTA] Error %u\n", error);
-    });
-    ArduinoOTA.begin();
-
-    // Web server
+    // Web server (async — no handleClient() needed in loop)
+    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
     server.on("/", HTTP_GET, handleRoot);
     server.on("/source", HTTP_GET, handleSource);
     server.on("/upload", HTTP_GET, handleUploadPage);
@@ -285,14 +288,29 @@ void setup() {
     server.on("/cycletime", HTTP_POST, handleSetCycleTime);
     server.on("/palette", HTTP_POST, handleSetPalette);
     server.on("/devcolor", HTTP_POST, handleDevColor);
-    server.enableCORS(true);
+
+    // OTA via ElegantOTA (async — no handle() needed in loop)
+    ElegantOTA.begin(&server);
+    ElegantOTA.onStart([]() { Serial.println("[OTA] Start"); });
+    ElegantOTA.onEnd([](bool success) {
+        Serial.printf("[OTA] %s\n", success ? "Done" : "Failed");
+    });
+
     server.begin();
-    Serial.println("[Web] Server started on port 80");
+    Serial.println("[Web] Async server started on port 80");
+    Serial.println("[OTA] ElegantOTA at /update");
 }
 
-// --- Main loop ---
+// --- Main loop (pure render — no web/OTA blocking) ---
+
+static uint32_t statsLastPrint = 0;
+static uint32_t loopCount = 0;
+static uint32_t loopTotalUs = 0;
+static uint32_t loopMaxUs = 0;
 
 void loop() {
+    uint32_t loopStart = micros();
+
     // WiFi reconnect
     if (WiFi.status() != WL_CONNECTED) {
         static unsigned long lastReconnect = 0;
@@ -303,9 +321,6 @@ void loop() {
             lastReconnect = millis();
         }
     }
-
-    ArduinoOTA.handle();
-    server.handleClient();
 
     // Phase accumulator for smooth animation
     static uint32_t lastFrameMs = 0;
@@ -340,4 +355,20 @@ void loop() {
     }
 
     delay(16); // ~60fps
+
+    // Loop timing stats
+    uint32_t loopTime = micros() - loopStart;
+    loopCount++;
+    loopTotalUs += loopTime;
+    if (loopTime > loopMaxUs) loopMaxUs = loopTime;
+    if (now - statsLastPrint >= 2000) {
+        float fps = loopCount * 1000.0f / (now - statsLastPrint);
+        float avgMs = (loopTotalUs / 1000.0f) / loopCount;
+        float maxMs = loopMaxUs / 1000.0f;
+        Serial.printf("[Perf] FPS=%.1f  avg=%.1fms  max=%.1fms\n", fps, avgMs, maxMs);
+        loopCount = 0;
+        loopTotalUs = 0;
+        loopMaxUs = 0;
+        statsLastPrint = now;
+    }
 }

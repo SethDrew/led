@@ -269,7 +269,7 @@ entries:
     scope: deployment
     source: []
     tags: [nano, ch340, power, hardware, deployment, flashing]
-    relates_to: [diamond-sculpture-hardware-spec, eeprom-device-id-protocol]
+    relates_to: [diamond-sculpture-hardware-spec, ch340-no-unique-serial]
     notes: >
       The Nano draws significant current during firmware upload — the CH340
       USB-serial chip, ATmega328 flash write cycles, and any connected LEDs
@@ -280,7 +280,7 @@ entries:
       This is a hard blocker for deployment: you cannot flash new firmware
       without dedicated 5V power. Always connect a separate 5V supply before
       running pio run --target upload. This also affects EEPROM device ID
-      assignment (see eeprom-device-id-protocol) since that requires a
+      assignment (see ch340-no-unique-serial) since that requires a
       successful flash first.
 
   # ── WS2812B Color & Gamma ────────────────────────────────────────
@@ -358,3 +358,48 @@ entries:
 
       Implication: what looks good on discrete WS2812B (diamond) won't necessarily
       look the same on COB. Different physical light behavior.
+
+  # ── ESP32-C3 Single-Core Constraints ───────────────────────────
+
+  - id: esp32-c3-single-core-web-blocking
+    date: 2026-03-12
+    touched: 2026-03-12
+    title: "ESP32-C3 single-core: synchronous WebServer blocks LED render loop"
+    summary: >
+      The Arduino WebServer library's handleClient() is fully synchronous and blocks
+      the entire render loop on ESP32-C3 (single-core RISC-V). Measured 15-second page
+      load times. Unlike dual-core ESP32, there is no second core to offload web handling.
+      ESPAsyncWebServer (ESP32Async fork v3.10.1) eliminates loop blocking — page loads
+      drop to 0.5s, API calls to 37ms, LED animation unaffected during web requests.
+    status: resolved
+    severity: high
+    scope: hardware
+    source:
+      - festicorn/src/main.cpp
+      - festicorn/platformio.ini
+    tags: [esp32, esp32-c3, constraint, single-core, webserver, performance]
+    relates_to: [esp32-hardware-selection-rationale, ws2812b-timing-architecture]
+    notes: >
+      The ESP32-C3 has a single RISC-V core (vs dual Xtensa on ESP32). This means:
+
+      1. No core pinning — WiFi stack, web server, and LED rendering all share one core
+      2. Synchronous WebServer::handleClient() has an internal delay(1) per call when
+         idle (~1ms overhead per loop iteration), and blocks entirely during HTTP parsing
+         and response delivery
+      3. ArduinoOTA also fails — port 3232 becomes unresponsive because the OTA handler
+         can't run frequently enough on the congested single core
+
+      Solution stack:
+      - ESP32Async/AsyncTCP + ESP32Async/ESPAsyncWebServer (v3.10.1)
+      - ayushsharma82/ElegantOTA (v3.1.7) with -DELEGANTOTA_USE_ASYNC_WEBSERVER=1
+      - ElegantOTA serves browser-based OTA at /update (no UDP port 3232 needed)
+
+      Important: the original me-no-dev/ESPAsyncWebServer has crash bugs on C3
+      (StringArray.h delete bug causing "Load access fault"). The mathieucarbou fork
+      was archived Jan 2025. ESP32Async is the active successor.
+
+      Measured before/after (butterfly sculpture, 150 LEDs):
+      - Page load: 15s → 0.5s (subsequent), 2s (cold)
+      - /status API: unmeasured → 37ms
+      - LED FPS: ~47 FPS unchanged (loop no longer contains handleClient or OTA.handle)
+      - RAM: 43.9KB → 40.5KB (async uses less RAM than sync WebServer)

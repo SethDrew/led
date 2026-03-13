@@ -127,7 +127,13 @@ void loop() {
             strip.show();
             frames++;
           } else {
-            // Partial frame in buffer but won't show — next good frame overwrites
+            // DEBUG: print mismatch
+            Serial.print("XOR:");
+            Serial.print(runningXor);
+            Serial.print(" got:");
+            Serial.print(b);
+            Serial.print(" n:");
+            Serial.println(bytesRead);
             dropped++;
           }
           rxState = WAIT_SYNC1;

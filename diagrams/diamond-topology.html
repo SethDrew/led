@@ -1,0 +1,1137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Diamond Sculpture — LED Topology</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* ============ THEME ============ */
+  :root {
+    --font-body: 'IBM Plex Sans', system-ui, sans-serif;
+    --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+    /* Blueprint dark — deep slate/navy */
+    --bg: #0b1422;
+    --bg-grid: rgba(56, 189, 248, 0.04);
+    --surface: #101c2e;
+    --surface2: #0e1829;
+    --surface-elevated: #142237;
+    --border: rgba(148, 163, 184, 0.10);
+    --border-bright: rgba(148, 163, 184, 0.20);
+    --text: #e2e8f0;
+    --text-dim: #64748b;
+    --text-bright: #f1f5f9;
+
+    /* Branch colors */
+    --left: #22d3ee;
+    --left-dim: rgba(34, 211, 238, 0.12);
+    --left-glow: rgba(34, 211, 238, 0.25);
+    --right: #fbbf24;
+    --right-dim: rgba(251, 191, 36, 0.10);
+    --right-glow: rgba(251, 191, 36, 0.25);
+    --middle: #34d399;
+    --middle-dim: rgba(52, 211, 153, 0.10);
+    --middle-glow: rgba(52, 211, 153, 0.25);
+
+    /* Accent */
+    --accent: #38bdf8;
+    --accent-dim: rgba(56, 189, 248, 0.10);
+    --adjacency: #f472b6;
+    --adjacency-dim: rgba(244, 114, 182, 0.12);
+  }
+
+  /* ============ RESET + BASE ============ */
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    background-image:
+      radial-gradient(circle at 1px 1px, var(--bg-grid) 1px, transparent 0);
+    background-size: 32px 32px;
+    color: var(--text);
+    font-family: var(--font-body);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ============ ANIMATION ============ */
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .fade-in {
+    animation: fadeUp 0.5s ease-out both;
+    animation-delay: calc(var(--i, 0) * 0.08s);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-delay: 0ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  /* ============ LAYOUT ============ */
+  .page {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 48px 40px 80px;
+  }
+
+  /* ============ HERO ============ */
+  .hero {
+    text-align: center;
+    margin-bottom: 48px;
+  }
+
+  .hero h1 {
+    font-size: clamp(28px, 4vw, 42px);
+    font-weight: 700;
+    letter-spacing: -1.5px;
+    color: var(--text-bright);
+    margin-bottom: 12px;
+    text-wrap: balance;
+  }
+
+  .hero h1 span {
+    color: var(--accent);
+  }
+
+  .hero-stats {
+    display: flex;
+    justify-content: center;
+    gap: 32px;
+    flex-wrap: wrap;
+  }
+
+  .hero-stat {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+
+  .hero-stat .val {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text-bright);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ============ DIAGRAM CONTAINER ============ */
+  .diagram-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 32px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .diagram-wrap .section-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--accent);
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .diagram-wrap .section-label::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  /* ============ SVG DIAGRAM ============ */
+  #topology-svg {
+    width: 100%;
+    height: 600px;
+    display: block;
+  }
+
+  /* ============ TOOLTIP ============ */
+  .tooltip {
+    position: fixed;
+    pointer-events: none;
+    z-index: 1000;
+    background: var(--surface-elevated);
+    border: 1px solid var(--border-bright);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    max-width: 220px;
+  }
+
+  .tooltip.visible {
+    opacity: 1;
+  }
+
+  .tooltip .tt-branch {
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .tooltip .tt-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .tooltip .tt-label {
+    color: var(--text-dim);
+  }
+
+  .tooltip .tt-val {
+    font-weight: 500;
+  }
+
+  /* ============ PANELS GRID ============ */
+  .panels {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin-bottom: 32px;
+  }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+  }
+
+  .panel .section-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .panel .section-label::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  /* ============ ADJACENCY LIST ============ */
+  .adjacency-list {
+    list-style: none;
+    font-size: 13px;
+    line-height: 1.8;
+  }
+
+  .adjacency-list li {
+    padding: 8px 12px;
+    border-radius: 6px;
+    margin-bottom: 6px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+  }
+
+  .adjacency-list li .adj-name {
+    font-weight: 600;
+    color: var(--adjacency);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    display: block;
+    margin-bottom: 2px;
+  }
+
+  .adjacency-list li .adj-leds {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  .adjacency-list li .adj-desc {
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-top: 2px;
+  }
+
+  /* ============ LEGEND ============ */
+  .legend-grid {
+    display: grid;
+    gap: 14px;
+  }
+
+  .legend-branch {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+  }
+
+  .legend-swatch {
+    width: 24px;
+    height: 4px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+
+  .legend-branch .branch-name {
+    font-weight: 600;
+    min-width: 56px;
+  }
+
+  .legend-branch .branch-info {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  .legend-features {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+
+  .legend-features .feat-title {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    margin-bottom: 10px;
+  }
+
+  .legend-features ul {
+    list-style: none;
+    font-size: 12px;
+    line-height: 1.8;
+  }
+
+  .legend-features li {
+    padding-left: 14px;
+    position: relative;
+    color: var(--text-dim);
+  }
+
+  .legend-features li::before {
+    content: '\25B8';
+    position: absolute;
+    left: 0;
+    color: var(--accent);
+    font-size: 10px;
+  }
+
+  .landmark-legend {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .landmark-legend svg {
+    flex-shrink: 0;
+  }
+
+  /* ============ STRIP WIRING ============ */
+  .strip-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+  }
+
+  .strip-wrap .section-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--accent);
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .strip-wrap .section-label::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  #strip-svg {
+    width: 100%;
+    height: 80px;
+    display: block;
+  }
+
+  .strip-labels {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-top: 8px;
+    padding: 0 8px;
+  }
+
+  /* ============ RESPONSIVE ============ */
+  @media (max-width: 768px) {
+    .page { padding: 24px 16px 60px; }
+    .panels { grid-template-columns: 1fr; }
+    .hero-stats { gap: 16px; }
+    #topology-svg { height: 450px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="page">
+
+  <!-- Hero -->
+  <header class="hero fade-in" style="--i:0">
+    <h1>Diamond Sculpture <span>&mdash;</span> LED Topology</h1>
+    <div class="hero-stats">
+      <div class="hero-stat"><span class="val">72</span> LEDs</div>
+      <div class="hero-stat"><span class="val">3</span> branches</div>
+      <div class="hero-stat"><span class="val">80</span> pixel strip</div>
+    </div>
+  </header>
+
+  <!-- Main SVG Diagram -->
+  <div class="diagram-wrap fade-in" style="--i:1">
+    <div class="section-label">Spatial Topology</div>
+    <svg id="topology-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+  </div>
+
+  <!-- Panels: Adjacencies + Legend -->
+  <div class="panels">
+    <div class="panel fade-in" style="--i:3">
+      <div class="section-label" style="color: var(--adjacency)">Cross-Branch Adjacencies</div>
+      <ul class="adjacency-list">
+        <li>
+          <span class="adj-name">Base Convergence</span>
+          <span class="adj-leds">LEDs 0, 61, 62 &mdash; all at (0, 0)</span>
+          <span class="adj-desc">All three branches originate from the same physical point at the sculpture base</span>
+        </li>
+        <li>
+          <span class="adj-name">Near-Neighbors</span>
+          <span class="adj-leds">LEDs 4, 63 &mdash; left / middle</span>
+          <span class="adj-desc">Cross-branch neighbors close to the base, left and middle branches run adjacent</span>
+        </li>
+        <li>
+          <span class="adj-name">Apex Junction</span>
+          <span class="adj-leds">LEDs 41, 42, 71 &mdash; at top</span>
+          <span class="adj-desc">Left and right branches meet at the apex; middle branch also terminates here</span>
+        </li>
+        <li>
+          <span class="adj-name">Crossover</span>
+          <span class="adj-leds">LEDs 46, 66 &mdash; right / middle</span>
+          <span class="adj-desc">Right branch crosses the middle branch path midway down the sculpture</span>
+        </li>
+      </ul>
+    </div>
+    <div class="panel fade-in" style="--i:4">
+      <div class="section-label" style="color: var(--accent)">Legend</div>
+      <div class="legend-grid">
+        <div class="legend-branch">
+          <div class="legend-swatch" style="background: var(--left)"></div>
+          <span class="branch-name" style="color: var(--left)">Left</span>
+          <span class="branch-info">42 LEDs (0-41) &uarr; base to apex</span>
+        </div>
+        <div class="legend-branch">
+          <div class="legend-swatch" style="background: var(--right)"></div>
+          <span class="branch-name" style="color: var(--right)">Right</span>
+          <span class="branch-info">20 LEDs (42-61) &darr; apex to base</span>
+        </div>
+        <div class="legend-branch">
+          <div class="legend-swatch" style="background: var(--middle)"></div>
+          <span class="branch-name" style="color: var(--middle)">Middle</span>
+          <span class="branch-info">10 LEDs (62-71) &uarr; base to apex</span>
+        </div>
+      </div>
+
+      <div class="landmark-legend">
+        <svg width="20" height="20" viewBox="0 0 20 20">
+          <circle cx="10" cy="10" r="7" fill="none" stroke="var(--text-dim)" stroke-width="1.5"/>
+          <circle cx="10" cy="10" r="3" fill="var(--text-dim)"/>
+        </svg>
+        <span>Landmark node (labeled with name + LED index)</span>
+      </div>
+
+      <div class="legend-features">
+        <div class="feat-title">Topology Features</div>
+        <ul>
+          <li>Left tip (LED 26) dips below middle height</li>
+          <li>Right branch self-loops at LEDs 52/57 (same position)</li>
+          <li>Right crosses middle twice: apex (42/71) and mid (46/66)</li>
+          <li>Middle branch runs roughly center (x=0) with slight leftward lean</li>
+          <li>Data flows continuously: base &rarr; left up &rarr; apex &rarr; right down &rarr; base &rarr; middle up</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- Strip Wiring -->
+  <div class="strip-wrap fade-in" style="--i:5">
+    <div class="section-label">Strip Wiring Order</div>
+    <svg id="strip-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div class="strip-labels">
+      <span>LED 0 (data in)</span>
+      <span>LED 41 | 42</span>
+      <span>LED 61 | 62</span>
+      <span>LED 71</span>
+    </div>
+  </div>
+
+</div>
+
+<!-- Tooltip element -->
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+(function() {
+  'use strict';
+
+  // ============ DATA ============
+
+  const branches = {
+    left: {
+      name: 'Left',
+      color: '#22d3ee',
+      colorDim: 'rgba(34, 211, 238, 0.12)',
+      colorGlow: 'rgba(34, 211, 238, 0.3)',
+      start: 0, end: 41,
+      reversed: false,
+      xy_keyframes: [[0, 0.0, 0.0], [24, -0.90, 0.33], [26, -1.0, 0.35], [27, -0.90, 0.33], [41, 0.0, 1.0]],
+      height_keyframes: [[0, 0.0], [26, 0.35], [41, 1.0]]
+    },
+    right: {
+      name: 'Right',
+      color: '#fbbf24',
+      colorDim: 'rgba(251, 191, 36, 0.10)',
+      colorGlow: 'rgba(251, 191, 36, 0.3)',
+      start: 42, end: 61,
+      reversed: true,
+      xy_keyframes: [[42, 0.0, 1.0], [44, -0.08, 0.92], [46, 0.0, 0.85], [49, 0.25, 0.60], [52, 0.40, 0.35], [53, 0.50, 0.29], [54, 0.40, 0.23], [55, 0.30, 0.29], [56, 0.35, 0.32], [57, 0.40, 0.35], [58, 0.25, 0.21], [61, 0.0, 0.0]],
+      height_keyframes: [[42, 1.0], [46, 0.85], [55, 0.3], [61, 0.0]]
+    },
+    middle: {
+      name: 'Middle',
+      color: '#34d399',
+      colorDim: 'rgba(52, 211, 153, 0.10)',
+      colorGlow: 'rgba(52, 211, 153, 0.3)',
+      start: 62, end: 71,
+      reversed: false,
+      xy_keyframes: [[62, 0.0, 0.0], [63, -0.05, 0.10], [64, -0.15, 0.12], [66, 0.0, 0.85], [71, 0.0, 1.0]],
+      height_keyframes: [[62, 0.0], [71, 1.0]]
+    }
+  };
+
+  const landmarks = {
+    0:  'base_start',
+    26: 'left_tip',
+    41: 'apex_left',
+    42: 'apex_right',
+    46: 'crossover',
+    55: 'right_tip',
+    61: 'base_junction',
+    71: 'middle_end'
+  };
+
+  // ============ INTERPOLATION ============
+
+  function interpolate(keyframes, index, indexField) {
+    const idx = indexField || 0;
+    // Find surrounding keyframes
+    let lo = keyframes[0];
+    let hi = keyframes[keyframes.length - 1];
+    for (let i = 0; i < keyframes.length; i++) {
+      if (keyframes[i][idx] === index) return keyframes[i];
+      if (keyframes[i][idx] <= index) lo = keyframes[i];
+      if (keyframes[i][idx] >= index && (hi[idx] < lo[idx] || keyframes[i][idx] <= hi[idx])) {
+        hi = keyframes[i];
+        break;
+      }
+    }
+    if (lo[idx] === hi[idx]) return lo;
+    const t = (index - lo[idx]) / (hi[idx] - lo[idx]);
+    return lo.map((v, i) => i === idx ? index : lo[i] + (hi[i] - lo[i]) * t);
+  }
+
+  function interpolateXY(keyframes, index) {
+    let lo = keyframes[0];
+    let hi = keyframes[keyframes.length - 1];
+    for (let i = 0; i < keyframes.length; i++) {
+      if (keyframes[i][0] === index) return { x: keyframes[i][1], y: keyframes[i][2] };
+      if (keyframes[i][0] <= index) lo = keyframes[i];
+      if (keyframes[i][0] > index) { hi = keyframes[i]; break; }
+    }
+    if (lo[0] === hi[0]) return { x: lo[1], y: lo[2] };
+    const t = (index - lo[0]) / (hi[0] - lo[0]);
+    return {
+      x: lo[1] + (hi[1] - lo[1]) * t,
+      y: lo[2] + (hi[2] - lo[2]) * t
+    };
+  }
+
+  function interpolateHeight(keyframes, index) {
+    let lo = keyframes[0];
+    let hi = keyframes[keyframes.length - 1];
+    for (let i = 0; i < keyframes.length; i++) {
+      if (keyframes[i][0] === index) return keyframes[i][1];
+      if (keyframes[i][0] <= index) lo = keyframes[i];
+      if (keyframes[i][0] > index) { hi = keyframes[i]; break; }
+    }
+    if (lo[0] === hi[0]) return lo[1];
+    const t = (index - lo[0]) / (hi[0] - lo[0]);
+    return lo[1] + (hi[1] - lo[1]) * t;
+  }
+
+  // ============ COMPUTE LED POSITIONS ============
+
+  const leds = {};
+
+  Object.entries(branches).forEach(([key, branch]) => {
+    for (let i = branch.start; i <= branch.end; i++) {
+      const pos = interpolateXY(branch.xy_keyframes, i);
+      const height = interpolateHeight(branch.height_keyframes, i);
+      leds[i] = {
+        index: i,
+        branch: key,
+        branchName: branch.name,
+        color: branch.color,
+        x: pos.x,
+        y: pos.y,
+        height: height,
+        isLandmark: landmarks.hasOwnProperty(i),
+        landmarkName: landmarks[i] || null
+      };
+    }
+  });
+
+  // ============ RENDER MAIN DIAGRAM ============
+
+  const svg = document.getElementById('topology-svg');
+  const NS = 'http://www.w3.org/2000/svg';
+  const tooltip = document.getElementById('tooltip');
+
+  function renderDiagram() {
+    const rect = svg.getBoundingClientRect();
+    const W = rect.width || 900;
+    const H = rect.height || 600;
+    const margin = { top: 50, right: 60, bottom: 50, left: 60 };
+    const plotW = W - margin.left - margin.right;
+    const plotH = H - margin.top - margin.bottom;
+
+    // Map data coords to SVG coords
+    // x: -1..+1 -> margin.left .. margin.left + plotW
+    // y: 0..1 -> margin.top + plotH .. margin.top (flip: 0 = bottom, 1 = top)
+    function toSVG(dataX, dataY) {
+      return {
+        sx: margin.left + ((dataX + 1) / 2) * plotW,
+        sy: margin.top + (1 - dataY) * plotH
+      };
+    }
+
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    svg.innerHTML = '';
+
+    // Defs
+    const defs = document.createElementNS(NS, 'defs');
+
+    // Glow filter
+    const filter = document.createElementNS(NS, 'filter');
+    filter.setAttribute('id', 'glow');
+    filter.setAttribute('x', '-50%');
+    filter.setAttribute('y', '-50%');
+    filter.setAttribute('width', '200%');
+    filter.setAttribute('height', '200%');
+    const blur = document.createElementNS(NS, 'feGaussianBlur');
+    blur.setAttribute('stdDeviation', '3');
+    blur.setAttribute('result', 'blur');
+    const merge = document.createElementNS(NS, 'feMerge');
+    const mn1 = document.createElementNS(NS, 'feMergeNode');
+    mn1.setAttribute('in', 'blur');
+    const mn2 = document.createElementNS(NS, 'feMergeNode');
+    mn2.setAttribute('in', 'SourceGraphic');
+    merge.appendChild(mn1);
+    merge.appendChild(mn2);
+    filter.appendChild(blur);
+    filter.appendChild(merge);
+    defs.appendChild(filter);
+
+    // Arrow markers for each branch
+    ['left', 'right', 'middle'].forEach(key => {
+      const marker = document.createElementNS(NS, 'marker');
+      marker.setAttribute('id', `arrow-${key}`);
+      marker.setAttribute('viewBox', '0 0 10 10');
+      marker.setAttribute('refX', '5');
+      marker.setAttribute('refY', '5');
+      marker.setAttribute('markerWidth', '6');
+      marker.setAttribute('markerHeight', '6');
+      marker.setAttribute('orient', 'auto');
+      const path = document.createElementNS(NS, 'path');
+      path.setAttribute('d', 'M 0 2 L 6 5 L 0 8 Z');
+      path.setAttribute('fill', branches[key].color);
+      path.setAttribute('opacity', '0.6');
+      marker.appendChild(path);
+      defs.appendChild(marker);
+    });
+
+    // Adjacency marker
+    const adjMarker = document.createElementNS(NS, 'marker');
+    adjMarker.setAttribute('id', 'arrow-adj');
+    adjMarker.setAttribute('viewBox', '0 0 10 10');
+    adjMarker.setAttribute('refX', '5');
+    adjMarker.setAttribute('refY', '5');
+    adjMarker.setAttribute('markerWidth', '5');
+    adjMarker.setAttribute('markerHeight', '5');
+    adjMarker.setAttribute('orient', 'auto');
+    const adjPath = document.createElementNS(NS, 'path');
+    adjPath.setAttribute('d', 'M 0 2 L 6 5 L 0 8 Z');
+    adjPath.setAttribute('fill', '#f472b6');
+    adjPath.setAttribute('opacity', '0.4');
+    adjMarker.appendChild(adjPath);
+    defs.appendChild(adjMarker);
+
+    svg.appendChild(defs);
+
+    // Background grid lines
+    const gridG = document.createElementNS(NS, 'g');
+    gridG.setAttribute('class', 'grid');
+    // Horizontal height lines
+    for (let h = 0; h <= 1; h += 0.25) {
+      const yy = margin.top + (1 - h) * plotH;
+      const line = document.createElementNS(NS, 'line');
+      line.setAttribute('x1', margin.left);
+      line.setAttribute('y1', yy);
+      line.setAttribute('x2', margin.left + plotW);
+      line.setAttribute('y2', yy);
+      line.setAttribute('stroke', 'rgba(148, 163, 184, 0.06)');
+      line.setAttribute('stroke-width', '1');
+      gridG.appendChild(line);
+
+      // Label
+      const lbl = document.createElementNS(NS, 'text');
+      lbl.setAttribute('x', margin.left - 8);
+      lbl.setAttribute('y', yy + 4);
+      lbl.setAttribute('text-anchor', 'end');
+      lbl.setAttribute('fill', '#475569');
+      lbl.setAttribute('font-size', '10');
+      lbl.setAttribute('font-family', "'IBM Plex Mono', monospace");
+      lbl.textContent = h.toFixed(2);
+      gridG.appendChild(lbl);
+    }
+    // Vertical x lines
+    for (let x = -1; x <= 1; x += 0.5) {
+      const p = toSVG(x, 0);
+      const line = document.createElementNS(NS, 'line');
+      line.setAttribute('x1', p.sx);
+      line.setAttribute('y1', margin.top);
+      line.setAttribute('x2', p.sx);
+      line.setAttribute('y2', margin.top + plotH);
+      line.setAttribute('stroke', 'rgba(148, 163, 184, 0.06)');
+      line.setAttribute('stroke-width', '1');
+      gridG.appendChild(line);
+
+      const lbl = document.createElementNS(NS, 'text');
+      lbl.setAttribute('x', p.sx);
+      lbl.setAttribute('y', margin.top + plotH + 16);
+      lbl.setAttribute('text-anchor', 'middle');
+      lbl.setAttribute('fill', '#475569');
+      lbl.setAttribute('font-size', '10');
+      lbl.setAttribute('font-family', "'IBM Plex Mono', monospace");
+      lbl.textContent = x.toFixed(1);
+      gridG.appendChild(lbl);
+    }
+    svg.appendChild(gridG);
+
+    // Cross-branch adjacency lines (draw under paths)
+    const adjacencies = [
+      { leds: [4, 63], label: 'near-neighbors' },
+      { leds: [46, 66], label: 'crossover' }
+    ];
+    const adjG = document.createElementNS(NS, 'g');
+    adjacencies.forEach(adj => {
+      const a = leds[adj.leds[0]];
+      const b = leds[adj.leds[1]];
+      const pa = toSVG(a.x, a.y);
+      const pb = toSVG(b.x, b.y);
+      const line = document.createElementNS(NS, 'line');
+      line.setAttribute('x1', pa.sx);
+      line.setAttribute('y1', pa.sy);
+      line.setAttribute('x2', pb.sx);
+      line.setAttribute('y2', pb.sy);
+      line.setAttribute('stroke', '#f472b6');
+      line.setAttribute('stroke-width', '1');
+      line.setAttribute('stroke-dasharray', '4 4');
+      line.setAttribute('opacity', '0.3');
+      adjG.appendChild(line);
+    });
+    svg.appendChild(adjG);
+
+    // Branch paths with direction arrows
+    Object.entries(branches).forEach(([key, branch]) => {
+      const pathG = document.createElementNS(NS, 'g');
+
+      // Build point list in strip order
+      const points = [];
+      for (let i = branch.start; i <= branch.end; i++) {
+        const led = leds[i];
+        const p = toSVG(led.x, led.y);
+        points.push({ sx: p.sx, sy: p.sy, index: i });
+      }
+
+      // Draw segments
+      for (let i = 0; i < points.length - 1; i++) {
+        const a = points[i];
+        const b = points[i + 1];
+        const line = document.createElementNS(NS, 'line');
+        line.setAttribute('x1', a.sx);
+        line.setAttribute('y1', a.sy);
+        line.setAttribute('x2', b.sx);
+        line.setAttribute('y2', b.sy);
+        line.setAttribute('stroke', branch.color);
+        line.setAttribute('stroke-width', '1.5');
+        line.setAttribute('opacity', '0.35');
+        pathG.appendChild(line);
+      }
+
+      // Direction arrows every N LEDs along the path
+      const arrowInterval = key === 'middle' ? 3 : 6;
+      for (let i = arrowInterval; i < points.length; i += arrowInterval) {
+        const prev = points[i - 1];
+        const curr = points[i];
+        const dx = curr.sx - prev.sx;
+        const dy = curr.sy - prev.sy;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len < 5) continue;
+        const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+        const mx = (prev.sx + curr.sx) / 2;
+        const my = (prev.sy + curr.sy) / 2;
+
+        const arrow = document.createElementNS(NS, 'polygon');
+        arrow.setAttribute('points', '-4,-3 4,0 -4,3');
+        arrow.setAttribute('transform', `translate(${mx},${my}) rotate(${angle})`);
+        arrow.setAttribute('fill', branch.color);
+        arrow.setAttribute('opacity', '0.5');
+        pathG.appendChild(arrow);
+      }
+
+      svg.appendChild(pathG);
+    });
+
+    // LED dots
+    const dotsG = document.createElementNS(NS, 'g');
+    Object.values(leds).forEach(led => {
+      const p = toSVG(led.x, led.y);
+      const g = document.createElementNS(NS, 'g');
+      g.style.cursor = 'pointer';
+
+      if (led.isLandmark) {
+        // Outer ring
+        const ring = document.createElementNS(NS, 'circle');
+        ring.setAttribute('cx', p.sx);
+        ring.setAttribute('cy', p.sy);
+        ring.setAttribute('r', '10');
+        ring.setAttribute('fill', 'none');
+        ring.setAttribute('stroke', led.color);
+        ring.setAttribute('stroke-width', '1.5');
+        ring.setAttribute('opacity', '0.3');
+        g.appendChild(ring);
+      }
+
+      // Main dot
+      const circle = document.createElementNS(NS, 'circle');
+      circle.setAttribute('cx', p.sx);
+      circle.setAttribute('cy', p.sy);
+      circle.setAttribute('r', led.isLandmark ? '5' : '3.5');
+      circle.setAttribute('fill', led.color);
+      circle.setAttribute('opacity', led.isLandmark ? '0.9' : '0.7');
+      circle.setAttribute('filter', led.isLandmark ? 'url(#glow)' : '');
+      g.appendChild(circle);
+
+      // Invisible hit area
+      const hitArea = document.createElementNS(NS, 'circle');
+      hitArea.setAttribute('cx', p.sx);
+      hitArea.setAttribute('cy', p.sy);
+      hitArea.setAttribute('r', '10');
+      hitArea.setAttribute('fill', 'transparent');
+      hitArea.dataset.ledIndex = led.index;
+      g.appendChild(hitArea);
+
+      dotsG.appendChild(g);
+    });
+    svg.appendChild(dotsG);
+
+    // Landmark labels
+    const labelsG = document.createElementNS(NS, 'g');
+    const labelOffsets = {
+      0:  { dx: 12, dy: 16, anchor: 'start' },
+      26: { dx: -14, dy: 0, anchor: 'end' },
+      41: { dx: -14, dy: -8, anchor: 'end' },
+      42: { dx: 14, dy: -8, anchor: 'start' },
+      46: { dx: 14, dy: 0, anchor: 'start' },
+      55: { dx: 14, dy: 4, anchor: 'start' },
+      61: { dx: 14, dy: 16, anchor: 'start' },
+      71: { dx: 0, dy: -16, anchor: 'middle' }
+    };
+
+    Object.entries(landmarks).forEach(([idx, name]) => {
+      const led = leds[idx];
+      const p = toSVG(led.x, led.y);
+      const offset = labelOffsets[idx] || { dx: 12, dy: -8, anchor: 'start' };
+
+      // Name label
+      const text = document.createElementNS(NS, 'text');
+      text.setAttribute('x', p.sx + offset.dx);
+      text.setAttribute('y', p.sy + offset.dy);
+      text.setAttribute('text-anchor', offset.anchor);
+      text.setAttribute('fill', led.color);
+      text.setAttribute('font-size', '10');
+      text.setAttribute('font-family', "'IBM Plex Mono', monospace");
+      text.setAttribute('font-weight', '600');
+      text.setAttribute('opacity', '0.8');
+      text.textContent = `${name}`;
+      labelsG.appendChild(text);
+
+      // Index label
+      const idx_text = document.createElementNS(NS, 'text');
+      idx_text.setAttribute('x', p.sx + offset.dx);
+      idx_text.setAttribute('y', p.sy + offset.dy + 12);
+      idx_text.setAttribute('text-anchor', offset.anchor);
+      idx_text.setAttribute('fill', '#64748b');
+      idx_text.setAttribute('font-size', '9');
+      idx_text.setAttribute('font-family', "'IBM Plex Mono', monospace");
+      idx_text.textContent = `LED ${idx}`;
+      labelsG.appendChild(idx_text);
+    });
+    svg.appendChild(labelsG);
+
+    // Axis labels
+    const xLabel = document.createElementNS(NS, 'text');
+    xLabel.setAttribute('x', margin.left + plotW / 2);
+    xLabel.setAttribute('y', H - 8);
+    xLabel.setAttribute('text-anchor', 'middle');
+    xLabel.setAttribute('fill', '#475569');
+    xLabel.setAttribute('font-size', '10');
+    xLabel.setAttribute('font-family', "'IBM Plex Mono', monospace");
+    xLabel.textContent = 'x position';
+    svg.appendChild(xLabel);
+
+    const yLabel = document.createElementNS(NS, 'text');
+    yLabel.setAttribute('x', 14);
+    yLabel.setAttribute('y', margin.top + plotH / 2);
+    yLabel.setAttribute('text-anchor', 'middle');
+    yLabel.setAttribute('fill', '#475569');
+    yLabel.setAttribute('font-size', '10');
+    yLabel.setAttribute('font-family', "'IBM Plex Mono', monospace");
+    yLabel.setAttribute('transform', `rotate(-90 14 ${margin.top + plotH / 2})`);
+    yLabel.textContent = 'height (y)';
+    svg.appendChild(yLabel);
+  }
+
+  // ============ TOOLTIP ============
+
+  const topologySvg = document.getElementById('topology-svg');
+
+  topologySvg.addEventListener('mousemove', function(e) {
+    const target = e.target;
+    if (target.dataset && target.dataset.ledIndex !== undefined) {
+      const led = leds[parseInt(target.dataset.ledIndex)];
+      if (!led) return;
+
+      let branchColor = branches[led.branch].color;
+      let html = `<div class="tt-branch" style="color:${branchColor}">${led.branchName} Branch</div>`;
+      html += `<div class="tt-row"><span class="tt-label">LED</span><span class="tt-val">#${led.index}</span></div>`;
+      html += `<div class="tt-row"><span class="tt-label">Position</span><span class="tt-val">(${led.x.toFixed(2)}, ${led.y.toFixed(2)})</span></div>`;
+      html += `<div class="tt-row"><span class="tt-label">Height</span><span class="tt-val">${led.height.toFixed(2)}</span></div>`;
+      if (led.landmarkName) {
+        html += `<div class="tt-row"><span class="tt-label">Landmark</span><span class="tt-val" style="color:${branchColor}">${led.landmarkName}</span></div>`;
+      }
+
+      tooltip.innerHTML = html;
+      tooltip.classList.add('visible');
+
+      const ttRect = tooltip.getBoundingClientRect();
+      let tx = e.clientX + 16;
+      let ty = e.clientY - 10;
+      if (tx + ttRect.width > window.innerWidth - 10) tx = e.clientX - ttRect.width - 16;
+      if (ty + ttRect.height > window.innerHeight - 10) ty = e.clientY - ttRect.height - 10;
+      if (ty < 10) ty = 10;
+      tooltip.style.left = tx + 'px';
+      tooltip.style.top = ty + 'px';
+    }
+  });
+
+  topologySvg.addEventListener('mouseleave', function() {
+    tooltip.classList.remove('visible');
+  });
+
+  topologySvg.addEventListener('mouseout', function(e) {
+    if (!e.target.dataset || e.target.dataset.ledIndex === undefined) {
+      // Check if still over another LED
+      if (!e.relatedTarget || !e.relatedTarget.dataset || e.relatedTarget.dataset.ledIndex === undefined) {
+        tooltip.classList.remove('visible');
+      }
+    }
+  });
+
+  // ============ STRIP WIRING DIAGRAM ============
+
+  function renderStrip() {
+    const stripSvg = document.getElementById('strip-svg');
+    const rect = stripSvg.getBoundingClientRect();
+    const W = rect.width || 900;
+    const H = 80;
+    const pad = 16;
+    const stripW = W - pad * 2;
+    const dotR = 4;
+    const centerY = H / 2;
+
+    stripSvg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    stripSvg.innerHTML = '';
+
+    // Background track
+    const track = document.createElementNS(NS, 'rect');
+    track.setAttribute('x', pad);
+    track.setAttribute('y', centerY - 8);
+    track.setAttribute('width', stripW);
+    track.setAttribute('height', 16);
+    track.setAttribute('rx', 8);
+    track.setAttribute('fill', 'rgba(148, 163, 184, 0.05)');
+    track.setAttribute('stroke', 'rgba(148, 163, 184, 0.08)');
+    track.setAttribute('stroke-width', '1');
+    stripSvg.appendChild(track);
+
+    // Branch separators
+    const sep1x = pad + (41.5 / 71) * stripW;
+    const sep2x = pad + (61.5 / 71) * stripW;
+    [sep1x, sep2x].forEach(sx => {
+      const line = document.createElementNS(NS, 'line');
+      line.setAttribute('x1', sx);
+      line.setAttribute('y1', centerY - 14);
+      line.setAttribute('x2', sx);
+      line.setAttribute('y2', centerY + 14);
+      line.setAttribute('stroke', 'rgba(148, 163, 184, 0.15)');
+      line.setAttribute('stroke-width', '1');
+      line.setAttribute('stroke-dasharray', '3 3');
+      stripSvg.appendChild(line);
+    });
+
+    // LED dots
+    for (let i = 0; i <= 71; i++) {
+      const led = leds[i];
+      if (!led) continue;
+      const x = pad + (i / 71) * stripW;
+
+      const circle = document.createElementNS(NS, 'circle');
+      circle.setAttribute('cx', x);
+      circle.setAttribute('cy', centerY);
+      circle.setAttribute('r', led.isLandmark ? dotR + 1 : dotR);
+      circle.setAttribute('fill', led.color);
+      circle.setAttribute('opacity', led.isLandmark ? '0.9' : '0.55');
+      stripSvg.appendChild(circle);
+
+      // Landmark ticks
+      if (led.isLandmark) {
+        const tick = document.createElementNS(NS, 'line');
+        tick.setAttribute('x1', x);
+        tick.setAttribute('y1', centerY + 12);
+        tick.setAttribute('x2', x);
+        tick.setAttribute('y2', centerY + 20);
+        tick.setAttribute('stroke', led.color);
+        tick.setAttribute('stroke-width', '1');
+        tick.setAttribute('opacity', '0.5');
+        stripSvg.appendChild(tick);
+
+        const lbl = document.createElementNS(NS, 'text');
+        lbl.setAttribute('x', x);
+        lbl.setAttribute('y', centerY + 30);
+        lbl.setAttribute('text-anchor', 'middle');
+        lbl.setAttribute('fill', led.color);
+        lbl.setAttribute('font-size', '8');
+        lbl.setAttribute('font-family', "'IBM Plex Mono', monospace");
+        lbl.setAttribute('opacity', '0.7');
+        lbl.textContent = i;
+        stripSvg.appendChild(lbl);
+      }
+    }
+
+    // Data flow arrow
+    const arrow = document.createElementNS(NS, 'polygon');
+    arrow.setAttribute('points', '-5,-4 5,0 -5,4');
+    arrow.setAttribute('transform', `translate(${pad + stripW + 4},${centerY})`);
+    arrow.setAttribute('fill', '#64748b');
+    arrow.setAttribute('opacity', '0.4');
+    stripSvg.appendChild(arrow);
+
+    // Branch labels above
+    const branchLabels = [
+      { name: 'LEFT', x: pad + (20 / 71) * stripW, color: '#22d3ee' },
+      { name: 'RIGHT', x: pad + (51 / 71) * stripW, color: '#fbbf24' },
+      { name: 'MID', x: pad + (66 / 71) * stripW, color: '#34d399' }
+    ];
+    branchLabels.forEach(b => {
+      const lbl = document.createElementNS(NS, 'text');
+      lbl.setAttribute('x', b.x);
+      lbl.setAttribute('y', centerY - 16);
+      lbl.setAttribute('text-anchor', 'middle');
+      lbl.setAttribute('fill', b.color);
+      lbl.setAttribute('font-size', '9');
+      lbl.setAttribute('font-family', "'IBM Plex Mono', monospace");
+      lbl.setAttribute('font-weight', '600');
+      lbl.setAttribute('letter-spacing', '1.5');
+      lbl.setAttribute('opacity', '0.6');
+      lbl.textContent = b.name;
+      stripSvg.appendChild(lbl);
+    });
+  }
+
+  // ============ INIT ============
+
+  renderDiagram();
+  renderStrip();
+
+  // Redraw on resize
+  let resizeTimer;
+  window.addEventListener('resize', function() {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function() {
+      renderDiagram();
+      renderStrip();
+    }, 150);
+  });
+})();
+</script>
+
+</body>
+</html>

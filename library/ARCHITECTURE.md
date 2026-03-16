@@ -38,6 +38,8 @@ What we can compute. Two key principles; full catalog in `AUDIO_FEATURES.md` (li
 
 **Context deviation:** All features are relative to a running baseline. The adaptation time constant IS the temporal scope. A subjective quality is not a fixed spectral shape -- it's deviation from the surrounding context's norm. (Ledger: `feelings-are-contextual`)
 
+Full feature catalog in `AUDIO_FEATURES.md` (library). Signal normalization primitive -- multi-output EMA design with peak_normalized, ema_ratio, and sigmoid taps -- in `SIGNAL_NORMALIZATION.md` (library).
+
 ### Axis 4: LED Behaviors
 
 The visual vocabulary, independent of what triggers them. Three categories: foreground (transient, additive -- sparkle, pulse, flash, traveling pulse, collision), background (persistent, base layer -- breathe, zone coloring, flow, gradient shift), and standalone (self-contained composition -- sidechain pump, band proportional, growth).

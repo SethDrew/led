@@ -1615,7 +1615,7 @@ entries:
 
   - id: per-band-normalization-with-dropout-handling
     date: 2026-02-21
-    touched: 2026-02-22
+    touched: 2026-03-15
     title: "Per-band peak-decay normalization (standard); dropout emphasis deferred to events layer"
     summary: >
       Per-band normalization is standard peak-decay: peak = max(energy, peak * 0.9995).
@@ -1623,7 +1623,7 @@ entries:
       practice (scottlawsonbc, WLED concept, PCEN). Produces clean 0-1 values per band.
       Dropout detection and reintroduction emphasis are separate concerns that belong in
       the events/temporal layer, not in normalization.
-    status: exploring
+    status: superseded
     warmth: high
     confidence: high
     source: library/arch-impl/axis6-composition/PER_BAND_NORMALIZATION.md
@@ -1838,7 +1838,7 @@ entries:
     status: integrated
     warmth: low
     confidence: high
-    source: git history (commit before deletion: b374d0b)
+    source: "git history (commit before deletion: b374d0b)"
     tags: [repo-hygiene, tools]
     relates_to: [repo-discoverability]
     notes: >
@@ -2765,3 +2765,276 @@ entries:
       - This is the natural next step for palette design
 
       User has expressed interest in saturation gradients for future work.
+
+  # ── Normalization Investigation (2026-03) ──────────────────────────
+
+  - id: ema-normalization-replaces-peak-decay
+    date: 2026-03-15
+    touched: 2026-03-15
+    title: "EMA (mean-tracking) normalization structurally outperforms peak-decay for section-aware dynamics"
+    summary: >
+      EMA normalization divides by a running mean rather than a decaying peak.
+      Peak-tracking denominators are dominated by the single loudest moment,
+      compressing everything else toward zero and erasing section differences.
+      Mean-tracking normalizes against the current energy context, preserving
+      both within-section dynamics (beat visibility) and inter-section contrast
+      (drops feel different from builds).
+    status: validated
+    warmth: high
+    confidence: high
+    source:
+      - audio-reactive/research/norm_comparison.py
+      - audio-reactive/research/section_norm_test.py
+      - audio-reactive/research/normalization-tests/
+    tags: [feature-extraction, normalization, architecture, perception]
+    relates_to: [per-band-normalization-with-dropout-handling, normalization-prior-art-audit, normalization-events-separation, feelings-are-contextual, perception-is-layered-by-timescale, ema-time-constant-is-section-relative, ema-section-boundary-contrast, ema-normalization-prior-art, frame-rate-normalization-bug, normalization-metric-bias-warning]
+    notes: >
+      13 normalization algorithms tested across electronic tracks. EMA with 20s
+      time constant won decisively on the product metric (intra-section CV ×
+      inter-section range), which measures the dual objective: preserve beats
+      within sections while maintaining contrast between sections.
+
+      The structural argument: peak-decay tracks the maximum, so after a loud
+      drop the denominator stays near that peak for minutes. Everything after
+      the drop normalizes to a fraction of that peak — quiet sections read as
+      near-zero. EMA tracks the mean, so it adapts to whatever energy level is
+      currently present, letting each section use the full 0-1 output range.
+
+      Connects to three independent lines of prior work: divisive normalization
+      in neuroscience (Carandini & Heeger 2012), PCEN in ML audio (Lostanlen &
+      Salamon 2018), and EBU R128 mean-loudness broadcasting standard.
+
+      Supersedes the peak-decay approach in per-band-normalization-with-dropout-handling.
+
+  - id: ema-time-constant-is-section-relative
+    date: 2026-03-15
+    touched: 2026-03-15
+    title: "Optimal EMA time constant scales with typical section length (~0.5-0.7x)"
+    summary: >
+      The EMA time constant should be approximately 0.5-0.7× the typical
+      section length of the music. 20s for EDM (~30s sections), 30-40s for
+      rock (~60s sections), 60-90s for DJ sets, 120s+ for classical.
+    status: validated
+    warmth: medium
+    confidence: high
+    source:
+      - audio-reactive/research/norm_comparison.py
+      - audio-reactive/research/normalization-tests/metrics.json
+    tags: [feature-extraction, normalization, tuning]
+    relates_to: [ema-normalization-replaces-peak-decay, perception-is-layered-by-timescale, feelings-are-contextual]
+    notes: >
+      20s validated on electronic music (typical section ~30s). 30s scores
+      marginally better on tracks with longer sections. The ratio makes
+      intuitive sense: the EMA needs to be slow enough to represent "this
+      section's average" but fast enough to forget the previous section
+      before the next transition.
+
+      Should always be specified in wall-clock seconds, not per-frame decay
+      constants (see frame-rate-normalization-bug). The conversion is:
+      alpha = 2.0 / (time_constant_seconds * fps + 1).
+
+      This is a genre-level parameter, not a per-song parameter. A reasonable
+      default (20s) works across most electronic music. Classical and ambient
+      may need a "slow music" preset.
+
+  - id: ema-section-boundary-contrast
+    date: 2026-03-15
+    touched: 2026-03-15
+    title: "EMA adaptation lag at section boundaries IS the section contrast signal"
+    summary: >
+      When energy jumps at a drop, the EMA denominator is still tracking
+      the quiet section's mean — so energy/ema spikes well above 1.0. When
+      energy falls in a breakdown, the denominator is still high from the
+      loud section — so the output dips near zero. This transient
+      "mismatch" is perceptually correct: it mirrors human auditory
+      adaptation.
+    status: validated
+    warmth: high
+    confidence: high
+    source:
+      - audio-reactive/research/normalization-tests/fa_br_drop1_section_comparison.png
+      - audio-reactive/research/section_norm_test.py
+    tags: [feature-extraction, normalization, perception, feelings]
+    relates_to: [ema-normalization-replaces-peak-decay, feelings-are-contextual, derivatives-over-absolutes]
+    notes: >
+      Peak-decay's instant attack absorbs energy jumps in a single frame:
+      the new peak becomes the denominator immediately, so the output never
+      spikes. Drops are invisible to the normalizer. The slow decay means
+      only downward transitions produce any contrast (and those are
+      compressed by the still-high peak).
+
+      EMA's symmetric lag works in both directions: spikes on upward
+      transitions, dips on downward transitions. The "wrong" normalization
+      during the transition IS the desired visual effect — it's exactly
+      the surprise signal that makes drops feel like drops.
+
+      This connects to derivatives-over-absolutes: the EMA mismatch is
+      essentially a derivative signal (rate of change relative to recent
+      context) embedded in the normalization itself.
+
+  - id: frame-rate-normalization-bug
+    date: 2026-03-15
+    touched: 2026-03-15
+    title: "Per-frame decay constants produce frame-rate-dependent normalization"
+    summary: >
+      The same decay constant (e.g., 0.9995) produces radically different
+      time behavior at different frame rates: 64s half-life at 21.5fps but
+      16s at 86fps. Effects with different hop sizes silently get different
+      normalization behavior.
+    status: validated
+    warmth: low
+    confidence: high
+    source: audio-reactive/research/norm_comparison.py
+    tags: [feature-extraction, normalization, failure-mode]
+    relates_to: [ema-normalization-replaces-peak-decay, per-band-normalization-with-dropout-handling, ema-time-constant-is-section-relative]
+    notes: >
+      This is a bug in the original peak-decay specification (0.9995 per
+      frame). Half-life = -ln(2) / ln(decay), measured in frames. At 30fps
+      that's ~46s, but the same constant at 60fps is ~23s — half the
+      musical memory.
+
+      Fix: always specify normalization time constants in wall-clock
+      seconds, then derive the per-frame constant at runtime:
+      alpha = 2.0 / (time_constant_seconds * fps + 1).
+
+      This affects any system using per-frame decay constants, including
+      the original per-band-normalization-with-dropout-handling design
+      and likely WLED's AGC implementation.
+
+  - id: ema-normalization-prior-art
+    date: 2026-03-15
+    touched: 2026-03-15
+    title: "Mean-tracking normalization has deep roots across domains — but not in the LED/VJ community"
+    summary: >
+      Andrew Tuline's FastLED-SoundReactive implemented mean-tracking
+      (multAgc = targetAgc / sampleAvg), later replaced by peak-tracking
+      in WLED. PCEN (Lostanlen & Salamon 2018) formalizes the same
+      principle for ML audio. EBU R128 (2010) replaced peak with
+      mean-loudness in broadcasting. Neuroscience: divisive normalization
+      by pooled mean (Carandini & Heeger 2012), auditory slow adaptation
+      ~12.3s (Dean et al. 2008). Nobody in the VJ/LED community has
+      articulated mean > peak as a general principle.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: web research (PCEN paper, EBU R128, Carandini & Heeger 2012, Dean et al. 2008, FastLED-SoundReactive source)
+    tags: [normalization, prior-art, perception, neuroscience]
+    relates_to: [ema-normalization-replaces-peak-decay, normalization-prior-art-audit, wled-sr-reimplemented]
+    notes: >
+      The convergence across domains is striking:
+
+      - **Neuroscience**: Carandini & Heeger (2012) "Normalization as a
+        canonical neural computation" — neurons divide by pooled mean
+        activity, not by peak. Dean et al. (2008) measured auditory cortex
+        adaptation time constant at ~12.3s in ferrets.
+      - **Broadcast**: EBU R128 (2010) replaced peak metering with
+        integrated mean loudness (LUFS) because peak normalization produced
+        the loudness wars — exactly the same failure mode we observed.
+      - **ML audio**: PCEN (Lostanlen & Salamon 2018) uses per-channel
+        exponential moving average for normalization, replacing fixed or
+        peak-based gain.
+      - **LED community**: Tuline's FastLED-SoundReactive had mean-tracking
+        AGC. WLED replaced it with peak-tracking. This project's original
+        design also used peak-decay. The regression happened independently
+        twice.
+
+      The fact that WLED moved FROM mean TO peak suggests the LED community
+      optimizes for "immediate responsiveness" over section-level dynamics,
+      which makes sense for short demos but fails for full-song experiences.
+
+  - id: normalization-metric-bias-warning
+    date: 2026-03-15
+    touched: 2026-03-15
+    title: "Product metric may be structurally biased toward faster-adapting algorithms"
+    summary: >
+      The product metric (intra-section CV × inter-section range) may be
+      biased toward EMA-like algorithms. CV is inversely proportional to
+      output mean; EMA's lower mean inflates CV independent of actual beat
+      visibility. The qualitative argument for EMA is strong; the
+      quantitative claim rests on a potentially circular metric.
+    status: exploring
+    warmth: low
+    confidence: medium
+    source: audio-reactive/research/norm_comparison.py
+    tags: [normalization, tools, data-quality]
+    relates_to: [ema-normalization-replaces-peak-decay]
+    notes: >
+      The product metric was designed to capture the dual objective: beat
+      visibility within sections (intra-CV) AND contrast between sections
+      (inter-range). But CV = std/mean, so an algorithm that produces lower
+      mean output (like EMA, which doesn't clamp to a peak) gets higher CV
+      even if the actual beat amplitude variation is identical.
+
+      The cross-genre "17/24 wins" claim for EMA should be treated as
+      suggestive rather than definitive. The structural/qualitative argument
+      (mean-tracking preserves section context, peak-tracking erases it) is
+      the real evidence. The metric confirms the direction but may
+      exaggerate the margin.
+
+      Future validation: perceptual A/B tests on actual LEDs, comparing
+      EMA vs peak-decay on tracks with clear section structure.
+
+  - id: self-relative-normalization-for-integrals
+    date: 2026-03-15
+    touched: 2026-03-15
+    title: "RMS-bounded normalization for pre-integrated features (not EMA)"
+    summary: >
+      Pre-integrated features (rolling integrals of RMS, spectral flux, etc.)
+      should NOT be EMA-normalized — double-smoothing collapses dynamic range.
+      Instead, normalize by the theoretical maximum: integral / (rms_peak ×
+      window_frames), where rms_peak is a fast-tracking peak of the underlying
+      RMS signal. This achieves r=0.90-0.999 correlation with ideal output,
+      compared to r=0.05-0.74 for peak-decay on integrals.
+    status: validated
+    warmth: medium
+    confidence: high
+    source:
+      - audio-reactive/research/normalization-tests/fa_br_drop1_absint_comparison.png
+      - audio-reactive/research/norm_comparison.py
+    tags: [feature-extraction, normalization, architecture]
+    relates_to: [ema-normalization-replaces-peak-decay, rolling-integral-sustained-energy]
+    notes: >
+      The key insight: an integral's theoretical maximum over a window is
+      (peak_value × window_length). If we track the RMS peak with a fast
+      EMA or peak-decay, we can bound the integral analytically without
+      any adaptive normalization of the integral itself.
+
+      This matters because integrals are already smoothed — they accumulate
+      energy over their window. Applying EMA normalization on top of that
+      creates double-smoothing: the integral smooths the input, then the
+      EMA smooths the integral. The result loses both beat-level and
+      section-level dynamics.
+
+      The self-relative approach preserves the integral's natural dynamics
+      (slow-building energy in builds, sustained high values in drops)
+      while keeping output in a bounded range. It's a different
+      normalization strategy for a different feature type — not a
+      contradiction of EMA for instantaneous features.
+
+  - id: proportional-mapping-needs-midrange-centering
+    date: 2026-03-15
+    touched: 2026-03-15
+    title: "Proportional brightness mapping needs mid-range centering for equal headroom"
+    summary: >
+      Continuous visual parameters (brightness, size, speed) that track energy
+      proportionally need their normalized input centered at mid-range, not
+      pushed to the ceiling. When the reference adapts to match the signal, the
+      normalized value saturates near 1.0 and loses upward headroom — quiet
+      moments and loud moments both map to "near full brightness." Centering at
+      0.5 preserves equal room for the signal to express both "louder than
+      recent context" and "quieter than recent context." This contrasts with
+      event/threshold effects, which only need clean discrimination at one
+      boundary.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: design conversation
+    tags: [normalization, perception, architecture]
+    relates_to: [feelings-are-contextual, perception-is-layered-by-timescale, normalization-events-separation, ema-normalization-replaces-peak-decay]
+    notes: >
+      The implementation (sigmoid, soft-clamp, etc.) is separate from the
+      perceptual need. Any mapping that centers output at ~0.5 and provides
+      equal headroom above and below satisfies this requirement. The sigmoid
+      ratio/(ratio+1) is one such mapping; linear rescaling with clip is
+      another. The key insight is about perceptual symmetry — headroom in both
+      directions — not about any particular math.

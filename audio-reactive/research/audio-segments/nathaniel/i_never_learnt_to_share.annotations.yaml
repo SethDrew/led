@@ -1,0 +1,9 @@
+segments:
+  - start: 0.0
+    end: 120.0
+    label: first_half
+    note: Building atmosphere, sparse.
+  - start: 120.0
+    end: 291.5
+    label: key_section
+    note: From 2:00 to end. The emotional core — stress test for making lights feel sad.

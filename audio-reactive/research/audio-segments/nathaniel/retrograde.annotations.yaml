@@ -1,0 +1,12 @@
+segments:
+  - start: 0.0
+    end: 90.0
+    label: intro_verse
+    note: Vocal-led opening, sparse production.
+  - start: 90.0
+    end: 210.0
+    label: synth_section
+    note: Key section (1:30-3:30). Slow harmonic drift — tests timbral sensitivity over transient detection.
+  - start: 210.0
+    end: 242.0
+    label: outro

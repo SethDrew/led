@@ -8,7 +8,7 @@ Interactive LED installation development. Work is ongoing across seven axes of d
 4. **LED Behaviors** — the visual vocabulary (sparkle, pulse, flow, growth...)
 5. **Temporal Scope** — frame-level transients to song-level arcs
 6. **Composition** — how effects layer, blend, and transition
-7. **Perceptual Mapping** — bridging audio features to visual parameters
+7. **Perceptual Mapping** — bridging audio features to visual parameters, e.g. color, brightness
 
 Commits are welcome across any of these.
 

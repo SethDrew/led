@@ -122,9 +122,6 @@ PALETTES = {
 
 # ── Rendering ────────────────────────────────────────────────────────
 
-CHROMA_PALETTES = {'blue_wash', 'red_wash', 'green_wash', 'purple_wash', 'gold_wash'}
-
-
 def _lerp_palette_wrap(colors, t):
     """Interpolate palette with wrap-around (last stop blends back to first)."""
     n = len(colors)
@@ -146,23 +143,23 @@ def render_gradient(palette_name, num_leds, phase=0.0):
     return np.clip(frame, 0, 255).astype(np.uint8)
 
 
-def render_chroma_global(palette_name, num_leds, phase=0.0):
-    """Chroma wash: all LEDs same color, phase picks chroma level."""
-    colors = np.array(PALETTES.get(palette_name, PALETTES['blue_wash']),
-                      dtype=np.float32)
-    n_stops = len(colors)
-    t = phase - int(phase)
-    idx = t * (n_stops - 1)
-    lo = int(idx)
-    hi = min(lo + 1, n_stops - 1)
-    frac = idx - lo
-    color = colors[lo] * (1 - frac) + colors[hi] * frac
-    color = np.clip(color, 0, 255).astype(np.uint8)
-    return np.tile(color, (num_leds, 1))
-
-
 def render_solid(color, num_leds):
     return np.tile(np.array(color, dtype=np.uint8), (num_leds, 1))
+
+
+def apply_chroma(frame, chroma):
+    """Desaturate toward per-pixel BT.601 luminance grey.
+    Source: ITU-R BT.601-7 (2011), Y = 0.299R + 0.587G + 0.114B.
+    Cited in COLOR_ENGINEERING.md — not yet validated on hardware (ledger
+    entry oklch-color-solid-coverage, status: spark, confidence: high)."""
+    if chroma >= 255:
+        return frame
+    f = frame.astype(np.float32)
+    grey = (0.299 * f[:, 0] + 0.587 * f[:, 1] + 0.114 * f[:, 2])
+    t = chroma / 255.0
+    for c in range(3):
+        f[:, c] = grey * (1 - t) + f[:, c] * t
+    return np.clip(f, 0, 255).astype(np.uint8)
 
 
 def apply_brightness(frame, brightness):
@@ -191,6 +188,7 @@ state = {
     'mode': 'gradient',       # gradient | solid
     'palette': 'oklch_rainbow',
     'brightness': 128,
+    'chroma': 255,
     'cycle_ms': 8000,
     'solid_color': [255, 140, 0],
     'phase': 0.0,
@@ -206,18 +204,17 @@ def stream_loop(ser, num_leds):
             mode = state['mode']
             palette = state['palette']
             brightness = state['brightness']
+            chroma = state['chroma']
             cycle_ms = state['cycle_ms']
             solid = list(state['solid_color'])
             phase = state['phase']
 
         if mode == 'gradient':
-            if palette in CHROMA_PALETTES:
-                frame = render_chroma_global(palette, num_leds, phase)
-            else:
-                frame = render_gradient(palette, num_leds, phase)
+            frame = render_gradient(palette, num_leds, phase)
         else:
             frame = render_solid(solid, num_leds)
 
+        frame = apply_chroma(frame, chroma)
         frame = apply_brightness(frame, brightness)
         send_frame(ser, frame)
 
@@ -310,6 +307,15 @@ HTML = '''<!DOCTYPE html>
   </div>
 </div>
 
+<div class="section">
+  <div class="section-label">Chroma</div>
+  <div class="slider-container">
+    <input type="range" id="chroma" min="0" max="255" value="255"
+      oninput="document.getElementById('ch-val').textContent=this.value; postDebounced('/chroma','chroma',this.value)">
+    <span class="slider-val" id="ch-val">255</span>
+  </div>
+</div>
+
 <div class="section" id="sec-cycletime">
   <div class="section-label">Cycle Time</div>
   <div class="slider-container">
@@ -346,14 +352,6 @@ var GRADIENTS = [
   {id:'magenta_cyan', css:'linear-gradient(90deg, rgb(252,20,162), rgb(148,1,6), rgb(186,90,1), rgb(26,155,1), rgb(2,144,145))'},
   {id:'sunset_sky', css:'linear-gradient(90deg, rgb(50,40,130), rgb(125,50,115), rgb(210,60,55), rgb(175,60,5), rgb(210,110,15))'}
 ];
-var CHROMAS = [
-  {id:'blue_wash', css:'linear-gradient(90deg, rgb(32,72,251), rgb(37,74,220), rgb(49,77,165), rgb(63,78,118), rgb(78,78,78))'},
-  {id:'red_wash', css:'linear-gradient(90deg, rgb(145,1,4), rgb(128,7,7), rgb(95,18,16), rgb(65,28,25), rgb(37,37,37))'},
-  {id:'green_wash', css:'linear-gradient(90deg, rgb(2,163,12), rgb(16,156,23), rgb(45,141,48), rgb(76,125,76), rgb(108,108,108))'},
-  {id:'purple_wash', css:'linear-gradient(90deg, rgb(29,0,79), rgb(27,3,67), rgb(22,8,45), rgb(18,12,28), rgb(15,15,15))'},
-  {id:'gold_wash', css:'linear-gradient(90deg, rgb(166,100,1), rgb(157,102,13), rgb(139,105,39), rgb(123,107,70), rgb(108,108,108))'}
-];
-
 var container = document.getElementById('palette-container');
 var allPaletteIds = [];
 function buildGrid(items) {
@@ -370,16 +368,7 @@ function buildGrid(items) {
   });
   return grid;
 }
-function addLabel(text) {
-  var lbl = document.createElement('div');
-  lbl.className = 'palette-group-label';
-  lbl.textContent = text;
-  container.appendChild(lbl);
-}
-addLabel('Gradients');
 container.appendChild(buildGrid(GRADIENTS));
-addLabel('Chroma');
-container.appendChild(buildGrid(CHROMAS));
 
 function sliderToMs(pos) {
   pos = Number(pos);
@@ -430,6 +419,8 @@ function pollStatus() {
     document.getElementById('sec-solid').classList.toggle('hidden', s.mode!=='solid');
     document.getElementById('brightness').value = s.brightness;
     document.getElementById('br-val').textContent = s.brightness;
+    document.getElementById('chroma').value = s.chroma;
+    document.getElementById('ch-val').textContent = s.chroma;
     allPaletteIds.forEach(function(pid) {
       var el = document.getElementById('btn-' + pid);
       if (el) el.classList.toggle('active', s.palette === pid);
@@ -472,6 +463,7 @@ class Handler(BaseHTTPRequestHandler):
                     'mode': state['mode'],
                     'palette': state['palette'],
                     'brightness': state['brightness'],
+                    'chroma': state['chroma'],
                     'cycleTime': state['cycle_ms'],
                     'port': self.server.serial_port,
                     'leds': self.server.num_leds,
@@ -491,6 +483,8 @@ class Handler(BaseHTTPRequestHandler):
                     state['mode'] = 'gradient'
             elif path == '/brightness':
                 state['brightness'] = max(0, min(255, int(params.get('brightness', [128])[0])))
+            elif path == '/chroma':
+                state['chroma'] = max(0, min(255, int(params.get('chroma', [255])[0])))
             elif path == '/cycletime':
                 state['cycle_ms'] = max(100, int(params.get('cycletime', [8000])[0]))
             elif path == '/mode':

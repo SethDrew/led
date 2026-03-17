@@ -403,3 +403,35 @@ entries:
       - /status API: unmeasured → 37ms
       - LED FPS: ~47 FPS unchanged (loop no longer contains handleClient or OTA.handle)
       - RAM: 43.9KB → 40.5KB (async uses less RAM than sync WebServer)
+
+  # ── SK6812 RGBW Characteristics ─────────────────────────────────
+
+  - id: sk6812-w-channel-worse-low-brightness
+    date: 2026-03-17
+    touched: 2026-03-17
+    title: "SK6812 W channel has worse low-brightness stepping than RGB channels"
+    summary: >
+      SK6812 RGBW uses strictly linear 8-bit PWM (1:256 dynamic range) on all
+      channels. Unlike WS2812 RGB, which has an undocumented nonlinear internal
+      mapping giving 1:2048 effective range (per cpldcpu measurements), SK6812
+      has no such compensation. The W channel shows more visible stepping than
+      RGB during low-brightness fades — confirmed by A/B test on same strip.
+    status: resolved
+    severity: medium
+    scope: hardware
+    source:
+      - https://cpldcpu.com/2022/08/15/does-the-ws2812-have-integrated-gamma-correction/
+    tags: [sk6812, rgbw, quantization, constraint, low-brightness]
+    relates_to: [ws2812b-gamma-correction, ws2812b-hue-shift-low-brightness]
+    notes: >
+      cpldcpu (Tim) measured SK6812 PWM output vs input and found strictly linear
+      mapping. WS2812 by contrast maps 8-bit input to internal 11-bit PWM values —
+      an undocumented feature that improves low-end dimming. SK6812 PWM frequency
+      is 1.2kHz (per datasheet).
+
+      Practical consequence: for warm white glow effects on SK6812 RGBW, using
+      RGB channels (R+G+B mixed to approximate white) produces smoother low-end
+      fades than using the dedicated W channel alone, because the same brightness
+      level spread across 3 channels gives 3x the effective resolution.
+
+      ESP32-C3 test setup: 50 SK6812 RGBW LEDs on pin 10, FastLED 3.10.3.

@@ -3038,3 +3038,58 @@ entries:
       ratio/(ratio+1) is one such mapping; linear rescaling with clip is
       another. The key insight is about perceptual symmetry — headroom in both
       directions — not about any particular math.
+
+  # ── Low-Brightness Dithering (2026-03) ─────────────────────────────
+
+  - id: temporal-dithering-smooths-low-brightness
+    date: 2026-03-17
+    touched: 2026-03-17
+    title: "16-phase temporal dithering at 300+ fps produces visibly smoother low-brightness fades on SK6812"
+    summary: >
+      A/B test on 50 SK6812 RGBW LEDs (first 25 dithered, last 25 raw truncated)
+      confirmed that manual 16-phase temporal dithering produces visibly smoother
+      fades in the 5–51 brightness range. The eye integrates rapid toggling between
+      adjacent integer values (e.g. 7↔8) as fractional brightness. FastLED's
+      built-in dithering only applies to setBrightness() master scaling, not
+      per-pixel values — manual dithering is required for per-pixel control.
+      A brightness floor of ~5 is needed to avoid the 0↔1 dead zone where
+      dithering causes visible strobe.
+    status: validated
+    warmth: high
+    confidence: high
+    source:
+      - firmware/stick/src/soft_white_glow.cpp
+    tags: [dithering, low-brightness, perception, sk6812, technique]
+    relates_to: [hybrid-gamma-brightness, oklch-color-solid-coverage, sk6812-w-channel-worse-low-brightness]
+    notes: >
+      ## Mechanism
+
+      Temporal dithering exploits flicker fusion: at frame rates above ~200 fps,
+      the eye averages rapid alternations between adjacent brightness levels into
+      a perceived intermediate value. For a target of 7.3, 70% of frames show
+      value 8 and 30% show value 7. With 16 dither phases, we get 1/16 = 0.0625
+      brightness resolution — roughly 4 bits of sub-pixel precision.
+
+      ## What works
+
+      - 16-phase dithering (frameCount & 15) at uncapped frame rate (~300+ fps
+        on ESP32-C3 with 50 SK6812 LEDs)
+      - Brightness floor of 5 to avoid the 0↔1 perceptual dead zone
+      - millis()-based animation timing decoupled from frame rate, so max refresh
+        rate feeds dithering quality without affecting animation speed
+
+      ## What doesn't work
+
+      - FastLED's built-in dithering (setDither) — only affects the global
+        setBrightness() multiplier, not per-pixel values. User could not see
+        any difference between FastLED with dithering on vs Adafruit NeoPixel.
+      - 4-phase dithering at low values — too few phases, visible strobe
+      - Dithering without a brightness floor — the 0↔1 transition is perceptually
+        enormous (off vs on) and causes visible flicker at any practical frame rate
+
+      ## Implications for the system
+
+      Any effect that uses smooth low-brightness fades on SK6812 (glow, breathe,
+      ambient) should use temporal dithering with a brightness floor. This is a
+      per-pixel technique that can be applied after all color/brightness
+      calculations, as a final output stage before FastLED.show().

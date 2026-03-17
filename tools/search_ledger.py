@@ -127,8 +127,24 @@ def search(query: str, top_k: int = 5) -> str:
     query_vec = vectorizer.transform([query])
     scores = cosine_similarity(query_vec, matrix).flatten()
 
-    ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
-    ranked = [(i, s) for i, s in ranked if s >= MIN_SCORE][:top_k]
+    # Boost scores based on domain metadata (warmth, status, confidence)
+    boosted = []
+    for i, score in enumerate(scores):
+        if score < MIN_SCORE:
+            continue
+        boost = 0.0
+        entry = entries[i]
+        warmth = entry.get("warmth", "")
+        if warmth == "high":
+            boost += 0.03
+        status = entry.get("status", "")
+        if status in ("validated", "integrated", "resonates"):
+            boost += 0.02
+        if entry.get("confidence", "") == "high":
+            boost += 0.01
+        boosted.append((i, score + boost))
+
+    ranked = sorted(boosted, key=lambda x: x[1], reverse=True)[:top_k]
 
     if not ranked:
         return ""

@@ -113,6 +113,7 @@ void handleStatus(AsyncWebServerRequest *request) {
     String json = "{";
     json += "\"effect\":\"" + String(effectName) + "\",";
     json += "\"brightness\":" + String(state.brightness) + ",";
+    json += "\"chroma\":" + String(state.chroma) + ",";
     json += "\"cycleTime\":" + String(state.cycleTimeMs) + ",";
     const char *palName;
     switch (state.palette) {
@@ -162,6 +163,14 @@ void handleSetCycleTime(AsyncWebServerRequest *request) {
     if (request->hasParam("cycletime", true)) {
         long ct = request->getParam("cycletime", true)->value().toInt();
         if (ct >= 1000 && ct <= 600000) state.cycleTimeMs = ct;
+    }
+    request->send(200, "text/plain", "OK");
+}
+
+void handleSetChroma(AsyncWebServerRequest *request) {
+    if (request->hasParam("chroma", true)) {
+        int c = request->getParam("chroma", true)->value().toInt();
+        if (c >= 0 && c <= 255) state.chroma = c;
     }
     request->send(200, "text/plain", "OK");
 }
@@ -285,6 +294,7 @@ void setup() {
     server.on("/status", HTTP_GET, handleStatus);
     server.on("/effect", HTTP_POST, handleSetEffect);
     server.on("/brightness", HTTP_POST, handleSetBrightness);
+    server.on("/chroma", HTTP_POST, handleSetChroma);
     server.on("/cycletime", HTTP_POST, handleSetCycleTime);
     server.on("/palette", HTTP_POST, handleSetPalette);
     server.on("/devcolor", HTTP_POST, handleDevColor);

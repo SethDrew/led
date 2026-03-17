@@ -28,6 +28,7 @@ enum Palette {
 struct EffectState {
     Effect effect = RAINBOW;
     uint8_t brightness = 128;  // 50%
+    uint8_t chroma = 255;      // 255 = full color, 0 = greyscale
     uint32_t cycleTimeMs = 8000;
     Palette palette = SAP_FLOW;
 };

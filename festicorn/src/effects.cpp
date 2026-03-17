@@ -46,6 +46,20 @@ uint8_t gammaHybrid(uint8_t v) {
     return g < 2 ? 2 : g;
 }
 
+// ── BT.601 chroma desaturation ────────────────────────────────────
+// Blend toward per-pixel luminance grey.
+// Source: ITU-R BT.601-7 (2011), Y = 0.299R + 0.587G + 0.114B.
+// Cited in COLOR_ENGINEERING.md — not yet validated on hardware (ledger
+// entry oklch-color-solid-coverage, status: spark, confidence: high).
+static void applyChroma(uint8_t &r, uint8_t &g, uint8_t &b, uint8_t chroma) {
+    if (chroma >= 255) return;
+    uint16_t grey = ((uint16_t)r * 77 + (uint16_t)g * 150 + (uint16_t)b * 29) >> 8;
+    // 77/256≈0.299, 150/256≈0.587, 29/256≈0.114
+    r = (uint8_t)(((uint16_t)grey * (255 - chroma) + (uint16_t)r * chroma) / 255);
+    g = (uint8_t)(((uint16_t)grey * (255 - chroma) + (uint16_t)g * chroma) / 255);
+    b = (uint8_t)(((uint16_t)grey * (255 - chroma) + (uint16_t)b * chroma) / 255);
+}
+
 // ── OKLCH constant-L rainbow LUT ───────────────────────────────────
 // L=0.75 everywhere, per-hue max chroma (98% of gamut boundary). 256 entries.
 // OKLab -> linear sRGB -> 8-bit. No additional gamma needed.
@@ -208,6 +222,7 @@ void renderRainbow(Adafruit_NeoPixel &strip, const EffectState &state) {
         uint8_t r = (uint16_t)oklchVarL[idx][0] * br / 255;
         uint8_t g = (uint16_t)oklchVarL[idx][1] * br / 255;
         uint8_t b = (uint16_t)oklchVarL[idx][2] * br / 255;
+        applyChroma(r, g, b, state.chroma);
         strip.setPixelColor(i + LED_OFFSET, r, g, b);
     }
 }
@@ -434,15 +449,14 @@ static const RGB goldWash[] = {
 };
 static const uint8_t goldWashCount = sizeof(goldWash) / sizeof(goldWash[0]);
 
-// ── Palette interpolation ──────────────────────────────────────────
+// ── Palette interpolation (wrap-around) ───────────────────────────
 
 static uint32_t lerpPalette(const RGB *pal, uint8_t count, float t) {
-    // t in [0, 1] -> interpolate across color stops
-    float idx = t * (count - 1);
-    uint8_t lo = (uint8_t)idx;
-    uint8_t hi = lo + 1;
-    if (hi >= count) hi = count - 1;
-    float frac = idx - lo;
+    // Wrap-around: last stop blends back to first for smooth cycling
+    float idx = t * count;
+    uint8_t lo = (uint8_t)idx % count;
+    uint8_t hi = (lo + 1) % count;
+    float frac = idx - (int)idx;
     uint8_t r = pal[lo].r + (pal[hi].r - pal[lo].r) * frac;
     uint8_t g = pal[lo].g + (pal[hi].g - pal[lo].g) * frac;
     uint8_t b = pal[lo].b + (pal[hi].b - pal[lo].b) * frac;
@@ -483,13 +497,13 @@ void renderGradient(Adafruit_NeoPixel &strip, const EffectState &state) {
 
     uint16_t visible = n - LED_OFFSET;
     for (uint16_t i = 0; i < visible; i++) {
-        float t = (float)i / (visible - 1);
-        t = t + offset;
-        if (t >= 1.0f) t -= 1.0f;
+        float t = (float)i / visible + offset;
+        t -= (int)t;
         uint32_t c = lerpPalette(pal, count, t);
         uint8_t r = (uint16_t)((c >> 16) & 0xFF) * br / 255;
         uint8_t g = (uint16_t)((c >> 8) & 0xFF) * br / 255;
         uint8_t b = (uint16_t)(c & 0xFF) * br / 255;
+        applyChroma(r, g, b, state.chroma);
         strip.setPixelColor(i + LED_OFFSET, r, g, b);
     }
 }

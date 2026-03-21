@@ -327,3 +327,13 @@
   id: la10_ambient_waves2
   recorded: 2026-03-11 21:31
   sample_rate: 44100
+- duration_seconds: 11.2
+  filename: ten_ambient.wav
+  id: ten_ambient
+  recorded: 2026-03-18 21:29
+  sample_rate: 44100
+- duration_seconds: 98.4
+  filename: ten_ambient.wav
+  id: ten_ambient
+  recorded: 2026-03-18 21:31
+  sample_rate: 44100

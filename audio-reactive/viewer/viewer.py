@@ -509,6 +509,7 @@ class SyncedVisualizer:
 
         self._compute_events()
         self._compute_calculus()
+        self._compute_vibes()
 
         print(f"Tempo: {self.tempo:.1f} BPM, {len(self.onset_times)} onsets, {len(self.beat_times)} beats")
 
@@ -529,6 +530,174 @@ class SyncedVisualizer:
         if in_span and len(mask) - start_idx >= min_frames:
             spans.append((times[start_idx], times[len(mask) - 1]))
         return spans
+
+    def _compute_vibes(self):
+        """Compute perceptual 'vibes' features: warmth, roughness, fluctuation, fullness.
+
+        Based on Zwicker psychoacoustic model (sharpness, roughness, fluctuation
+        strength) and timbral dimension research (Grey 1977, McAdams 1995,
+        Zacharakis 2014).
+
+        Warmth: spectral slope — how fast energy drops with frequency.
+                Orthogonal to brightness (Zacharakis et al. 2014).
+        Roughness: amplitude modulation energy in band envelopes (15+ Hz).
+                   Correlates with perceived tension/dissonance.
+        Fluctuation: slow AM in band envelopes (~1-8 Hz).
+                     Captures pulse, groove, breathing quality.
+        Fullness: spectral spread (std dev around centroid).
+        Lightness: centroid remapped to 0-1 perceptual scale.
+        """
+        from scipy.ndimage import gaussian_filter1d, uniform_filter1d
+
+        print("Computing vibes...")
+        fps = self.sr / self.hop_length
+        dt = self.hop_length / self.sr
+        n = len(self.times)
+
+        # --- Warmth: spectral slope (tilt) per frame ---
+        # Compute on 64-mel spectrogram, 50-8000Hz range
+        mel_spec_w = librosa.feature.melspectrogram(
+            y=self.y, sr=self.sr, n_fft=self.n_fft, hop_length=self.hop_length,
+            n_mels=64, fmin=50, fmax=8000
+        )
+        mel_db_w = librosa.power_to_db(mel_spec_w + 1e-10, ref=np.max)
+        mel_freqs_w = librosa.mel_frequencies(n_mels=64, fmin=50, fmax=8000)
+        log_freqs = np.log2(mel_freqs_w + 1)
+
+        # Vectorized linear regression: slope per frame
+        x = log_freqs
+        x_mean = np.mean(x)
+        x_centered = x - x_mean
+        x_var = np.sum(x_centered ** 2)
+
+        y_frames = mel_db_w[:, :n]
+        y_mean = np.mean(y_frames, axis=0)
+        slopes = (x_centered @ (y_frames - y_mean[np.newaxis, :])) / (x_var + 1e-10)
+
+        # Negate: negative acoustic slope = warm sound = positive warmth value
+        self.vibes_warmth = -slopes
+
+        # --- Fullness: spectral spread (bandwidth) ---
+        self.vibes_fullness = librosa.feature.spectral_bandwidth(
+            y=self.y, sr=self.sr, n_fft=self.n_fft, hop_length=self.hop_length
+        )[0][:n]
+
+        # --- Roughness proxy: fast AM energy in band envelopes ---
+        # Local variance in ~100ms windows captures modulation > ~10Hz
+        rough_window = max(3, int(0.1 / dt))
+        band_roughness = []
+        for band_name in FREQUENCY_BANDS:
+            energy = self.band_energies[band_name][:n]
+            local_mean = uniform_filter1d(energy, size=rough_window, mode='reflect')
+            local_sq_mean = uniform_filter1d(energy ** 2, size=rough_window, mode='reflect')
+            local_var = np.maximum(local_sq_mean - local_mean ** 2, 0)
+            # Coefficient of variation: scale-independent modulation depth
+            band_roughness.append(np.sqrt(local_var) / (local_mean + 1e-10))
+
+        self.vibes_roughness = np.mean(band_roughness, axis=0)
+
+        # --- Fluctuation Strength proxy: slow AM energy (~1-8Hz) ---
+        # Local variance in ~1s windows captures slow modulation
+        fluct_window = max(3, int(1.0 / dt))
+        band_fluctuation = []
+        for band_name in FREQUENCY_BANDS:
+            energy = self.band_energies[band_name][:n]
+            local_mean = uniform_filter1d(energy, size=fluct_window, mode='reflect')
+            local_sq_mean = uniform_filter1d(energy ** 2, size=fluct_window, mode='reflect')
+            local_var = np.maximum(local_sq_mean - local_mean ** 2, 0)
+            band_fluctuation.append(np.sqrt(local_var) / (local_mean + 1e-10))
+
+        self.vibes_fluctuation = np.mean(band_fluctuation, axis=0)
+
+        # --- Vassilakis sensory roughness (Plomp-Levelt polynomial) ---
+        # Peak-based pairwise dissonance, computed every 4th frame for speed.
+        # References: Vassilakis 2001, Essentia dissonance.cpp, dissonant library
+        from scipy.signal import find_peaks
+
+        print("Computing Vassilakis roughness...")
+        S_mag = np.abs(librosa.stft(self.y, n_fft=self.n_fft, hop_length=self.hop_length))
+        stft_freqs = librosa.fft_frequencies(sr=self.sr, n_fft=self.n_fft)
+        n_stft = min(S_mag.shape[1], n)
+        n_peaks_max = 20
+        skip = 4  # compute every 4th frame, interpolate the rest
+
+        # Precompute Bark values for all FFT frequencies
+        bark_all = 13.0 * np.arctan(0.00076 * stft_freqs) + 3.5 * np.arctan((stft_freqs / 7500.0) ** 2)
+
+        roughness_sparse = np.zeros(n_stft)
+        computed_indices = list(range(0, n_stft, skip))
+
+        for idx in computed_indices:
+            mag = S_mag[:, idx]
+            noise_floor = np.max(mag) * 0.01
+            if noise_floor < 1e-10:
+                continue
+
+            # Find spectral peaks (local maxima above noise floor)
+            peak_idx, props = find_peaks(mag, height=noise_floor, distance=2)
+            if len(peak_idx) < 2:
+                continue
+
+            # Keep top N by amplitude
+            if len(peak_idx) > n_peaks_max:
+                top = np.argpartition(mag[peak_idx], -n_peaks_max)[-n_peaks_max:]
+                peak_idx = peak_idx[top]
+
+            # Sort by frequency for early-exit optimization
+            order = np.argsort(peak_idx)
+            pf = stft_freqs[peak_idx[order]]
+            pa = mag[peak_idx[order]]
+            pb = bark_all[peak_idx[order]]
+            np_peaks = len(pf)
+
+            # Vectorized pairwise computation
+            # Build upper-triangle index pairs
+            ii, jj = np.triu_indices(np_peaks, k=1)
+            bark_diff = np.abs(pb[jj] - pb[ii])
+
+            # Early-exit: only pairs within 1.18 Bark
+            close = bark_diff <= 1.18
+            if not np.any(close):
+                continue
+
+            ii, jj, bark_diff = ii[close], jj[close], bark_diff[close]
+            a1, a2 = pa[ii], pa[jj]
+
+            # Plomp-Levelt polynomial dissonance curve
+            x = bark_diff / 1.18
+            x2 = x * x
+            x3 = x2 * x
+            d = np.maximum(0.0,
+                -1.2866 * x2 * x3 + 6.3694 * x2 * x2 - 11.7275 * x3
+                + 9.7166 * x2 - 2.7059 * x - 0.1984)
+
+            # Weight by amplitude product (simplified from Vassilakis full model)
+            roughness_sparse[idx] = np.sum(a1 * a2 * d)
+
+        # Interpolate skipped frames
+        roughness_full = np.interp(
+            np.arange(n_stft),
+            computed_indices,
+            roughness_sparse[computed_indices]
+        )
+
+        # Normalize to 0-1
+        rmax = np.percentile(roughness_full[roughness_full > 0], 99) if np.any(roughness_full > 0) else 1.0
+        self.vibes_roughness_vassilakis = np.clip(roughness_full[:n] / max(rmax, 1e-10), 0, 1)
+
+        # --- Lightness: centroid remapped to 0-1 perceptual scale ---
+        # Log-scale mapping: 200Hz → 0.0, 10kHz → 1.0
+        cent = self.spectral_centroid[:n]
+        log_lo, log_hi = np.log2(200), np.log2(10000)
+        self.vibes_lightness = np.clip(
+            (np.log2(np.maximum(cent, 1)) - log_lo) / (log_hi - log_lo), 0, 1
+        )
+
+        print(f"Vibes: warmth μ={np.mean(self.vibes_warmth):.2f}, "
+              f"roughness(AM) μ={np.mean(self.vibes_roughness):.3f}, "
+              f"roughness(Vass) μ={np.mean(self.vibes_roughness_vassilakis):.3f}, "
+              f"fluctuation μ={np.mean(self.vibes_fluctuation):.3f}, "
+              f"fullness μ={np.mean(self.vibes_fullness):.0f}Hz")
 
     def _compute_events(self):
         """Dispatch to algorithm A or B based on self.event_algorithm."""
@@ -1275,6 +1444,161 @@ class SyncedVisualizer:
             self.axes = []
         self.axes.append(ax)
 
+    # ── Vibes panels ─────────────────────────────────────────────
+
+    def _build_vibes_lightness_panel(self, ax):
+        """Lightness: centroid remapped to perceptual brightness (0-1)."""
+        from scipy.ndimage import gaussian_filter1d
+        t = self.times
+        n = len(t)
+        raw = self.vibes_lightness[:n]
+        smooth = gaussian_filter1d(raw, sigma=int(7 * self.sr / self.hop_length))  # 7s EMA-like
+
+        ax.fill_between(t, raw, alpha=0.15, color='#FFD54F')
+        ax.plot(t, raw, color='#FFD54F', linewidth=0.5, alpha=0.3)
+        ax.plot(t, smooth, color='#FFD54F', linewidth=2.5, label='Lightness (7s smooth)')
+
+        ax.set_xlim([0, self.duration])
+        ax.set_ylim([-0.05, 1.05])
+        ax.set_ylabel('Lightness (0=dark, 1=bright)')
+        ax.set_title('Lightness — centroid mapped to L channel (not hue)', fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_vibes_warmth_panel(self, ax):
+        """Warmth: spectral slope — orthogonal to brightness (Zacharakis 2014)."""
+        from scipy.ndimage import gaussian_filter1d
+        t = self.times
+        n = len(t)
+        raw = self.vibes_warmth[:n]
+        smooth = gaussian_filter1d(raw, sigma=int(3 * self.sr / self.hop_length))  # 3s
+
+        # Color: warm (positive) = orange/red, cold (negative) = blue
+        pos = np.maximum(smooth, 0)
+        neg = np.minimum(smooth, 0)
+        ax.fill_between(t, pos, color='#FF7043', alpha=0.5, linewidth=0)
+        ax.fill_between(t, neg, color='#42A5F5', alpha=0.5, linewidth=0)
+        ax.plot(t, smooth, color='white', linewidth=1.5, alpha=0.8)
+        ax.axhline(0, color='#666', linewidth=0.5)
+
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('Warmth (slope)')
+        ax.set_title('Warmth — spectral slope (orange=warm, blue=cold) — independent of brightness',
+                      fontsize=11)
+        ax.grid(True, alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_vibes_roughness_panel(self, ax):
+        """Roughness: AM proxy vs Vassilakis sensory roughness side by side."""
+        from scipy.ndimage import gaussian_filter1d
+        t = self.times
+        n = len(t)
+        sigma_frames = int(0.5 * self.sr / self.hop_length)  # 0.5s
+
+        # AM proxy (quick, band-envelope modulation depth)
+        am_raw = self.vibes_roughness[:n]
+        am_smooth = gaussian_filter1d(am_raw, sigma=sigma_frames)
+        # Normalize AM to 0-1 for visual comparison
+        am_max = np.percentile(am_smooth[am_smooth > 0], 99) if np.any(am_smooth > 0) else 1.0
+        am_norm = np.clip(am_smooth / max(am_max, 1e-10), 0, 1)
+
+        # Vassilakis (peak-based Plomp-Levelt)
+        vass_raw = self.vibes_roughness_vassilakis[:n]
+        vass_smooth = gaussian_filter1d(vass_raw, sigma=sigma_frames)
+
+        ax.fill_between(t, am_norm, alpha=0.2, color='#EF5350')
+        ax.plot(t, am_norm, color='#EF5350', linewidth=1.5, alpha=0.7,
+                label='AM proxy (band-envelope)')
+        ax.plot(t, vass_smooth, color='#FFD740', linewidth=2.5,
+                label='Vassilakis (peak-based)')
+
+        ax.set_xlim([0, self.duration])
+        ax.set_ylim([-0.02, 1.05])
+        ax.set_ylabel('Roughness (0-1)')
+        ax.set_title('Roughness — AM proxy (red) vs Vassilakis sensory dissonance (gold)',
+                      fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_vibes_fluctuation_panel(self, ax):
+        """Fluctuation strength proxy: slow AM energy (~groove/breathing/pulse)."""
+        from scipy.ndimage import gaussian_filter1d
+        t = self.times
+        n = len(t)
+        raw = self.vibes_fluctuation[:n]
+        smooth = gaussian_filter1d(raw, sigma=int(2 * self.sr / self.hop_length))  # 2s
+
+        ax.fill_between(t, smooth, alpha=0.4, color='#AB47BC')
+        ax.plot(t, raw, color='#AB47BC', linewidth=0.5, alpha=0.2)
+        ax.plot(t, smooth, color='#AB47BC', linewidth=2, label='Fluctuation (2s smooth)')
+
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('Fluctuation (slow AM)')
+        ax.set_title('Fluctuation Strength — slow amplitude modulation ≈ pulse/groove/breathing',
+                      fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_vibes_fullness_panel(self, ax):
+        """Fullness: spectral spread (bandwidth around centroid)."""
+        from scipy.ndimage import gaussian_filter1d
+        t = self.times
+        n = len(t)
+        raw = self.vibes_fullness[:n]
+        smooth = gaussian_filter1d(raw, sigma=int(3 * self.sr / self.hop_length))  # 3s
+
+        ax.fill_between(t, smooth, alpha=0.3, color='#26A69A')
+        ax.plot(t, raw, color='#26A69A', linewidth=0.5, alpha=0.2)
+        ax.plot(t, smooth, color='#26A69A', linewidth=2, label='Fullness (3s smooth)')
+
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('Bandwidth (Hz)')
+        ax.set_title('Fullness — spectral spread (wide=full/rich, narrow=thin/focused)', fontsize=11)
+        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+        ax.grid(True, alpha=0.2)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _build_vibes_timbral_panel(self, ax):
+        """Timbral shape: MFCC heatmap showing spectral envelope character over time."""
+        t = self.times
+        n = len(t)
+
+        # MFCCs 1-12 (skip 0 = overall energy, already captured by other panels)
+        mfcc_display = self.mfccs[1:13, :n]
+
+        # Normalize each coefficient independently so all rows are visible
+        mfcc_norm = np.zeros_like(mfcc_display, dtype=float)
+        for i in range(mfcc_display.shape[0]):
+            row = mfcc_display[i]
+            lo, hi = np.percentile(row, [2, 98])
+            span = hi - lo if hi > lo else 1.0
+            mfcc_norm[i] = np.clip((row - lo) / span, 0, 1)
+
+        ax.imshow(mfcc_norm, aspect='auto', origin='lower', cmap='magma',
+                  extent=[0, self.duration, 1, 13], interpolation='bilinear')
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('MFCC')
+        ax.set_yticks(np.arange(1, 13) + 0.5)
+        ax.set_yticklabels([str(i) for i in range(1, 13)])
+        ax.set_title('Timbral Shape — spectral envelope character '
+                     '(color shifts = sound character changed)', fontsize=11)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
     def _build_figure(self):
         print("Building visualization...")
         plt.style.use('dark_background')
@@ -1326,6 +1650,12 @@ class SyncedVisualizer:
             'calc-absint-d2': self._build_calc_absint_d2_panel,
             'calc-absint-jitter': self._build_calc_absint_jitter_panel,
             'calc-build-detector': self._build_calc_build_detector_panel,
+            'vibes-lightness': self._build_vibes_lightness_panel,
+            'vibes-warmth': self._build_vibes_warmth_panel,
+            'vibes-roughness': self._build_vibes_roughness_panel,
+            'vibes-fluctuation': self._build_vibes_fluctuation_panel,
+            'vibes-fullness': self._build_vibes_fullness_panel,
+            'vibes-timbral': self._build_vibes_timbral_panel,
         }
         if has_annotations:
             focus_builders['annotations'] = self._build_annotation_panel
@@ -1345,7 +1675,11 @@ class SyncedVisualizer:
                           'calc-slope-peaks': 1.2, 'calc-integral-curvature': 1,
                           'calc-multi-scale': 1,
                           'calc-onset-d2': 1, 'calc-jitter': 1,
-                          'calc-build-detector': 1.2}
+                          'calc-build-detector': 1.2,
+                          'vibes-lightness': 1, 'vibes-warmth': 1,
+                          'vibes-roughness': 1, 'vibes-fluctuation': 1,
+                          'vibes-fullness': 1,
+                          'vibes-timbral': 1.5}
             ratios = [height_map.get(name, 1) for name, _ in builders]
             if has_annotations:
                 n_layers = len(self.annotations) + (1 if self.annotate_layer else 0)

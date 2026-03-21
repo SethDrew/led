@@ -4,8 +4,8 @@
 
 set -euo pipefail
 
-VENV_PYTHON="/Users/KO16K39/Documents/led/venv/bin/python"
-SEARCH_SCRIPT="/Users/KO16K39/Documents/led/tools/search_ledger.py"
+VENV_PYTHON="/Users/sethdrew/Documents/projects/led/venv/bin/python"
+SEARCH_SCRIPT="/Users/sethdrew/Documents/projects/led/tools/search_ledger.py"
 
 # Read stdin (hook provides JSON with prompt)
 INPUT=$(cat)

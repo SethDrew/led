@@ -1278,6 +1278,29 @@ async function loadPanel() {
         return;
     }
 
+    if (currentTab === 'vibes') {
+        document.getElementById('controlsHint').innerHTML =
+            '<kbd>Space</kbd> play/pause &nbsp; <kbd>&larr;</kbd> <kbd>&rarr;</kbd> &plusmn;5s &nbsp; Click to seek &nbsp; ' +
+            'Lightness &middot; Warmth &middot; Roughness &middot; Fluctuation &middot; Fullness';
+        document.getElementById('stemStatus').style.display = 'none';
+
+        const url = '/api/render-vibes/' + encodeURIComponent(currentFile);
+        showOverlay('Rendering vibes...');
+        try {
+            const result = await cachedFetchPNG(url);
+            if (gen !== renderGen) return;
+            if (!result) { showOverlay('Render failed'); return; }
+            pixelMapping = result.pixelMapping;
+            panelImg.src = URL.createObjectURL(result.blob);
+            hideOverlay();
+            cursorLine.style.display = 'block';
+        } catch (e) {
+            if (e.name === 'AbortError' || gen !== renderGen) return;
+            showOverlay('Error: ' + e.message);
+        }
+        return;
+    }
+
     if (COMPUTE_TABS[currentTab]) {
         // Demucs requires too much RAM for the public server
         if (currentTab === 'stems' && isPublicMode) {
@@ -1697,7 +1720,8 @@ let deprecatedEffects = [];  // effects marked as deprecated
 let palettesList = [];  // available palettes
 let selectedPalette = JSON.parse(localStorage.getItem('selectedPalette') || '{}');
 let selectedBrightness = JSON.parse(localStorage.getItem('selectedBrightness') || '{}');
-let effectsRunning = null;  // name of running effect or null
+let effectsRunning = {};  // {target_id: effect_name} — per-target running state
+let selectedTargetId = 'all';  // 'all' or a specific target id
 let effectsPollTimer = null;
 
 function paletteGradientCSS(pal) {
@@ -2076,8 +2100,6 @@ function createBrightnessPopover(effectName, onChange) {
 }
 let selectorState = [];  // array of Sets, one per segment depth
 let outputTargets = [];  // from /api/controllers (sculptures + controllers)
-let selectedTarget = null;  // output target id or null (no LEDs)
-let selectedTargetType = null;  // 'sculpture' | 'controller' | null
 
 async function loadEffects() {
     const panel = document.getElementById('effectsPanel');
@@ -2095,11 +2117,7 @@ async function loadEffects() {
         effectsList = data.effects || [];
         deprecatedEffects = data.deprecated || [];
         palettesList = data.palettes || [];
-        effectsRunning = data.running;
-        if (data.controller !== undefined) {
-            selectedTarget = data.controller;
-            selectedTargetType = data.controller_type || null;
-        }
+        effectsRunning = data.running || {};
         if (selectorState.length === 0) {
             const maxSegs = Math.max(...effectsList.map(e => e.name.split('_').length));
             selectorState = Array.from({length: maxSegs}, () => new Set());
@@ -2198,56 +2216,80 @@ const FEATURE_LABELS = {
     centroid: 'Centroid',
     autocorr_conf: 'Autocorr',
 };
-function buildControllerBar(panel) {
-    const bar = document.createElement('div');
-    bar.className = 'controller-bar';
+function isEffectRunning(name) {
+    return Object.values(effectsRunning).includes(name);
+}
 
-    const label = document.createElement('label');
-    label.textContent = 'Output:';
-    bar.appendChild(label);
+function getTargetsRunningEffect(name) {
+    return Object.entries(effectsRunning)
+        .filter(([, n]) => n === name)
+        .map(([tid]) => tid);
+}
 
-    const select = document.createElement('select');
-    // Default: no LEDs
-    const noLeds = document.createElement('option');
-    noLeds.value = '';
-    noLeds.textContent = 'No LEDs (terminal only)';
-    select.appendChild(noLeds);
+function buildTargetBar(panel) {
+    const container = document.createElement('div');
+    container.className = 'target-bar';
 
-    outputTargets.forEach(t => {
-        const opt = document.createElement('option');
-        opt.value = t.id;
-        opt.dataset.type = t.type;
-        const status = t.port ? t.port : 'disconnected';
-        // Show: "Name (N LEDs) — Controller Name" or "Name (N LEDs) — status"
-        const suffix = t.type === 'sculpture' ? ' \u2014 ' + t.controller_name : '';
-        opt.textContent = t.name + ' (' + t.leds + ' LEDs)' + suffix + ' \u2014 ' + status;
-        if (!t.port) opt.disabled = true;
-        if (t.id === selectedTarget) opt.selected = true;
-        select.appendChild(opt);
+    const connectedTargets = outputTargets.filter(t => t.port);
+
+    // "All" tab
+    const allTab = document.createElement('div');
+    allTab.className = 'target-tab' + (selectedTargetId === 'all' ? ' active' : '');
+    allTab.textContent = 'All';
+    allTab.addEventListener('click', () => {
+        selectedTargetId = 'all';
+        renderEffectsCards();
     });
+    container.appendChild(allTab);
 
-    if (!selectedTarget) noLeds.selected = true;
+    // Per-target tabs
+    connectedTargets.forEach(t => {
+        const tab = document.createElement('div');
+        tab.className = 'target-tab' + (selectedTargetId === t.id ? ' active' : '');
 
-    select.addEventListener('change', () => {
-        const opt = select.selectedOptions[0];
-        selectedTarget = select.value || null;
-        selectedTargetType = opt && opt.dataset.type || null;
-        // Persist selection
-        const body = {};
-        if (selectedTargetType === 'sculpture') {
-            body.sculpture = selectedTarget;
-        } else if (selectedTarget) {
-            body.controller = selectedTarget;
+        const nameSpan = document.createTextNode(t.name);
+        tab.appendChild(nameSpan);
+
+        const runningName = effectsRunning[t.id];
+        if (runningName) {
+            const rn = document.createElement('span');
+            rn.className = 'running-name';
+            rn.textContent = '(' + runningName + ')';
+            tab.appendChild(rn);
+
+            const stopX = document.createElement('span');
+            stopX.className = 'stop-x';
+            stopX.textContent = '\u2715';
+            stopX.title = 'Stop ' + t.name;
+            stopX.addEventListener('click', (e) => {
+                e.stopPropagation();
+                stopEffect(t.id);
+            });
+            tab.appendChild(stopX);
+        } else {
+            const idle = document.createElement('span');
+            idle.className = 'running-name';
+            idle.textContent = '(idle)';
+            tab.appendChild(idle);
         }
-        fetch('/api/effects/controller', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-        }).catch(() => {});
+
+        tab.addEventListener('click', () => {
+            selectedTargetId = t.id;
+            renderEffectsCards();
+        });
+        container.appendChild(tab);
     });
 
-    bar.appendChild(select);
-    panel.appendChild(bar);
+    // "Stop All" button — only when something is running
+    if (Object.keys(effectsRunning).length > 0) {
+        const stopAll = document.createElement('button');
+        stopAll.className = 'stop-all-btn';
+        stopAll.textContent = 'Stop All';
+        stopAll.addEventListener('click', () => stopEffect());
+        container.appendChild(stopAll);
+    }
+
+    panel.appendChild(container);
 }
 
 function renderEffectsCards() {
@@ -2259,7 +2301,7 @@ function renderEffectsCards() {
     panel.innerHTML = '';
     const listWrap = document.createElement('div');
     listWrap.className = 'effects-list';
-    buildControllerBar(listWrap);
+    buildTargetBar(listWrap);
     buildSelector(listWrap);
 
     const REF_COLS = ['Pattern', 'Scope', 'Input'];
@@ -2286,7 +2328,8 @@ function renderEffectsCards() {
 
     filtered.forEach(eff => {
         const tr = document.createElement('tr');
-        tr.className = eff.name === effectsRunning ? 'running' : '';
+        const effIsRunning = isEffectRunning(eff.name);
+        tr.className = effIsRunning ? 'running' : '';
         tr.dataset.name = eff.name;
 
         // Drag handle
@@ -2308,10 +2351,26 @@ function renderEffectsCards() {
         nameEl.className = 'effect-name';
         nameEl.textContent = eff.display_name || eff.name;
         if (eff.description) nameEl.title = eff.description;
-        if (eff.name === effectsRunning) {
+        if (effIsRunning) {
             const dot = document.createElement('span');
             dot.className = 'running-dot';
             nameEl.appendChild(dot);
+
+            // Add target badges showing which targets run this effect
+            const runningTargets = getTargetsRunningEffect(eff.name);
+            runningTargets.forEach(tid => {
+                const target = outputTargets.find(t => t.id === tid);
+                if (!target) return;
+                const badge = document.createElement('span');
+                badge.className = 'target-badge';
+                badge.textContent = target.name.charAt(0).toUpperCase();
+                badge.title = 'Running on ' + target.name + ' \u2014 click to stop';
+                badge.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    stopEffect(tid);
+                });
+                nameEl.appendChild(badge);
+            });
         }
         nameEl.addEventListener('click', (e) => { e.stopPropagation(); showEffectDetail(eff.name); });
         nameWrap.appendChild(nameEl);
@@ -2381,13 +2440,33 @@ function renderEffectsCards() {
         const ctrlTd = document.createElement('td');
         ctrlTd.className = 'effect-controls-cell';
 
+        // Determine if this effect is running on the selected target
+        const effRunningOnSelected = selectedTargetId === 'all'
+            ? effIsRunning
+            : effectsRunning[selectedTargetId] === eff.name;
+
         const btn = document.createElement('button');
-        btn.className = 'effect-toggle' + (eff.name === effectsRunning ? ' stop' : '');
-        btn.textContent = eff.name === effectsRunning ? 'Stop' : 'Start';
+        btn.className = 'effect-toggle' + (effRunningOnSelected ? ' stop' : '');
+        btn.textContent = effRunningOnSelected ? 'Stop' : 'Start';
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
-            if (eff.name === effectsRunning) stopEffect();
-            else startEffect(eff.name);
+            if (effRunningOnSelected) {
+                if (selectedTargetId === 'all') {
+                    // Stop this effect on all targets running it
+                    const targets = getTargetsRunningEffect(eff.name);
+                    targets.forEach(tid => stopEffect(tid));
+                } else {
+                    stopEffect(selectedTargetId);
+                }
+            } else {
+                if (selectedTargetId === 'all') {
+                    startEffectOnAllTargets(eff.name);
+                } else {
+                    const target = outputTargets.find(t => t.id === selectedTargetId);
+                    const targetType = target ? target.type : null;
+                    startEffect(eff.name, selectedTargetId, targetType);
+                }
+            }
         });
         ctrlTd.appendChild(btn);
 
@@ -2559,14 +2638,14 @@ async function restoreEffect(name) {
     } catch (e) { console.error('restoreEffect:', e); }
 }
 
-async function startEffect(name) {
+async function startEffect(name, targetId, targetType) {
     try {
         const body = {};
-        if (selectedTarget) {
-            if (selectedTargetType === 'sculpture') {
-                body.sculpture = selectedTarget;
+        if (targetId) {
+            if (targetType === 'sculpture') {
+                body.sculpture = targetId;
             } else {
-                body.controller = selectedTarget;
+                body.controller = targetId;
             }
         }
         const eff = effectsList.find(e => e.name === name);
@@ -2581,15 +2660,43 @@ async function startEffect(name) {
             body: JSON.stringify(body),
         };
         await fetch('/api/effects/start/' + encodeURIComponent(name), opts);
-        effectsRunning = name;
+        if (targetId) {
+            effectsRunning[targetId] = name;
+        } else {
+            effectsRunning['__no_leds__'] = name;
+        }
         renderEffectsCards();
     } catch (e) { console.error('startEffect:', e); }
 }
 
-async function stopEffect() {
+async function startEffectOnAllTargets(name) {
+    const connectedTargets = outputTargets.filter(t => t.port);
+    if (connectedTargets.length === 0) {
+        // No connected targets — start in no-LEDs mode
+        await startEffect(name, null, null);
+        return;
+    }
+    // Start on all connected targets that don't already have something running
+    const available = connectedTargets.filter(t => !effectsRunning[t.id]);
+    const targets = available.length > 0 ? available : connectedTargets;
+    for (const t of targets) {
+        await startEffect(name, t.id, t.type);
+    }
+}
+
+async function stopEffect(targetId) {
     try {
-        await fetch('/api/effects/stop', { method: 'POST' });
-        effectsRunning = null;
+        const body = targetId ? { target_id: targetId } : {};
+        await fetch('/api/effects/stop', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (targetId) {
+            delete effectsRunning[targetId];
+        } else {
+            effectsRunning = {};
+        }
         renderEffectsCards();
     } catch (e) { console.error('stopEffect:', e); }
 }
@@ -2625,30 +2732,18 @@ function startEffectsPoll() {
             const resp = await fetch('/api/effects');
             if (!resp.ok) return;
             const data = await resp.json();
-            const newRunning = data.running;
-            if (newRunning !== effectsRunning) {
-                const prev = effectsRunning;
+            const newRunning = data.running || {};
+            const oldJson = JSON.stringify(effectsRunning);
+            const newJson = JSON.stringify(newRunning);
+            if (newJson !== oldJson) {
                 effectsRunning = newRunning;
                 // Start/stop live feature poll if in detail view
                 if (effectDetailName) {
-                    if (newRunning === effectDetailName) startLiveFeaturePoll();
+                    if (isEffectRunning(effectDetailName)) startLiveFeaturePoll();
                     else stopLiveFeaturePoll();
                 }
-                // Update running indicator on rows without full rebuild
-                const rows = document.querySelectorAll('.effect-ref-table tbody tr[data-name]');
-                if (rows.length > 0) {
-                    rows.forEach(c => {
-                        const n = c.dataset.name;
-                        c.classList.toggle('running', n === newRunning);
-                        const toggle = c.querySelector('.effect-toggle');
-                        if (toggle) {
-                            toggle.classList.toggle('stop', n === newRunning);
-                            toggle.textContent = (n === newRunning) ? 'Stop' : 'Start';
-                        }
-                    });
-                } else {
-                    renderEffectsCards();
-                }
+                // Full rebuild to update target rows + card states
+                renderEffectsCards();
             }
         } catch (e) {}
     }, 2000);
@@ -2779,7 +2874,7 @@ function showEffectDetail(name, focusNotes) {
     panel.appendChild(liveWrap);
 
     // Start live feature poll if effect is running
-    if (effectsRunning === name) {
+    if (isEffectRunning(name)) {
         startLiveFeaturePoll();
     }
 

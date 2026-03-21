@@ -52,7 +52,7 @@ def gamma_hybrid(v):
     return max(g, 2)
 
 
-# ── Palette definitions (from festicorn/src/effects.cpp) ─────────────
+# ── Palette definitions (from festicorn/butterfly/src/effects.cpp) ────
 
 PALETTES = {
     'sap_flow': [

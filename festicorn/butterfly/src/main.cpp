@@ -126,6 +126,7 @@ void handleStatus(AsyncWebServerRequest *request) {
         case ORANGE_TEAL:      palName = "orange_teal";      break;
         case MAGENTA_CYAN:     palName = "magenta_cyan";     break;
         case SUNSET_SKY:       palName = "sunset_sky";       break;
+        case INK_WASH:         palName = "ink_wash";         break;
         // Chroma sweeps
         case BLUE_WASH:        palName = "blue_wash";        break;
         case RED_WASH:         palName = "red_wash";         break;
@@ -187,6 +188,7 @@ void handleSetPalette(AsyncWebServerRequest *request) {
         else if (p == "orange_teal")      state.palette = ORANGE_TEAL;
         else if (p == "magenta_cyan")     state.palette = MAGENTA_CYAN;
         else if (p == "sunset_sky")       state.palette = SUNSET_SKY;
+        else if (p == "ink_wash")         state.palette = INK_WASH;
         // Chroma sweeps
         else if (p == "blue_wash")        state.palette = BLUE_WASH;
         else if (p == "red_wash")         state.palette = RED_WASH;

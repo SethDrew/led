@@ -641,3 +641,77 @@ td.ref-data { color: #777; font-size: 11px; }
 }
 .controller-bar select:hover { border-color: #e94560; }
 .controller-bar select:focus { outline: none; border-color: #e94560; }
+
+/* Target bar */
+.target-bar {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin-bottom: 12px;
+    border-bottom: 1px solid #333;
+    padding-bottom: 0;
+}
+.target-tab {
+    padding: 6px 16px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    font-size: 13px;
+    color: #888;
+    transition: all 0.15s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    user-select: none;
+}
+.target-tab:hover { color: #ccc; }
+.target-tab.active { color: #e94560; border-bottom-color: #e94560; }
+.target-tab .running-name {
+    color: #666;
+    font-size: 11px;
+    font-style: italic;
+}
+.target-tab.active .running-name { color: #b05070; }
+.target-tab .stop-x {
+    color: #888;
+    font-size: 11px;
+    cursor: pointer;
+    padding: 1px 4px;
+    border-radius: 3px;
+    line-height: 1;
+}
+.target-tab .stop-x:hover {
+    color: #e94560;
+    background: rgba(233,69,96,0.15);
+}
+.target-bar .stop-all-btn {
+    margin-left: auto;
+    background: rgba(233,69,96,0.15);
+    color: #e94560;
+    border: 1px solid rgba(233,69,96,0.3);
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.target-bar .stop-all-btn:hover {
+    background: rgba(233,69,96,0.3);
+}
+
+/* Target badges on running effect names */
+.target-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 600;
+    background: rgba(233,69,96,0.2);
+    color: #e94560;
+    padding: 1px 4px;
+    border-radius: 3px;
+    margin-left: 4px;
+    cursor: pointer;
+    vertical-align: middle;
+}
+.target-badge:hover {
+    background: rgba(233,69,96,0.4);
+}

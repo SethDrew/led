@@ -1,16 +1,29 @@
-ESP32 control platform and user interface design for addressable LED sculptures.
+Umbrella project for all LED installation firmware. Each installation is a separate PlatformIO project under this directory.
 
-Firmware drives WS2812B strips with real-time effect switching, OKLCH color palettes, and gamma-corrected brightness. A web UI served from LittleFS provides wireless control. Python tools generate perceptually uniform color lookup tables and palette definitions.
+## Installations
 
-## Hardware target
+- **butterfly/** — WiFi-controlled WS2812B sculpture (ESP32-C3). Web UI served from LittleFS for real-time effect switching, OKLCH palettes, and OTA updates.
+- **bulbs/** — Standalone gyro+mic reactive LED bulbs. IMU-driven color mapping with audio reactivity, no WiFi required.
+- **stick/** — Dual-strip diffuser stick. Streams audio-reactive frames over serial from a host.
 
-ESP32-C3 with OTA firmware updates over WiFi. Current build configuration targets "Butterfly" (150 LEDs, pin 1, 41-pixel offset).
+## Shared Libraries
 
-## Structure
+`lib/` contains libraries shared across installations:
 
-- `src/` — firmware: effect rendering, web server, WiFi/OTA
-- `data/` — HTML user interfaces served from LittleFS
+- **oklch_lut** — 256-entry OKLCH rainbow LUT with hue-dependent lightness
+- **delta_sigma** — First-order delta-sigma modulator for sub-byte brightness
+- **streaming_protocol** — Packet framing and checksum for serial frame streaming
+
+## Python Tooling
+
 - `gen_palettes.py` — generates OKLCH hue-arc gradients and chroma sweeps
-- `gen_oklch_varL_lut.py` — generates 256-entry rainbow LUT with hue-dependent lightness
-- `analyze_oklch_lut.py` — analysis tool for LUT brightness and hue distribution
-- `platformio.ini` — PlatformIO build configuration
+- `gen_oklch_varL_lut.py` — generates the OKLCH rainbow LUT header into `lib/oklch_lut/`
+- `gradient_server.py` — web UI gradient picker that streams frames to a Nano over serial
+
+## Build
+
+```
+cd festicorn/butterfly && pio run -e butterfly
+cd festicorn/bulbs && pio run
+cd festicorn/stick && pio run
+```

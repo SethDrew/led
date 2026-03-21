@@ -63,16 +63,15 @@ _recording = None       # {'stream': sd.InputStream, 'sf': sf.SoundFile, 'path':
 
 # ── Effects management ────────────────────────────────────────────────
 
-_effect_process = None   # subprocess.Popen or None
-_active_controller = None  # id of the controller the running effect is using, or None
-_effect_start_params = None  # dict of params passed to _start_effect, for hot reload
+# Per-target effect slots: target_id → {process, name, params, feature_reader_thread}
+_effect_slots = {}
+_effect_slots_lock = threading.Lock()
 
 # ── Live feature streaming ────────────────────────────────────────
 _feature_buffer = collections.deque(maxlen=900)  # 30s @ 30fps
 _feature_seq = 0
 _feature_meta = None  # list of {id, label, color} from runner's _meta line
 _feature_lock = threading.Lock()
-_feature_reader_thread = None
 
 EFFECTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'effects')
 
@@ -305,9 +304,15 @@ def _effect_hot_reload_loop():
                 print(f"[hot-reload] Source changed, cleared {n} cached renders")
         if cur_effects != last_effects:
             last_effects = cur_effects
-            params = _effect_start_params
-            if params:
-                print(f"[hot-reload] Effect files changed, restarting '{params['name']}'")
+            # Restart all running effects for hot reload
+            with _effect_slots_lock:
+                slots_to_restart = [
+                    (tid, dict(slot['params']))
+                    for tid, slot in _effect_slots.items()
+                    if slot.get('params')
+                ]
+            for tid, params in slots_to_restart:
+                print(f"[hot-reload] Effect files changed, restarting '{params['name']}' on {tid}")
                 _start_effect(**params)
 
 
@@ -488,7 +493,9 @@ def _get_effects_list():
 
 def _start_effect(name, controller_id=None, sculpture_id=None, palette_name=None,
                   brightness=None):
-    """Start an effect subprocess. Kills any running effect first.
+    """Start an effect subprocess on a specific target.
+
+    If the target already has a running effect, stops ONLY that one first.
 
     Args:
         name: Effect registry name
@@ -497,16 +504,6 @@ def _start_effect(name, controller_id=None, sculpture_id=None, palette_name=None
         palette_name: Palette override for signal effects
         brightness: Brightness cap (0-1)
     """
-    global _effect_process, _active_controller, _effect_start_params
-    _stop_effect()
-
-    # Save params for hot reload
-    _effect_start_params = {
-        'name': name, 'controller_id': controller_id,
-        'sculpture_id': sculpture_id, 'palette_name': palette_name,
-        'brightness': brightness,
-    }
-
     cmd = [sys.executable, 'runner.py', name]
 
     if palette_name:
@@ -539,27 +536,47 @@ def _start_effect(name, controller_id=None, sculpture_id=None, palette_name=None
     else:
         cmd.append('--no-leds')
 
+    # If no target resolved, use a fallback key for "no LEDs" mode
+    if target_id is None:
+        target_id = '__no_leds__'
+
+    # Stop any existing effect on this target
+    _stop_effect(target_id)
+
     cmd.append('--stream-features')
 
+    params = {
+        'name': name, 'controller_id': controller_id,
+        'sculpture_id': sculpture_id, 'palette_name': palette_name,
+        'brightness': brightness,
+    }
+
     try:
-        _effect_process = subprocess.Popen(
+        proc = subprocess.Popen(
             cmd,
             cwd=EFFECTS_DIR,
             stderr=subprocess.PIPE,
         )
-        _active_controller = target_id
         # Start background thread to read feature stream from stderr
-        _start_feature_reader(_effect_process)
-        print(f"[effects] Started: {name} (pid {_effect_process.pid}) cmd: {' '.join(cmd)}")
+        reader_thread = _start_feature_reader(proc, target_id)
+        with _effect_slots_lock:
+            _effect_slots[target_id] = {
+                'process': proc,
+                'name': name,
+                'params': params,
+                'feature_reader_thread': reader_thread,
+            }
+        print(f"[effects] Started: {name} on {target_id} (pid {proc.pid}) cmd: {' '.join(cmd)}")
     except Exception as e:
         print(f"[effects] Start failed: {e}")
-        _effect_process = None
-        _active_controller = None
 
 
-def _start_feature_reader(process):
-    """Start background thread to read feature JSONL from subprocess stderr."""
-    global _feature_reader_thread, _feature_seq, _feature_meta
+def _start_feature_reader(process, target_id):
+    """Start background thread to read feature JSONL from subprocess stderr.
+
+    Returns the thread object so it can be stored in the effect slot.
+    """
+    global _feature_seq, _feature_meta
 
     with _feature_lock:
         _feature_buffer.clear()
@@ -574,6 +591,7 @@ def _start_feature_reader(process):
                 continue
             try:
                 data = json.loads(line)
+                data['_target'] = target_id
                 if data.get('_meta'):
                     with _feature_lock:
                         _feature_meta = data.get('features', [])
@@ -584,44 +602,66 @@ def _start_feature_reader(process):
             except (json.JSONDecodeError, ValueError):
                 pass
 
-    _feature_reader_thread = threading.Thread(target=_read_loop, daemon=True)
-    _feature_reader_thread.start()
+    thread = threading.Thread(target=_read_loop, daemon=True)
+    thread.start()
+    return thread
 
 
-def _stop_effect():
-    """Stop the running effect subprocess."""
-    global _effect_process, _active_controller, _feature_seq, _feature_meta
-    if _effect_process is not None:
-        try:
-            _effect_process.terminate()
-            _effect_process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            _effect_process.kill()
-        except Exception:
-            pass
-        print(f"[effects] Stopped (pid {_effect_process.pid})")
-        _effect_process = None
-        _active_controller = None
-        with _feature_lock:
-            _feature_buffer.clear()
-            _feature_seq = 0
-            _feature_meta = None
+def _stop_effect(target_id=None):
+    """Stop effect subprocess(es).
+
+    Args:
+        target_id: Stop only this target's effect. If None, stop ALL effects.
+    """
+    global _feature_seq, _feature_meta
+
+    def _kill_slot(tid, slot):
+        proc = slot['process']
+        if proc is not None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            except Exception:
+                pass
+            print(f"[effects] Stopped {slot['name']} on {tid} (pid {proc.pid})")
+
+    with _effect_slots_lock:
+        if target_id is not None:
+            slot = _effect_slots.pop(target_id, None)
+            if slot:
+                _kill_slot(target_id, slot)
+        else:
+            # Stop all
+            for tid, slot in list(_effect_slots.items()):
+                _kill_slot(tid, slot)
+            _effect_slots.clear()
+
+    # Clear feature buffer when any effect stops
+    with _feature_lock:
+        _feature_buffer.clear()
+        _feature_seq = 0
+        _feature_meta = None
 
 
-def _get_running_effect_name():
-    """Get the name of the currently running effect, or None."""
-    global _effect_process, _active_controller
-    if _effect_process is None:
-        return None
-    if _effect_process.poll() is not None:
-        _effect_process = None
-        _active_controller = None
-        return None
-    # Extract from command line args
-    args = _effect_process.args
-    if len(args) >= 3:
-        return args[2]
-    return None
+def _get_running_effects():
+    """Get dict of currently running effects: {target_id: effect_name}.
+
+    Also cleans up any slots whose processes have exited.
+    """
+    result = {}
+    dead = []
+    with _effect_slots_lock:
+        for tid, slot in _effect_slots.items():
+            proc = slot['process']
+            if proc is None or proc.poll() is not None:
+                dead.append(tid)
+            else:
+                result[tid] = slot['name']
+        for tid in dead:
+            del _effect_slots[tid]
+    return result
 
 
 # ── User Palettes ────────────────────────────────────────────────────
@@ -849,6 +889,53 @@ def render_band_analysis(filepath):
     filename = Path(filepath).name
     viz.fig.suptitle(filename, fontsize=14, fontweight='bold', y=0.98)
     viz.fig.subplots_adjust(top=0.91, bottom=0.07, hspace=0.35)
+
+    viz.fig.canvas.draw()
+
+    ax = viz.axes[0]
+    x_left = ax.transData.transform((0, 0))[0]
+    x_right = ax.transData.transform((viz.duration, 0))[0]
+
+    fig_width = viz.fig.get_figwidth() * DPI
+    fig_height = viz.fig.get_figheight() * DPI
+
+    buf = io.BytesIO()
+    viz.fig.savefig(buf, format='png', dpi=DPI, facecolor=viz.fig.get_facecolor())
+    matplotlib.pyplot.close(viz.fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(viz.duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
+
+
+VIBES_PANELS = ('vibes-lightness', 'vibes-warmth', 'vibes-roughness',
+                 'vibes-fluctuation', 'vibes-fullness', 'vibes-timbral')
+
+
+def render_vibes(filepath):
+    """Render vibes view: perceptual feeling-based signals."""
+    cache_key = (filepath, 'vibes')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    from viewer import SyncedVisualizer
+
+    viz = SyncedVisualizer(filepath, panels=list(VIBES_PANELS),
+                           annotations_path='/dev/null/none.yaml')
+
+    for line in viz.cursor_lines:
+        line.remove()
+
+    filename = Path(filepath).name
+    viz.fig.suptitle(f'{filename} — Vibes', fontsize=14, fontweight='bold', y=0.995)
+    viz.fig.subplots_adjust(top=0.97, bottom=0.02)
 
     viz.fig.canvas.draw()
 
@@ -3360,6 +3447,223 @@ def render_lab_zcr_dataset(filepath):
     return png_bytes, headers
 
 
+def render_lab_spectro_color(filepath):
+    """Spectro-Color Lab — spectrogram-to-color mapping strategies for LED strips."""
+    cache_key = (filepath, 'lab-spectro-color')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    import numpy as np
+    import librosa
+    import librosa.display
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+    import matplotlib.colors as mcolors
+    from scipy.ndimage import gaussian_filter1d
+
+    plt.style.use('dark_background')
+
+    y, sr = librosa.load(filepath, sr=None, mono=True)
+    duration = librosa.get_duration(y=y, sr=sr)
+    n_fft = 2048
+    hop_length = 512
+
+    # Compute features
+    S = librosa.feature.melspectrogram(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length, n_mels=128)
+    S_dB = librosa.power_to_db(S, ref=np.max)
+    times = librosa.frames_to_time(np.arange(S.shape[1]), sr=sr, hop_length=hop_length)
+
+    centroid = librosa.feature.spectral_centroid(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length)[0]
+    bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length)[0]
+    chroma = librosa.feature.chroma_stft(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length)
+
+    sigma = 5  # smoothing sigma
+    fps = sr / hop_length
+
+    # Layout: 5 original + 2 new smoothing comparison panels
+    fig = plt.figure(figsize=(18, 36))
+    gs = gridspec.GridSpec(7, 1, height_ratios=[1.5, 1, 1.8, 1, 0.5, 1.5, 1.5], hspace=0.35)
+
+    # ── Panel 1: Mel Spectrogram ──
+    ax = fig.add_subplot(gs[0])
+    librosa.display.specshow(S_dB, sr=sr, hop_length=hop_length, x_axis='time',
+                             y_axis='mel', ax=ax, cmap='magma')
+    ax.set_xlim([0, duration])
+    ax.set_title('Mel Spectrogram — the raw spectral input for all color mapping strategies',
+                 fontsize=12)
+    ax.set_ylabel('Frequency (Hz)')
+
+    # ── Panel 2: Spectral Centroid with Color Mapping ──
+    ax = fig.add_subplot(gs[1])
+    # Normalize centroid to [0, 1] for hue mapping
+    centroid_smooth = gaussian_filter1d(centroid, sigma=sigma)
+    c_min, c_max = np.percentile(centroid, [2, 98])
+    c_range = c_max - c_min if c_max > c_min else 1.0
+    centroid_norm = np.clip((centroid - c_min) / c_range, 0, 1)
+    centroid_smooth_norm = np.clip((centroid_smooth - c_min) / c_range, 0, 1)
+
+    # Map centroid to hue (HSV): low freq = red/warm, high freq = blue/cool
+    colors_raw = plt.cm.turbo(centroid_norm)
+    ax.scatter(times, centroid, c=colors_raw, s=1, alpha=0.3)
+    ax.plot(times, centroid_smooth, color='white', linewidth=1.5, alpha=0.7, label='Smoothed centroid')
+    ax.set_xlim([0, duration])
+    ax.set_ylabel('Frequency (Hz)')
+    ax.set_title('Spectral Centroid — "brightness" of sound mapped to hue (turbo colormap: '
+                 'red=low, blue=high)', fontsize=11)
+    ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panel 3: Centroid Smoothing Comparison ──
+    ax = fig.add_subplot(gs[2])
+
+    # --- Approach A: Long Gaussian (5s) ---
+    sigma_long = int(5 * fps)
+    centroid_gauss5 = gaussian_filter1d(centroid, sigma=sigma_long)
+
+    # --- Approach B: Asymmetric EMA (fast attack ~200ms, slow decay ~8s) ---
+    alpha_up = 2.0 / (0.2 * fps + 1)
+    alpha_down = 2.0 / (8.0 * fps + 1)
+    centroid_asym = np.zeros_like(centroid)
+    centroid_asym[0] = centroid[0]
+    for i in range(1, len(centroid)):
+        a = alpha_up if centroid[i] > centroid_asym[i-1] else alpha_down
+        centroid_asym[i] = centroid_asym[i-1] + a * (centroid[i] - centroid_asym[i-1])
+
+    # --- Approach C: Rolling integral (10s window, self-relative) ---
+    win_frames = int(10 * fps)
+    centroid_cumsum = np.cumsum(centroid)
+    centroid_integral = np.zeros_like(centroid)
+    for i in range(len(centroid)):
+        start = max(0, i - win_frames + 1)
+        centroid_integral[i] = (centroid_cumsum[i] - (centroid_cumsum[start - 1] if start > 0 else 0)) / (i - start + 1)
+
+    # --- Approach D: Sticky floor + adaptive range (bulbs pattern) ---
+    alpha_floor_base = 2.0 / (30.0 * fps + 1)
+    floor_ema = centroid[0] * 0.8
+    ceil_ema = centroid[0] * 1.2 + 100
+    centroid_sticky = np.zeros_like(centroid)
+    for i in range(len(centroid)):
+        v = centroid[i]
+        # Sticky floor: fast down (4x), slow up (0.1x)
+        if v < floor_ema:
+            floor_ema += alpha_floor_base * 4.0 * (v - floor_ema)
+        else:
+            floor_ema += alpha_floor_base * 0.1 * (v - floor_ema)
+        # Sticky ceiling: fast up (4x), slow down (0.1x)
+        if v > ceil_ema:
+            ceil_ema += alpha_floor_base * 4.0 * (v - ceil_ema)
+        else:
+            ceil_ema += alpha_floor_base * 0.1 * (v - ceil_ema)
+        span = ceil_ema - floor_ema
+        if span < 1.0:
+            centroid_sticky[i] = 0.5
+        else:
+            centroid_sticky[i] = np.clip((v - floor_ema) / span, 0, 1)
+
+    # Plot all approaches
+    ax.scatter(times, centroid, c=plt.cm.turbo(centroid_norm), s=0.5, alpha=0.15)
+    ax.plot(times, centroid_smooth, color='white', linewidth=1, alpha=0.4, label=f'Gaussian σ={sigma} (current)')
+    ax.plot(times, centroid_gauss5, color='#4FC3F7', linewidth=2.5, label='Gaussian 5s')
+    ax.plot(times, centroid_asym, color='#FF7043', linewidth=2.5, label='Asymmetric EMA (200ms↑ / 8s↓)')
+    ax.plot(times, centroid_integral, color='#69F0AE', linewidth=2.5, label='Rolling mean (10s window)')
+    ax.set_xlim([0, duration])
+    ax.set_ylabel('Frequency (Hz)')
+    ax.set_title('Centroid Smoothing Comparison — macro color adaptation strategies', fontsize=11)
+    ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panel 4: Color Strips for Each Approach ──
+    ax = fig.add_subplot(gs[3])
+    # Stack 5 color strips vertically
+    approaches = [
+        ('Current (σ=5)', centroid_smooth),
+        ('Gaussian 5s', centroid_gauss5),
+        ('Asymmetric EMA', centroid_asym),
+        ('Rolling Mean 10s', centroid_integral),
+        ('Sticky Adaptive', None),  # needs separate normalization
+    ]
+    n_strips = len(approaches)
+    strip_height = 1.0 / n_strips
+
+    for idx, (label, curve) in enumerate(approaches):
+        y_bot = 1.0 - (idx + 1) * strip_height
+        y_top = 1.0 - idx * strip_height
+
+        if curve is not None:
+            c_n = np.clip((curve - c_min) / c_range, 0, 1)
+        else:
+            c_n = centroid_sticky  # already 0-1
+        strip = plt.cm.turbo(c_n).reshape(1, -1, 4)
+        ax.imshow(strip, aspect='auto', extent=[0, duration, y_bot, y_top],
+                  interpolation='bilinear')
+        ax.text(-duration * 0.005, (y_bot + y_top) / 2, label, fontsize=8,
+                color='white', ha='right', va='center')
+
+    ax.set_xlim([0, duration])
+    ax.set_ylim([0, 1])
+    ax.set_yticks([])
+    ax.set_title('Color Strips — same centroid, different smoothing → different LED behavior', fontsize=11)
+
+    # ── Panel 5: Spectral Bandwidth ──
+    ax = fig.add_subplot(gs[4])
+    bandwidth_smooth = gaussian_filter1d(bandwidth, sigma=sigma)
+    ax.plot(times, bandwidth, color='#B388FF', linewidth=0.4, alpha=0.3)
+    ax.plot(times, bandwidth_smooth, color='#B388FF', linewidth=2, label='Smoothed bandwidth')
+    ax.fill_between(times, bandwidth_smooth, alpha=0.15, color='#B388FF')
+    ax.set_xlim([0, duration])
+    ax.set_ylabel('Bandwidth (Hz)')
+    ax.set_title('Spectral Bandwidth — spread of energy around the centroid '
+                 '(narrow = pure tones, wide = noise/richness)', fontsize=11)
+    ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panel 6: Centroid-to-Color Strip ──
+    ax = fig.add_subplot(gs[5])
+    # Create a 2D image: 1 row of centroid-mapped colors over time
+    color_strip = plt.cm.turbo(centroid_smooth_norm).reshape(1, -1, 4)
+    ax.imshow(color_strip, aspect='auto', extent=[0, duration, 0, 1], interpolation='bilinear')
+    ax.set_xlim([0, duration])
+    ax.set_yticks([])
+    ax.set_title('Centroid-to-Color Strip — what an LED strip would look like using '
+                 'whole-strip uniform color from spectral centroid', fontsize=11)
+
+    # ── Panel 7: Chromagram ──
+    ax = fig.add_subplot(gs[6])
+    librosa.display.specshow(chroma, sr=sr, hop_length=hop_length, x_axis='time',
+                             y_axis='chroma', ax=ax, cmap='magma')
+    ax.set_xlim([0, duration])
+    ax.set_title('Chromagram (12-bin) — pitch class energy over time, useful for '
+                 'harmonic-based color mapping', fontsize=12)
+    ax.set_ylabel('Pitch Class')
+    ax.set_xlabel('Time (s)')
+
+    filename = Path(filepath).name
+    fig.suptitle(f'{filename} — Spectrogram-Based Color Mapping Lab', fontsize=14,
+                 fontweight='bold', y=0.995)
+    fig.subplots_adjust(top=0.975, bottom=0.02)
+    fig.canvas.draw()
+
+    ax0 = fig.axes[0]
+    x_left = ax0.transData.transform((0, 0))[0]
+    x_right = ax0.transData.transform((duration, 0))[0]
+    fig_width = fig.get_figwidth() * DPI
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=DPI, facecolor=fig.get_facecolor())
+    matplotlib.pyplot.close(fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
+
+
 def render_lab_timbral(filepath):
     """Timbral Shape Lab — MFCC coefficients broken out with explanations."""
     cache_key = (filepath, 'lab-timbral')
@@ -3888,9 +4192,9 @@ class ViewerHandler(BaseHTTPRequestHandler):
         self._json_response({'ok': True})
 
     def _handle_effect_stop(self):
-        global _effect_start_params
-        _stop_effect()
-        _effect_start_params = None  # explicit stop — don't hot-reload
+        body = self._read_json_body()
+        target_id = body.get('target_id') if body else None
+        _stop_effect(target_id)  # None → stop all
         self._json_response({'ok': True})
 
     def _handle_effect_rate(self):
@@ -4462,6 +4766,9 @@ class ViewerHandler(BaseHTTPRequestHandler):
         elif path.startswith('/api/render-band-analysis/'):
             rel_path = path[len('/api/render-band-analysis/'):]
             self._serve_render_band_analysis(rel_path)
+        elif path.startswith('/api/render-vibes/'):
+            rel_path = path[len('/api/render-vibes/'):]
+            self._serve_render_vibes(rel_path)
         elif path.startswith('/api/render-calculus/'):
             rel_path = path[len('/api/render-calculus/'):]
             self._serve_render_calculus(rel_path)
@@ -4503,30 +4810,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._json_response(targets)
         elif path == '/api/effects':
             effects, deprecated, palettes = _get_effects_list()
-            # Return active target, or fall back to persisted preference
-            prefs = _load_effect_prefs()
-            target = _active_controller
-            target_type = None
-            if target is None:
-                if '__sculpture__' in prefs:
-                    target = prefs['__sculpture__']
-                    target_type = 'sculpture'
-                elif '__controller__' in prefs:
-                    target = prefs['__controller__']
-                    target_type = 'controller'
-            else:
-                # Determine type from active target
-                if any(s['id'] == target for s in _get_sculptures()):
-                    target_type = 'sculpture'
-                else:
-                    target_type = 'controller'
+            running = _get_running_effects()
             self._json_response({
                 'effects': effects,
                 'deprecated': deprecated,
                 'palettes': palettes,
-                'running': _get_running_effect_name(),
-                'controller': target,
-                'controller_type': target_type,
+                'running': running,
             })
         elif path == '/api/effects/features':
             since = int(query.get('since', [0])[0])
@@ -4535,7 +4824,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 last_seq = _feature_seq
                 meta = _feature_meta
             self._json_response({
-                'running': _get_running_effect_name(),
+                'running': _get_running_effects(),
                 'seq': last_seq,
                 'features': [f for _, f in entries],
                 'source_features': meta,
@@ -4683,6 +4972,30 @@ class ViewerHandler(BaseHTTPRequestHandler):
             png_bytes, headers = render_calculus(filepath)
         except Exception as e:
             print(f"[render-calculus] Error: {e}")
+            self.send_error(500, str(e))
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/png')
+        self.send_header('Content-Length', str(len(png_bytes)))
+        self.send_header('Cache-Control', 'max-age=3600')
+        exposed = ', '.join(headers.keys())
+        self.send_header('Access-Control-Expose-Headers', exposed)
+        for k, v in headers.items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(png_bytes)
+
+    def _serve_render_vibes(self, rel_path):
+        filepath = _resolve_audio_path(rel_path)
+        if filepath is None:
+            self.send_error(404, 'File not found')
+            return
+
+        try:
+            png_bytes, headers = render_vibes(filepath)
+        except Exception as e:
+            print(f"[render-vibes] Error: {e}")
             self.send_error(500, str(e))
             return
 

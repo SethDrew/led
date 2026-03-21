@@ -422,16 +422,44 @@ entries:
     source:
       - https://cpldcpu.com/2022/08/15/does-the-ws2812-have-integrated-gamma-correction/
     tags: [sk6812, rgbw, quantization, constraint, low-brightness]
-    relates_to: [ws2812b-gamma-correction, ws2812b-hue-shift-low-brightness]
+    relates_to: [ws2812b-gamma-correction, ws2812b-hue-shift-low-brightness, delta-sigma-eliminates-low-brightness-flicker]
     notes: >
       cpldcpu (Tim) measured SK6812 PWM output vs input and found strictly linear
       mapping. WS2812 by contrast maps 8-bit input to internal 11-bit PWM values —
       an undocumented feature that improves low-end dimming. SK6812 PWM frequency
-      is 1.2kHz (per datasheet).
+      is 1.2kHz (per datasheet). Data rate is 800kHz (4 bytes RGBW per pixel,
+      32 bits × 50 LEDs = 2ms wire time + 80μs reset).
 
-      Practical consequence: for warm white glow effects on SK6812 RGBW, using
-      RGB channels (R+G+B mixed to approximate white) produces smoother low-end
-      fades than using the dedicated W channel alone, because the same brightness
-      level spread across 3 channels gives 3x the effective resolution.
+      ## Hardware constraint and software compensation
 
-      ESP32-C3 test setup: 50 SK6812 RGBW LEDs on pin 10, FastLED 3.10.3.
+      The SK6812's linear 8-bit PWM means each channel has exactly 256 brightness
+      levels with uniform spacing. At the low end (values 0–10), these steps are
+      perceptually large — the jump from 0→1 is 0.4% of full output, from 1→2
+      is another 0.4%. Human vision has ~1% JND (just-noticeable difference) at
+      these levels, so every step is visible.
+
+      The 1.2kHz internal PWM frequency means the LED refreshes its duty cycle
+      ~1200× per second. Software temporal dithering at 300–480 fps creates an
+      amplitude modulation envelope that the LED faithfully reproduces. Ordered
+      dithering (e.g., 16-phase) creates periodic ripple at fps/phases = 18.75 Hz
+      — visible. First-order delta-sigma modulation creates aperiodic noise-shaped
+      ripple with no detectable frequency — invisible to the eye.
+
+      ## Resolution: W channel is sufficient with delta-sigma
+
+      A/B test compared delta-sigma on W-only vs delta-sigma on R+G+B warm white.
+      Both were flicker-free. Multi-channel RGB spreading is unnecessary when
+      delta-sigma is applied — the dithering technique matters more than channel
+      count. The W channel's warm white phosphor is the preferred output for
+      glow/breathe effects (correct color temperature, single-channel simplicity).
+
+      See research ledger: delta-sigma-eliminates-low-brightness-flicker for the
+      full dithering pipeline specification.
+
+      ## Hardware alternatives
+
+      WS2816 has native 16-bit PWM (65536 levels) with 10kHz refresh and built-in
+      4-bit gamma — eliminates the dithering problem in hardware. Worth considering
+      if dimming quality is paramount and software complexity is a concern.
+
+      ESP32-C3 test setup: 50 SK6812 RGBW LEDs on pin 10, Adafruit NeoPixel.

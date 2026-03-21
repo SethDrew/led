@@ -46,4 +46,14 @@ audio-reactive/research/audio-segments/uploads/
 *.search_cache.pkl
 
 # Festicorn local credentials
-festicorn/src/wifi_credentials_local.h
+festicorn/butterfly/src/wifi_credentials_local.h
+
+# Claude Code local settings
+.claude/settings.local.json
+**/.claude/settings.local.json
+
+# VJ extraction output (large generated media/features/plots)
+audio-reactive/research/vj-extraction/output/
+
+# Generated analysis plots (regenerable from scripts)
+audio-reactive/research/*.png

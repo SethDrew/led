@@ -10,25 +10,18 @@
  */
 
 #include <Adafruit_NeoPixel.h>
+#include <streaming_protocol.h>
 
 #define TOTAL_LEDS (STRIP_A_COUNT + STRIP_B_COUNT)
 
 Adafruit_NeoPixel stripA(STRIP_A_COUNT, STRIP_A_PIN, NEO_GRB + NEO_KHZ800);
 Adafruit_NeoPixel stripB(STRIP_B_COUNT, STRIP_B_PIN, NEO_GRB + NEO_KHZ800);
 
-// Frame buffer
+// Frame buffer and receiver
 uint8_t buf[TOTAL_LEDS * 3];
-
-// Protocol
-const uint8_t START1 = 0xFF;
-const uint8_t START2 = 0xAA;
-const uint16_t FRAME_BYTES = TOTAL_LEDS * 3;
-
-enum RxState { WAIT_SYNC1, WAIT_SYNC2, READ_FRAME };
-RxState rxState = WAIT_SYNC1;
-uint16_t bytesRead = 0;
-uint8_t runningXor = 0;
+StreamReceiver rx;
 unsigned long frameStartTime = 0;
+bool receiving = false;
 
 // Stats
 unsigned long framesOk = 0;
@@ -52,6 +45,7 @@ void showFrame() {
 
 void setup() {
     Serial.begin(1000000);
+    streamReceiverInit(rx, TOTAL_LEDS, buf);
 
     stripA.begin();
     stripA.setBrightness(255);
@@ -77,45 +71,28 @@ void loop() {
     while (Serial.available()) {
         uint8_t b = Serial.read();
 
-        switch (rxState) {
-            case WAIT_SYNC1:
-                if (b == START1) rxState = WAIT_SYNC2;
-                break;
-
-            case WAIT_SYNC2:
-                if (b == START2) {
-                    rxState = READ_FRAME;
-                    bytesRead = 0;
-                    runningXor = 0;
-                    frameStartTime = millis();
-                } else if (b == START1) {
-                    // consecutive 0xFF — stay
-                } else {
-                    rxState = WAIT_SYNC1;
-                }
-                break;
-
-            case READ_FRAME:
-                if (bytesRead < FRAME_BYTES) {
-                    buf[bytesRead++] = b;
-                    runningXor ^= b;
-                } else {
-                    if (runningXor == b) {
-                        showFrame();
-                        framesOk++;
-                    } else {
-                        framesBad++;
-                    }
-                    rxState = WAIT_SYNC1;
-                }
-                break;
+        if (streamReceiverFeed(rx, b)) {
+            showFrame();
+            framesOk++;
+            receiving = false;
+        } else if (rx.state >= 2) {
+            // Entered DATA or CHECK state — start timeout clock
+            if (!receiving) {
+                frameStartTime = millis();
+                receiving = true;
+            }
+        } else if (receiving) {
+            // Was receiving but dropped back to SYNC — checksum failed
+            framesBad++;
+            receiving = false;
         }
     }
 
     // Frame timeout
-    if (rxState == READ_FRAME && (millis() - frameStartTime) > 50) {
-        rxState = WAIT_SYNC1;
+    if (receiving && (millis() - frameStartTime) > 50) {
+        streamReceiverInit(rx, TOTAL_LEDS, buf);
         framesBad++;
+        receiving = false;
     }
 
     // Stats every 2s

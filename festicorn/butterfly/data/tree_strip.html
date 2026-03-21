@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Butterfly</title>
+<title>Tree Strip</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -32,9 +32,8 @@
   .palette-group-label { font-size: 0.75em; color: #666; text-transform: uppercase;
     letter-spacing: 1px; margin: 10px 0 4px 0; }
   .palette-group-label:first-child { margin-top: 0; }
-  .palette-grid {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
-  }
+  .palette-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .solid-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
   .palette-btn {
     height: 48px; border-radius: 8px; border: 2px solid #333;
     cursor: pointer; transition: all 0.2s;
@@ -49,14 +48,14 @@
 </style>
 </head>
 <body>
-<h1>&#x1f98b; Butterfly</h1>
+<h1>Tree Strip</h1>
+<h2>150 LEDs on D32</h2>
 
 <div class="section">
   <div class="section-label">Effect</div>
   <div class="btn-group">
     <button class="btn btn-effect" id="btn-rainbow" onclick="setEffect('rainbow')">Rainbow</button>
     <button class="btn btn-effect" id="btn-gradient" onclick="setEffect('gradient')">Gradient</button>
-    <button class="btn btn-effect" id="btn-devcolor" onclick="setEffect('dev_color')">Dev Color</button>
   </div>
 </div>
 
@@ -64,8 +63,19 @@
   <div class="section-label">Brightness</div>
   <div class="slider-container">
     <input type="range" id="brightness" min="0" max="255" value="128"
-      oninput="document.getElementById('br-val').textContent=this.value; postValDebounced('/brightness','brightness',this.value)">
+      oninput="document.getElementById('br-val').textContent=this.value"
+      onchange="postVal('/brightness','brightness',this.value)">
     <span class="slider-val" id="br-val">128</span>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-label">Chroma</div>
+  <div class="slider-container">
+    <input type="range" id="chroma" min="0" max="255" value="255"
+      oninput="document.getElementById('ch-val').textContent=Math.round(this.value/2.55)+'%'"
+      onchange="postVal('/chroma','chroma',this.value)">
+    <span class="slider-val" id="ch-val">100%</span>
   </div>
 </div>
 
@@ -73,7 +83,8 @@
   <div class="section-label">Cycle Time</div>
   <div class="slider-container">
     <input type="range" id="cycletime" min="0" max="1000" step="1" value="71"
-      oninput="document.getElementById('ct-val').textContent=fmtCycle(sliderToMs(this.value)); postValDebounced('/cycletime','cycletime',sliderToMs(this.value))">
+      oninput="document.getElementById('ct-val').textContent=fmtCycle(sliderToMs(this.value))"
+      onchange="postVal('/cycletime','cycletime',sliderToMs(this.value))">
     <span class="slider-val" id="ct-val">8.0s</span>
   </div>
 </div>
@@ -81,10 +92,6 @@
 <div class="section hidden" id="sec-palette">
   <div class="section-label">Palette</div>
   <div id="palette-container"></div>
-</div>
-
-<div class="section hidden" id="sec-devcolor">
-  <div class="section-label" style="color:#e94560;">Receiving from design tool</div>
 </div>
 
 <div class="status" id="status">Connecting...</div>
@@ -98,28 +105,37 @@ var GRADIENTS = [
   {id:'green_purple', css:'linear-gradient(90deg, rgb(2,163,12), rgb(2,149,108), rgb(2,135,212), rgb(30,67,251), rgb(40,0,86))'},
   {id:'orange_teal', css:'linear-gradient(90deg, rgb(137,27,0), rgb(188,82,1), rgb(116,119,1), rgb(2,163,14), rgb(2,149,112))'},
   {id:'magenta_cyan', css:'linear-gradient(90deg, rgb(252,20,162), rgb(148,1,6), rgb(186,90,1), rgb(26,155,1), rgb(2,144,145))'},
-  {id:'sunset_sky', css:'linear-gradient(90deg, rgb(50,40,130), rgb(125,50,115), rgb(210,60,55), rgb(175,60,5), rgb(210,110,15))'}
+  {id:'sunset_sky', css:'linear-gradient(90deg, rgb(50,40,130), rgb(125,50,115), rgb(210,60,55), rgb(175,60,5), rgb(210,110,15))'},
+  {id:'ink_wash', css:'linear-gradient(90deg, rgb(241,165,184), rgb(175,137,185), rgb(189,200,212), rgb(91,161,132), rgb(20,78,54))'}
 ];
-var CHROMAS = [
-  {id:'blue_wash', css:'linear-gradient(90deg, rgb(32,72,251), rgb(37,74,220), rgb(49,77,165), rgb(63,78,118), rgb(78,78,78))'},
-  {id:'red_wash', css:'linear-gradient(90deg, rgb(145,1,4), rgb(128,7,7), rgb(95,18,16), rgb(65,28,25), rgb(37,37,37))'},
-  {id:'green_wash', css:'linear-gradient(90deg, rgb(2,163,12), rgb(16,156,23), rgb(45,141,48), rgb(76,125,76), rgb(108,108,108))'},
-  {id:'purple_wash', css:'linear-gradient(90deg, rgb(29,0,79), rgb(27,3,67), rgb(22,8,45), rgb(18,12,28), rgb(15,15,15))'},
-  {id:'gold_wash', css:'linear-gradient(90deg, rgb(166,100,1), rgb(157,102,13), rgb(139,105,39), rgb(123,107,70), rgb(108,108,108))'}
+var SOLIDS = [
+  {id:'s_red',     hex:'fb0340', css:'rgb(251,3,64)'},
+  {id:'s_orange',  hex:'bc5201', css:'rgb(188,82,1)'},
+  {id:'s_yellow',  hex:'a66401', css:'rgb(166,100,1)'},
+  {id:'s_green',   hex:'02a30c', css:'rgb(2,163,12)'},
+  {id:'s_cyan',    hex:'029091', css:'rgb(2,144,145)'},
+  {id:'s_blue',    hex:'2048fb', css:'rgb(32,72,251)'},
+  {id:'s_purple',  hex:'1d004f', css:'rgb(29,0,79)'},
+  {id:'s_magenta', hex:'fc14a2', css:'rgb(252,20,162)'}
 ];
 
 var container = document.getElementById('palette-container');
 var allPaletteIds = [];
-function buildGrid(items) {
+
+function buildGrid(items, gridClass) {
   var grid = document.createElement('div');
-  grid.className = 'palette-grid';
+  grid.className = gridClass || 'palette-grid';
   items.forEach(function(p) {
     allPaletteIds.push(p.id);
     var btn = document.createElement('button');
     btn.className = 'palette-btn';
     btn.id = 'btn-' + p.id;
     btn.style.background = p.css;
-    btn.onclick = function() { setPalette(p.id); };
+    if (p.hex) {
+      btn.onclick = function() { setCustomColor(p.hex); };
+    } else {
+      btn.onclick = function() { setPalette(p.id); };
+    }
     grid.appendChild(btn);
   });
   return grid;
@@ -131,9 +147,9 @@ function addLabel(text) {
   container.appendChild(lbl);
 }
 addLabel('Gradients');
-container.appendChild(buildGrid(GRADIENTS));
-addLabel('Chroma');
-container.appendChild(buildGrid(CHROMAS));
+container.appendChild(buildGrid(GRADIENTS, 'palette-grid'));
+addLabel('Solid Colors');
+container.appendChild(buildGrid(SOLIDS, 'solid-grid'));
 
 function sliderToMs(pos) {
   pos = Number(pos);
@@ -154,12 +170,6 @@ function postVal(path, key, val) {
   fetch(path, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body: key+'='+val});
 }
-var _debounceTimers = {};
-function postValDebounced(path, key, val, delay) {
-  if (!delay) delay = 50;
-  if (_debounceTimers[path]) clearTimeout(_debounceTimers[path]);
-  _debounceTimers[path] = setTimeout(function() { postVal(path, key, val); }, delay);
-}
 function setEffect(e) {
   fetch('/effect', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body: 'effect='+e}).then(function(){pollStatus()});
@@ -168,17 +178,21 @@ function setPalette(p) {
   fetch('/palette', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body: 'palette='+p}).then(function(){pollStatus()});
 }
+function setCustomColor(hex) {
+  fetch('/custom', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body: 'c='+hex}).then(function(){pollStatus()});
+}
 function updateUI(s) {
   document.getElementById('btn-rainbow').classList.toggle('active', s.effect==='rainbow');
   document.getElementById('btn-gradient').classList.toggle('active', s.effect==='gradient');
-  document.getElementById('btn-devcolor').classList.toggle('active', s.effect==='dev_color');
   document.getElementById('brightness').value = s.brightness;
   document.getElementById('br-val').textContent = s.brightness;
+  document.getElementById('chroma').value = s.chroma;
+  document.getElementById('ch-val').textContent = Math.round(s.chroma/2.55)+'%';
   document.getElementById('cycletime').value = msToSlider(s.cycleTime);
   document.getElementById('ct-val').textContent = fmtCycle(s.cycleTime);
-  document.getElementById('sec-cycletime').classList.toggle('hidden', s.effect==='dev_color');
+  document.getElementById('sec-cycletime').classList.toggle('hidden', s.effect!=='rainbow');
   document.getElementById('sec-palette').classList.toggle('hidden', s.effect!=='gradient');
-  document.getElementById('sec-devcolor').classList.toggle('hidden', s.effect!=='dev_color');
   allPaletteIds.forEach(function(pid) {
     var el = document.getElementById('btn-' + pid);
     if (el) el.classList.toggle('active', s.palette === pid);

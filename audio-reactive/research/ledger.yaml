@@ -3053,8 +3053,9 @@ entries:
       built-in dithering only applies to setBrightness() master scaling, not
       per-pixel values — manual dithering is required for per-pixel control.
       A brightness floor of ~5 is needed to avoid the 0↔1 dead zone where
-      dithering causes visible strobe.
-    status: validated
+      dithering causes visible strobe. Superseded by delta-sigma modulation
+      (see delta-sigma-eliminates-low-brightness-flicker).
+    status: superseded
     warmth: high
     confidence: high
     source:
@@ -3093,3 +3094,281 @@ entries:
       ambient) should use temporal dithering with a brightness floor. This is a
       per-pixel technique that can be applied after all color/brightness
       calculations, as a final output stage before FastLED.show().
+
+  - id: delta-sigma-eliminates-low-brightness-flicker
+    date: 2026-03-17
+    touched: 2026-03-17
+    title: "First-order delta-sigma modulation with gamma 2.4 eliminates visible flicker on SK6812 — complete solution"
+    summary: >
+      Replacing 16-phase ordered temporal dithering with first-order delta-sigma
+      modulation (Fadecandy-style) completely eliminates visible low-brightness
+      flicker on SK6812 RGBW. The ordered dither had an 18.75 Hz periodic ripple
+      (300fps / 16 phases) within the visible flicker range. Delta-sigma is
+      aperiodic and noise-shaped — no detectable flicker frequency. Combined
+      with gamma 2.4 perceptual correction and a 0↔1 snap-to-zero floor, this
+      produces flicker-free smooth fades across the full 0–20% brightness range
+      on the W channel alone. Multi-channel RGB spreading was tested but
+      unnecessary — the W channel is sufficient with proper dithering.
+    status: validated
+    warmth: high
+    confidence: high
+    source:
+      - firmware/stick/src/soft_white_glow.cpp
+    tags: [dithering, delta-sigma, low-brightness, perception, sk6812, technique]
+    relates_to: [temporal-dithering-smooths-low-brightness, sk6812-w-channel-worse-low-brightness, hybrid-gamma-brightness, rgb-color-gamut-limitations]
+    notes: >
+      ## The complete pipeline (Fadecandy-style)
+
+      1. Compute target brightness as float (animation math)
+      2. Apply gamma 2.4: `pow(linear, 2.4)` — perceptual uniformity
+      3. Convert to 8.8 fixed point (16-bit): `target * max_bright * 256`
+      4. Snap to zero if target16 < 256 — avoids 0↔1 dither zone
+      5. First-order delta-sigma per pixel: accumulate target, output high
+         byte, keep low byte as residual
+      6. Seed per-pixel accumulators with spread values to decorrelate dither
+
+      ## Why ordered dithering failed
+
+      16-phase ordered dithering (`frameCount & 15`) creates periodic
+      switching at fps/16. At 300 fps, that is 18.75 Hz — well within
+      visible flicker range for peripheral vision. The periodicity creates
+      a detectable temporal pattern the eye can track.
+
+      Delta-sigma replaces this with an aperiodic, noise-shaped pattern.
+      The quantization noise is pushed to higher frequencies where flicker
+      fusion makes it invisible.
+
+      ## Key surprise: W channel alone is sufficient
+
+      A/B tested delta-sigma on W-only (LEDs 0-24) vs delta-sigma on
+      R+G+B warm white with no W (LEDs 25-49). Both looked great — no
+      visible flicker on either. The W channel's linear 8-bit PWM is NOT
+      the fundamental limitation; the dithering technique is. With proper
+      delta-sigma, even a single 8-bit channel produces perceptually smooth
+      fades. Multi-channel spreading adds complexity without visible benefit
+      when delta-sigma is already applied.
+
+      ## Implementation cost
+
+      Per-pixel accumulator: 2 bytes per channel. For 50 LEDs on W channel:
+      100 bytes. Negligible on ESP32-C3 (320KB RAM). The deltaSigma()
+      function is 3 operations (add, shift, mask) — no measurable impact
+      on frame rate.
+
+      ## Applicability
+
+      This pipeline should be the standard output stage for all SK6812
+      effects that need smooth dimming. It replaces both the raw truncation
+      approach and the 16-phase ordered dithering. The gamma curve,
+      delta-sigma modulation, and 0↔1 floor are independent of the
+      animation/effect logic upstream.
+
+  # ── INMP441 MEMS Microphone Characterization ──────────────────────
+
+  - id: inmp441-frequency-response
+    date: 2026-03-17
+    touched: 2026-03-17
+    title: "INMP441 MEMS mic has severe bass/mid deficit vs system audio — treble only is comparable"
+    summary: >
+      Dual-capture comparison (BlackHole system loopback vs INMP441 acoustic
+      pickup near speaker) shows the INMP441 is ~24 dB quieter overall, with
+      catastrophic bass loss. Per-band deltas vs system audio: sub-bass
+      (20-80 Hz) -15 dB, bass (80-250 Hz) -28 dB, mids (250-2 kHz) -21 dB,
+      treble (6-8 kHz) comparable. Envelope correlation between sources is
+      only 0.29 and SNR is 3.9 dB.
+    status: validated
+    warmth: high
+    confidence: high
+    source: dual-capture measurement (BlackHole vs INMP441 acoustic, same music)
+    tags: [hardware, microphone, inmp441, frequency-response, esp32, measurement]
+    relates_to: [taps-track-bass-peaks, equal-loudness-weighting-dead-end]
+    notes: >
+      The 24 dB overall level difference is fixable with gain or normalization.
+      The frequency imbalance is the real problem — it is a property of the
+      MEMS element's mechanical response plus the acoustic path (speaker to
+      mic through air), not an amplitude issue. No amount of broadband gain
+      will restore the missing bass energy. The INMP441 datasheet shows flat
+      response 100 Hz-10 kHz on-axis in an anechoic chamber, but real-world
+      acoustic pickup (off-axis, room reflections, speaker directivity) adds
+      significant additional roll-off below 250 Hz.
+
+      Key numbers:
+        Sub-bass (20-80 Hz):    -15 dB  (attenuated but present)
+        Bass (80-250 Hz):       -28 dB  (essentially absent)
+        Mids (250-2 kHz):       -21 dB  (heavily attenuated)
+        High-mids (2-6 kHz):    ~-10 dB (moderate loss)
+        Treble (6-8 kHz):       comparable
+        Overall RMS:            -24 dB
+        Envelope correlation:   0.29  (weak)
+        SNR:                    3.9 dB (poor)
+
+      The bass deficit is particularly severe because bass (80-250 Hz) is
+      where kick drums live — the primary beat-tracking target (see
+      taps-track-bass-peaks). The INMP441 essentially cannot see the
+      signal that drives most of our beat detection.
+
+  - id: inmp441-signal-impact
+    date: 2026-03-17
+    touched: 2026-03-17
+    title: "INMP441 bass deficit fundamentally changes which signal primitives work"
+    summary: >
+      The INMP441's -28dB bass deficit (see inmp441-frequency-response)
+      breaks three categories of audio signal differently: (1) bass-band
+      signals become noise, (2) broadband signals lose their kick component
+      and shift to treble-tracking, (3) per-band decomposition loses its
+      lowest 2 bands. This is a signal-level problem, not an effect-level
+      problem — any technique built on these primitives inherits the limitation.
+    status: validated
+    warmth: high
+    confidence: high
+    source: analysis of signal primitives against measured INMP441 frequency response
+    tags: [hardware, microphone, inmp441, signal-processing, esp32]
+    relates_to: [inmp441-frequency-response, taps-track-bass-peaks, onset-envelope-for-tempo, per-band-normalization-with-dropout-handling]
+    notes: >
+      Three signal categories, by impact:
+
+      **Bass-band signals (broken):** Any signal derived from energy below
+      ~250Hz — bass spectral flux, bass-band HPSS, low-frequency energy
+      ratio — receives noise, not music. Kick drum detection via bass
+      flux is impossible. This is the most damaging loss because kicks
+      are the primary periodic signal for beat tracking (see
+      taps-track-bass-peaks).
+
+      **Broadband signals (degraded):** RMS, abs-integral (|d(RMS)/dt|),
+      and broadband spectral flux still function because treble energy
+      varies with the music. But the character changes — abs-integral
+      peaks shift from kick-driven (groove) to hi-hat/snare-driven
+      (accent). The feel is fundamentally different: the signal tracks
+      rhythmic surface detail rather than rhythmic foundation.
+
+      **Tempo trackers (degraded, genre-dependent):** All current trackers
+      (onset-envelope, beat-predictor, fusion variants) rely on
+      autocorrelation of onset or energy signals. Without bass, the
+      strongest periodic component (kick pattern) is absent. Trackers
+      may lock to hi-hat rate (correct or half-tempo depending on genre)
+      or fail entirely on bass-heavy music (electronic, hip-hop). This
+      worsens the octave ambiguity problem. Music with prominent treble
+      periodicity (trap hi-hats, acoustic guitar strumming) fares better.
+
+      **Spectral centroid (biased):** With bass energy absent, centroid
+      sits permanently in the upper range. The warm-to-cool dynamic
+      range compresses. Centroid still varies, but within a narrower,
+      cooler band.
+
+      **Per-band decomposition (collapsed):** A 5-band split loses its
+      bottom 2 bands to noise. The effective decomposition is 3-band
+      (low-mid, high-mid, treble). Band-share voting, dominant-band
+      detection, and zone-mapped effects lose 40% of their range.
+
+      **Key insight:** The degradation is at the signal primitive level,
+      not the effect level. Any future effect using these same primitives
+      will inherit the same limitations. ESP32 standalone effects should
+      be designed around 3-band mid/high decomposition and treble-onset
+      beat detection from the start, rather than adapting 5-band
+      bass-dependent designs.
+
+  - id: inmp441-normalization-limits
+    date: 2026-03-17
+    touched: 2026-03-17
+    title: "Normalization fixes INMP441 amplitude deficit but cannot restore missing frequency content"
+    summary: >
+      The 24 dB overall level difference between INMP441 and system audio
+      normalizes away trivially (peak-decay, EMA ratio, or simple gain).
+      But normalization cannot fix the frequency imbalance: bass is -28 dB
+      relative to system audio, so per-band normalization of the bass band
+      just amplifies noise floor to full scale. The bass "signal" after
+      per-band normalization is noise, not music.
+    status: validated
+    warmth: high
+    confidence: high
+    source: dual-capture measurement + normalization analysis
+    tags: [hardware, microphone, inmp441, normalization, signal-processing, esp32]
+    relates_to: [inmp441-frequency-response, inmp441-signal-impact, per-band-normalization-with-dropout-handling, ema-normalization-replaces-peak-decay, feelings-are-contextual]
+    notes: >
+      ## What normalization CAN fix
+
+      - Overall amplitude: The 24 dB level difference is purely a gain
+        issue. Any normalization scheme (peak-decay, EMA ratio, AGC)
+        handles this transparently.
+
+      - Relative dynamics within surviving bands: Treble and high-mid
+        energy still varies with the music. Normalizing these bands
+        independently produces usable 0-1 signals.
+
+      ## What normalization CANNOT fix
+
+      - Missing bass content: At -28 dB in the bass band (80-250 Hz),
+        the SNR is effectively 0 dB. Per-band normalization amplifies
+        noise to full scale, producing random triggers. This is the
+        "amplifying nothing" problem — normalization cannot create
+        information that was never captured.
+
+      - Frequency balance: A kick drum produces a bass spike 10-20 dB
+        above treble in system audio. Through the INMP441, that kick
+        is at or below the noise floor while treble is at full level.
+        No normalization restores this ratio.
+
+      - Envelope shape: The 0.29 envelope correlation means the
+        temporal pattern is different, not just quieter. The mic
+        responds to different frequency content, producing a different
+        waveform. Room acoustics further distort the envelope.
+
+      - SNR: At 3.9 dB, noise is only ~2.5x below signal.
+        Normalization amplifies both equally. Derivatives (abs-integral)
+        will have significant noise contribution.
+
+      ## Implications for ESP32 standalone
+
+      Beat detection should shift from bass-tracking to treble-onset-
+      tracking (hi-hat patterns, spectral flux in 2-8 kHz). Per-band
+      decomposition should collapse to 3 bands (low-mid, high-mid,
+      treble) since the lowest 2 bands are noise. The feelings-are-
+      contextual principle still applies — deviations from running
+      average still track musical events, just treble-dominated ones.
+
+      Hardware mitigation: analog preamp with bass shelf (+20 dB below
+      250 Hz) could partially compensate, but the MEMS element's
+      mechanical rolloff may still limit recovery.
+
+  - id: sticky-floor-adaptive-normalization
+    date: 2026-03-18
+    touched: 2026-03-18
+    title: Asymmetric floor EMA + log-scale for room-adaptive brightness
+    summary: >
+      Noise floor EMA with asymmetric alpha (fast descent 4x, slow ascent 0.1x,
+      30s base TC) paired with log dB mapping over a 15dB window produces
+      room-adaptive audio-reactive brightness. Standard symmetric EMA floor
+      drifts upward during sustained music, collapsing dynamic range. The
+      asymmetric alpha fixes this — floor drops quickly when room quiets but
+      resists rising when music plays, preserving the gap between ambient and
+      peaks.
+    status: validated
+    warmth: high
+    confidence: high
+    source: []
+    tags: [normalization, perception, brightness, hardware, tested]
+    relates_to: [perception-is-layered-by-timescale, ema-normalization-replaces-peak-decay]
+    notes: >
+      Validated via 5 rounds of A/B testing on gyro color stick (50 LEDs split
+      into halves, same color, different brightness pipelines). Key findings
+      from the A/B rounds:
+
+      - Log-scale beats sigmoid and linear for audio→brightness mapping.
+        Ratio-based was too twitchy (tiny changes → huge swings), sigmoid+integral
+        too sluggish, linear thresholds stayed too bright at idle.
+
+      - 15dB window empirically matched to real-world INMP441 mic dynamic range
+        in room settings. 30dB window was too wide — actual signal only spanned
+        ~11dB, so brightness could only reach 37% of output range.
+
+      - Asymmetric exponential decay (fast attack ~60ms, slow decay ~5s) preferred
+        over linear decay. The lingering exponential tail feels natural — energy
+        enters the system quickly and fades slowly.
+
+      - Peak vs RMS: indistinguishable under log compression. Log mapping absorbs
+        the peak/RMS difference. Peak chosen for simplicity.
+
+      The technique is not specific to gyro stick — any mic-based brightness
+      effect in any room benefits from adaptive floor tracking that resists
+      upward drift during sustained sound.
+

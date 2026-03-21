@@ -13,6 +13,7 @@ Usage:
 import argparse
 import os
 import pickle
+import re
 import sys
 
 import yaml
@@ -118,62 +119,143 @@ def get_index(ledger_path: str):
     return entries, vectorizer, matrix
 
 
+# Keyword → arch-impl reference doc mapping.
+# Each value is (regex_pattern, brief_description).
+REFERENCE_DOCS = {
+    "COLOR_ENGINEERING.md": (
+        r"colou?r|rainbow|palette|gamma|hue|saturation|chroma|oklch|brightness|rgb",
+        "color pipeline, gamma, OKLCH, chroma",
+    ),
+    "SIGNAL_NORMALIZATION.md": (
+        r"normali[zs]|scaling|ema|time.?constant|smoothing|agc|envelope",
+        "EMA, scaling, AGC, envelope following",
+    ),
+    "MATHY_EFFECTS_CATALOG.md": (
+        r"effect.?design|generative|math.?effect|pattern|perlin|simplex|wave|oscillat",
+        "generative patterns, Perlin noise, wave math",
+    ),
+    "NATURE_TOPOLOGY_EFFECTS_CATALOG.md": (
+        r"topolog|tree.?form|diamond|branch|sculpture|canopy|radial",
+        "topology-specific effects, tree/diamond forms",
+    ),
+    "VJ_AUDIO_VISUAL_MAPPING.md": (
+        r"vj|audio.?visual|mapping.?conven|lighting.?design|ld\b",
+        "VJ conventions, audio-visual mapping principles",
+    ),
+    "SPECTROGRAM_BASED_COLOR.md": (
+        r"spectro|mel.?to.?color|frequency.?color|spectral.?color",
+        "mel-to-color strategies, spectral color mapping",
+    ),
+    "ENTITY_INTERACTIONS.md": (
+        r"entit|collision|flock|swarm|multi.?agent|particle.?interact",
+        "multi-entity behavior, collision, flocking",
+    ),
+    "INPUT_ROLE_MATRIX.md": (
+        r"input.?role|composition|layer.?role|foreground|background|midground",
+        "input roles, layer composition",
+    ),
+    "SHOW_AUTOMATION.md": (
+        r"show.?auto|scene.?change|phrase.?detect|arc|set.?list|transition",
+        "show automation, scene transitions, phrase detection",
+    ),
+    "AUDIO_FEATURES.md": (
+        r"audio.?feature|onset|spectral.?flux|centroid|rms|zcr|mfcc",
+        "audio features: onset, flux, centroid, RMS, MFCC",
+    ),
+    "AUDIO_ANALYSIS_ALGORITHMS.md": (
+        r"algorithm|fft|stft|hpss|decompos|harmonic|percussive",
+        "FFT, STFT, HPSS, harmonic/percussive separation",
+    ),
+    "PER_BAND_NORMALIZATION.md": (
+        r"per.?band|band.?normal|frequency.?band|sub.?bass|bass|mid|treble",
+        "per-band normalization, frequency band processing",
+    ),
+    "AUDIO_VISUAL_MAPPING_PATTERNS.md": (
+        r"mapping.?pattern|reactive.?pattern|pulse.?map|beat.?map",
+        "reactive mapping patterns, beat/pulse mapping",
+    ),
+}
+
+MAX_REFERENCE_DOCS = 3
+
+
+def match_reference_docs(query: str) -> list[tuple[str, str]]:
+    """Match query against keyword patterns to find relevant arch-impl docs.
+
+    Returns list of (doc_name, description) tuples, capped at MAX_REFERENCE_DOCS.
+    """
+    matches = []
+    for doc_name, (pattern, description) in REFERENCE_DOCS.items():
+        if re.search(pattern, query, re.IGNORECASE):
+            matches.append((doc_name, description))
+    return matches[:MAX_REFERENCE_DOCS]
+
+
 def search(query: str, top_k: int = 5) -> str:
     """Search the ledger and return formatted results."""
+    lines = []
+
+    # TF-IDF ledger search
     entries, vectorizer, matrix = get_index(LEDGER_PATH)
-    if not entries or vectorizer is None:
-        return ""
+    if entries and vectorizer is not None:
+        query_vec = vectorizer.transform([query])
+        scores = cosine_similarity(query_vec, matrix).flatten()
 
-    query_vec = vectorizer.transform([query])
-    scores = cosine_similarity(query_vec, matrix).flatten()
+        # Boost scores based on domain metadata (warmth, status, confidence)
+        boosted = []
+        for i, score in enumerate(scores):
+            if score < MIN_SCORE:
+                continue
+            boost = 0.0
+            entry = entries[i]
+            warmth = entry.get("warmth", "")
+            if warmth == "high":
+                boost += 0.03
+            status = entry.get("status", "")
+            if status in ("validated", "integrated", "resonates"):
+                boost += 0.02
+            if entry.get("confidence", "") == "high":
+                boost += 0.01
+            boosted.append((i, score + boost))
 
-    # Boost scores based on domain metadata (warmth, status, confidence)
-    boosted = []
-    for i, score in enumerate(scores):
-        if score < MIN_SCORE:
-            continue
-        boost = 0.0
-        entry = entries[i]
-        warmth = entry.get("warmth", "")
-        if warmth == "high":
-            boost += 0.03
-        status = entry.get("status", "")
-        if status in ("validated", "integrated", "resonates"):
-            boost += 0.02
-        if entry.get("confidence", "") == "high":
-            boost += 0.01
-        boosted.append((i, score + boost))
+        ranked = sorted(boosted, key=lambda x: x[1], reverse=True)[:top_k]
 
-    ranked = sorted(boosted, key=lambda x: x[1], reverse=True)[:top_k]
+        if ranked:
+            lines.append("## Relevant research ledger entries:\n")
+            for idx, score in ranked:
+                entry = entries[idx]
+                eid = entry.get("id", "unknown")
+                status = entry.get("status", "?")
+                warmth = entry.get("warmth", "?")
+                confidence = entry.get("confidence", "?")
 
-    if not ranked:
-        return ""
+                summary = entry.get("summary", "").strip()
+                if not summary:
+                    summary = entry.get("title", "(no summary)")
 
-    lines = ["## Relevant research ledger entries:\n"]
-    for idx, score in ranked:
-        entry = entries[idx]
-        eid = entry.get("id", "unknown")
-        status = entry.get("status", "?")
-        warmth = entry.get("warmth", "?")
-        confidence = entry.get("confidence", "?")
+                relates = entry.get("relates_to", [])
+                if relates and isinstance(relates, list):
+                    relates_str = ", ".join(str(r) for r in relates)
+                else:
+                    relates_str = ""
 
-        summary = entry.get("summary", "").strip()
-        if not summary:
-            summary = entry.get("title", "(no summary)")
+                lines.append(
+                    f"**{eid}** [{status}, warmth:{warmth}, confidence:{confidence}]"
+                )
+                lines.append(f"{summary}")
+                if relates_str:
+                    lines.append(f"Related: [{relates_str}]")
+                lines.append("")
 
-        relates = entry.get("relates_to", [])
-        if relates and isinstance(relates, list):
-            relates_str = ", ".join(str(r) for r in relates)
-        else:
-            relates_str = ""
-
-        lines.append(
-            f"**{eid}** [{status}, warmth:{warmth}, confidence:{confidence}]"
-        )
-        lines.append(f"{summary}")
-        if relates_str:
-            lines.append(f"Related: [{relates_str}]")
-        lines.append("")
+    # Keyword-matched reference docs
+    ref_matches = match_reference_docs(query)
+    if ref_matches:
+        if lines:
+            lines.append("")
+        lines.append("## Relevant reference documents:")
+        lines.append("Read these arch-impl docs if working on related topics:")
+        for doc_name, description in ref_matches:
+            lines.append(f"- {doc_name} ({description})")
 
     return "\n".join(lines).rstrip()
 

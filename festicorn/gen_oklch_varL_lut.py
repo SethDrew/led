@@ -12,6 +12,7 @@ Per-hue max chroma via binary search (98% of gamut boundary).
 Output: C array format for effects.cpp.
 """
 import math
+import os
 import sys
 
 
@@ -185,11 +186,13 @@ if __name__ == "__main__":
     c_var = format_c_array(var_entries, "oklchVarL")
     print(c_var)
 
-    # Also write just the variable-L array to a file for easy copy-paste
-    with open("/Users/KO16K39/Documents/led/festicorn/oklch_varL_lut.h", "w") as f:
+    # Write the variable-L array to the shared library header
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    out_path = os.path.join(script_dir, "lib", "oklch_lut", "oklch_varL_lut.h")
+    with open(out_path, "w") as f:
         f.write("// OKLCH variable-L rainbow LUT\n")
         f.write("// Hue-dependent lightness: red ~0.52, purple ~0.38, green/cyan/yellow ~0.75\n")
         f.write("// Per-hue max chroma at 98% gamut boundary.\n")
         f.write(c_var + "\n")
 
-    print("\nDone. Variable-L LUT written to festicorn/oklch_varL_lut.h")
+    print(f"\nDone. Variable-L LUT written to {out_path}")

@@ -17,6 +17,7 @@ enum Palette {
     ORANGE_TEAL,
     MAGENTA_CYAN,
     SUNSET_SKY,
+    INK_WASH,
     // Chroma sweeps
     BLUE_WASH,
     RED_WASH,

@@ -124,4 +124,4 @@ See [OPTIMIZATION.md](OPTIMIZATION.md) for technical details on the memory optim
 
 ## 🗑️ Old Project
 
-The old PlatformIO project at `/Users/KO16K39/Documents/PlatformIO/Projects/led1` is no longer needed and can be safely deleted.
+The old PlatformIO project at `/Users/KO16K39/Documents/PlatformIO/Projects/led1` (on the old machine) is no longer needed and can be safely deleted.

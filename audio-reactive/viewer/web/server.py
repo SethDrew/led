@@ -215,10 +215,15 @@ def _build_output_targets(sculptures, controllers):
             logical_leds = sum(st['count'] for st in s['strips'])
         else:
             logical_leds = 0
+        branches = s.get('branches', [])
+        has_topology = len(branches) > 1 and any(
+            b.get('xy_keyframes') for b in branches
+        )
         targets.append({
             'id': s['id'],
             'name': s['name'],
             'type': 'sculpture',
+            'has_topology': has_topology,
             'controller_id': s['controller'],
             'controller_name': ctrl['name'] if ctrl else s['controller'],
             'leds': logical_leds,
@@ -380,6 +385,7 @@ def _discover_effects():
                 'ref_pattern': sig.get('ref_pattern', ''),
                 'ref_scope': sig.get('ref_scope', ''),
                 'ref_input': sig.get('ref_input', ''),
+                'handles_topology': sig.get('handles_topology', False),
             })
         for eff in data.get('effects', []):
             entries.append({
@@ -389,6 +395,7 @@ def _discover_effects():
                 'ref_pattern': eff.get('ref_pattern', ''),
                 'ref_scope': eff.get('ref_scope', ''),
                 'ref_input': eff.get('ref_input', ''),
+                'handles_topology': eff.get('handles_topology', False),
             })
         return entries, data.get('palettes', [])
     except Exception as e:
@@ -470,6 +477,7 @@ def _get_effects_list():
             'ref_pattern': entry.get('ref_pattern', '') if isinstance(entry, dict) else '',
             'ref_scope': entry.get('ref_scope', '') if isinstance(entry, dict) else '',
             'ref_input': entry.get('ref_input', '') if isinstance(entry, dict) else '',
+            'handles_topology': entry.get('handles_topology', False) if isinstance(entry, dict) else False,
         }
         if p.get('display_name'):
             e['display_name'] = p['display_name']

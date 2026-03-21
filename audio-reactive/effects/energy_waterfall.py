@@ -12,7 +12,7 @@ Color: full red, brightness-modulated.
 import numpy as np
 import threading
 from base import AudioReactiveEffect
-from signals import OverlapFrameAccumulator
+from signals import OverlapFrameAccumulator, StickyFloorRMS
 
 
 class EnergyWaterfallEffect(AudioReactiveEffect):
@@ -21,7 +21,7 @@ class EnergyWaterfallEffect(AudioReactiveEffect):
     registry_name = 'energy_waterfall'
     ref_pattern = 'proportional'
     ref_scope = 'beat'
-    ref_input = 'RMS amplitude'
+    ref_input = 'RMS amplitude (sticky floor)'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
@@ -32,15 +32,15 @@ class EnergyWaterfallEffect(AudioReactiveEffect):
         self.accum = OverlapFrameAccumulator(
             frame_len=self.n_fft, hop=self.hop_length,
         )
-        self.window = np.hanning(self.n_fft).astype(np.float32)
+
+        # Sticky floor normalization: constant energy decays over time.
+        self._sticky = StickyFloorRMS(
+            fps=sample_rate / self.hop_length,
+        )
 
         # Shared state
-        self._rms = np.float32(0.0)
+        self._energy = np.float32(0.0)
         self._lock = threading.Lock()
-
-        # Peak-decay normalization
-        self._rms_peak = np.float32(1e-10)
-        self._peak_decay = 0.9995
 
         # Waterfall buffer
         self._wf_buffer = np.zeros((num_leds, 3), dtype=np.uint8)
@@ -54,37 +54,32 @@ class EnergyWaterfallEffect(AudioReactiveEffect):
 
     @property
     def description(self):
-        return "Scrolling RMS energy pulses — raw waveform amplitude waterfall."
+        return "Scrolling RMS energy pulses — sticky floor adaptive normalization."
 
     def process_audio(self, mono_chunk: np.ndarray):
         for frame in self.accum.feed(mono_chunk):
-            self._process_frame(frame)
-
-    def _process_frame(self, frame):
-        rms = np.float32(np.sqrt(np.mean(frame ** 2)))
-        self._rms_peak = max(rms, self._rms_peak * self._peak_decay)
-        rms_norm = rms / self._rms_peak if self._rms_peak > 1e-10 else 0.0
-
-        with self._lock:
-            self._rms = np.float32(rms_norm)
+            val = self._sticky.update(frame)
+            with self._lock:
+                self._energy = np.float32(val)
 
     def render(self, dt: float) -> np.ndarray:
         with self._lock:
-            rms = float(self._rms)
+            energy = float(self._energy)
 
         # Scroll buffer
         self._wf_buffer[1:] = self._wf_buffer[:-1]
 
-        # New entry: raw RMS → brightness on full red
-        wf_bright = np.clip(rms, 0.0, 1.0)
+        # New entry: sticky floor energy → brightness on full red
+        wf_bright = np.clip(energy, 0.0, 1.0)
         self._wf_buffer[0] = (self._full_red * wf_bright).astype(np.uint8)
 
         return self._wf_buffer.copy()
 
     def get_diagnostics(self) -> dict:
         with self._lock:
-            rms = float(self._rms)
+            energy = float(self._energy)
 
         return {
-            'rms': f'{rms:.2f}',
+            'energy': f'{energy:.2f}',
+            'floor': f'{self._sticky._floor:.6f}',
         }

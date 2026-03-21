@@ -519,17 +519,6 @@ body {
     border: 1px solid #444; border-radius: 3px; cursor: pointer; transition: all 0.1s;
 }
 .brightness-popover-presets button:hover { border-color: #e94560; color: #fff; }
-.effects-selector { display: flex; gap: 1px; margin-bottom: 12px; border: 1px solid #333;
-    border-radius: 6px; overflow: hidden; flex-shrink: 0; }
-.selector-col { min-width: 110px; max-height: 180px; overflow-y: auto; background: #0f1a2e;
-    border-right: 1px solid #333; }
-.selector-col:last-child { border-right: none; }
-.selector-item { display: flex; align-items: center; gap: 6px; padding: 3px 10px;
-    cursor: pointer; font-size: 13px; color: #aaa; transition: background 0.1s; }
-.selector-item:hover { background: #1a2a4e; }
-.selector-item.checked { color: #e0e0e0; }
-.selector-item input[type="checkbox"] { accent-color: #e94560; width: 13px; height: 13px; }
-.selector-count { color: #555; font-size: 11px; margin-left: auto; }
 .effect-name { cursor: pointer; }
 .effect-name:hover { text-decoration: underline; text-decoration-color: #555; text-underline-offset: 3px; }
 .effect-ref-wrap {
@@ -561,6 +550,11 @@ body {
     background: #333;
 }
 td.ref-data { color: #777; font-size: 11px; }
+.effect-section-header td {
+    padding: 8px 10px 4px; color: #888; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.8px; border-bottom: 1px solid #333;
+    background: #0f1a2e;
+}
 /* Deprecated effects */
 .deprecated-section {
     margin-top: 16px;

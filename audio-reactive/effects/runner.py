@@ -263,7 +263,8 @@ def get_effect_registry():
     return {'signals': signals, 'effects': effects}
 
 
-def create_effect(name, num_leds, sample_rate, palette_name=None):
+def create_effect(name, num_leds, sample_rate, palette_name=None,
+                   sculpture_id=None):
     """Create an effect by name, composing with palette if it's a signal effect.
 
     Args:
@@ -271,6 +272,7 @@ def create_effect(name, num_leds, sample_rate, palette_name=None):
         num_leds: Number of LEDs
         sample_rate: Audio sample rate
         palette_name: Optional palette override (signal effects only)
+        sculpture_id: Optional sculpture ID for topology-aware effects
 
     Returns:
         AudioReactiveEffect instance
@@ -290,7 +292,11 @@ def create_effect(name, num_leds, sample_rate, palette_name=None):
         palette = copy.deepcopy(available[preset])
         return ComposedEffect(signal, palette)
     elif name in effects:
-        return effects[name](num_leds=num_leds, sample_rate=sample_rate)
+        cls = effects[name]
+        kwargs = dict(num_leds=num_leds, sample_rate=sample_rate)
+        if sculpture_id and getattr(cls, 'handles_topology', False):
+            kwargs['sculpture_id'] = sculpture_id
+        return cls(**kwargs)
     else:
         raise ValueError(f"Unknown effect: {name}")
 
@@ -752,6 +758,7 @@ def list_json():
                 'ref_pattern': getattr(cls, 'ref_pattern', ''),
                 'ref_scope': getattr(cls, 'ref_scope', ''),
                 'ref_input': getattr(cls, 'ref_input', ''),
+                'handles_topology': getattr(cls, 'handles_topology', False),
             })
         except Exception:
             pass
@@ -768,6 +775,7 @@ def list_json():
                 'ref_pattern': getattr(cls, 'ref_pattern', ''),
                 'ref_scope': getattr(cls, 'ref_scope', ''),
                 'ref_input': getattr(cls, 'ref_input', ''),
+                'handles_topology': getattr(cls, 'handles_topology', False),
             })
         except Exception:
             pass
@@ -890,9 +898,10 @@ def main():
         physical_leds = args.leds
 
     # Create effect (with palette composition if signal)
-    # Effect renders to LOGICAL LED count (unless it handles topology itself)
+    # Topology-aware effects receive sculpture_id so they can load spatial data.
     try:
-        effect = create_effect(args.effect, logical_leds, SAMPLE_RATE, args.palette)
+        effect = create_effect(args.effect, logical_leds, SAMPLE_RATE, args.palette,
+                               sculpture_id=args.sculpture)
     except ValueError as e:
         print(f"  Error: {e}")
         sys.exit(1)

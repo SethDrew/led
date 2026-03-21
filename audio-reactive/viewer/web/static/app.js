@@ -2098,7 +2098,6 @@ function createBrightnessPopover(effectName, onChange) {
 
     return anchor;
 }
-let selectorState = [];  // array of Sets, one per segment depth
 let outputTargets = [];  // from /api/controllers (sculptures + controllers)
 
 async function loadEffects() {
@@ -2118,87 +2117,11 @@ async function loadEffects() {
         deprecatedEffects = data.deprecated || [];
         palettesList = data.palettes || [];
         effectsRunning = data.running || {};
-        if (selectorState.length === 0) {
-            const maxSegs = Math.max(...effectsList.map(e => e.name.split('_').length));
-            selectorState = Array.from({length: maxSegs}, () => new Set());
-        }
         renderEffectsCards();
         startEffectsPoll();
     } catch (e) {
         panel.innerHTML = '<span style="color:#e94560;">Error: ' + e.message + '</span>';
     }
-}
-
-function getFilteredEffects() {
-    return effectsList.filter(eff => {
-        const parts = eff.name.split('_');
-        for (let d = 0; d < selectorState.length; d++) {
-            if (selectorState[d].size > 0 && !selectorState[d].has(parts[d] || '')) return false;
-        }
-        return true;
-    });
-}
-
-function buildSelector(panel) {
-    const container = document.createElement('div');
-    container.className = 'effects-selector';
-
-    for (let depth = 0; depth < selectorState.length; depth++) {
-        // Only show column if depth 0 or previous column has selections
-        if (depth > 0 && selectorState[depth - 1].size === 0) break;
-
-        // Get effects matching all selections at prior depths
-        const matching = effectsList.filter(eff => {
-            const parts = eff.name.split('_');
-            for (let d = 0; d < depth; d++) {
-                if (selectorState[d].size > 0 && !selectorState[d].has(parts[d] || '')) return false;
-            }
-            return true;
-        });
-
-        // Collect unique values at this depth with counts
-        const valueCounts = {};
-        matching.forEach(eff => {
-            const seg = eff.name.split('_')[depth];
-            if (seg) valueCounts[seg] = (valueCounts[seg] || 0) + 1;
-        });
-
-        const values = Object.keys(valueCounts).sort();
-        if (values.length === 0) break;
-
-        const col = document.createElement('div');
-        col.className = 'selector-col';
-
-        values.forEach(val => {
-            const item = document.createElement('label');
-            const isChecked = selectorState[depth].has(val);
-            item.className = 'selector-item' + (isChecked ? ' checked' : '');
-
-            const cb = document.createElement('input');
-            cb.type = 'checkbox';
-            cb.checked = isChecked;
-            cb.addEventListener('change', () => {
-                if (cb.checked) selectorState[depth].add(val);
-                else selectorState[depth].delete(val);
-                // Clear deeper selections when a parent changes
-                for (let d = depth + 1; d < selectorState.length; d++) selectorState[d].clear();
-                renderEffectsCards();
-            });
-
-            const count = document.createElement('span');
-            count.className = 'selector-count';
-            count.textContent = valueCounts[val];
-
-            item.appendChild(cb);
-            item.appendChild(document.createTextNode(val));
-            item.appendChild(count);
-            col.appendChild(item);
-        });
-
-        container.appendChild(col);
-    }
-
-    panel.appendChild(container);
 }
 
 
@@ -2302,7 +2225,6 @@ function renderEffectsCards() {
     const listWrap = document.createElement('div');
     listWrap.className = 'effects-list';
     buildTargetBar(listWrap);
-    buildSelector(listWrap);
 
     const REF_COLS = ['Pattern', 'Scope', 'Input'];
     const wrap = document.createElement('div');
@@ -2324,9 +2246,31 @@ function renderEffectsCards() {
     table.appendChild(thead);
 
     const tbody = document.createElement('tbody');
-    const filtered = getFilteredEffects();
+    // Filter and partition effects by selected target
+    const selectedTarget = outputTargets.find(t => t.id === selectedTargetId);
+    const targetHasTopology = selectedTarget ? selectedTarget.has_topology : false;
+    const filtered = effectsList.filter(eff => {
+        if (selectedTargetId === 'all') return true;
+        if (eff.handles_topology && !targetHasTopology) return false;
+        return true;
+    });
 
-    filtered.forEach(eff => {
+    // Partition into topology-specific and general when a topology target is selected
+    const showPartitions = selectedTargetId !== 'all' && targetHasTopology;
+    const specificEffects = showPartitions ? filtered.filter(e => e.handles_topology) : [];
+    const generalEffects = showPartitions ? filtered.filter(e => !e.handles_topology) : filtered;
+
+    const addSectionHeader = (label) => {
+        const tr = document.createElement('tr');
+        tr.className = 'effect-section-header';
+        const td = document.createElement('td');
+        td.colSpan = 7;
+        td.textContent = label;
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+    };
+
+    const renderEffectRow = (eff) => {
         const tr = document.createElement('tr');
         const effIsRunning = isEffectRunning(eff.name);
         tr.className = effIsRunning ? 'running' : '';
@@ -2532,7 +2476,14 @@ function renderEffectsCards() {
         });
 
         tbody.appendChild(tr);
-    });
+    };
+
+    if (showPartitions && specificEffects.length > 0) {
+        addSectionHeader(selectedTarget.name);
+        specificEffects.forEach(renderEffectRow);
+        addSectionHeader('General');
+    }
+    generalEffects.forEach(renderEffectRow);
 
     table.appendChild(tbody);
     wrap.appendChild(table);

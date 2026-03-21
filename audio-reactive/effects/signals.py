@@ -65,6 +65,73 @@ class OverlapFrameAccumulator:
         return frames
 
 
+class StickyFloorRMS:
+    """RMS normalization via sticky noise floor + log dB mapping.
+
+    Ported from the bulbs firmware (gyro_mic_fade.cpp). Three-stage pipeline:
+
+    1. Sticky floor EMA — tracks the ambient noise level.
+       Fast down (4x alpha), very sticky up (0.1x alpha).
+       During constant music the floor slowly creeps upward, causing the
+       output to decay. Transient spikes punch through because they're
+       far above the rising floor.
+
+    2. Log dB above floor — 20 * log10((rms - floor) / floor), clamped
+       to a dB_window (default 15 dB) and mapped to [0, 1].
+
+    3. Output is a 0-1 value suitable for brightness mapping.
+
+    Key property: constant energy → signal decays (floor catches up).
+    This is fundamentally different from peak-decay normalization where
+    constant energy → signal stays at ~1.0 forever.
+    """
+
+    def __init__(self, floor_tc: float = 10.0, fps: float = 86.0,
+                 db_window: float = 15.0):
+        """
+        Args:
+            floor_tc:   Base time constant for floor EMA in seconds.
+                        Actual up-alpha is 0.1x this, down-alpha is 4x.
+            fps:        Rate at which update() is called (audio frames/sec).
+                        Default 86 ≈ 44100/512 for standard hop.
+            db_window:  dB range mapped to 0-1. Default 15 dB means the
+                        signal hits 1.0 when rms is ~30x above the floor.
+        """
+        self._alpha_base = 2.0 / (floor_tc * fps + 1.0)
+        self._db_window = db_window
+        self._floor = 0.0
+        self._initialized = False
+        self.value = 0.0  # latest 0-1 output
+
+    def update(self, frame: np.ndarray) -> float:
+        """Process one audio frame, return 0-1 normalized value."""
+        rms = float(np.sqrt(np.mean(frame ** 2)))
+
+        if not self._initialized:
+            # Start floor very low so the effect responds immediately even
+            # if we start mid-song. The floor will adapt upward via the
+            # slow 0.1x alpha. (The bulbs firmware can initialize to the
+            # first reading because the mic always starts in silence.)
+            self._floor = 1e-6
+            self._initialized = True
+
+        # Asymmetric floor EMA: fast down (4x), sticky up (0.1x)
+        if rms < self._floor:
+            self._floor += self._alpha_base * 4.0 * (rms - self._floor)
+        else:
+            self._floor += self._alpha_base * 0.1 * (rms - self._floor)
+
+        # Prevent floor from hitting zero
+        floor = max(self._floor, 1e-10)
+
+        # Log dB above floor → [0, 1]
+        above_floor = max(rms - floor, 1e-10)
+        db = 20.0 * np.log10(above_floor / floor)
+        self.value = float(np.clip(db / self._db_window, 0.0, 1.0))
+
+        return self.value
+
+
 class AbsIntegral:
     """Computes normalized absolute integral of RMS derivative.
 

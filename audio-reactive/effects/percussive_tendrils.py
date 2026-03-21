@@ -72,9 +72,10 @@ class PercussiveTendrilsEffect(AudioReactiveEffect):
     registry_name = 'percussive_tendrils'
     handles_topology = True
 
-    def __init__(self, num_leds: int, sample_rate: int = 44100):
+    def __init__(self, num_leds: int, sample_rate: int = 44100,
+                 sculpture_id: str = 'cob_diamond'):
         super().__init__(num_leds, sample_rate)
-        self.topo = SculptureTopology('cob_diamond')
+        self.topo = SculptureTopology(sculpture_id)
         self.num_leds = self.topo.num_leds
 
         # ── Build wire-path adjacency ──

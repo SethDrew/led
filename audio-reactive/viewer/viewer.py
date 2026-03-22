@@ -699,6 +699,23 @@ class SyncedVisualizer:
               f"fluctuation μ={np.mean(self.vibes_fluctuation):.3f}, "
               f"fullness μ={np.mean(self.vibes_fullness):.0f}Hz")
 
+        # --- Timbral section transitions (online detection, simulated) ---
+        # Uses the same anchored-reference algorithm as timbral_chroma_split
+        # to detect section boundaries via L2-normalized MFCC shape drift.
+        # Runs causally on the pre-computed MFCC matrix (no future data).
+        try:
+            _effects_dir = str(Path(__file__).resolve().parent.parent / 'effects')
+            if _effects_dir not in sys.path:
+                sys.path.insert(0, _effects_dir)
+            from timbral_section_detect import detect_log_eagerness
+            self.timbral_transitions = detect_log_eagerness(
+                self.mfccs[0:13], fps, l2_normalize=False, power=3.0
+            )
+            print(f"Timbral sections: {len(self.timbral_transitions)} transitions detected")
+        except Exception as e:
+            print(f"Timbral section detection skipped: {e}")
+            self.timbral_transitions = []
+
     def _compute_events(self):
         """Dispatch to algorithm A or B based on self.event_algorithm."""
         from scipy.ndimage import gaussian_filter1d
@@ -1572,7 +1589,8 @@ class SyncedVisualizer:
         self.axes.append(ax)
 
     def _build_vibes_timbral_panel(self, ax):
-        """Timbral shape: MFCC heatmap showing spectral envelope character over time."""
+        """Timbral shape: MFCC heatmap showing spectral envelope character over time.
+        Uses global percentile [2,98] normalization per coefficient."""
         t = self.times
         n = len(t)
 
@@ -1593,8 +1611,64 @@ class SyncedVisualizer:
         ax.set_ylabel('MFCC')
         ax.set_yticks(np.arange(1, 13) + 0.5)
         ax.set_yticklabels([str(i) for i in range(1, 13)])
-        ax.set_title('Timbral Shape — spectral envelope character '
-                     '(color shifts = sound character changed)', fontsize=11)
+
+        # Draw timbral section transition markers
+        self._draw_timbral_markers(ax)
+
+        ax.set_title('Timbral Shape — global normalization (percentile [2,98])',
+                     fontsize=11)
+        if not hasattr(self, 'axes'):
+            self.axes = []
+        self.axes.append(ax)
+
+    def _draw_timbral_markers(self, ax):
+        """Draw timbral section transition markers."""
+        for i, tt in enumerate(getattr(self, 'timbral_transitions', [])):
+            ax.axvline(x=tt, color='#00FF88', linewidth=1.5, alpha=0.85, linestyle='--')
+            ax.text(tt, 12.6, f'T{i+1}', color='#00FF88', fontsize=7,
+                    fontweight='bold', ha='center', va='bottom',
+                    bbox=dict(boxstyle='round,pad=0.12', facecolor='black',
+                              edgecolor='#00FF88', alpha=0.7, linewidth=0.5))
+
+    def _build_vibes_timbral_local_panel(self, ax):
+        """Timbral shape: MFCC heatmap with local windowed normalization + gamma.
+        30-second sliding window min/max per coefficient, gamma 0.6 for midtone contrast."""
+        t = self.times
+        n = len(t)
+
+        # MFCCs 1-12 (skip 0 = overall energy, already captured by other panels)
+        mfcc_display = self.mfccs[1:13, :n]
+
+        # Local windowed normalization per coefficient (30s sliding window).
+        # Global percentile [2,98] crushes contrast for ambient tracks where
+        # the full-song range dwarfs local variation. A sliding window preserves
+        # local contrast so subtle timbral shifts remain visible.
+        from scipy.ndimage import minimum_filter1d, maximum_filter1d
+        fps = n / self.duration if self.duration > 0 else 43.0
+        win_frames = max(1, int(30.0 * fps))  # 30s window
+        mfcc_norm = np.zeros_like(mfcc_display, dtype=float)
+        for i in range(mfcc_display.shape[0]):
+            row = mfcc_display[i]
+            local_min = minimum_filter1d(row, size=win_frames, mode='nearest')
+            local_max = maximum_filter1d(row, size=win_frames, mode='nearest')
+            span = np.maximum(local_max - local_min, 1e-6)
+            mfcc_norm[i] = np.clip((row - local_min) / span, 0, 1)
+        # Gamma 0.6 boosts midtone contrast — dark regions become more
+        # visible without clipping bright regions.
+        mfcc_norm = np.power(mfcc_norm, 0.6)
+
+        ax.imshow(mfcc_norm, aspect='auto', origin='lower', cmap='magma',
+                  extent=[0, self.duration, 1, 13], interpolation='bilinear')
+        ax.set_xlim([0, self.duration])
+        ax.set_ylabel('MFCC')
+        ax.set_yticks(np.arange(1, 13) + 0.5)
+        ax.set_yticklabels([str(i) for i in range(1, 13)])
+
+        # Draw timbral section transition markers
+        self._draw_timbral_markers(ax)
+
+        ax.set_title(u'Timbral Shape \u2014 local contrast (30s window, \u03b3=0.6)',
+                     fontsize=11)
         if not hasattr(self, 'axes'):
             self.axes = []
         self.axes.append(ax)
@@ -1656,6 +1730,7 @@ class SyncedVisualizer:
             'vibes-fluctuation': self._build_vibes_fluctuation_panel,
             'vibes-fullness': self._build_vibes_fullness_panel,
             'vibes-timbral': self._build_vibes_timbral_panel,
+            'vibes-timbral-local': self._build_vibes_timbral_local_panel,
         }
         if has_annotations:
             focus_builders['annotations'] = self._build_annotation_panel
@@ -1679,7 +1754,8 @@ class SyncedVisualizer:
                           'vibes-lightness': 1, 'vibes-warmth': 1,
                           'vibes-roughness': 1, 'vibes-fluctuation': 1,
                           'vibes-fullness': 1,
-                          'vibes-timbral': 1.5}
+                          'vibes-timbral': 1.5,
+                          'vibes-timbral-local': 1.5}
             ratios = [height_map.get(name, 1) for name, _ in builders]
             if has_annotations:
                 n_layers = len(self.annotations) + (1 if self.annotate_layer else 0)

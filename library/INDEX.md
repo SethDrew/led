@@ -5,6 +5,7 @@ Reference documents for the synchronous LED system. Organized by the seven desig
 ## Root
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — The design space framework: seven axes, key principles, input roles, show architecture.
+- **[visual-qa-preview-system.md](visual-qa-preview-system.md)** — Internal tooling: composite PNG preview for AI-driven effect QA, team pattern, iteration protocol.
 
 ## arch-impl/
 

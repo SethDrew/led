@@ -3372,3 +3372,129 @@ entries:
       effect in any room benefits from adaptive floor tracking that resists
       upward drift during sustained sound.
 
+  - id: spectral-evolution-speed-signal
+    date: 2026-03-20
+    touched: 2026-03-20
+    title: "Spectral evolution rate as ambient-friendly speed signal"
+    summary: >
+      For ambient music where tempo tracking fails (no periodicity in onset
+      envelope), blending three uncorrelated spectral features — spectral flux,
+      centroid rate of change, and chroma flux — produces a smooth 0-1 speed
+      signal. Each captures a different dimension of "how fast is the sound
+      changing": texture (flux), brightness (centroid), harmony (chroma).
+      Analyzed on live ambient audio: 0.3 direction changes/sec at 1.5s EMA,
+      organic drift suitable for driving rotation speed.
+    status: exploring
+    warmth: high
+    confidence: medium
+    source: audio-reactive/effects/signals.py
+    tags: [feature-extraction, ambient, speed, spectral-flux, centroid, chroma]
+    relates_to: [derivatives-over-absolutes, input-role-taxonomy, tempo-genre-applicability]
+    notes: >
+      Stub implementation exists as SpeedSignal in signals.py. Not yet wired
+      into any effect or validated on hardware. The three features are nearly
+      uncorrelated (r < 0.03 for flux/centroid, r = -0.41 for flux/chroma),
+      so the composite stays active when individual features go quiet.
+
+  - id: timbral-shift-detection-eagerness
+    date: 2026-03-21
+    touched: 2026-03-21
+    title: "Timbral shift detection: simple algorithm + eagerness curve wins over complex approaches"
+    summary: >
+      Tested 5 approaches for deciding when to switch palettes based on
+      timbral changes. The simplest one won: track recent timbre with a 5s
+      average, fire when the current sound is unusually different, and get
+      progressively more willing to switch as time passes (cubic eagerness
+      curve, 3-sigma → 1-sigma over 2 minutes). The eagerness models the
+      idea that humans get visually bored after 1-2 minutes of the same
+      palette and want the vibe to change — even on a subtle moment.
+    status: validated
+    warmth: high
+    confidence: high
+    source: [audio-reactive/effects/timbral_section_detect.py, audio-reactive/viewer/viewer.py]
+    tags: [effects, perception, timbral, section-detection, eagerness, architecture]
+    relates_to: [perception-is-layered-by-timescale, ld-vj-decision-decomposition, normalization-events-separation, ema-time-constant-is-section-relative]
+    notes: >
+      Why we tested 5 approaches: the original detector (fixed threshold +
+      15s cooldown) only caught changes with big energy swings (EDM drops)
+      and missed subtle timbral shifts in hip-hop, dark electronic, and
+      ambient. We built increasingly complex solutions trying to fix this.
+
+      What we tried and why we rejected each:
+
+      1. Anchored-reference dual-EMA with distance normalization — tuned
+         across 675+ parameter combos, hit 4/6 tracks but required
+         genre-specific parameters. Overfit.
+
+      2. Dual-EMA (fast 5s + slow 45s) — gave the detector a longer
+         memory of what the old section sounded like, but added
+         complexity for marginal gain.
+
+      3. L2-normalized MFCCs (strip loudness, keep shape only) —
+         principled idea but loudness IS a real timbral feature that
+         humans perceive. Removing it lost real boundaries.
+
+      4. Adaptive codebook (learn a vocabulary of timbral states, fire
+         when something new appears) — clever but overfit to codebook
+         parameters.
+
+      5. Core+candidate buckets (3 known states + 3 testing slots, fire
+         when 2+ new states appear) — interesting but also overfit.
+
+      The winning insight: this detector's job is to pick good MOMENTS
+      to switch the visual — artistically choosing individual audio
+      moments, rather than trying to identify section boundaries. The
+      eagerness curve naturally handles the "when" by getting more
+      willing over time. Right after a switch, only dramatic changes
+      trigger (the new palette is fresh). After 2 minutes, even subtle
+      shifts are enough (the palette is stale).
+
+      This is complementary to section-level analysis. Section energy/
+      mood should drive WHAT palette to show. This detector drives WHEN
+      to switch. Different concerns, different timescales.
+
+      Future: this same eagerness pattern could drive other transitions
+      — effect selection, intensity modes, any parameter that should
+      change "when the vibe shifts" but hold steady otherwise. Cheap
+      to compute (13 floats + distance stats, streaming/causal).
+
+  - id: dual-ema-section-level-detection
+    date: 2026-03-21
+    touched: 2026-03-21
+    title: "Dual-EMA with L2-norm is viable for section-level timbral detection"
+    summary: >
+      While the simple eagerness algorithm (above) won for moment-picking,
+      the dual-EMA approach (5s fast + 45s slow, L2-normalized MFCCs) showed
+      real promise for detecting actual section-level character changes. The
+      slow 45s EMA holds a reference to what the section "sounds like" long
+      enough that gradual timbral evolution (Lorn, ambient) registers as
+      drift — something the single 5s EMA absorbs too quickly to catch.
+    status: exploring
+    warmth: medium
+    confidence: medium
+    source: audio-reactive/effects/timbral_section_detect.py
+    tags: [effects, timbral, section-detection, architecture]
+    relates_to: [timbral-shift-detection-eagerness, perception-is-layered-by-timescale, ema-time-constant-is-section-relative]
+    notes: >
+      This was the runner-up in our A/B testing (labeled "Orange/L" in the
+      viewer). It uses L2-normalized MFCCs so the distance metric responds
+      to timbral shape changes independent of loudness, and a slow 45s EMA
+      that resists adapting to the new section.
+
+      Strengths vs the simple approach:
+      - Better at catching gradual shifts at constant energy (Lorn, ambient)
+      - L2 normalization decouples shape from loudness
+      - The slow EMA gives eagerness a longer window to act
+
+      Why we didn't choose it for palette switching:
+      - For moment-picking, the simple approach fires on more musically
+        interesting moments (actual timbral transients)
+      - The dual-EMA fires when drift accumulates, which is less "artistic"
+      - Added complexity (two EMAs, normalization) for a different purpose
+
+      This approach is better suited for section-level concerns — detecting
+      THAT the section changed, rather than picking a good moment to act
+      on it. Could be useful for: determining what palette/mood to select,
+      logging section boundaries for analysis, or any feature that needs
+      to know "we're in a different part of the song now."
+

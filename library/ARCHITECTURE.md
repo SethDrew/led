@@ -61,7 +61,13 @@ The time horizon of both music and effects. To detect a phrase-level musical eve
 
 **The adaptation time constant IS the temporal scope.** When you compute a feature relative to a 5-second running average, you're operating at phrase scope. When you use a 150ms window, you're at beat scope.
 
-**Current gap: no streaming event detection.** All event detection code lives in `viewer.py` as batch-only visualization. Foote's checkerboard novelty is O(n^2) -- fundamentally non-streaming. A streaming event detector needs rolling integral slope or per-band dropout detection. (Ledger: `event-detection-viewer-only`)
+**Timbral shift detection across timescales.** MFCC-based timbral analysis provides streaming event detection at multiple scopes:
+
+- **Frame-level (moment-picking):** Track recent timbre with a 5s EMA of raw MFCCs 0-12. Fire when frame-vs-EMA distance exceeds `dist_ema + N * dist_std`, where N decays cubically from 3.0 to 1.0 over 120s (eagerness curve). This picks artistically good moments to change the visual — the eagerness models human fatigue with the same palette after 1-2 minutes. Simple, cheap, streaming. (Ledger: `timbral-shift-detection-eagerness`)
+
+- **Phrase/Song-level (section detection):** Dual-EMA approach — fast 5s EMA tracks current timbre, slow 45s EMA holds the section reference. L2-normalize MFCCs to decouple shape from loudness. Distance between fast and slow EMAs measures how far the current timbre has drifted from the section baseline. Detects gradual timbral evolution (ambient, dark electronic) that frame-level misses. Viable for driving palette selection (WHAT to show) while frame-level drives timing (WHEN to switch). (Ledger: `dual-ema-section-level-detection`)
+
+**Remaining gap: semantic section detection.** Neither approach identifies section type (verse/chorus/drop) — they detect that a change happened, not what kind. Semantic section detection remains non-streaming (requires self-similarity matrices). (Ledger: `automated-show-phrase-detection-is-key`)
 
 ### Axis 6: Composition
 

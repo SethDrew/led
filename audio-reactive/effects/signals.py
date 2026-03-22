@@ -7,6 +7,7 @@ Building blocks that effects compose via has-a:
   AbsIntegral             — computes normalized abs-integral of RMS derivative
   BeatPredictor           — autocorrelation tempo + predicted/confirmed beats
   OnsetTempoTracker       — onset-envelope autocorrelation for tempo estimation
+  SpeedSignal             — spectral evolution rate (ambient-friendly 0-1 speed)
 
 Usage:
     accum = OverlapFrameAccumulator()
@@ -87,18 +88,24 @@ class StickyFloorRMS:
     """
 
     def __init__(self, floor_tc: float = 10.0, fps: float = 86.0,
-                 db_window: float = 15.0):
+                 db_window: float = 15.0,
+                 up_mult: float = 0.1, down_mult: float = 4.0):
         """
         Args:
             floor_tc:   Base time constant for floor EMA in seconds.
-                        Actual up-alpha is 0.1x this, down-alpha is 4x.
             fps:        Rate at which update() is called (audio frames/sec).
                         Default 86 ≈ 44100/512 for standard hop.
             db_window:  dB range mapped to 0-1. Default 15 dB means the
                         signal hits 1.0 when rms is ~30x above the floor.
+            up_mult:    Multiplier on alpha for floor rising (sticky).
+                        0.1 = very sticky (~50s to adapt). 1.0 = same as base TC.
+            down_mult:  Multiplier on alpha for floor falling (fast).
+                        4.0 = drops ~4x faster than base TC.
         """
         self._alpha_base = 2.0 / (floor_tc * fps + 1.0)
         self._db_window = db_window
+        self._up_mult = up_mult
+        self._down_mult = down_mult
         self._floor = 0.0
         self._initialized = False
         self.value = 0.0  # latest 0-1 output
@@ -115,11 +122,11 @@ class StickyFloorRMS:
             self._floor = 1e-6
             self._initialized = True
 
-        # Asymmetric floor EMA: fast down (4x), sticky up (0.1x)
+        # Asymmetric floor EMA: fast down, sticky up
         if rms < self._floor:
-            self._floor += self._alpha_base * 4.0 * (rms - self._floor)
+            self._floor += self._alpha_base * self._down_mult * (rms - self._floor)
         else:
-            self._floor += self._alpha_base * 0.1 * (rms - self._floor)
+            self._floor += self._alpha_base * self._up_mult * (rms - self._floor)
 
         # Prevent floor from hitting zero
         floor = max(self._floor, 1e-10)
@@ -981,3 +988,127 @@ class FusionTempoTracker:
     @property
     def rms_fps(self):
         return self.spectral.rms_fps
+
+
+class SpeedSignal:
+    """Spectral evolution rate — ambient-friendly speed signal.
+
+    Blends spectral flux, centroid rate, and chroma flux into a single
+    0-1 value. Works on ambient music where tempo tracking fails.
+
+    Three uncorrelated spectral features are computed per frame:
+      1. Spectral flux (multi-band): FFT → 6 mel bands → log energy →
+         diff → half-wave rectify → mean. Same band setup as
+         OnsetTempoTracker.feed_frame().
+      2. Centroid rate of change: |centroid[t] - centroid[t-1]| where
+         centroid = weighted mean of FFT magnitudes.
+      3. Chroma flux: L2 distance between consecutive 12-bin chroma
+         vectors. Same approach as HarmonicChangeTempoTracker.
+
+    Each feature is peak-normalized to 0-1 (fast attack, configurable
+    decay), then averaged and EMA-smoothed.
+    """
+
+    def __init__(self, sample_rate=44100, frame_len=2048,
+                 ema_seconds=1.5, peak_decay=0.998, n_bands=6):
+        self.sample_rate = sample_rate
+        self.frame_len = frame_len
+        self._peak_decay = peak_decay
+
+        # EMA smoothing: alpha from time constant
+        fps = sample_rate / 512  # hop-based frame rate
+        self._ema_alpha = 2.0 / (ema_seconds * fps + 1.0)
+
+        # ── Spectral flux state (multi-band, same as OnsetTempoTracker) ──
+        fft_size = frame_len // 2 + 1
+        freqs = np.linspace(0, sample_rate / 2, fft_size)
+        mel_lo = 2595 * np.log10(1 + 20 / 700)
+        mel_hi = 2595 * np.log10(1 + (sample_rate / 2) / 700)
+        mel_edges = np.linspace(mel_lo, mel_hi, n_bands + 1)
+        hz_edges = 700 * (10 ** (mel_edges / 2595) - 1)
+        self._band_slices = []
+        for b in range(n_bands):
+            lo_bin = np.searchsorted(freqs, hz_edges[b])
+            hi_bin = np.searchsorted(freqs, hz_edges[b + 1])
+            hi_bin = max(hi_bin, lo_bin + 1)
+            self._band_slices.append(slice(lo_bin, hi_bin))
+        self._prev_band_energy = np.zeros(n_bands, dtype=np.float64)
+        self._flux_peak = 1e-10
+
+        # ── Centroid rate state ──
+        self._prev_centroid = 0.0
+        self._centroid_peak = 1e-10
+        # Precompute frequency weights for centroid calculation
+        self._freqs = np.linspace(0, sample_rate / 2, fft_size)
+
+        # ── Chroma flux state (same as HarmonicChangeTempoTracker) ──
+        self._prev_chroma = np.zeros(12, dtype=np.float64)
+        self._chroma_peak = 1e-10
+        chroma_freqs = np.fft.rfftfreq(frame_len, 1.0 / sample_rate)
+        self._chroma_bins = [[] for _ in range(12)]
+        for i, f in enumerate(chroma_freqs):
+            if f < 65 or f > sample_rate / 2 * 0.9:
+                continue
+            midi = 69 + 12 * np.log2(f / 440.0)
+            pc = int(round(midi)) % 12
+            self._chroma_bins[pc].append(i)
+
+        # ── Output state ──
+        self.value = 0.0            # latest 0-1 speed value (EMA-smoothed)
+        self.spectral_flux = 0.0    # raw normalized spectral flux
+        self.centroid_rate = 0.0    # raw normalized centroid rate
+        self.chroma_flux = 0.0      # raw normalized chroma flux
+
+    def update(self, frame: np.ndarray) -> float:
+        """Process one audio frame, return 0-1 speed value."""
+        spectrum = np.abs(np.fft.rfft(frame))
+
+        # ── 1. Spectral flux (multi-band, half-wave rectified) ──
+        n_bands = len(self._band_slices)
+        band_energy = np.zeros(n_bands, dtype=np.float64)
+        for b, sl in enumerate(self._band_slices):
+            band_energy[b] = np.log1p(np.sum(spectrum[sl] ** 2))
+        flux = band_energy - self._prev_band_energy
+        self._prev_band_energy = band_energy
+        raw_flux = float(np.mean(np.maximum(0, flux)))
+        # Peak-normalize
+        self._flux_peak = max(raw_flux, self._flux_peak * self._peak_decay)
+        self.spectral_flux = (raw_flux / self._flux_peak
+                              if self._flux_peak > 1e-10 else 0.0)
+
+        # ── 2. Centroid rate of change ──
+        mag_sum = np.sum(spectrum)
+        if mag_sum > 1e-10:
+            centroid = float(np.sum(self._freqs * spectrum) / mag_sum)
+        else:
+            centroid = 0.0
+        raw_centroid_rate = abs(centroid - self._prev_centroid)
+        self._prev_centroid = centroid
+        self._centroid_peak = max(raw_centroid_rate,
+                                  self._centroid_peak * self._peak_decay)
+        self.centroid_rate = (raw_centroid_rate / self._centroid_peak
+                              if self._centroid_peak > 1e-10 else 0.0)
+
+        # ── 3. Chroma flux (L2 distance) ──
+        chroma = np.zeros(12, dtype=np.float64)
+        for pc in range(12):
+            bins = self._chroma_bins[pc]
+            if bins:
+                chroma[pc] = np.sum(spectrum[bins] ** 2)
+        chroma = np.log1p(chroma)
+        total = np.sum(chroma)
+        if total > 1e-10:
+            chroma /= total
+        raw_chroma_flux = float(np.linalg.norm(chroma - self._prev_chroma))
+        self._prev_chroma = chroma.copy()
+        self._chroma_peak = max(raw_chroma_flux,
+                                self._chroma_peak * self._peak_decay)
+        self.chroma_flux = (raw_chroma_flux / self._chroma_peak
+                            if self._chroma_peak > 1e-10 else 0.0)
+
+        # ── Blend and smooth ──
+        raw_speed = (self.spectral_flux + self.centroid_rate
+                     + self.chroma_flux) / 3.0
+        self.value += self._ema_alpha * (raw_speed - self.value)
+
+        return self.value

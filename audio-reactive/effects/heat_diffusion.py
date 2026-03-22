@@ -19,7 +19,7 @@ Color: black body inspired — black → deep red → orange → white at max he
 import numpy as np
 import threading
 from base import AudioReactiveEffect
-from signals import OverlapFrameAccumulator, StickyFloorRMS
+from signals import OverlapFrameAccumulator, StickyFloorRMS, OnsetTempoTracker
 
 
 class HeatDiffusionEffect(AudioReactiveEffect):
@@ -73,8 +73,10 @@ class HeatDiffusionEffect(AudioReactiveEffect):
             frame_len=self.n_fft, hop=self.hop_length,
         )
         self._sticky = StickyFloorRMS(fps=sample_rate / self.hop_length)
+        self._tempo = OnsetTempoTracker(sample_rate=sample_rate)
 
         self._energy = np.float32(0.0)
+        self._tempo_period = 0.0  # seconds per beat, 0 = unknown
         self._lock = threading.Lock()
 
         # Load sculpture topology if provided (runner passes this automatically)
@@ -195,8 +197,10 @@ class HeatDiffusionEffect(AudioReactiveEffect):
     def process_audio(self, mono_chunk: np.ndarray):
         for frame in self.accum.feed(mono_chunk):
             val = self._sticky.update(frame)
+            self._tempo.feed_frame(frame)
             with self._lock:
                 self._energy = np.float32(val)
+                self._tempo_period = self._tempo.estimated_period
 
     # ------------------------------------------------------------------ #
     #  Render thread                                                       #
@@ -212,8 +216,27 @@ class HeatDiffusionEffect(AudioReactiveEffect):
         cool = self._cooling
         gain = self._heat_gain
 
-        # Advance rotation
-        self._rotation_phase += dt / self._rotation_period
+        # Tempo-driven rotation speed.
+        # Pick the power-of-2 multiple of beat period that falls in [10s, 30s].
+        # 10s = fastest (current feel), 30s = 3x slower.
+        # No tempo lock → fall back to fixed rotation_period.
+        with self._lock:
+            beat_period = self._tempo_period
+
+        MIN_ROT, MAX_ROT = 10.0, 30.0
+        rot_period = self._rotation_period  # fallback
+        if beat_period > 0.1:
+            # Start with the raw beat period and double until in range
+            p = beat_period
+            while p < MIN_ROT:
+                p *= 2.0
+            # If we overshot, halve once
+            while p > MAX_ROT:
+                p /= 2.0
+            # Clamp to guardrails
+            rot_period = max(MIN_ROT, min(MAX_ROT, p))
+
+        self._rotation_phase += dt / rot_period
         self._rotation_phase %= 1.0
         path = self._rotation_path
         inj = path[int(self._rotation_phase * len(path)) % len(path)]
@@ -279,11 +302,12 @@ class HeatDiffusionEffect(AudioReactiveEffect):
         path = self._rotation_path
         inj = path[int(self._rotation_phase * len(path)) % len(path)]
 
+        bpm = self._tempo.bpm
         return {
             'energy': f'{energy:.3f}',
             'T_max': f'{np.max(self._T):.4f}',
-            'T_mean': f'{np.mean(self._T):.4f}',
             'inj_led': str(inj),
             'rotation': f'{self._rotation_phase:.2f}',
+            'bpm': f'{bpm:.0f}' if bpm > 0 else '—',
             'mode': 'graph' if self._use_graph else '1D',
         }

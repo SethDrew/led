@@ -924,7 +924,8 @@ def render_band_analysis(filepath):
 
 
 VIBES_PANELS = ('vibes-lightness', 'vibes-warmth', 'vibes-roughness',
-                 'vibes-fluctuation', 'vibes-fullness', 'vibes-timbral')
+                 'vibes-fluctuation', 'vibes-fullness', 'vibes-timbral',
+                 'vibes-timbral-local')
 
 
 def render_vibes(filepath):
@@ -965,6 +966,11 @@ def render_vibes(filepath):
         'X-Png-Width': str(fig_width),
         'X-Duration': str(viz.duration),
     }
+
+    # Pass timbral section transitions to frontend
+    transitions = getattr(viz, 'timbral_transitions', [])
+    if transitions:
+        headers['X-Timbral-Transitions'] = ','.join(f'{t:.2f}' for t in transitions)
 
     _render_cache[cache_key] = (png_bytes, headers)
     return png_bytes, headers
@@ -1062,6 +1068,12 @@ def render_single_panel(filepath, panel_name):
         'X-Png-Width': str(fig_width),
         'X-Duration': str(viz.duration),
     }
+
+    # Pass timbral transitions when rendering timbral panel
+    if panel_name == 'vibes-timbral':
+        transitions = getattr(viz, 'timbral_transitions', [])
+        if transitions:
+            headers['X-Timbral-Transitions'] = ','.join(f'{t:.2f}' for t in transitions)
 
     _render_cache[cache_key] = (png_bytes, headers)
     return png_bytes, headers
@@ -1592,6 +1604,8 @@ def render_lab(filepath, variant='timbral'):
         return render_lab_novelty(filepath)
     if variant == 'spectro-color':
         return render_lab_spectro_color(filepath)
+    if variant == 'speed-signal':
+        return render_lab_speed_signal(filepath)
     return render_lab_timbral(filepath)
 
 
@@ -2337,6 +2351,136 @@ def render_lab_onset_absint(filepath):
     fig.suptitle(f'{filename} — Onset + AbsInt Lab', fontsize=14,
                  fontweight='bold', y=0.995)
     fig.subplots_adjust(top=0.975, bottom=0.02)
+    fig.canvas.draw()
+
+    ax0 = fig.axes[0]
+    x_left = ax0.transData.transform((0, 0))[0]
+    x_right = ax0.transData.transform((duration, 0))[0]
+    fig_width = fig.get_figwidth() * DPI
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=DPI, facecolor=fig.get_facecolor())
+    matplotlib.pyplot.close(fig)
+    png_bytes = buf.getvalue()
+
+    headers = {
+        'X-Left-Px': str(x_left),
+        'X-Right-Px': str(x_right),
+        'X-Png-Width': str(fig_width),
+        'X-Duration': str(duration),
+    }
+
+    _render_cache[cache_key] = (png_bytes, headers)
+    return png_bytes, headers
+
+
+def render_lab_speed_signal(filepath):
+    """Speed Signal Lab — spectral flux, centroid rate, chroma flux, and blended speed."""
+    cache_key = (filepath, 'lab-speed-signal')
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
+    import numpy as np
+    import librosa
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+    import sys, os
+
+    # Import SpeedSignal from effects/signals.py
+    effects_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               '..', '..', 'effects')
+    if effects_dir not in sys.path:
+        sys.path.insert(0, effects_dir)
+    from signals import OverlapFrameAccumulator, SpeedSignal
+
+    plt.style.use('dark_background')
+
+    y, sr = librosa.load(filepath, sr=None, mono=True)
+    duration = librosa.get_duration(y=y, sr=sr)
+    n_fft = 2048
+    hop_length = 512
+
+    # ── Run SpeedSignal frame-by-frame ──
+    accum = OverlapFrameAccumulator(frame_len=n_fft, hop=hop_length)
+    speed_sig = SpeedSignal(sample_rate=sr, frame_len=n_fft)
+
+    flux_trace = []
+    centroid_trace = []
+    chroma_trace = []
+    speed_trace = []
+    frame_times = []
+
+    rms_dt = hop_length / sr
+    time_acc = 0.0
+
+    # Feed audio in chunks
+    chunk_size = 4096
+    for start in range(0, len(y), chunk_size):
+        chunk = y[start:start + chunk_size]
+        for frame in accum.feed(chunk):
+            speed_sig.update(frame)
+            flux_trace.append(speed_sig.spectral_flux)
+            centroid_trace.append(speed_sig.centroid_rate)
+            chroma_trace.append(speed_sig.chroma_flux)
+            speed_trace.append(speed_sig.value)
+            frame_times.append(time_acc)
+            time_acc += rms_dt
+
+    flux_trace = np.array(flux_trace)
+    centroid_trace = np.array(centroid_trace)
+    chroma_trace = np.array(chroma_trace)
+    speed_trace = np.array(speed_trace)
+    frame_times = np.array(frame_times)
+
+    # ── Waveform ──
+    waveform_times = np.linspace(0, duration, len(y))
+
+    # ── Layout: 3 panels — waveform, individual traces, combined speed ──
+    fig = plt.figure(figsize=(18, 14))
+    gs = gridspec.GridSpec(3, 1, height_ratios=[0.6, 1.2, 1], hspace=0.35)
+
+    # Panel 1: Waveform (context)
+    ax = fig.add_subplot(gs[0])
+    ax.plot(waveform_times, y, color='#607D8B', linewidth=0.3, alpha=0.7)
+    ax.set_xlim([0, duration])
+    ax.set_ylabel('Amplitude')
+    ax.set_title('Waveform — context reference', fontsize=11)
+    ax.grid(True, alpha=0.15)
+
+    # Panel 2: Three individual component traces
+    ax = fig.add_subplot(gs[1])
+    ax.plot(frame_times, flux_trace, color='#FF6B6B', linewidth=1.2,
+            alpha=0.8, label='Spectral Flux')
+    ax.plot(frame_times, centroid_trace, color='#4ECB71', linewidth=1.2,
+            alpha=0.8, label='Centroid Rate')
+    ax.plot(frame_times, chroma_trace, color='#5B9BD5', linewidth=1.2,
+            alpha=0.8, label='Chroma Flux')
+    ax.set_xlim([0, duration])
+    ax.set_ylim([-0.05, 1.1])
+    ax.set_ylabel('Normalized (0-1)')
+    ax.set_title('SpeedSignal components — peak-normalized spectral features',
+                 fontsize=11)
+    ax.legend(loc='upper right', fontsize=9)
+    ax.grid(True, alpha=0.2)
+
+    # Panel 3: Combined speed signal
+    ax = fig.add_subplot(gs[2])
+    ax.fill_between(frame_times, speed_trace, alpha=0.15, color='#FFFFFF')
+    ax.plot(frame_times, speed_trace, color='#FFFFFF', linewidth=2,
+            label='Speed Signal (blended + EMA)')
+    ax.set_xlim([0, duration])
+    ax.set_ylim([-0.05, 1.1])
+    ax.set_ylabel('Speed (0-1)')
+    ax.set_xlabel('Time (s)')
+    ax.set_title('Blended speed — mean of 3 features, EMA-smoothed (1.5s)',
+                 fontsize=11)
+    ax.legend(loc='upper right', fontsize=9)
+    ax.grid(True, alpha=0.2)
+
+    filename = Path(filepath).name
+    fig.suptitle(f'{filename} — Speed Signal Lab', fontsize=14,
+                 fontweight='bold', y=0.995)
+    fig.subplots_adjust(top=0.975, bottom=0.03)
     fig.canvas.draw()
 
     ax0 = fig.axes[0]

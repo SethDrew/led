@@ -62,7 +62,8 @@ This is where automated show control lives — and it's largely unimplemented.
 - Rolling integral slope: positive = build, negative = breakdown, near-zero = sustained
 - Per-band onset density: sparse onsets = breakdown, dense = groove
 - Spectral flux variance: high variance = transition, low = stable section
-- MFCC distance from running mean: sudden jump = section boundary
+- **Timbral moment-picking (one validated approach):** Frame-vs-EMA distance on raw MFCCs 0-12 with cubic eagerness curve (N decays 3σ→1σ over 120s). Picks artistically good audio moments to switch visuals. The eagerness models human visual fatigue — after ~2 minutes of the same look, the detector gets more willing to switch. Cheap and streaming. There are many ways to approach this problem — this is one that works well for our use case. (Ledger: `timbral-shift-detection-eagerness`)
+- **Timbral section drift (one exploring approach):** Dual-EMA (5s fast + 45s slow) on L2-normalized MFCCs detects gradual timbral evolution (ambient, dark electronic) that frame-level misses. Better for identifying THAT the section changed. Also just one of many possible approaches. (Ledger: `dual-ema-section-level-detection`)
 
 ### Layer 4: Song-Level (Future / Optional)
 
@@ -123,7 +124,7 @@ Not prescriptive — this is a default mapping that a human would override for t
 For multi-hour automated shows, the system needs strategies to stay interesting:
 
 1. **Effect Rotation** — don't use the same effect for more than N consecutive sections of the same type. After 3 drops with Fire, switch to Root Pulse or Electrical Storm.
-2. **Palette Cycling** — rotate through palette families (warm, cool, monochrome, complementary) over 10-20 minute periods, independent of section detection.
+2. **Palette Cycling** — can be timer-based (rotate through palette families every 10-20 minutes) or audio-driven. One approach that works: the timbral moment-picking detector's eagerness curve naturally increases willingness to switch as time passes, picking musically appropriate moments. (Ledger: `timbral-shift-detection-eagerness`)
 3. **Complexity Curve** — track a long-horizon "visual complexity" metric. If it's been high for too long, force a simpler section. Mirror the concept of dynamic range in mastering.
 4. **Spatial Rotation** — alternate between topology modes (full-strip, zoned, height-mapped, branch-independent) to keep the spatial experience fresh.
 5. **Novelty Injection** — periodically introduce a rare effect (frost crystallization, reaction-diffusion) that hasn't been used recently. The surprise factor prevents habituation.

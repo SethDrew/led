@@ -31,8 +31,12 @@ class EnergyWaterfallEffect(AudioReactiveEffect):
                  # 0.008 = a full-brightness pulse adds ~0.8% per frame it sits on a pixel.
                  pulse_deposit: float = 0.008,
                  # Per-frame decay multiplier for background brightness.
-                 # 0.993 at 30fps → ~4.5s half-life.
-                 bg_decay: float = 0.985,
+                 bg_decay: float = 0.96,
+                 # Breathing dead band: meeting points oscillate outward from center.
+                 breathe_amplitude: int = 25,    # max LEDs each boundary moves from center
+                 breathe_period: float = 60.0,   # seconds for full expand-hold-contract cycle
+                 breathe_hold: float = 10.0,     # seconds to hold at widest point
+                 breathe_fade: int = 4,          # pixels of soft fade at dead band edges
                  ):
         super().__init__(num_leds, sample_rate)
 
@@ -68,6 +72,17 @@ class EnergyWaterfallEffect(AudioReactiveEffect):
         self._bg = np.zeros(num_leds, dtype=np.float32)
         self._pulse_deposit = pulse_deposit
         self._bg_decay = bg_decay
+
+        # Center source buffers (scroll from center toward dead band boundaries)
+        self._center_left = np.zeros(breathe_amplitude, dtype=np.float32)
+        self._center_right = np.zeros(breathe_amplitude, dtype=np.float32)
+
+        # Breathing dead band
+        self._breathe_amplitude = breathe_amplitude
+        self._breathe_period = breathe_period
+        self._breathe_hold = breathe_hold
+        self._breathe_fade = breathe_fade
+        self._breathe_time = 0.0
 
         # Full red color
         self._full_red = np.array([255.0, 40.0, 0.0])
@@ -106,32 +121,82 @@ class EnergyWaterfallEffect(AudioReactiveEffect):
 
         val = np.clip(energy, 0.0, 1.0)
 
-        # Left half: inject at index 0, scroll toward midpoint (higher index)
+        # Three-phase breathing: expand → hold → contract
+        self._breathe_time += dt
+        cycle_t = self._breathe_time % self._breathe_period
+        move_time = (self._breathe_period - self._breathe_hold) / 2.0
+
+        if cycle_t < move_time:
+            # Expanding outward (smooth ease-in-out)
+            t = cycle_t / move_time
+            raw_offset = self._breathe_amplitude * 0.5 * (1.0 - np.cos(np.pi * t))
+        elif cycle_t < move_time + self._breathe_hold:
+            # Holding at maximum
+            raw_offset = float(self._breathe_amplitude)
+        else:
+            # Contracting back (smooth ease-in-out)
+            t = (cycle_t - move_time - self._breathe_hold) / move_time
+            raw_offset = self._breathe_amplitude * 0.5 * (1.0 + np.cos(np.pi * t))
+
+        offset = int(raw_offset)
+
+        # Outer waterfall: scroll from ends toward center
         self._left_buf[1:] = self._left_buf[:-1]
         self._left_buf[0] = val
-
-        # Right half: inject at index 0 (maps to LED N-1), scroll toward midpoint
         self._right_buf[1:] = self._right_buf[:-1]
         self._right_buf[0] = val
 
-        # Combine into full strip: left half normal, right half reversed
+        # Center source: always scroll so it's ready when dead band opens
+        self._center_left[1:] = self._center_left[:-1]
+        self._center_left[0] = val
+        self._center_right[1:] = self._center_right[:-1]
+        self._center_right[0] = val
+
+        # Combine outer waterfall into full strip
         n = self.num_leds
         mid = self._mid
         wf_combined = np.empty(n, dtype=np.float32)
         wf_combined[:mid] = self._left_buf
         wf_combined[mid:] = self._right_buf[::-1]
 
-        # Decay all background pixels
+        # Replace dead band region with center source
+        dead_start = mid - offset
+        dead_end = mid + offset
+        if offset > 0:
+            # Center-left: newest at center (mid-1), oldest at boundary (dead_start)
+            wf_combined[dead_start:mid] = self._center_left[:offset][::-1]
+            # Center-right: newest at center (mid), oldest at boundary (dead_end-1)
+            wf_combined[mid:dead_end] = self._center_right[:offset]
+
+        # Background phosphor
         self._bg *= self._bg_decay
-
-        # Each pulse pixel deposits brightness proportional to its intensity
         self._bg += wf_combined * self._pulse_deposit
-
-        # Clamp background
         np.clip(self._bg, 0.0, 0.4, out=self._bg)
 
         # Final brightness: max of pulse and background
         brightness = np.maximum(wf_combined, self._bg)
+
+        # Soft fade at boundaries between outer and center sources
+        if offset > 0:
+            fw = self._breathe_fade
+            for i in range(fw):
+                alpha = (i + 1) / (fw + 1)
+                # Left boundary — outer side
+                idx = dead_start - 1 - i
+                if 0 <= idx:
+                    brightness[idx] *= alpha
+                # Left boundary — center side
+                idx = dead_start + i
+                if idx < mid:
+                    brightness[idx] *= alpha
+                # Right boundary — center side
+                idx = dead_end - 1 - i
+                if idx >= mid:
+                    brightness[idx] *= alpha
+                # Right boundary — outer side
+                idx = dead_end + i
+                if idx < n:
+                    brightness[idx] *= alpha
 
         # Map to color
         self._frame_buf[:] = (self._full_red * brightness[:, np.newaxis]).astype(np.uint8)

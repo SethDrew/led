@@ -259,13 +259,18 @@ const infoPanel = document.getElementById('infoPanel');
 const volSlider = document.getElementById('volSlider');
 const volIcon = document.getElementById('volIcon');
 
-let masterVolume = 0.8;
+// Square-curve volume: slider^2 = actual volume.
+// Gives fine control in the 5-40% range where most listening happens.
+function sliderToVolume(s) { return s * s; }
+function volumeToSlider(v) { return Math.sqrt(v); }
+
+let masterVolume = sliderToVolume(0.32);  // ~10% default
 let mutedVolume = null;  // stashed volume when muted
 
 audio.volume = masterVolume;
 
 volSlider.addEventListener('input', () => {
-    masterVolume = parseFloat(volSlider.value);
+    masterVolume = sliderToVolume(parseFloat(volSlider.value));
     mutedVolume = null;
     applyVolume();
     updateVolIcon();
@@ -279,7 +284,7 @@ volIcon.addEventListener('click', () => {
         mutedVolume = masterVolume;
         masterVolume = 0;
     }
-    volSlider.value = masterVolume;
+    volSlider.value = volumeToSlider(masterVolume);
     applyVolume();
     updateVolIcon();
 });
@@ -296,7 +301,7 @@ function applyVolume() {
 }
 
 function updateVolIcon() {
-    volIcon.textContent = masterVolume === 0 ? '\u{1F507}' : masterVolume < 0.5 ? '\u{1F509}' : '\u{1F50A}';
+    volIcon.textContent = masterVolume === 0 ? '\u{1F507}' : masterVolume < 0.25 ? '\u{1F509}' : '\u{1F50A}';
 }
 
 let currentFile = null;

@@ -15,6 +15,7 @@ Architecture:
     audio.currentTime is sample-accurate — zero drift by definition.
 """
 
+import atexit
 import collections
 import hashlib
 import hmac
@@ -24,6 +25,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import subprocess
 import sys
 import threading
@@ -548,9 +550,6 @@ def _start_effect(name, controller_id=None, sculpture_id=None, palette_name=None
     if target_id is None:
         target_id = '__no_leds__'
 
-    # Stop any existing effect on this target
-    _stop_effect(target_id)
-
     cmd.append('--stream-features')
 
     params = {
@@ -559,24 +558,43 @@ def _start_effect(name, controller_id=None, sculpture_id=None, palette_name=None
         'brightness': brightness,
     }
 
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=EFFECTS_DIR,
-            stderr=subprocess.PIPE,
-        )
-        # Start background thread to read feature stream from stderr
-        reader_thread = _start_feature_reader(proc, target_id)
-        with _effect_slots_lock:
+    # Atomic stop→start under lock to prevent two threads from spawning
+    # duplicate processes for the same target (hot reload + HTTP handler race)
+    with _effect_slots_lock:
+        # Stop any existing effect on this target (inline to stay under lock)
+        if target_id in _effect_slots:
+            slot = _effect_slots.pop(target_id)
+            proc = slot.get('process')
+            if proc and proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
+                except Exception:
+                    pass
+                print(f"[effects] Stopped {slot['name']} on {target_id} (pid {proc.pid})")
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=EFFECTS_DIR,
+                stderr=subprocess.PIPE,
+            )
+            reader_thread = _start_feature_reader(proc, target_id)
             _effect_slots[target_id] = {
                 'process': proc,
                 'name': name,
                 'params': params,
                 'feature_reader_thread': reader_thread,
             }
-        print(f"[effects] Started: {name} on {target_id} (pid {proc.pid}) cmd: {' '.join(cmd)}")
-    except Exception as e:
-        print(f"[effects] Start failed: {e}")
+            print(f"[effects] Started: {name} on {target_id} (pid {proc.pid}) cmd: {' '.join(cmd)}")
+        except Exception as e:
+            print(f"[effects] Start failed: {e}")
 
 
 def _start_feature_reader(process, target_id):
@@ -631,6 +649,10 @@ def _stop_effect(target_id=None):
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
             except Exception:
                 pass
             print(f"[effects] Stopped {slot['name']} on {tid} (pid {proc.pid})")
@@ -670,6 +692,48 @@ def _get_running_effects():
         for tid in dead:
             del _effect_slots[tid]
     return result
+
+
+# ── Cleanup: exit + startup ─────────────────────────────────────────
+
+def _cleanup_all_runners():
+    """Stop all running effect subprocesses."""
+    try:
+        _stop_effect()
+    except Exception:
+        pass
+
+atexit.register(_cleanup_all_runners)
+
+def _signal_cleanup(signum, frame):
+    _cleanup_all_runners()
+    sys.exit(128 + signum)
+
+signal.signal(signal.SIGTERM, _signal_cleanup)
+signal.signal(signal.SIGHUP, _signal_cleanup)
+
+
+def _kill_stale_runners():
+    """Kill any runner.py processes orphaned by a previous server session.
+
+    Runs once at import time so a fresh server never fights with zombies.
+    """
+    import subprocess as _sp
+    try:
+        result = _sp.run(['pgrep', '-f', 'runner\\.py.*--stream-features'],
+                         capture_output=True, text=True, timeout=3)
+        if result.stdout.strip():
+            pids = result.stdout.strip().split('\n')
+            for pid in pids:
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                    print(f"[startup] Killed stale runner (pid {pid})")
+                except (ProcessLookupError, ValueError):
+                    pass
+    except Exception:
+        pass
+
+_kill_stale_runners()
 
 
 # ── User Palettes ────────────────────────────────────────────────────
@@ -4955,9 +5019,10 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._serve_annotations(rel_path)
         elif path == '/api/controllers':
             global _sculptures, _controllers
-            _sculptures = _load_sculptures()
-            _controllers = _load_controllers()
-            _resolve_controller_ports(_controllers)
+            if _controllers is None:
+                _sculptures = _load_sculptures()
+                _controllers = _load_controllers()
+                _resolve_controller_ports(_controllers)
             targets = _build_output_targets(_sculptures, _controllers)
             self._json_response(targets)
         elif path == '/api/effects':

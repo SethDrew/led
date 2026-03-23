@@ -89,7 +89,8 @@ class StickyFloorRMS:
 
     def __init__(self, floor_tc: float = 10.0, fps: float = 86.0,
                  db_window: float = 15.0,
-                 up_mult: float = 0.1, down_mult: float = 4.0):
+                 up_mult: float = 0.1, down_mult: float = 4.0,
+                 warm_start: bool = False):
         """
         Args:
             floor_tc:   Base time constant for floor EMA in seconds.
@@ -101,11 +102,15 @@ class StickyFloorRMS:
                         0.1 = very sticky (~50s to adapt). 1.0 = same as base TC.
             down_mult:  Multiplier on alpha for floor falling (fast).
                         4.0 = drops ~4x faster than base TC.
+            warm_start: If True, initialize floor to first RMS reading so
+                        output starts near zero and ramps up gradually.
+                        Default False = start floor near zero (eager/hot start).
         """
         self._alpha_base = 2.0 / (floor_tc * fps + 1.0)
         self._db_window = db_window
         self._up_mult = up_mult
         self._down_mult = down_mult
+        self._warm_start = warm_start
         self._floor = 0.0
         self._initialized = False
         self.value = 0.0  # latest 0-1 output
@@ -115,11 +120,14 @@ class StickyFloorRMS:
         rms = float(np.sqrt(np.mean(frame ** 2)))
 
         if not self._initialized:
-            # Start floor very low so the effect responds immediately even
-            # if we start mid-song. The floor will adapt upward via the
-            # slow 0.1x alpha. (The bulbs firmware can initialize to the
-            # first reading because the mic always starts in silence.)
-            self._floor = 1e-6
+            if self._warm_start:
+                # Reluctant start: floor = first reading, output starts near 0
+                # and ramps up as floor adapts. Good for effects that should
+                # fade in rather than blast on immediately.
+                self._floor = max(rms, 1e-6)
+            else:
+                # Eager start: floor near zero, output spikes immediately.
+                self._floor = 1e-6
             self._initialized = True
 
         # Asymmetric floor EMA: fast down, sticky up

@@ -38,13 +38,15 @@ class HeatDiffusionEffect(AudioReactiveEffect):
                  substeps: int = 6,
                  # --- Rotating source ---
                  rotation_period: float = 10.0,
+                 inj_sigma: float = 3.0,
                  # --- Sculpture ---
                  sculpture_id: str = None,
                  neighbor_radius: float = 0.12,
                  # --- Appearance ---
-                 heat_gain: float = 3.0,
-                 gamma: float = 0.7,
-                 max_brightness: float = 0.7,
+                 heat_gain: float = 15.0,
+                 gamma: float = 1.0,
+                 max_brightness: float = 0.95,
+                 debug_gradient: bool = False,
                  ):
         """
         Args:
@@ -72,8 +74,14 @@ class HeatDiffusionEffect(AudioReactiveEffect):
         self.accum = OverlapFrameAccumulator(
             frame_len=self.n_fft, hop=self.hop_length,
         )
-        self._sticky = StickyFloorRMS(fps=sample_rate / self.hop_length)
+        self._sticky = StickyFloorRMS(fps=sample_rate / self.hop_length,
+                                      floor_tc=20.0, warm_start=True)
         self._tempo = OnsetTempoTracker(sample_rate=sample_rate)
+
+        # Peak-decay normalization: instant attack, 5s decay
+        fps = sample_rate / self.hop_length
+        self._peak = 1e-6
+        self._peak_alpha = 2.0 / (5.0 * fps + 1.0)
 
         self._energy = np.float32(0.0)
         self._tempo_period = 0.0  # seconds per beat, 0 = unknown
@@ -92,6 +100,14 @@ class HeatDiffusionEffect(AudioReactiveEffect):
         self._heat_gain = heat_gain
         self._gamma = gamma
         self._max_brightness = max_brightness
+        self._debug_gradient = debug_gradient
+
+        # Hot wand: thermal reservoir between audio and sculpture.
+        # Audio energy heats the wand instantly. The wand transfers heat
+        # into the sculpture at a limited rate — smooths jarring brightness
+        # spikes while preserving total energy over time.
+        self._wand_heat = 0.0
+        self._wand_transfer_rate = 8.0  # 1/s — wand TC ≈ 0.125s
 
         # Sticky ceiling: adaptive max for temperature-to-color mapping.
         # Fast up (4x) so peaks don't blow out. Slow down (0.1x) so quiet
@@ -117,6 +133,15 @@ class HeatDiffusionEffect(AudioReactiveEffect):
             [255, 200,  40],     # 0.75 — yellow
             [255, 255, 200],     # 1.00 — white-hot
         ], dtype=np.float64)
+
+        # Gaussian injection kernel (strip mode only).
+        # Precompute unnormalized weights; we shift and normalize per frame.
+        self._inj_sigma = inj_sigma
+        kernel_hw = int(np.ceil(inj_sigma * 3))  # half-width: 3 sigma
+        offsets = np.arange(-kernel_hw, kernel_hw + 1, dtype=np.float64)
+        self._inj_kernel = np.exp(-0.5 * (offsets / inj_sigma) ** 2)
+        self._inj_kernel *= 3.0 / self._inj_kernel.sum()  # sum to 3: wider = more total heat
+        self._inj_kernel_hw = kernel_hw
 
         self._frame_buf = np.zeros((num_leds, 3), dtype=np.uint8)
 
@@ -241,11 +266,30 @@ class HeatDiffusionEffect(AudioReactiveEffect):
         path = self._rotation_path
         inj = path[int(self._rotation_phase * len(path)) % len(path)]
 
+        # --- Hot wand: absorb audio energy, transfer to sculpture ---
+        self._wand_heat += energy * gain * dt
+        transfer = self._wand_heat * self._wand_transfer_rate * dt
+        self._wand_heat -= transfer
+
         # --- PDE substeps ---
         dt_sub = dt / self._substeps
+        heat_per_sub = transfer / self._substeps
 
         for _ in range(self._substeps):
-            T[inj] += energy * gain * dt_sub
+            if self._use_graph:
+                # Graph mode: inject into inj + physical neighbors (wider heat source)
+                T[inj] += heat_per_sub
+                nbr_idx, nbr_w = self._neighbors[inj]
+                if len(nbr_idx) > 0:
+                    w_norm = nbr_w / nbr_w.sum() * 2.0  # neighbors add 2x, center adds 1x = 3x total
+                    T[nbr_idx] += heat_per_sub * w_norm
+            else:
+                # Strip mode: gaussian kernel injection
+                hw = self._inj_kernel_hw
+                for k in range(-hw, hw + 1):
+                    idx = inj + k
+                    if 0 <= idx < n:
+                        T[idx] += heat_per_sub * self._inj_kernel[k + hw]
 
             if self._use_graph:
                 # Graph Laplacian: weighted sum of neighbor temp differences
@@ -267,11 +311,13 @@ class HeatDiffusionEffect(AudioReactiveEffect):
 
         # --- Color mapping (black body ramp, sticky ceiling) ---
         # Sticky ceiling: fast up (catches peaks), slow down (adapts to quiet).
+        # Ensures the hottest pixel always maps to the top of the color ramp,
+        # so peaks read as white-hot regardless of the current energy level.
         t_max = np.max(T)
         if t_max > self._ceiling:
             self._ceiling += self._ceiling_alpha * 4.0 * (t_max - self._ceiling)
         else:
-            self._ceiling += self._ceiling_alpha * 0.1 * (t_max - self._ceiling)
+            self._ceiling += self._ceiling_alpha * 1.0 * (t_max - self._ceiling)
         self._ceiling = max(self._ceiling, 1e-6)
 
         t_norm = T / self._ceiling
@@ -289,6 +335,18 @@ class HeatDiffusionEffect(AudioReactiveEffect):
         colors *= self._max_brightness
 
         self._frame_buf[:] = np.clip(colors, 0, 255).astype(np.uint8)
+
+        # Debug: overwrite first 10 pixels with white-hot gradient (no brightness cap)
+        # Shows what the physical LEDs look like from warm-orange to full white-hot
+        if self._debug_gradient:
+            for i in range(min(10, n)):
+                t = i / 9.0  # 0.0 to 1.0
+                rp = 0.5 + t * 0.5  # ramp position 0.5 (orange) to 1.0 (white-hot)
+                ri = min(int(rp * (len(self._color_ramp) - 1)), len(self._color_ramp) - 2)
+                rf = rp * (len(self._color_ramp) - 1) - ri
+                c = self._color_ramp[ri] + (self._color_ramp[ri + 1] - self._color_ramp[ri]) * rf
+                self._frame_buf[i] = np.clip(c, 0, 255).astype(np.uint8)
+
         return self._frame_buf.copy()
 
     # ------------------------------------------------------------------ #

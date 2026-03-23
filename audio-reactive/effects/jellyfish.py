@@ -30,21 +30,25 @@ TARGET_PERIOD = 1.5  # desired seconds per bell cycle — calm jellyfish
 
 # Phase boundaries
 CONTRACTION_END = 0.35   # wavefront reaches rim
-HOLD_END = 0.50          # peak brightness hold
-# 0.50–1.0 = relaxation + tendril trailing
+HOLD_END = 0.42          # brief peak brightness hold
+# 0.42–1.0 = relaxation + tendril trailing (longer dark gap)
 
 # Wavefront geometry
 BELL_TOP = 1.0           # normalized height of apex
 BELL_RIM = 0.35          # height where bell ends and tendrils begin
-WAVEFRONT_SIGMA = 0.12   # Gaussian softness of the wavefront edge
+WAVEFRONT_SIGMA = 0.06   # Gaussian softness — tight edge for visible sweep on 72 LEDs
 TENDRIL_DECAY = 4.0      # exponential decay rate for tendril trailing glow
+PEAK_BRIGHTNESS = 0.65   # bioluminescent cap — never full white
 
 # Ambient base
-AMBIENT = 0.05           # faint always-on glow
+AMBIENT = 0.01           # barely-visible glow — jellyfish should breathe from darkness
 
 # Hue trail: how many seconds of pot history are visible top-to-bottom
 TRAIL_SECONDS = 2.5      # time for a color to flow from apex to tips
 TRAIL_SATURATION = 0.65  # soft bioluminescent saturation (not full rainbow blast)
+
+# Autonomous hue drift: slow color rotation when pot is not being turned
+AUTO_HUE_CYCLE = 60.0    # seconds for full color wheel rotation
 
 
 def octave_nearest(period, target):
@@ -91,52 +95,60 @@ def bell_brightness(height, phase):
         frac = phase / CONTRACTION_END
         wavefront_h = BELL_TOP - frac * (BELL_TOP - BELL_RIM)
 
-        # Gaussian soft edge: bright above wavefront, fading below
-        dist = height - wavefront_h
-        envelope = 0.5 * (1.0 + math.erf(dist / (WAVEFRONT_SIGMA * math.sqrt(2))))
-
         # Only the bell region (above rim) lights during contraction
         if height < BELL_RIM:
             return AMBIENT
+
+        # Gaussian peak centered ON the wavefront — narrow bright band
+        # LEDs well above the wavefront (already passed) fade back down
+        dist = height - wavefront_h
+        # Forward edge: bright ahead of wavefront (standard erf)
+        forward = 0.5 * (1.0 + math.erf(dist / (WAVEFRONT_SIGMA * math.sqrt(2))))
+        # Trailing fade: LEDs far above the wavefront dim back
+        trail_fade = math.exp(-3.0 * max(0, dist) ** 2)
+        # Blend: the wavefront is a bright band, not a permanent fill
+        envelope = forward * (0.15 + 0.85 * trail_fade)
+
         return AMBIENT + (1.0 - AMBIENT) * envelope
 
     elif phase < HOLD_END:
-        # Hold: full bell illuminated with gentle pulsing
+        # Hold: brief peak, dimmer than before (0.7 peak instead of 0.9-1.0)
         hold_frac = (phase - CONTRACTION_END) / (HOLD_END - CONTRACTION_END)
-        pulse = 0.9 + 0.1 * math.cos(hold_frac * math.pi)  # subtle throb
+        pulse = 0.4 + 0.1 * math.cos(hold_frac * math.pi)  # brief dim throb
 
         if height >= BELL_RIM:
             return AMBIENT + (1.0 - AMBIENT) * pulse
         else:
             # Tendril wavefront just starting to bleed below rim
             dist_below = BELL_RIM - height
-            trail = math.exp(-TENDRIL_DECAY * dist_below) * pulse * 0.4
+            trail = math.exp(-TENDRIL_DECAY * dist_below) * pulse * 0.3
             return AMBIENT + trail
 
     else:
-        # Relaxation: bell dims, tendril wavefront descends
-        relax_frac = (phase - HOLD_END) / (1.0 - HOLD_END)  # 0–1
+        # Relaxation: bell dims aggressively, tendril wavefront descends
+        relax_frac = (phase - HOLD_END) / (1.0 - HOLD_END)  # 0-1
+
+        # Aggressive power-curve dimming: reaches near-zero by 40% through relaxation
+        # so the last 60% of the cycle is near-dark (breathing room before next pulse)
+        dim_curve = max(0.0, 1.0 - relax_frac ** 0.3) ** 2.5
 
         if height >= BELL_RIM:
-            # Bell fades smoothly — top fades first (inverse of contraction)
+            # Bell fades smoothly -- top fades first (inverse of contraction)
             fade_wavefront = BELL_TOP - relax_frac * (BELL_TOP - BELL_RIM)
             dist = height - fade_wavefront
             fade_envelope = 0.5 * (1.0 - math.erf(dist / (WAVEFRONT_SIGMA * math.sqrt(2))))
-            bell_dim = (1.0 - relax_frac) * fade_envelope
+            bell_dim = dim_curve * fade_envelope
             return AMBIENT + (1.0 - AMBIENT) * bell_dim
         else:
             # Tendril trailing glow: wavefront continues below rim
             tendril_wavefront = BELL_RIM - relax_frac * BELL_RIM
             dist_below = tendril_wavefront - height
             if dist_below > 0:
-                # LED is below the wavefront — already passed
                 trail = math.exp(-TENDRIL_DECAY * dist_below)
             else:
-                # LED is above wavefront — in the lit zone behind the front
                 trail = math.exp(-TENDRIL_DECAY * abs(dist_below) * 0.5)
-            # Overall fade as relaxation progresses
-            fade = 1.0 - relax_frac ** 0.5
-            return AMBIENT + 0.6 * trail * fade
+            # Aggressive overall fade matching the bell
+            return AMBIENT + 0.4 * trail * dim_curve
 
 
 class JellyfishEffect(AudioReactiveEffect):
@@ -179,6 +191,9 @@ class JellyfishEffect(AudioReactiveEffect):
 
         # Pot state: hue 0-1 mapped from pot 0-1023
         self._pot_hue = 0.75  # default: start in the blue-magenta range
+        self._pot_active = False  # True when pot has been turned at least once
+        self._auto_hue_phase = 0.75  # autonomous drift starting hue
+        self._render_time = 0.0  # accumulated render time for auto-drift
 
     @property
     def name(self):
@@ -191,6 +206,7 @@ class JellyfishEffect(AudioReactiveEffect):
     def set_pot_value(self, raw):
         """Map pot 0-1023 to hue 0-1 (full color wheel)."""
         self._pot_hue = raw / 1023.0
+        self._pot_active = True
 
     # ------------------------------------------------------------------
     # Audio processing
@@ -223,14 +239,22 @@ class JellyfishEffect(AudioReactiveEffect):
         with self._lock:
             phase = self._snap_phase
 
-        # Advance hue trail: push current pot hue into the ring buffer
+        # Determine current hue: pot if active, otherwise slow autonomous drift
+        self._render_time += dt
+        if self._pot_active:
+            current_hue = self._pot_hue
+        else:
+            self._auto_hue_phase = (self._render_time / AUTO_HUE_CYCLE) % 1.0
+            current_hue = self._auto_hue_phase
+
+        # Advance hue trail: push current hue into the ring buffer
         self._trail_head = (self._trail_head + 1) % self._trail_len
-        self._hue_trail[self._trail_head] = self._pot_hue
+        self._hue_trail[self._trail_head] = current_hue
 
         frame = np.zeros((self.num_leds, 3), dtype=np.uint8)
         for i in range(self.num_leds):
             b = bell_brightness(self._heights[i], phase)
-            b = max(0.0, min(1.0, b))
+            b = max(0.0, min(PEAK_BRIGHTNESS, b))
             if b > 0:
                 # Look up hue from trail: height=1 (apex) → newest,
                 # height=0 (tips) → oldest

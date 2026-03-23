@@ -81,32 +81,35 @@ class ThreeVoicesEffect(AudioReactiveEffect):
         self.spec_buf_idx = 0
         self.spec_buf_filled = 0
 
-        # Slow-decay peak trackers for normalization.
-        # Fast attack (instant), slow release (~10s half-life).
-        # This preserves absolute energy relationships: when bass drops out,
-        # the peak stays high so normalized value → 0.
-        self.peak_decay = 0.998  # per FFT frame (~46ms), half-life ~16s
+        # EMA normalization: divide by running mean instead of decaying peak.
+        # Peak-decay gets dominated by the loudest moment and compresses
+        # everything after. EMA adapts to the current energy context,
+        # preserving both beat visibility and section contrast.
+        # See ledger: ema-normalization-replaces-peak-decay
+        self._fft_fps = sample_rate / self.n_fft  # ~21.5 Hz
+        self._ema_tc = 5.0  # seconds — fast enough to track sections
+        self._ema_alpha = 2.0 / (self._ema_tc * self._fft_fps + 1.0)
 
         # Voice 1: Bass energy
         self.bass_energy = 0.0
         self.bass_smooth = 0.0
-        self.bass_peak = 1e-10  # slow-decay peak tracker
+        self.bass_ema = 1e-10  # EMA mean tracker
 
         # Voice 2: Harmonic energy
         self.harmonic_energy = 0.0
         self.harmonic_smooth = 0.0
-        self.harmonic_peak = 1e-10
+        self.harmonic_ema = 1e-10
 
         # Voice 3: Percussive flash state
         self.perc_energy = 0.0
-        self.perc_peak = 1e-10
-        self.perc_history = np.zeros(64, dtype=np.float32)  # short window for threshold
+        self.perc_ema = 1e-10
+        self.perc_history = np.zeros(32, dtype=np.float32)  # shorter window for faster-adapting threshold
         self.perc_hist_idx = 0
         self.flash_brightness = 0.0
         self.flash_depth = 35.0  # where the flash originates
         self.last_flash_time = 0.0
         self.time_acc = 0.0
-        self.flash_cooldown = 0.08  # 80ms between flashes
+        self.flash_cooldown = 0.05  # 50ms between flashes — electronic music has sub-100ms hit spacing
 
         # Depth map (use tree depths if 197 LEDs, otherwise linear)
         if num_leds == 197:
@@ -169,10 +172,11 @@ class ThreeVoicesEffect(AudioReactiveEffect):
         # Voice 3: Percussive total energy
         perc_e = np.sum(percussive ** 2)
 
-        # Update slow-decay peak trackers (fast attack, slow release)
-        self.bass_peak = max(bass_e, self.bass_peak * self.peak_decay)
-        self.harmonic_peak = max(harm_e, self.harmonic_peak * self.peak_decay)
-        self.perc_peak = max(perc_e, self.perc_peak * self.peak_decay)
+        # Update EMA mean trackers (smooth symmetric EMA)
+        alpha = self._ema_alpha
+        self.bass_ema += alpha * (bass_e - self.bass_ema)
+        self.harmonic_ema += alpha * (harm_e - self.harmonic_ema)
+        self.perc_ema += alpha * (perc_e - self.perc_ema)
 
         # Percussive peak detection: short-window stats for threshold
         self.perc_history[self.perc_hist_idx] = perc_e
@@ -181,16 +185,20 @@ class ThreeVoicesEffect(AudioReactiveEffect):
         perc_std = np.std(self.perc_history)
 
         with self._lock:
-            # Voice 1: normalized bass — when bass drops out, peak stays high → ratio → 0
-            self.bass_energy = min(1.0, bass_e / self.bass_peak)
+            # Voice 1: normalized bass — energy / running mean gives ~1.0 at average,
+            # >1.0 on peaks, <1.0 in quiet. Clip to 0-1 for brightness.
+            self.bass_energy = min(1.0, bass_e / (self.bass_ema + 1e-10))
 
             # Voice 2: normalized harmonic
-            self.harmonic_energy = min(1.0, harm_e / self.harmonic_peak)
+            self.harmonic_energy = min(1.0, harm_e / (self.harmonic_ema + 1e-10))
 
-            # Voice 3: flash on percussive peaks exceeding threshold
-            perc_threshold = perc_mean + 1.5 * perc_std
+            # Voice 3: flash on percussive peaks exceeding threshold.
+            # Lower threshold (1.0 std) + shorter history (32 frames) catches
+            # more hits on high-energy electronic tracks without false positives
+            # because the HPSS separation already isolates percussive energy.
+            perc_threshold = perc_mean + 1.0 * perc_std
             if perc_e > perc_threshold and perc_threshold > 0:
-                self.perc_energy = min(1.0, perc_e / self.perc_peak)
+                self.perc_energy = min(1.0, perc_e / (self.perc_ema + 1e-10))
 
     def render(self, dt: float) -> np.ndarray:
         self.time_acc += dt

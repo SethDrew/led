@@ -1112,3 +1112,129 @@ class SpeedSignal:
         self.value += self._ema_alpha * (raw_speed - self.value)
 
         return self.value
+
+
+class FixedRangeRMS:
+    """Fixed-range log mapping from raw RMS to 0-1.
+
+    Maps a calibrated RMS range to brightness via log scale. No adaptive
+    floor — same input always produces the same output. A slow peak-decay
+    ceiling handles unexpectedly loud input without clipping.
+
+    Based on INMP441 sensitivity (-26 dBFS at 94 dB SPL) and typical
+    speech levels at arm's length (~30cm):
+        Quiet speech  ~65 dB SPL → RMS ~0.002
+        Normal speech ~75 dB SPL → RMS ~0.007
+        Loud speech   ~85 dB SPL → RMS ~0.02
+        Shouting      ~95 dB SPL → RMS ~0.06
+
+    The floor acts as a hard gate (below = 0). The ceiling defines full
+    brightness. Above the ceiling, a slow peak decay gently expands the
+    range so loud input still maps to ~1.0 rather than clipping.
+    """
+
+    def __init__(self, floor_rms: float = 0.005, ceiling_rms: float = 0.06,
+                 peak_decay: float = 0.9999, fps: float = 86.0):
+        """
+        Args:
+            floor_rms:    Hard gate — below this RMS, output is 0.
+            ceiling_rms:  Base ceiling — this RMS maps to 1.0.
+            peak_decay:   Per-frame decay for the adaptive ceiling.
+                          0.9999 at 86fps ≈ 80s half-life.
+            fps:          Frame rate for time-constant reference.
+        """
+        self.floor = floor_rms
+        self.base_ceiling = ceiling_rms
+        self.ceiling = ceiling_rms
+        self._peak_decay = peak_decay
+        self.value = 0.0
+        self.raw_rms = 0.0
+
+    def update(self, frame: np.ndarray) -> float:
+        """Process one audio frame, return 0-1 mapped value."""
+        rms = float(np.sqrt(np.mean(frame ** 2)))
+        self.raw_rms = rms
+
+        # Peak decay on ceiling — expands for loud input, decays back to base
+        self.ceiling = max(self.base_ceiling,
+                          self.ceiling * self._peak_decay)
+        if rms > self.ceiling:
+            self.ceiling = rms
+
+        # Hard gate
+        if rms < self.floor:
+            self.value = 0.0
+            return 0.0
+
+        # Log mapping over the current range
+        db = 20.0 * np.log10(rms / self.floor)
+        db_range = 20.0 * np.log10(self.ceiling / self.floor)
+        self.value = float(np.clip(db / db_range, 0.0, 1.0))
+
+        return self.value
+
+
+class EnergyDelta:
+    """Frame-to-frame RMS change with peak normalization.
+
+    Detects onsets/transients by measuring how much the RMS energy changes
+    between consecutive frames. The absolute delta is normalized via a
+    slow-decay peak to produce a 0-1 value — high on sudden changes
+    (syllable onsets, percussive hits), low during sustained energy.
+    """
+
+    def __init__(self, peak_decay: float = 0.998):
+        """
+        Args:
+            peak_decay: Per-frame decay for the running peak. 0.998 gives
+                        ~500 frames (~6s at 86 fps) half-life.
+        """
+        self._prev_rms = 0.0
+        self._peak = 1e-10
+        self._peak_decay = peak_decay
+        self.value = 0.0  # latest 0-1 output
+
+    def update(self, frame: np.ndarray) -> float:
+        """Process one audio frame, return 0-1 normalized delta."""
+        rms = float(np.sqrt(np.mean(frame ** 2)))
+        delta = abs(rms - self._prev_rms)
+        self._prev_rms = rms
+
+        # Slow-decay peak normalization
+        self._peak = max(delta, self._peak * self._peak_decay)
+        self.value = delta / self._peak if self._peak > 1e-10 else 0.0
+
+        return self.value
+
+
+class RollingIntegral:
+    """Windowed average of RMS over a configurable time window.
+
+    Maintains a ring buffer of per-frame RMS values and returns the
+    running mean. Useful as a smoothed energy envelope — less noisy
+    than single-frame RMS, less laggy than EMA at long time constants.
+    """
+
+    def __init__(self, window_sec: float = 0.3, fps: float = 86.0):
+        """
+        Args:
+            window_sec: Window duration in seconds.
+            fps:        Rate at which update() is called (frames/sec).
+                        Default 86 ≈ 44100/512 for standard hop.
+        """
+        self._window_size = max(1, int(window_sec * fps))
+        self._buf = np.zeros(self._window_size, dtype=np.float32)
+        self._pos = 0
+        self._filled = 0
+        self.value = 0.0  # latest output (average RMS over window)
+
+    def update(self, frame: np.ndarray) -> float:
+        """Process one audio frame, return average RMS over window."""
+        rms = float(np.sqrt(np.mean(frame ** 2)))
+
+        self._buf[self._pos % self._window_size] = rms
+        self._pos += 1
+        self._filled = min(self._filled + 1, self._window_size)
+
+        self.value = float(np.sum(self._buf[:self._filled]) / self._filled)
+        return self.value

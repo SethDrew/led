@@ -3498,3 +3498,37 @@ entries:
       logging section boundaries for analysis, or any feature that needs
       to know "we're in a different part of the song now."
 
+  - id: rgbw-pure-w-at-low-brightness
+    date: 2026-03-22
+    touched: 2026-03-22
+    title: Pure W channel at low brightness eliminates RGB die strobe on SK6812 RGBW
+    summary: >
+      At low brightness (<25%) on SK6812 RGBW, outputting unequal RGB channels
+      causes visible strobe on the weaker dies (green, blue) as they toggle between
+      0 and 1 in uint8. Fix: below a brightness threshold, output equal-channel RGB
+      (e.g. 170,170,170) so the firmware's min(R,G,B) → W conversion puts ALL light
+      on the dedicated warm white LED with zero residual RGB. Above the threshold,
+      smoothly blend in the actual color. The W channel's single die handles
+      low-brightness delta-sigma dithering cleanly.
+    status: validated
+    warmth: high
+    confidence: high
+    source:
+      - audio-reactive/effects/flicker_flame_warmth.py
+      - festicorn/bulbs/src/stream_recv.cpp
+    tags: [sk6812, rgbw, low-brightness, perception, hardware, technique]
+    relates_to: [hue-shift-low-brightness, delta-sigma-eliminates-low-brightness-flicker, rgb-color-gamut-limitations]
+    notes: >
+      Discovered during interactive bulb effect tuning. The flicker_flame_warmth
+      effect runs at 15-25% brightness during silence (warm white idle glow).
+      With unequal RGB (180,170,160), the firmware RGBW conversion extracts
+      min=160 as W, leaving residual R=20, G=10, B=0. At low brightness
+      multiplied by these small values, green toggles between 0 and 1 in
+      uint8 — visible as a green channel strobe.
+
+      The fix complements delta-sigma dithering: dithering smooths the W
+      channel fade (single die, aperiodic noise-shaped), while this technique
+      avoids RGB dies entirely at low brightness where their near-zero values
+      are unstable. Above ~25% brightness, the color blends back in smoothly
+      since the per-channel values are large enough to be stable in uint8.
+

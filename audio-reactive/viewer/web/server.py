@@ -579,6 +579,29 @@ def _start_effect(name, controller_id=None, sculpture_id=None, palette_name=None
                     pass
                 print(f"[effects] Stopped {slot['name']} on {target_id} (pid {proc.pid})")
 
+        # Belt-and-suspenders: kill ANY runner.py using the same serial port,
+        # even ones we've lost track of (orphans from crashes, hot reloads, etc.)
+        port_arg = None
+        for i, c in enumerate(cmd):
+            if c == '--port' and i + 1 < len(cmd):
+                port_arg = cmd[i + 1]
+                break
+        if port_arg:
+            try:
+                result = subprocess.run(
+                    ['pgrep', '-f', f'runner\\.py.*{port_arg}'],
+                    capture_output=True, text=True, timeout=2)
+                for pid_str in result.stdout.strip().split('\n'):
+                    if pid_str.strip():
+                        try:
+                            os.kill(int(pid_str), signal.SIGKILL)
+                            print(f"[effects] Killed stale runner on {port_arg} (pid {pid_str})")
+                        except (ProcessLookupError, ValueError):
+                            pass
+            except Exception:
+                pass
+            time.sleep(0.3)  # let port release
+
         try:
             proc = subprocess.Popen(
                 cmd,

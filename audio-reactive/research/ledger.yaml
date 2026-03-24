@@ -3556,3 +3556,38 @@ entries:
       could vary per effect or even adapt based on a rhythmic-ness classifier
       (more sticky for beat-driven, more raw for ambient/harmonic).
 
+  - id: log-peak-decay-rhythmicness
+    date: 2026-03-23
+    touched: 2026-03-23
+    title: Log-domain peak-decay of |d(RMS)/dt| is the best rhythmic-ness metric
+    summary: >
+      Compute log(1 + |d(RMS)/dt|), feed into peak-decay envelope (instant
+      attack, 2s exponential decay). Remap [0.97, 2.29] → [0, 1]. Achieves
+      clean separation: Bangarang loud sections 0.70-1.00, ambient ≤ 0.30,
+      Four Tet screech 0.44-0.51 (correctly borderline). The log compresses
+      volume differences without dividing by RMS — critical because ratio-based
+      approaches fail on compressed/mastered music where beat swings are large
+      in absolute terms but moderate relative to mean level.
+    status: validated
+    warmth: high
+    confidence: high
+    source: audio-reactive/viewer/viewer.py
+    tags: [feature-extraction, perception, effects]
+    relates_to: [raw-rms-sticky-blend, derivatives-over-absolutes, feelings-are-contextual, onset-vs-absint-comparison]
+    notes: >
+      Frame-to-frame (k=1, ~12ms) lookback is optimal; k=3 (35ms) has
+      marginally better separation but hurts borderline tracks; k=5+ blurs
+      beat pulses. ESP32 cost: 1 log + peak-decay per frame, 4 bytes state.
+      Can serve as continuous 0-1 blend weight for onset-driven vs energy-driven
+      effects, or use 0.50 as a binary threshold. Tested 8 alternative approaches
+      including ratio-based (|dRMS|/meanRMS), dual-EMA self-normalizing,
+      capped-rise variants, absint-ratio (200ms integration / 5s RMS), and
+      OnsetTempoTracker autocorrelation confidence — all inferior. Ratio-based
+      approaches fail on compressed music because ambient's derivative-to-RMS
+      ratio looks similar to Bangarang's. Tempo confidence has 3x narrower
+      separation gap (0.033 vs 0.200), false-positives on ambient textures,
+      and costs 1,350x more ops on ESP32. The absolute scale is what separates
+      beat from ambient, and normalization destroys it. The log provides partial
+      volume adaptation (10x louder → ~2.3x higher, not 10x) without fully
+      collapsing the separation.
+

@@ -107,7 +107,7 @@ class HeatDiffusionEffect(AudioReactiveEffect):
         # into the sculpture at a limited rate — smooths jarring brightness
         # spikes while preserving total energy over time.
         self._wand_heat = 0.0
-        self._wand_transfer_rate = 8.0  # 1/s — wand TC ≈ 0.125s
+        self._wand_transfer_rate = 16.0  # 1/s — wand TC ≈ 0.063s
 
         # Sticky ceiling: adaptive max for temperature-to-color mapping.
         # Fast up (4x) so peaks don't blow out. Slow down (0.1x) so quiet
@@ -140,7 +140,7 @@ class HeatDiffusionEffect(AudioReactiveEffect):
         kernel_hw = int(np.ceil(inj_sigma * 3))  # half-width: 3 sigma
         offsets = np.arange(-kernel_hw, kernel_hw + 1, dtype=np.float64)
         self._inj_kernel = np.exp(-0.5 * (offsets / inj_sigma) ** 2)
-        self._inj_kernel *= 3.0 / self._inj_kernel.sum()  # sum to 3: wider = more total heat
+        self._inj_kernel *= 1.5 / self._inj_kernel.sum()  # sum to 1.5: wider injection, 1.5x total heat
         self._inj_kernel_hw = kernel_hw
 
         self._frame_buf = np.zeros((num_leds, 3), dtype=np.uint8)
@@ -222,9 +222,11 @@ class HeatDiffusionEffect(AudioReactiveEffect):
     def process_audio(self, mono_chunk: np.ndarray):
         for frame in self.accum.feed(mono_chunk):
             val = self._sticky.update(frame)
+            raw_rms = np.sqrt(np.mean(frame ** 2))
             self._tempo.feed_frame(frame)
             with self._lock:
-                self._energy = np.float32(val)
+                # Blend: 70% sticky (transient-focused) + 30% raw RMS (sustain warmth)
+                self._energy = np.float32(val * 0.7 + raw_rms * 0.3)
                 self._tempo_period = self._tempo.estimated_period
 
     # ------------------------------------------------------------------ #

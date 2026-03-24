@@ -400,6 +400,16 @@ class SyncedVisualizer:
         dt = self.hop_length / self.sr
         self.rms_derivative = self.rms_derivative / dt  # units per second
 
+        # Deriv ratio: mean(|ΔRMS|) / mean(RMS) in rolling windows.
+        # Uses raw frame-to-frame diff (not /dt) so the ratio is dimensionless.
+        # Self-normalizing for volume. High = beat-driven, low = ambient.
+        from scipy.ndimage import uniform_filter1d
+        _dr_window = int(5.0 / dt)  # 5s window in frames
+        _abs_diff = np.abs(np.diff(self.rms_energy, prepend=self.rms_energy[0]))
+        _smooth_abs_diff = uniform_filter1d(_abs_diff, size=max(1, _dr_window), mode='nearest')
+        _smooth_rms = uniform_filter1d(self.rms_energy, size=max(1, _dr_window), mode='nearest')
+        self.deriv_ratio = _smooth_abs_diff / np.maximum(_smooth_rms, 1e-10)
+
         # Spectral centroid derivative (rate-of-change of brightness)
         self.centroid_derivative = np.diff(self.spectral_centroid, prepend=self.spectral_centroid[0])
         self.centroid_derivative = self.centroid_derivative / dt  # Hz per second
@@ -1020,6 +1030,35 @@ class SyncedVisualizer:
         absint_idx = np.arange(len(abs_deriv))
         absint_starts = np.maximum(0, absint_idx - absint_window + 1)
         self.absint_signal = (absint_cs[absint_idx + 1] - absint_cs[absint_starts]) * dt
+
+        # Log-domain peak-decay envelope of |d(RMS)/dt|: instant attack, 2s decay.
+        # Log compresses the range so the metric is partially volume-adaptive —
+        # a 10x louder track produces ~2.3x higher values, not 10x.
+        _decay_alpha = 1.0 - np.exp(-1.0 / (2.0 * fps))
+        _log_abs_deriv = np.log1p(np.abs(self.rms_derivative))
+        self.deriv_peak_env = np.zeros_like(_log_abs_deriv)
+        _env = 0.0
+        for i in range(len(_log_abs_deriv)):
+            if _log_abs_deriv[i] > _env:
+                _env = _log_abs_deriv[i]
+            else:
+                _env -= _decay_alpha * (_env - _log_abs_deriv[i])
+            self.deriv_peak_env[i] = _env
+
+        # Log-domain peak-decay with k=3 lookback (~35ms derivative gap).
+        # Slightly less noise than frame-to-frame, marginally better separation gap.
+        _rms = self.rms_energy
+        _k3_deriv = np.zeros(len(_rms), dtype=np.float64)
+        _k3_deriv[3:] = np.abs(_rms[3:] - _rms[:-3]) / (3.0 * dt)
+        _log_k3_deriv = np.log1p(_k3_deriv)
+        self.deriv_peak_env_k3 = np.zeros_like(_log_k3_deriv)
+        _env = 0.0
+        for i in range(len(_log_k3_deriv)):
+            if _log_k3_deriv[i] > _env:
+                _env = _log_k3_deriv[i]
+            else:
+                _env -= _decay_alpha * (_env - _log_k3_deriv[i])
+            self.deriv_peak_env_k3[i] = _env
 
         # AbsInt second derivatives at multiple smoothing scales
         self.absint_d2 = {}
@@ -1894,9 +1933,30 @@ class SyncedVisualizer:
         ax.fill_between(self.times, neg, color='#448AFF', alpha=0.7, linewidth=0)
         ax.axhline(y=0, color='#666', linewidth=0.5)
 
+        # Overlay: rhythmic-ness metrics on secondary y-axis
+        ax2 = ax.twinx()
+
+        # Green = deriv_ratio: mean(|ΔRMS|) / mean(RMS) over 5s
+        dr = np.clip((self.deriv_ratio - 0.03) / 0.07, 0.0, 1.0)
+        ax2.plot(self.times, dr, color='#66BB6A', linewidth=1.5, alpha=0.8, label='deriv ratio')
+
+        # Orange = log-domain peak-decay of |d(RMS)/dt| k=1: instant attack, 2s decay
+        # Empirical: ambient < 1.37, beat > 1.63, remap [0.97, 2.29] → [0, 1]
+        pd = np.clip((self.deriv_peak_env - 0.97) / 1.32, 0.0, 1.0)
+        ax2.plot(self.times, pd, color='#FFB74D', linewidth=1.5, alpha=0.8, label='log pd k=1')
+
+        # Coral = log-domain peak-decay k=3 (~35ms lookback)
+        pd3 = np.clip((self.deriv_peak_env_k3 - 0.97) / 1.32, 0.0, 1.0)
+        ax2.plot(self.times, pd3, color='#FFA726', linewidth=1.5, alpha=0.7, linestyle='--', label='log pd k=3')
+
+        ax2.set_ylim([0, 1.05])
+        ax2.set_ylabel('rhythmic-ness', fontsize=9)
+        ax2.tick_params(axis='y', labelsize=8)
+        ax2.legend(loc='upper right', framealpha=0.7, fontsize=7)
+
         ax.set_xlim([0, self.duration])
         ax.set_ylabel('dRMS/dt')
-        ax.set_title('RMS Derivative — red = getting louder, blue = getting quieter', fontsize=11)
+        ax.set_title('RMS Derivative — green = deriv ratio, orange = log peak-decay |d/dt|', fontsize=11)
         ax.grid(True, alpha=0.2)
         if not hasattr(self, 'axes'):
             self.axes = []

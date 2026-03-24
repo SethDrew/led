@@ -3498,37 +3498,61 @@ entries:
       logging section boundaries for analysis, or any feature that needs
       to know "we're in a different part of the song now."
 
-  - id: rgbw-pure-w-at-low-brightness
-    date: 2026-03-22
-    touched: 2026-03-22
-    title: Pure W channel at low brightness eliminates RGB die strobe on SK6812 RGBW
+  # rgbw-pure-w-at-low-brightness: MOVED to engineering ledger (2026-03-23)
+  # This is a hardware fact about SK6812 die behavior, not a research finding.
+
+  - id: sustain-detection-energy-derivative
+    date: 2026-03-23
+    touched: 2026-03-23
+    title: Sustain detection via smoothed energy derivative with 0.5 threshold
     summary: >
-      At low brightness (<25%) on SK6812 RGBW, outputting unequal RGB channels
-      causes visible strobe on the weaker dies (green, blue) as they toggle between
-      0 and 1 in uint8. Fix: below a brightness threshold, output equal-channel RGB
-      (e.g. 170,170,170) so the firmware's min(R,G,B) → W conversion puts ALL light
-      on the dedicated warm white LED with zero residual RGB. Above the threshold,
-      smoothly blend in the actual color. The W channel's single die handles
-      low-brightness delta-sigma dithering cleanly.
+      Smoothed energy derivative (200ms EMA TC) with 0.5 threshold cleanly
+      separates sustained notes (derivative <0.5) from true onsets (>1.0).
+      Natural vocal wobble during sustained hum produces derivatives of 0.2-0.3,
+      well below threshold. Initial threshold of 0.15 was too tight — wobble
+      kept resetting the detector. Combined with energy > 0.05 gate and
+      asymmetric ramp (0.35/s up, 1.0/s down), triggers reliably after ~1s
+      sustain, resets within 500ms on energy change.
     status: validated
     warmth: high
     confidence: high
-    source:
-      - audio-reactive/effects/flicker_flame_warmth.py
-      - festicorn/bulbs/src/stream_recv.cpp
-    tags: [sk6812, rgbw, low-brightness, perception, hardware, technique]
-    relates_to: [hue-shift-low-brightness, delta-sigma-eliminates-low-brightness-flicker, rgb-color-gamut-limitations]
+    source: audio-reactive/effects/flicker_flame_warmth.py
+    tags: [feature-extraction, effects, perception]
+    relates_to: [rolling-integral-sustained-energy, onset-vs-absint-comparison]
     notes: >
-      Discovered during interactive bulb effect tuning. The flicker_flame_warmth
-      effect runs at 15-25% brightness during silence (warm white idle glow).
-      With unequal RGB (180,170,160), the firmware RGBW conversion extracts
-      min=160 as W, leaving residual R=20, G=10, B=0. At low brightness
-      multiplied by these small values, green toggles between 0 and 1 in
-      uint8 — visible as a green channel strobe.
+      Developed for the fire_flicker bulb effect (sustain-triggered blown-fire
+      dropout). The key calibration insight: real onsets produce derivatives of
+      1.0+ while vocal wobble stays at 0.2-0.3, giving 2x headroom at 0.5
+      threshold. The 200ms EMA smoothing is critical — without it, frame-to-frame
+      noise causes false triggers. The asymmetric ramp (slower attack than decay)
+      means brief silence gaps don't accumulate false sustain, but stopping
+      input resets quickly. Useful for any effect that should respond differently
+      to sustained vs transient input.
 
-      The fix complements delta-sigma dithering: dithering smooths the W
-      channel fade (single die, aperiodic noise-shaped), while this technique
-      avoids RGB dies entirely at low brightness where their near-zero values
-      are unstable. Above ~25% brightness, the color blends back in smoothly
-      since the per-channel values are large enough to be stable in uint8.
+  - id: raw-rms-sticky-blend
+    date: 2026-03-23
+    touched: 2026-03-23
+    title: Mixing raw RMS into sticky-floor output preserves harmonic warmth
+    summary: >
+      Blending raw RMS back into sticky-floor-normalized energy (70% sticky +
+      30% raw) preserves transient responsiveness while maintaining warmth from
+      sustained harmonic content. Sticky floor alone acts as an implicit onset
+      gate — it normalizes away sustained energy, causing the sculpture to go
+      dark between beats even when harmonic content is present. The blend ratio
+      is a tunable knob: more raw RMS = more sustained warmth, more sticky =
+      sharper transient contrast.
+    status: validated
+    warmth: high
+    confidence: high
+    source: audio-reactive/effects/heat_diffusion.py
+    tags: [feature-extraction, effects, perception]
+    relates_to: [ema-section-boundary-contrast, feelings-are-contextual, derivatives-over-absolutes]
+    notes: >
+      Discovered during heat diffusion tuning. The sticky floor's fast-up /
+      slow-down asymmetry makes it excellent for transient detection but blind
+      to sustained harmonic energy. Between beats, the floor catches up to the
+      RMS level and output drops to near zero — perceptually wrong when there's
+      still musical content. The 70/30 blend was chosen empirically; the ratio
+      could vary per effect or even adapt based on a rhythmic-ness classifier
+      (more sticky for beat-driven, more raw for ambient/harmonic).
 

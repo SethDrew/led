@@ -3,10 +3,18 @@
  *
  * Receives raw sensor data via ESP-NOW from the handheld sender,
  * computes FixedRangeRMS energy + EnergyDelta onset detection locally,
- * renders sparkle_burst effect on SK6812 RGBW LEDs.
+ * renders effects on SK6812 RGBW LEDs.
  *
- * Calibration: auto-captures rest vector from first 2 seconds of packets.
- * Send 'c' over serial to recalibrate anytime.
+ * Algorithms:
+ *   sparkle_burst — onset-triggered sparkle with decay
+ *   fire_meld     — per-LED flame flicker, energy-driven color
+ *   fire_flicker  — fire_meld + sustain-triggered blown-fire dropout
+ *
+ * Serial commands:
+ *   's' — sparkle_burst
+ *   'm' — fire_meld
+ *   'f' — fire_flicker
+ *   'c' — recalibrate rest vector
  *
  * Wiring:
  *   GPIO 10 → LED data (SK6812 RGBW)
@@ -45,6 +53,11 @@
 // ── Sparkle parameters ───────────────────────────────────────────
 #define SPARKLE_DEADBAND 0.08f
 
+// ── Fire parameters ──────────────────────────────────────────────
+#define FIRE_FLICKER_SCALE  3.0f
+#define FIRE_DEADBAND       0.08f
+#define FIRE_DROPOUT_DEPTH  0.85f  // fire_flicker only
+
 // ── ESP-NOW ──────────────────────────────────────────────────────
 #define TIMEOUT_MS     500
 
@@ -53,6 +66,15 @@ struct __attribute__((packed)) SensorPacket {
     uint16_t rawRms;        // 2 bytes: raw audio RMS
     uint8_t micEnabled;     // 1 byte: shake toggle state
 };                          // 15 bytes total
+
+// ── Algorithm enum ───────────────────────────────────────────────
+enum Algorithm {
+    ALG_SPARKLE_BURST,
+    ALG_FIRE_MELD,
+    ALG_FIRE_FLICKER,
+};
+
+static Algorithm currentAlg = ALG_SPARKLE_BURST;
 
 // ── Global state ─────────────────────────────────────────────────
 
@@ -89,6 +111,16 @@ static float sparkle[LED_COUNT];
 static float decayRates[LED_COUNT];
 static float envelope = 0.0f;
 static float cooldownRemaining = 0.0f;
+
+// ── Fire render state (shared by fire_meld and fire_flicker) ─────
+static float fireTime = 0.0f;
+static float fireBaseBrightness = 0.0f;
+static float fireFlickerIntensity = 0.0f;
+static float fireColorEnergy = 0.0f;
+// Dropout state (fire_flicker only)
+static float firePrevEnergyForDeriv = 0.0f;
+static float fireEnergyDerivSmooth = 0.0f;
+static float fireDropoutAmount = 0.0f;
 
 // Simple PRNG state (xorshift32, seeded from esp_random at boot)
 static uint32_t prngState;
@@ -209,7 +241,7 @@ void setup() {
     esp_now_register_recv_cb(onReceive);
 
     Serial.println("Waiting for sender... (will auto-calibrate from first 2s of data)");
-    Serial.println("Send 'c' over serial to recalibrate anytime.");
+    Serial.println("Commands: 'c' recalibrate, 's' sparkle, 'm' fire_meld, 'f' fire_flicker");
 }
 
 // ── Calibration ──────────────────────────────────────────────────
@@ -245,75 +277,33 @@ void updateCalibration(float ax, float ay, float az) {
     }
 }
 
-// ── Main loop ────────────────────────────────────────────────────
+// ── Reset fire state (called on algorithm switch) ────────────────
 
-void loop() {
-    uint32_t now = millis();
-    float dt = 1.0f / SENSOR_HZ;  // ~40ms
+static void resetFireState() {
+    fireTime = 0.0f;
+    fireBaseBrightness = 0.0f;
+    fireFlickerIntensity = 0.0f;
+    fireColorEnergy = 0.0f;
+    firePrevEnergyForDeriv = 0.0f;
+    fireEnergyDerivSmooth = 0.0f;
+    fireDropoutAmount = 0.0f;
+}
 
-    // ── Serial command: 'c' to recalibrate ───────────────────────
-    if (Serial.available()) {
-        char c = Serial.read();
-        if (c == 'c' || c == 'C') {
-            startCalibration();
-        }
+// ── Reset sparkle state (called on algorithm switch) ─────────────
+
+static void resetSparkleState() {
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        sparkle[i] = 0.0f;
+        decayRates[i] = 0.92f + randFloat() * 0.05f;
     }
+    envelope = 0.0f;
+    cooldownRemaining = 0.0f;
+}
 
-    // ── Read latest packet ───────────────────────────────────────
-    float ax = latestPacket.ax;
-    float ay = latestPacket.ay;
-    float az = latestPacket.az;
-    uint16_t rawRms = latestPacket.rawRms;
-    bool micOn = latestPacket.micEnabled != 0;
-    bool connected = (lastPacketMs > 0) && (now - lastPacketMs < TIMEOUT_MS);
+// ── Sparkle burst render ─────────────────────────────────────────
 
-    // ── Calibration accumulation ─────────────────────────────────
-    if (connected) {
-        updateCalibration(ax, ay, az);
-    }
-
-    // ── Compute tilt angle from rest ─────────────────────────────
-    float angleDeg = 0;
-    if (calibrated && connected) {
-        float cosAngle = clampf(
-            restAx * ax + restAy * ay + restAz * az,
-            -1.0f, 1.0f
-        );
-        angleDeg = acosf(cosAngle) * (180.0f / M_PI);
-    }
-
-    // ── Audio processing ─────────────────────────────────────────
-    if (connected && micOn) {
-        energy = computeEnergy(rawRms);
-        onset = computeOnset(rawRms);
-    } else if (connected && !micOn) {
-        // Mic disabled: hold a gentle base glow
-        energy = 0.15f;
-        onset = 0.0f;
-    }
-
-    // ── Debug telemetry (every ~1s) ──────────────────────────────
-    if (connected && calibrated && (pktCount % 25 == 0)) {
-        Serial.printf("angle=%.1f rms=%d energy=%.3f onset=%.3f mic=%s\n",
-            angleDeg, rawRms, energy, onset, micOn ? "on" : "off");
-    }
-
-    // ── Timeout: breathing idle ──────────────────────────────────
-    if (!connected) {
-        float breath = (sinf(now / 1000.0f * M_PI) + 1.0f) / 2.0f;
-        // Render breathing on pure warm white
-        uint16_t bW = (uint16_t)(powf(breath * 0.12f, GAMMA) * 65535.0f);
-        for (uint16_t i = 0; i < LED_COUNT; i++) {
-            uint8_t w = deltaSigma(dsW[i], bW >> 8);
-            strip.setPixelColor(i, 0, 0, 0, w);
-        }
-        strip.show();
-        delay(1);
-        return;
-    }
-
-    // ── Sparkle burst render ─────────────────────────────────────
-
+static void renderSparkleBurst(float dt, float angleDeg, float tiltBlend,
+                                float tiltR, float tiltG, float tiltB) {
     bool isSilent = energy < 0.001f;
 
     // Asymmetric envelope: ~30ms attack, ~400ms decay
@@ -363,31 +353,16 @@ void loop() {
     // Subtle shimmer jitter between onsets (only when not silent)
     if (!isSilent) {
         for (uint16_t i = 0; i < LED_COUNT; i++) {
-            float jitter = (randFloat() - 0.5f) * 0.02f;  // [-0.01, 0.01]
+            float jitter = (randFloat() - 0.5f) * 0.02f;
             float newVal = sparkle[i] + jitter;
             if (newVal < 0.0f) newVal = 0.0f;
-            if (newVal > sparkle[i] && jitter > 0) newVal = sparkle[i];  // only jitter down
+            if (newVal > sparkle[i] && jitter > 0) newVal = sparkle[i];
             sparkle[i] = newVal;
         }
     }
 
     // Base brightness: envelope capped at 50%
     float base = fminf(envelope, 0.2f);
-
-    // ── Tilt → OKLCH hue (overlay on sparkle color) ──────────────
-    // When tilted past deadzone, blend tilt hue into the sparkle color
-    float tiltR = 0, tiltG = 0, tiltB = 0;
-    float tiltBlend = 0.0f;
-    if (angleDeg > DEADZONE_DEG) {
-        float hueFrac = (angleDeg - DEADZONE_DEG) / (MAX_ANGLE_DEG - DEADZONE_DEG);
-        if (hueFrac > 1.0f) hueFrac = 1.0f;
-        uint8_t hueIdx = (uint8_t)(hueFrac * 255) % 256;
-        tiltR = (float)oklchVarL[hueIdx][0];
-        tiltG = (float)oklchVarL[hueIdx][1];
-        tiltB = (float)oklchVarL[hueIdx][2];
-        tiltBlend = (angleDeg - DEADZONE_DEG) / BLEND_RANGE_DEG;
-        if (tiltBlend > 1.0f) tiltBlend = 1.0f;
-    }
 
     // ── Per-LED color + brightness → RGBW output ─────────────────
     for (uint16_t i = 0; i < LED_COUNT; i++) {
@@ -401,8 +376,8 @@ void loop() {
 
         // Color: warm amber base, sparkle interpolates toward white
         float colR = 255.0f;
-        float colG = 180.0f + (240.0f - 180.0f) * s;   // 180 → 240
-        float colB =  80.0f + (200.0f -  80.0f) * s;   //  80 → 200
+        float colG = 180.0f + (240.0f - 180.0f) * s;
+        float colB =  80.0f + (200.0f -  80.0f) * s;
 
         // Tilt hue overlay: blend in OKLCH color when tilted
         if (tiltBlend > 0.0f) {
@@ -438,6 +413,280 @@ void loop() {
         uint8_t b = deltaSigma(dsB[i], tB16);
         uint8_t w = deltaSigma(dsW[i], tW16);
         strip.setPixelColor(i, r, g, b, w);
+    }
+}
+
+// ── Fire render (shared by fire_meld and fire_flicker) ───────────
+
+static void renderFire(float dt, bool withDropout, float tiltBlend) {
+    fireTime += dt;
+    float t = fireTime;
+
+    bool isSilent = energy < 0.001f;
+
+    // Percussive-only detection: high delta relative to low energy
+    bool isPercussiveOnly = (!isSilent && energy < 0.15f && onset > 0.5f);
+
+    // --- Base brightness envelope ---
+    // Asymmetric EMA: ~50ms attack, ~2s release
+    float attackAlpha = fminf(1.0f, dt / 0.050f);
+    float decayAlpha  = fminf(1.0f, dt / 2.0f);
+
+    float targetBrightness;
+    if (isSilent) {
+        targetBrightness = 0.25f;  // hold at 25% during silence
+    } else {
+        targetBrightness = fmaxf(0.25f, energy);
+    }
+
+    if (targetBrightness > fireBaseBrightness)
+        fireBaseBrightness += attackAlpha * (targetBrightness - fireBaseBrightness);
+    else
+        fireBaseBrightness += decayAlpha * (targetBrightness - fireBaseBrightness);
+
+    // --- Flicker intensity: EMA-smoothed energy delta (~200ms TC) ---
+    float flickerAlpha = fminf(1.0f, dt / 0.200f);
+    float deltaTarget = isSilent ? 0.0f : onset;
+    fireFlickerIntensity += flickerAlpha * (deltaTarget - fireFlickerIntensity);
+
+    // --- Sustain-triggered dropout (fire_flicker only) ---
+    float dropoutAmount = 0.0f;
+    if (withDropout) {
+        float energyDeriv = (energy - firePrevEnergyForDeriv) / fmaxf(dt, 0.001f);
+        firePrevEnergyForDeriv = energy;
+        float derivAlpha = fminf(1.0f, dt / 0.200f);
+        fireEnergyDerivSmooth += derivAlpha * (energyDeriv - fireEnergyDerivSmooth);
+
+        bool isSustaining = (!isSilent && energy > 0.05f
+                             && fabsf(fireEnergyDerivSmooth) <= 0.5f);
+        if (isSustaining)
+            fireDropoutAmount = fminf(1.0f, fireDropoutAmount + dt * 0.35f);
+        else
+            fireDropoutAmount = fmaxf(0.0f, fireDropoutAmount - dt * 1.0f);
+
+        dropoutAmount = fireDropoutAmount;
+    }
+
+    // --- Color energy: sustained energy tracking for color mapping ---
+    float colorAttack = fminf(1.0f, dt / 0.080f);
+    float colorDecay  = fminf(1.0f, dt / 2.0f);
+
+    float colorTarget;
+    if (isPercussiveOnly || isSilent)
+        colorTarget = 0.0f;
+    else
+        colorTarget = energy;
+
+    if (colorTarget > fireColorEnergy)
+        fireColorEnergy += colorAttack * (colorTarget - fireColorEnergy);
+    else
+        fireColorEnergy += colorDecay * (colorTarget - fireColorEnergy);
+
+    // --- Base color from color_energy ---
+    float ce = fireColorEnergy;
+    float baseColR, baseColG, baseColB;
+
+    const float WHITE_BLEND_THRESHOLD = 0.15f;
+    const float RED_FULL = 0.5f;
+
+    // Color anchors
+    const float amberR = 255.0f, amberG = 140.0f, amberB = 30.0f;
+    const float redR   = 200.0f, redG   =  20.0f, redB   =  0.0f;
+    const float whiteR = 180.0f, whiteG = 170.0f, whiteB = 160.0f;
+
+    if (ce < WHITE_BLEND_THRESHOLD) {
+        float tw = 1.0f - (ce / WHITE_BLEND_THRESHOLD);
+        baseColR = amberR * (1.0f - tw) + whiteR * tw;
+        baseColG = amberG * (1.0f - tw) + whiteG * tw;
+        baseColB = amberB * (1.0f - tw) + whiteB * tw;
+    } else {
+        float tr = (ce - WHITE_BLEND_THRESHOLD) / (RED_FULL - WHITE_BLEND_THRESHOLD);
+        if (tr > 1.0f) tr = 1.0f;
+        baseColR = amberR * (1.0f - tr) + redR * tr;
+        baseColG = amberG * (1.0f - tr) + redG * tr;
+        baseColB = amberB * (1.0f - tr) + redB * tr;
+    }
+
+    // --- Deadband on base brightness ---
+    float base = fireBaseBrightness;
+    if (base < FIRE_DEADBAND) base = 0.0f;
+
+    float s = FIRE_FLICKER_SCALE;
+
+    // --- Per-LED rendering ---
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        float fi = (float)i;
+
+        // Per-LED noise: two incommensurate sines
+        float noise = sinf(fi * 7.3f + t * 2.5f) *
+                       sinf(fi * 3.7f + t * 1.4f) * 0.5f + 0.5f;
+
+        // Noise amplitude scaled by flicker_scale
+        float noiseAmp = fmaxf(0.15f * s, 0.10f * s / fmaxf(base, 0.1f));
+        float bright = base * (1.0f + noiseAmp * (noise - 0.5f))
+                        + fireFlickerIntensity * (noise - 0.5f) * 0.25f * s;
+
+        // --- Dropout per LED (fire_flicker only) ---
+        float perLedDim = 0.0f;
+        float colorRedShift = 0.0f;
+        if (withDropout && dropoutAmount > 0.0f) {
+            // Slow-drifting resilience per LED
+            float resilience = sinf(fi * 13.7f + t * 0.3f) *
+                                sinf(fi * 9.1f + t * 0.2f) * 0.5f + 0.5f;
+            perLedDim = clampf(
+                (dropoutAmount - resilience * 0.7f) / 0.3f, 0.0f, 1.0f
+            ) * FIRE_DROPOUT_DEPTH;
+
+            // Color red shift leads brightness
+            colorRedShift = clampf(perLedDim / 0.3f, 0.0f, 1.0f);
+        }
+
+        // Apply brightness dropout
+        bright *= (1.0f - perLedDim);
+        bright = clampf(bright, 0.0f, 1.0f);
+
+        // Per-LED color: blend base color toward ember red with dropout
+        float colR = baseColR * (1.0f - colorRedShift) + redR * colorRedShift;
+        float colG = baseColG * (1.0f - colorRedShift) + redG * colorRedShift;
+        float colB = baseColB * (1.0f - colorRedShift) + redB * colorRedShift;
+
+        // W channel: warm white proportional to brightness, fades with tilt
+        float colW = 255.0f * (1.0f - tiltBlend);
+
+        // Apply brightness + gamma
+        float linBright = powf(bright, GAMMA);
+        float oR = colR * linBright;
+        float oG = colG * linBright;
+        float oB = colB * linBright;
+        float oW = colW * linBright;
+
+        // Scale to 16-bit for delta-sigma dithering
+        uint16_t tR16 = (uint16_t)clampf(oR * 256.0f, 0, 65535);
+        uint16_t tG16 = (uint16_t)clampf(oG * 256.0f, 0, 65535);
+        uint16_t tB16 = (uint16_t)clampf(oB * 256.0f, 0, 65535);
+        uint16_t tW16 = (uint16_t)clampf(oW * 256.0f, 0, 65535);
+
+        // Sub-LSB noise gate
+        if (tR16 < 64) tR16 = 0;
+        if (tG16 < 64) tG16 = 0;
+        if (tB16 < 64) tB16 = 0;
+        if (tW16 < 64) tW16 = 0;
+
+        uint8_t r = deltaSigma(dsR[i], tR16);
+        uint8_t g = deltaSigma(dsG[i], tG16);
+        uint8_t b = deltaSigma(dsB[i], tB16);
+        uint8_t w = deltaSigma(dsW[i], tW16);
+        strip.setPixelColor(i, r, g, b, w);
+    }
+}
+
+// ── Main loop ────────────────────────────────────────────────────
+
+void loop() {
+    uint32_t now = millis();
+    float dt = 1.0f / SENSOR_HZ;  // ~40ms
+
+    // ── Serial commands ─────────────────────────────────────────
+    if (Serial.available()) {
+        char c = Serial.read();
+        if (c == 'c' || c == 'C') {
+            startCalibration();
+        } else if (c == 's' || c == 'S') {
+            currentAlg = ALG_SPARKLE_BURST;
+            resetSparkleState();
+            Serial.println("Algorithm: sparkle_burst");
+        } else if (c == 'm' || c == 'M') {
+            currentAlg = ALG_FIRE_MELD;
+            resetFireState();
+            Serial.println("Algorithm: fire_meld");
+        } else if (c == 'f' || c == 'F') {
+            currentAlg = ALG_FIRE_FLICKER;
+            resetFireState();
+            Serial.println("Algorithm: fire_flicker");
+        }
+    }
+
+    // ── Read latest packet ───────────────────────────────────────
+    float ax = latestPacket.ax;
+    float ay = latestPacket.ay;
+    float az = latestPacket.az;
+    uint16_t rawRms = latestPacket.rawRms;
+    bool micOn = latestPacket.micEnabled != 0;
+    bool connected = (lastPacketMs > 0) && (now - lastPacketMs < TIMEOUT_MS);
+
+    // ── Calibration accumulation ─────────────────────────────────
+    if (connected) {
+        updateCalibration(ax, ay, az);
+    }
+
+    // ── Compute tilt angle from rest ─────────────────────────────
+    float angleDeg = 0;
+    if (calibrated && connected) {
+        float cosAngle = clampf(
+            restAx * ax + restAy * ay + restAz * az,
+            -1.0f, 1.0f
+        );
+        angleDeg = acosf(cosAngle) * (180.0f / M_PI);
+    }
+
+    // ── Audio processing ─────────────────────────────────────────
+    if (connected && micOn) {
+        energy = computeEnergy(rawRms);
+        onset = computeOnset(rawRms);
+    } else if (connected && !micOn) {
+        // Mic disabled: hold a gentle base glow
+        energy = 0.15f;
+        onset = 0.0f;
+    }
+
+    // ── Debug telemetry (every ~1s) ──────────────────────────────
+    if (connected && calibrated && (pktCount % 25 == 0)) {
+        const char *algName = "sparkle";
+        if (currentAlg == ALG_FIRE_MELD) algName = "fire_meld";
+        else if (currentAlg == ALG_FIRE_FLICKER) algName = "fire_flicker";
+        Serial.printf("[%s] angle=%.1f rms=%d energy=%.3f onset=%.3f mic=%s\n",
+            algName, angleDeg, rawRms, energy, onset, micOn ? "on" : "off");
+    }
+
+    // ── Timeout: breathing idle ──────────────────────────────────
+    if (!connected) {
+        float breath = (sinf(now / 1000.0f * M_PI) + 1.0f) / 2.0f;
+        // Render breathing on pure warm white
+        uint16_t bW = (uint16_t)(powf(breath * 0.12f, GAMMA) * 65535.0f);
+        for (uint16_t i = 0; i < LED_COUNT; i++) {
+            uint8_t w = deltaSigma(dsW[i], bW >> 8);
+            strip.setPixelColor(i, 0, 0, 0, w);
+        }
+        strip.show();
+        delay(1);
+        return;
+    }
+
+    // ── Tilt → OKLCH hue (shared by all algorithms) ─────────────
+    float tiltR = 0, tiltG = 0, tiltB = 0;
+    float tiltBlend = 0.0f;
+    if (angleDeg > DEADZONE_DEG) {
+        float hueFrac = (angleDeg - DEADZONE_DEG) / (MAX_ANGLE_DEG - DEADZONE_DEG);
+        if (hueFrac > 1.0f) hueFrac = 1.0f;
+        uint8_t hueIdx = (uint8_t)(hueFrac * 255) % 256;
+        tiltR = (float)oklchVarL[hueIdx][0];
+        tiltG = (float)oklchVarL[hueIdx][1];
+        tiltB = (float)oklchVarL[hueIdx][2];
+        tiltBlend = (angleDeg - DEADZONE_DEG) / BLEND_RANGE_DEG;
+        if (tiltBlend > 1.0f) tiltBlend = 1.0f;
+    }
+
+    // ── Render current algorithm ─────────────────────────────────
+    switch (currentAlg) {
+        case ALG_SPARKLE_BURST:
+            renderSparkleBurst(dt, angleDeg, tiltBlend, tiltR, tiltG, tiltB);
+            break;
+        case ALG_FIRE_MELD:
+            renderFire(dt, false, tiltBlend);
+            break;
+        case ALG_FIRE_FLICKER:
+            renderFire(dt, true, tiltBlend);
+            break;
     }
 
     strip.show();

@@ -463,3 +463,37 @@ entries:
       if dimming quality is paramount and software complexity is a concern.
 
       ESP32-C3 test setup: 50 SK6812 RGBW LEDs on pin 10, Adafruit NeoPixel.
+
+  - id: rgbw-pure-w-at-low-brightness
+    date: 2026-03-22
+    touched: 2026-03-23
+    title: Pure W channel at low brightness eliminates RGB die strobe on SK6812 RGBW
+    summary: >
+      At low brightness (<25%) on SK6812 RGBW, outputting unequal RGB channels
+      causes visible strobe on the weaker dies (green, blue) as they toggle between
+      0 and 1 in uint8. Fix: below a brightness threshold, output equal-channel RGB
+      (e.g. 170,170,170) so the firmware's min(R,G,B) → W conversion puts ALL light
+      on the dedicated warm white LED with zero residual RGB. Above the threshold,
+      smoothly blend in the actual color. Alternatively, with direct RGBW control,
+      shift all light to the W channel below the threshold with RGB=0.
+    status: resolved
+    severity: high
+    scope: hardware
+    source:
+      - audio-reactive/effects/compare.py
+      - festicorn/bulbs/src/receiver.cpp
+    tags: [sk6812, rgbw, low-brightness, constraint]
+    relates_to: [sk6812-w-channel-worse-low-brightness]
+    notes: >
+      The SK6812 RGBW has four separate dies (R, G, B, W). At low brightness,
+      small uint8 values on R/G/B channels toggle between 0 and 1 at the PWM
+      refresh rate — visible as strobe on the weaker channels. The W channel's
+      single warm white die handles low-brightness smoothly with delta-sigma
+      dithering. The fix: below ~25% brightness, route all light to the W
+      channel only. Above threshold, smoothly blend in RGB color. This
+      complements delta-sigma dithering — dithering smooths the W fade,
+      this technique avoids RGB dies entirely where they're unstable.
+
+      Discovered during interactive bulb effect tuning. With unequal RGB
+      (180,170,160), firmware RGBW conversion extracts min=160 as W,
+      leaving residual R=20, G=10, B=0. Green toggles 0↔1 visibly.

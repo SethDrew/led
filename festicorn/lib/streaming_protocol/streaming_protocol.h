@@ -1,28 +1,30 @@
 #pragma once
 #include <stdint.h>
 
-// [0xFF][0xAA][RGB x numPixels][XOR checksum] streaming frame receiver.
+// [0xFF][0xAA][pixel data x numPixels][XOR checksum] streaming frame receiver.
+// Supports RGB (3 bytes/pixel) or RGBW (4 bytes/pixel).
 // Usage:
 //   StreamReceiver rx;
-//   streamReceiverInit(rx, numPixels, rgbBuffer);
+//   streamReceiverInit(rx, numPixels, buffer);        // RGB (3 bpp)
+//   streamReceiverInit(rx, numPixels, buffer, 4);     // RGBW (4 bpp)
 //   // In serial loop:
 //   while (Serial.available()) {
 //       if (streamReceiverFeed(rx, Serial.read())) {
-//           // Frame complete, data is in rgbBuffer
+//           // Frame complete, data is in buffer
 //       }
 //   }
 
 struct StreamReceiver {
     uint8_t *buf;
-    uint16_t bufLen;     // numPixels * 3
+    uint16_t bufLen;     // numPixels * bytesPerPixel
     uint16_t pos;
     uint8_t xorCheck;
     uint8_t state;       // 0=SYNC1, 1=SYNC2, 2=DATA, 3=CHECK
 };
 
-static inline void streamReceiverInit(StreamReceiver &rx, uint16_t numPixels, uint8_t *rgbBuf) {
-    rx.buf = rgbBuf;
-    rx.bufLen = numPixels * 3;
+static inline void streamReceiverInit(StreamReceiver &rx, uint16_t numPixels, uint8_t *buf, uint8_t bytesPerPixel = 3) {
+    rx.buf = buf;
+    rx.bufLen = numPixels * bytesPerPixel;
     rx.pos = 0;
     rx.xorCheck = 0;
     rx.state = 0;

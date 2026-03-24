@@ -149,25 +149,22 @@ class FlickerFlameShimmerEffect(AudioReactiveEffect):
         # No warmth drift in this variant
         self._warmth_drift = 0.0
 
-        # Vectorized per-LED noise: two incommensurate sine waves
+        # Vectorized per-LED noise: slowed for subtlety
         t = self._time
         idx = self._led_indices
-        noise = (np.sin(idx * 7.3 + t * 4.1) *
-                 np.sin(idx * 3.7 + t * 2.3) * 0.5 + 0.5)
+        noise = (np.sin(idx * 7.3 + t * 2.5) *
+                 np.sin(idx * 3.7 + t * 1.4) * 0.5 + 0.5)
 
-        # Fast dropout: each frame, random LEDs get dimmed.
-        # Use a fast-changing hash so different LEDs drop each frame.
+        # Dropout shimmer: random LEDs dim during sustained notes
         dropout_rand = np.abs(np.sin(idx * 13.7 + t * 5.2) *
-                              np.sin(idx * 9.1 + t * 7.1))  # 30% of original speed
-        # ~30% of LEDs drop out at any moment (those with dropout_rand < 0.3)
-        # shimmer controls the depth: 0 = no dropout, 1 = full dropout to near-black
+                              np.sin(idx * 9.1 + t * 7.1))
         dropout_mask = (dropout_rand < 0.3).astype(np.float64)
         dropout_factor = 1.0 - shimmer * 0.85 * dropout_mask
 
-        # Per-LED brightness with dropout applied
+        # Per-LED brightness: tighter noise swing (0.85-1.0 range vs 0.7-1.0)
         base = self._base_brightness
-        bright = (base * (0.7 + 0.3 * noise) * dropout_factor
-                  + self._flicker_intensity * (noise - 0.5) * 0.4)
+        bright = (base * (0.85 + 0.15 * noise) * dropout_factor
+                  + self._flicker_intensity * (noise - 0.5) * 0.25)
 
         # Deadband: snap to black below threshold, no hue shift during fade
         DEADBAND = 0.08

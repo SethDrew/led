@@ -1,10 +1,17 @@
 """
-Flicker Flame — per-LED organic flame flicker driven by audio.
+Fire Meld / Fire Flicker — per-LED organic flame flicker driven by audio.
 
-Each LED flickers independently like a candle. Audio energy controls color:
-more energy pushes toward deep saturated red, while silence fades to a soft
-warm white at low brightness (near-equal RGB so firmware RGBW conversion
-puts most light on the dedicated warm white LED).
+Two bulb effects built from the same engine:
+
+  Fire Meld (registry: fire_meld)
+    Each LED flickers independently like a candle. Audio energy controls color:
+    amber at rest, deep red when loud, soft warm white during silence/decay.
+    No sustain dropout — pure flickering fire.
+
+  Fire Flicker (registry: fire_flicker)
+    Same base flicker, plus a sustain-triggered "blown fire" effect: after ~1s
+    of sustained energy, LEDs gradually shift to ember red then dim out one by
+    one over ~3s, like blowing on a campfire. Resets when energy changes.
 
 Color journey: warm amber (idle) → deep red (loud) → soft warm white (silence/decay)
 """
@@ -17,9 +24,9 @@ from signals import OverlapFrameAccumulator, FixedRangeRMS, EnergyDelta
 
 
 class FlickerFlameWarmthEffect(AudioReactiveEffect):
-    """Flicker flame with energy-driven red shift and warm white decay."""
+    """Per-LED flame flicker with energy-driven color shift. Base class for fire effects."""
 
-    registry_name = 'flicker_flame_warmth'
+    registry_name = 'fire_meld'
     ref_pattern = 'ambient'
     ref_scope = 'phrase'
     ref_input = 'RMS energy + energy delta'
@@ -29,8 +36,15 @@ class FlickerFlameWarmthEffect(AudioReactiveEffect):
         {'id': 'flicker', 'label': 'Flicker', 'color': '#ffaa00'},
     ]
 
-    def __init__(self, num_leds: int, sample_rate: int = 44100):
+    def __init__(self, num_leds: int, sample_rate: int = 44100, flicker_scale: float = 3.0, dropout: float = 0.0):
         super().__init__(num_leds, sample_rate)
+        self._flicker_scale = flicker_scale
+        self._dropout_depth = dropout  # 0-1, max depth of sustain-triggered dropout
+
+        # Sustain-triggered dropout state
+        self._prev_energy_for_deriv = 0.0
+        self._energy_deriv_smooth = 0.0
+        self._dropout_amount = 0.0  # 0-1 current dropout level (ramps up after 500ms sustain)
 
         # --- Audio analysis ---
         self.n_fft = 2048
@@ -69,7 +83,7 @@ class FlickerFlameWarmthEffect(AudioReactiveEffect):
 
     @property
     def name(self):
-        return "Flicker Flame"
+        return "Fire Meld"
 
     @property
     def description(self):
@@ -126,6 +140,24 @@ class FlickerFlameWarmthEffect(AudioReactiveEffect):
         delta_target = 0.0 if is_silent else energy_delta
         self._flicker_intensity += flicker_alpha * (delta_target - self._flicker_intensity)
 
+        # --- Sustain-triggered dropout ---
+        # Detect sustained energy via smoothed derivative (same as shimmer variant)
+        if self._dropout_depth > 0:
+            energy_deriv = (energy - self._prev_energy_for_deriv) / max(dt, 0.001)
+            self._prev_energy_for_deriv = energy
+            deriv_alpha = min(1.0, dt / 0.200)
+            self._energy_deriv_smooth += deriv_alpha * (energy_deriv - self._energy_deriv_smooth)
+
+            # Ramp up after sustained energy: requires actual audio (not silence idle),
+            # and derivative must be below onset level. Real onsets are 1.0+,
+            # natural vocal wobble is 0.2-0.3, so 0.5 threshold rejects only true attacks.
+            is_sustaining = (not is_silent and energy > 0.05
+                             and abs(self._energy_deriv_smooth) <= 0.5)
+            if is_sustaining:
+                self._dropout_amount = min(1.0, self._dropout_amount + dt * 0.35)  # full in ~3s
+            else:
+                self._dropout_amount = max(0.0, self._dropout_amount - dt * 1.0)  # off in 1s
+
         # --- Color energy: smooth tracking of sustained energy for color mapping ---
         # Fast attack so color responds quickly to voice, slow release (~2s) for
         # smooth fade back to warm white
@@ -145,69 +177,70 @@ class FlickerFlameWarmthEffect(AudioReactiveEffect):
         else:
             self._color_energy += color_decay * (color_target - self._color_energy)
 
-        # --- Per-LED flicker noise ---
+        # --- Per-LED flicker noise (slowed for subtlety) ---
         t = self._time
         idx = self._led_indices
-        noise = (np.sin(idx * 7.3 + t * 4.1) *
-                 np.sin(idx * 3.7 + t * 2.3) * 0.5 + 0.5)
+        noise = (np.sin(idx * 7.3 + t * 2.5) *
+                 np.sin(idx * 3.7 + t * 1.4) * 0.5 + 0.5)
 
         # Per-LED brightness
         base = self._base_brightness
 
         # Deadband: snap base to zero to prevent hue shift during fade.
-        # Applied to base (not per-LED), so if base is above deadband all LEDs
-        # stay lit with their flicker variation intact.
         DEADBAND = 0.08
         if base < DEADBAND:
             base = 0.0
 
-        # Noise amplitude scales inversely with brightness: wide swing at idle
-        # (~5%-20% range at 15% base) narrowing at high energy.
-        noise_amp = max(0.3, 0.15 / max(base, 0.1))
+        # Noise amplitude scaled by flicker_scale
+        s = self._flicker_scale
+        noise_amp = max(0.15 * s, 0.10 * s / max(base, 0.1))
         bright = (base * (1.0 + noise_amp * (noise - 0.5))
-                  + self._flicker_intensity * (noise - 0.5) * 0.4)
+                  + self._flicker_intensity * (noise - 0.5) * 0.25 * s)
+
+        # --- Fire-blown dropout: sustain → redden → dim → go out ---
+        # Each LED has a slow-drifting "resilience" (0-1). Low-resilience LEDs
+        # start dimming first, creating a staggered wave of embers going out.
+        # Color shifts to deep red BEFORE brightness drops (embers glow red
+        # before dying). At full dropout (~4s sustain), ~60% of LEDs are out.
+        per_led_dim = np.zeros(self.num_leds)
+        if self._dropout_depth > 0 and self._dropout_amount > 0:
+            # Slow-drifting resilience per LED (changes over ~5-10s)
+            resilience = (np.sin(idx * 13.7 + t * 0.3) *
+                          np.sin(idx * 9.1 + t * 0.2) * 0.5 + 0.5)
+            # resilience is 0-1. LED starts dimming when dropout_amount
+            # exceeds its resilience * 0.7 (so low-resilience LEDs go first).
+            # The /0.3 controls how quickly each LED ramps once started.
+            per_led_dim = np.clip(
+                (self._dropout_amount - resilience * 0.7) / 0.3, 0.0, 1.0
+            ) * self._dropout_depth
+
+        # Apply brightness dropout
+        bright *= (1.0 - per_led_dim)
         bright = np.clip(bright, 0.0, 1.0)
 
         # --- Color mapping: energy drives amber → red, silence drives → warm white ---
+        # Dropout shifts color toward deep red/ember (color leads brightness)
         ce = self._color_energy
 
-        # Two-phase color:
-        #   ce near 0 → warm white (silence/decay)
-        #   ce > 0    → blend from amber toward deep red proportional to energy
-        #
-        # When ce is low (fading out), we blend from amber toward warm white.
-        # When ce is high, we blend from amber toward deep red.
-
-        # Threshold below which we start blending toward warm white
         WHITE_BLEND_THRESHOLD = 0.15
 
         if ce < WHITE_BLEND_THRESHOLD:
-            # Blend amber → warm white as ce approaches 0
-            t_white = 1.0 - (ce / WHITE_BLEND_THRESHOLD)  # 1.0 at silence, 0.0 at threshold
+            t_white = 1.0 - (ce / WHITE_BLEND_THRESHOLD)
             base_color = self._color_amber * (1.0 - t_white) + self._color_warm_white * t_white
         else:
-            # Blend amber → deep red. Full red by ce=0.5 (not 1.0)
-            # so moderate sustained input reaches deep red within 4s
             RED_FULL = 0.5
             t_red = (ce - WHITE_BLEND_THRESHOLD) / (RED_FULL - WHITE_BLEND_THRESHOLD)
             t_red = min(1.0, t_red)
             base_color = self._color_amber * (1.0 - t_red) + self._color_deep_red * t_red
 
-        # At low brightness, use pure equal-channel (→ all goes to W LED, no RGB strobe)
-        # At higher brightness, blend in the actual color
-        PURE_W_THRESHOLD = 0.25
-        equal_white = np.array([170.0, 170.0, 170.0])  # equal channels → pure W after firmware conversion
+        # Per-LED color: dropout shifts toward ember red (color leads brightness)
+        # At per_led_dim=0.3 the LED is already fully red, keeps dimming after that
+        color_red_shift = np.clip(per_led_dim / 0.3, 0.0, 1.0)
+        ember_color = self._color_deep_red  # [200, 20, 0]
 
-        # Per-LED: blend between equal white and base_color based on brightness
-        color_blend = np.clip((bright - 0.08) / (PURE_W_THRESHOLD - 0.08), 0.0, 1.0)
-        # color_blend is 0 at low brightness (pure W), 1 above threshold (full color)
-        per_led_color_r = equal_white[0] * (1.0 - color_blend) + base_color[0] * color_blend
-        per_led_color_g = equal_white[1] * (1.0 - color_blend) + base_color[1] * color_blend
-        per_led_color_b = equal_white[2] * (1.0 - color_blend) + base_color[2] * color_blend
-
-        r = per_led_color_r * bright
-        g = per_led_color_g * bright
-        b = per_led_color_b * bright
+        r = (base_color[0] * (1.0 - color_red_shift) + ember_color[0] * color_red_shift) * bright
+        g = (base_color[1] * (1.0 - color_red_shift) + ember_color[1] * color_red_shift) * bright
+        b = (base_color[2] * (1.0 - color_red_shift) + ember_color[2] * color_red_shift) * bright
 
         self._frame_buf[:, 0] = np.clip(r, 0, 255).astype(np.uint8)
         self._frame_buf[:, 1] = np.clip(g, 0, 255).astype(np.uint8)
@@ -238,3 +271,22 @@ class FlickerFlameWarmthEffect(AudioReactiveEffect):
                 'energy': float(self._energy),
                 'flicker': float(self._energy_delta),
             }
+
+
+class FireFlickerEffect(FlickerFlameWarmthEffect):
+    """Fire Flicker — flame flicker with sustain-triggered blown-fire dropout."""
+
+    registry_name = 'fire_flicker'
+
+    def __init__(self, num_leds: int, sample_rate: int = 44100, **kwargs):
+        kwargs.setdefault('flicker_scale', 3.0)
+        kwargs.setdefault('dropout', 0.85)
+        super().__init__(num_leds, sample_rate, **kwargs)
+
+    @property
+    def name(self):
+        return "Fire Flicker"
+
+    @property
+    def description(self):
+        return "Flame flicker with sustain-triggered blown-fire dropout: redden then dim."

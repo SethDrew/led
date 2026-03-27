@@ -140,7 +140,7 @@ class HeatDiffusionEffect(AudioReactiveEffect):
         kernel_hw = int(np.ceil(inj_sigma * 3))  # half-width: 3 sigma
         offsets = np.arange(-kernel_hw, kernel_hw + 1, dtype=np.float64)
         self._inj_kernel = np.exp(-0.5 * (offsets / inj_sigma) ** 2)
-        self._inj_kernel *= 1.5 / self._inj_kernel.sum()  # sum to 1.5: wider injection, 1.5x total heat
+        self._inj_kernel *= inj_sigma / self._inj_kernel.sum()  # sum to sigma: wider spread = proportionally more heat
         self._inj_kernel_hw = kernel_hw
 
         self._frame_buf = np.zeros((num_leds, 3), dtype=np.uint8)

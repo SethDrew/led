@@ -3398,7 +3398,7 @@ entries:
 
   - id: timbral-shift-detection-eagerness
     date: 2026-03-21
-    touched: 2026-03-21
+    touched: 2026-03-26
     title: "Timbral shift detection: simple algorithm + eagerness curve wins over complex approaches"
     summary: >
       Tested 5 approaches for deciding when to switch palettes based on
@@ -3411,7 +3411,7 @@ entries:
     status: validated
     warmth: high
     confidence: high
-    source: [audio-reactive/effects/timbral_section_detect.py, audio-reactive/viewer/viewer.py]
+    source: [audio-reactive/effects/signals.py, audio-reactive/viewer/viewer.py]
     tags: [effects, perception, timbral, section-detection, eagerness, architecture]
     relates_to: [perception-is-layered-by-timescale, ld-vj-decision-decomposition, normalization-events-separation, ema-time-constant-is-section-relative]
     notes: >
@@ -3590,4 +3590,65 @@ entries:
       beat from ambient, and normalization destroys it. The log provides partial
       volume adaptation (10x louder → ~2.3x higher, not 10x) without fully
       collapsing the separation.
+
+  - id: novelty-method-comparison
+    date: 2026-03-26
+    touched: 2026-03-26
+    title: Novelty method comparison — 6 approaches vs timbral section detector
+    summary: >
+      Compared 6 viewer novelty functions (feature flux, EMA deviation, Foote checkerboard,
+      multi-scale EMA, cumulative z-score, KNN reservoir) against detect_timbral_sections
+      across 5 tracks. Most are duplicative of existing validated approaches. Two capture
+      fundamentally different information: Foote's checkerboard (offline O(n²)) detects
+      structural boundaries via before-vs-after self-similarity — the only method that
+      captures song form. Multi-scale EMA deviation offers drift analysis at ~3s/~1min/~5min
+      timescales simultaneously. The remaining 4 (flux, naive EMA, z-score, KNN reservoir)
+      overlap with existing approaches but haven't received proper independent assessment.
+      Decision: detect_timbral_sections is the one production technique for now. Viewer
+      novelty functions stay as analysis-only visualization tools, available for future
+      exploration if a specific effect needs a different novelty axis.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: audio-reactive/viewer/viewer.py
+    tags: [feature-extraction, section-detection, architecture]
+    relates_to: [timbral-shift-detection-eagerness, dual-ema-section-level-detection, perception-is-layered-by-timescale]
+    notes: >
+      Feature flux and EMA deviation overlap with AbsIntegral and detect_timbral_sections
+      respectively, but may measure different things at different timescales — untested.
+      Cumulative z-score (Welford's) asks "is this unusual relative to everything so far?"
+      which could be distinct from EMA-based "unusual relative to recent context." KNN
+      reservoir ("have I heard this exact timbre before?") is a genuinely different
+      question — repetition detection — but hasn't been assessed for artistic value. Foote is genuinely
+      different: it requires the full audio (non-causal), builds an O(n²) similarity
+      matrix, and answers "do the next 3 seconds differ from the last 3 seconds?"
+      That's structural analysis, not real-time novelty. Multi-scale EMA is worth
+      revisiting if we build effects that need to respond differently at verse vs
+      arc timescales. The timbral_section_detect.py file (5 algorithm variants) was
+      deleted — winning algorithm moved to signals.detect_timbral_sections. All
+      rejected variants (anchored-reference, dual-EMA, bucket-novelty v1/v2,
+      core+candidate) documented in timbral-shift-detection-eagerness entry.
+
+  # ── Physical Environment & Display ─────────────────────────────────
+
+  - id: reflection-on-dark-screens
+    date: 2026-03-26
+    touched: 2026-03-26
+    title: "LED reflections on black MacBook screens look really cool"
+    summary: >
+      LEDs reflecting off a dark/off laptop screen produce a striking visual
+      effect. The glossy black surface acts as a diffuse mirror, doubling the
+      light show with a soft, ghosted copy that adds depth and atmosphere.
+    status: spark
+    warmth: high
+    confidence: medium
+    source: []
+    tags: [visual-design, perception, art, physical-environment]
+    relates_to: [topology-native-effects-principle]
+    notes: >
+      Another case where physical context matters — the environment around the
+      LEDs becomes part of the display. Glossy dark surfaces (screens, glass,
+      polished furniture) create accidental secondary displays. Worth considering
+      when choosing placement or designing effects that benefit from reflection
+      (symmetry, slow color washes might look especially good doubled).
 

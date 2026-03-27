@@ -8,6 +8,7 @@ Building blocks that effects compose via has-a:
   BeatPredictor           — autocorrelation tempo + predicted/confirmed beats
   OnsetTempoTracker       — onset-envelope autocorrelation for tempo estimation
   SpeedSignal             — spectral evolution rate (ambient-friendly 0-1 speed)
+  detect_timbral_sections — batch MFCC novelty detector with eagerness curve
 
 Usage:
     accum = OverlapFrameAccumulator()
@@ -1246,3 +1247,89 @@ class RollingIntegral:
 
         self.value = float(np.sum(self._buf[:self._filled]) / self._filled)
         return self.value
+
+
+# ── Batch / offline utilities ────────────────────────────────────────────
+
+
+def detect_timbral_sections(mfcc_matrix, fps, l2_normalize=False,
+                            ema_tc=5.0, cooldown_s=15.0,
+                            sigma_ceiling=3.0, sigma_floor=1.0,
+                            eagerness_tau=120.0, power=3.0):
+    """Single-EMA novelty detector with power-curve eagerness decay.
+
+    Runs causally on a pre-computed MFCC matrix (batch/offline).
+    Detects timbral section boundaries by tracking distance from a
+    smoothed EMA reference, with an adaptive threshold that decays
+    over time (eagerness curve).
+
+    Threshold stays near ceiling then drops at rate controlled by power.
+    power=3 (cubic): very patient. power=1: linear. power=0.5: eager early.
+
+    Parameters
+    ----------
+    mfcc_matrix : ndarray, shape (n_coeffs, n_frames)
+        MFCC coefficients over time.
+    fps : float
+        Analysis frame rate (sr / hop_length).
+    l2_normalize : bool
+        If True, L2-normalize each frame.
+    ema_tc : float
+        EMA time constant in seconds.
+    cooldown_s : float
+        Minimum seconds between transitions.
+    sigma_ceiling, sigma_floor : float
+        Threshold range (multiples of running std dev).
+    eagerness_tau : float
+        Seconds for threshold to decay from ceiling to floor.
+    power : float
+        Eagerness curve shape (3=cubic/patient, 1=linear, 0.5=eager).
+
+    Returns
+    -------
+    transitions : list of float
+        Timestamps (seconds) of detected section boundaries.
+    """
+    n_coeffs, n_frames = mfcc_matrix.shape
+    alpha = 1.0 / (ema_tc * fps)
+    cooldown = int(cooldown_s * fps)
+    sigma_range = sigma_ceiling - sigma_floor
+
+    x0 = mfcc_matrix[:, 0].astype(np.float64)
+    if l2_normalize:
+        x0 = x0 / (np.linalg.norm(x0) + 1e-10)
+
+    ema = x0.copy()
+    dist_ema = 0.0
+    dist_var_ema = 0.0
+    dist_alpha = 1.0 / (ema_tc * fps)
+
+    frames_since_switch = cooldown + 1
+    transitions = []
+
+    for i in range(n_frames):
+        x = mfcc_matrix[:, i].astype(np.float64)
+        if l2_normalize:
+            x = x / (np.linalg.norm(x) + 1e-10)
+
+        ema += alpha * (x - ema)
+
+        diff = x - ema
+        dist = np.sqrt(np.dot(diff, diff))
+
+        dist_ema += dist_alpha * (dist - dist_ema)
+        dist_var_ema += dist_alpha * ((dist - dist_ema) ** 2 - dist_var_ema)
+        dist_std = np.sqrt(max(dist_var_ema, 1e-20))
+
+        frames_since_switch += 1
+
+        # Eagerness curve: stays near ceiling, drops at rate controlled by power
+        t = frames_since_switch / fps
+        progress = min(t / eagerness_tau, 1.0)
+        N = sigma_ceiling - sigma_range * (progress ** power)
+
+        if frames_since_switch > cooldown and dist > dist_ema + N * dist_std:
+            transitions.append(i / fps)
+            frames_since_switch = 0
+
+    return transitions

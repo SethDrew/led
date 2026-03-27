@@ -1,13 +1,12 @@
 """
-150 Combined Spectro Fall — split-strip: spectro chroma + energy waterfall.
+Combined Spectro Fall — split-strip: spectro chroma + energy waterfall.
 
-Two halves on a 150-LED strip:
-  LEDs 0-74  (Spectro Chroma): Mel spectrogram with RMS-driven brightness
-             and per-bin gray→red chroma mapping.
-  LEDs 75-149 (Energy Waterfall): Scrolling RMS energy pulses — raw waveform
-             amplitude creates bright/dim bands traveling down the strip.
+First half  (Spectro Chroma): Mel spectrogram with RMS-driven brightness
+            and per-bin gray→red chroma mapping.
+Second half (Energy Waterfall): Scrolling RMS energy pulses — raw waveform
+            amplitude creates bright/dim bands traveling down the strip.
 
-Color: gray → deep red → bright red (no blues/purples).
+Splits any LED count 50/50. Color: gray → deep red → bright red (no blues/purples).
 """
 
 import numpy as np
@@ -19,7 +18,7 @@ from signals import OverlapFrameAccumulator
 class CombinedSpectroFallEffect(AudioReactiveEffect):
     """Split-strip: spectro chroma + energy waterfall."""
 
-    registry_name = '150_combined_spectro_fall'
+    registry_name = 'combined_spectro_fall'
     ref_pattern = 'proportional'
     ref_scope = 'beat'
     ref_input = '64-bin mel spectrogram'
@@ -27,9 +26,9 @@ class CombinedSpectroFallEffect(AudioReactiveEffect):
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
 
-        # Strip geometry
-        self.n_spec = min(75, num_leds)
-        self.n_waterfall = max(0, num_leds - self.n_spec)
+        # Strip geometry — proportional 50/50 split
+        self.n_spec = num_leds // 2
+        self.n_waterfall = num_leds - self.n_spec
 
         # Mel filterbank parameters
         self.n_mels = 64
@@ -49,7 +48,6 @@ class CombinedSpectroFallEffect(AudioReactiveEffect):
         self.window = np.hanning(self.n_fft).astype(np.float32)
 
         # Pre-compute mel-to-LED interpolation for spectrogram half
-        # Map 75 LEDs linearly across 64 mel bins
         fractional = np.linspace(0, self.n_mels - 1, self.n_spec)
         self._spec_mel_idx = np.clip(fractional.astype(np.int32), 0, self.n_mels - 2)
         self._spec_mel_weight = (fractional - self._spec_mel_idx).astype(np.float32)
@@ -74,11 +72,11 @@ class CombinedSpectroFallEffect(AudioReactiveEffect):
 
     @property
     def name(self):
-        return "150 Combined Spectro Fall"
+        return "Combined Spectro Fall"
 
     @property
     def description(self):
-        return "Split-strip: spectro chroma (0-74) + energy waterfall (75-149)."
+        return "Split-strip: spectro chroma (first half) + energy waterfall (second half)."
 
     # ── Audio processing (audio thread) ───────────────────────────────────
 
@@ -126,7 +124,7 @@ class CombinedSpectroFallEffect(AudioReactiveEffect):
 
         frame = np.zeros((self.num_leds, 3), dtype=np.uint8)
 
-        # ── Left half: spectrogram (LEDs 0-74) ────────────────────────
+        # ── First half: spectrogram ─────────────────────────────────
         # Brightness = total amplitude (RMS), same for all LEDs
         # Color = gray → full red, scaled by per-bin frequency energy
 
@@ -157,8 +155,8 @@ class CombinedSpectroFallEffect(AudioReactiveEffect):
         spec_rgb = (colors * brightness).astype(np.uint8)
         frame[:self.n_spec] = spec_rgb
 
-        # ── Right half: energy pulse waterfall (LEDs 75-149) ─────────
-        # Each frame pushes current RMS as brightness into LED 75.
+        # ── Second half: energy pulse waterfall ───────────────────────
+        # Each frame pushes current RMS as brightness into the first waterfall LED.
         # The buffer scrolls naturally — short bursts = narrow bright
         # pulses traveling down, sustained energy = wide bright bands.
         # No smoothing on the waterfall input — raw RMS for crisp edges.

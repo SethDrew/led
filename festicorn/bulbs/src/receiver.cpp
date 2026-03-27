@@ -17,7 +17,8 @@
  *   'c' — recalibrate rest vector
  *
  * Wiring:
- *   GPIO 10 → LED data (SK6812 RGBW)
+ *   GPIO 10 → LED data (SK6812 RGBW) — "bulbs" (50 LEDs)
+ *   GPIO 21 → LED data (WS2812B RGB) — "channel" (10 LEDs, slow blue fade)
  */
 
 #include <Arduino.h>
@@ -32,6 +33,11 @@
 // ── LED config ───────────────────────────────────────────────────
 #define LED_PIN    10
 #define LED_COUNT  50
+
+// ── Channel strip (slow blue fade) ──────────────────────────────
+#define CHANNEL_PIN    21
+#define CHANNEL_COUNT  10
+#define CHANNEL_BREATHE_PERIOD  8.0f  // seconds per full cycle
 
 // ── Rendering ────────────────────────────────────────────────────
 #define GAMMA 2.4f
@@ -79,9 +85,13 @@ static Algorithm currentAlg = ALG_SPARKLE_BURST;
 // ── Global state ─────────────────────────────────────────────────
 
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRBW + NEO_KHZ800);
+Adafruit_NeoPixel channel(CHANNEL_COUNT, CHANNEL_PIN, NEO_GRB + NEO_KHZ800);
 
 // Delta-sigma accumulators per pixel, per channel
 static uint16_t dsR[LED_COUNT], dsG[LED_COUNT], dsB[LED_COUNT], dsW[LED_COUNT];
+
+// Delta-sigma accumulators for channel strip (blue only)
+static uint16_t chDsB[CHANNEL_COUNT];
 
 // Latest received packet
 static volatile bool packetReady = false;
@@ -203,6 +213,9 @@ void setup() {
     strip.begin();
     strip.setBrightness(255);
 
+    channel.begin();
+    channel.setBrightness(255);
+
     // Seed delta-sigma accumulators
     for (uint16_t i = 0; i < LED_COUNT; i++) {
         uint16_t seed = (uint16_t)((uint32_t)i * 256 / LED_COUNT);
@@ -210,6 +223,9 @@ void setup() {
         dsG[i] = (seed + 64) & 0xFF;
         dsB[i] = (seed + 128) & 0xFF;
         dsW[i] = (seed + 192) & 0xFF;
+    }
+    for (uint16_t i = 0; i < CHANNEL_COUNT; i++) {
+        chDsB[i] = (uint16_t)((uint32_t)i * 256 / CHANNEL_COUNT);
     }
 
     // Init sparkle state
@@ -227,13 +243,18 @@ void setup() {
         decayRates[i] = 0.92f + randFloat() * 0.05f;
     }
 
-    // Boot flash — brief green
+    // Boot flash — brief green (bulbs), brief blue (channel)
     for (uint16_t i = 0; i < LED_COUNT; i++)
         strip.setPixelColor(i, 0, 40, 0, 0);
+    for (uint16_t i = 0; i < CHANNEL_COUNT; i++)
+        channel.setPixelColor(i, 0, 0, 40);
     strip.show();
+    channel.show();
     delay(200);
     strip.clear();
+    channel.clear();
     strip.show();
+    channel.show();
 
     // ── ESP-NOW init ──────────────────────────────────────────────
     WiFi.mode(WIFI_STA);
@@ -658,6 +679,17 @@ void loop() {
             strip.setPixelColor(i, 0, 0, 0, w);
         }
         strip.show();
+
+        // Channel: slow blue fade (runs regardless of connection)
+        float chPhase = now / 1000.0f * (2.0f * M_PI / CHANNEL_BREATHE_PERIOD);
+        float chBreath = (sinf(chPhase) + 1.0f) * 0.5f;
+        uint16_t chB = (uint16_t)(powf(chBreath, GAMMA) * 65535.0f);
+        for (uint16_t i = 0; i < CHANNEL_COUNT; i++) {
+            uint8_t b = deltaSigma(chDsB[i], chB >> 8);
+            channel.setPixelColor(i, 0, 0, b);
+        }
+        channel.show();
+
         delay(1);
         return;
     }
@@ -690,6 +722,18 @@ void loop() {
     }
 
     strip.show();
+
+    // ── Channel: slow blue fade ──────────────────────────────────
+    {
+        float phase = now / 1000.0f * (2.0f * M_PI / CHANNEL_BREATHE_PERIOD);
+        float breath = (sinf(phase) + 1.0f) * 0.5f;
+        uint16_t bB = (uint16_t)(powf(breath, GAMMA) * 65535.0f);
+        for (uint16_t i = 0; i < CHANNEL_COUNT; i++) {
+            uint8_t b = deltaSigma(chDsB[i], bB >> 8);
+            channel.setPixelColor(i, 0, 0, b);
+        }
+        channel.show();
+    }
 
     // Yield to WiFi task — critical on single-core ESP32-C3
     delay(1);

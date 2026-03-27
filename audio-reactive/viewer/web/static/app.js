@@ -1057,7 +1057,7 @@ filePicker.addEventListener('change', () => {
 
 // ── Tabs ─────────────────────────────────────────────────────────
 
-const analysisTabs = new Set(['analysis', 'band-analysis', 'calculus', 'annotate', 'stems', 'hpss', 'lab-repet', 'lab-nmf', 'lab-timbral', 'lab-misc', 'lab-onset', 'lab-mood', 'lab-tempo', 'lab-novelty', 'lab-speed', 'spectro-color']);
+const analysisTabs = new Set(['analysis', 'band-analysis', 'calculus', 'annotate', 'stems', 'hpss', 'lab-repet', 'lab-nmf', 'lab-timbral', 'lab-misc', 'lab-onset', 'lab-mood', 'lab-tempo', 'lab-speed', 'spectro-color']);
 const analysisDropdown = document.getElementById('analysisDropdown');
 const analysisToggle = document.getElementById('analysisDropdownToggle');
 
@@ -1206,7 +1206,6 @@ async function loadPanel() {
         'lab-onset': { label: 'Compute Onset + AbsInt', desc: 'Onset strength vs absolute integral — comparing two beat-detection signals', fn: () => loadLabVariant('onset-absint') },
         'lab-mood': { label: 'Compute MOOD Vectors', desc: 'Brightness, Texture, Tension, Fullness — 4D mood signal', fn: () => loadLabVariant('mood') },
         'lab-tempo': { label: 'Compute Tempo Compare', desc: 'OnsetTempoTracker vs AbsIntegral — side-by-side tempo detection', fn: () => loadLabVariant('tempo') },
-        'lab-novelty': { label: 'Compute Novelty Lab', desc: 'All novelty approaches side by side — flux, Foote, multi-scale EMA, z-score, KNN', fn: () => loadLabVariant('novelty') },
         'lab-speed': { label: 'Compute Speed Signal', desc: 'Spectral evolution rate — ambient-friendly 0-1 speed from spectral flux, centroid rate, chroma flux', fn: () => loadLabVariant('speed-signal') },
         'spectro-color': { label: 'Compute Spectro-Color', desc: 'Spectrum-to-LED color mapping — mel spectrogram, MFCC, and LED strip previews', fn: () => loadLabVariant('spectro-color') },
     };
@@ -1428,7 +1427,6 @@ async function loadLabVariant(variant) {
         'onset-absint': 'Onset Strength &middot; AbsIntegral &middot; Overlay &middot; Difference',
         'mood': 'Brightness (slope) &middot; Texture (harmonic ratio) &middot; Tension (chroma entropy) &middot; Fullness (spread)',
         'tempo': 'Onset Tracker &middot; AbsIntegral &middot; BPM comparison',
-        'novelty': 'Flux &middot; Foote &middot; Multi-scale EMA &middot; Z-score &middot; KNN Reservoir',
         'spectro-color': 'Mel Spectrogram &middot; MFCC &middot; Uniform &middot; Freq-Position &middot; Waterfall &middot; MFCC-RGB',
         'speed-signal': 'Spectral Flux &middot; Centroid Rate &middot; Chroma Flux &middot; Blended Speed',
     };
@@ -1730,6 +1728,21 @@ let selectedBrightness = JSON.parse(localStorage.getItem('selectedBrightness') |
 let effectsRunning = {};  // {target_id: effect_name} — per-target running state
 let selectedTargetId = 'all';  // 'all' or a specific target id
 let effectsPollTimer = null;
+
+// Binary class filter state — both checked by default.
+// Keys: 'audio-reactive', 'non-audio-reactive'. Values: boolean (checked).
+let classFilters = JSON.parse(localStorage.getItem('classFilters') || '{}');
+
+const CLASS_LABELS = {
+    'audio-reactive':     { label: 'Audio Reactive',     color: '#e94560' },
+    'non-audio-reactive': { label: 'Non Audio Reactive', color: '#888' },
+};
+
+function isEffectAudioReactive(eff) {
+    // An effect is non-audio-reactive if ref_input starts with "none" (case-insensitive)
+    const input = (eff.ref_input || '').trim().toLowerCase();
+    return !input.startsWith('none');
+}
 
 function paletteGradientCSS(pal) {
     const p = pal.colors;
@@ -2124,6 +2137,7 @@ async function loadEffects() {
         deprecatedEffects = data.deprecated || [];
         palettesList = data.palettes || [];
         effectsRunning = data.running || {};
+        initClassFilters();
         renderEffectsCards();
         startEffectsPoll();
     } catch (e) {
@@ -2222,6 +2236,80 @@ function buildTargetBar(panel) {
     panel.appendChild(container);
 }
 
+function initClassFilters() {
+    let changed = false;
+    for (const key of Object.keys(CLASS_LABELS)) {
+        if (!(key in classFilters)) {
+            classFilters[key] = true;
+            changed = true;
+        }
+    }
+    if (changed) {
+        localStorage.setItem('classFilters', JSON.stringify(classFilters));
+    }
+}
+
+function buildClassFilterBar(panel) {
+    // Count effects in each class
+    const counts = { 'audio-reactive': 0, 'non-audio-reactive': 0 };
+    effectsList.forEach(eff => {
+        const key = isEffectAudioReactive(eff) ? 'audio-reactive' : 'non-audio-reactive';
+        counts[key]++;
+    });
+
+    // Only show if both classes have effects
+    if (counts['audio-reactive'] === 0 || counts['non-audio-reactive'] === 0) return;
+
+    const container = document.createElement('div');
+    container.className = 'class-filter-bar';
+
+    const label = document.createElement('span');
+    label.className = 'class-filter-label';
+    label.textContent = 'Class';
+    container.appendChild(label);
+
+    for (const key of Object.keys(CLASS_LABELS)) {
+        const meta = CLASS_LABELS[key];
+        const count = counts[key];
+        const checked = classFilters[key] !== false;
+
+        const chip = document.createElement('label');
+        chip.className = 'class-filter-chip' + (checked ? ' checked' : '');
+
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = checked;
+        input.addEventListener('change', () => {
+            classFilters[key] = input.checked;
+            localStorage.setItem('classFilters', JSON.stringify(classFilters));
+            renderEffectsCards();
+        });
+        chip.appendChild(input);
+
+        const dot = document.createElement('span');
+        dot.className = 'class-filter-dot';
+        dot.style.background = meta.color;
+        chip.appendChild(dot);
+
+        const text = document.createTextNode(meta.label);
+        chip.appendChild(text);
+
+        const countSpan = document.createElement('span');
+        countSpan.className = 'class-filter-count';
+        countSpan.textContent = count;
+        chip.appendChild(countSpan);
+
+        container.appendChild(chip);
+    }
+
+    panel.appendChild(container);
+}
+
+function effectPassesClassFilter(eff) {
+    const key = isEffectAudioReactive(eff) ? 'audio-reactive' : 'non-audio-reactive';
+    return classFilters[key] !== false;
+}
+
 function renderEffectsCards() {
     const panel = document.getElementById('effectsPanel');
     if (effectsList.length === 0) {
@@ -2232,8 +2320,9 @@ function renderEffectsCards() {
     const listWrap = document.createElement('div');
     listWrap.className = 'effects-list';
     buildTargetBar(listWrap);
+    buildClassFilterBar(listWrap);
 
-    const REF_COLS = ['Pattern', 'Scope', 'Input'];
+    const REF_COLS = ['Pattern', 'Scope', 'Input', 'Notes'];
     const wrap = document.createElement('div');
     wrap.className = 'effect-ref-wrap';
 
@@ -2257,9 +2346,20 @@ function renderEffectsCards() {
     const selectedTarget = outputTargets.find(t => t.id === selectedTargetId);
     const targetHasTopology = selectedTarget ? selectedTarget.has_topology : false;
     const filtered = effectsList.filter(eff => {
+        // Class filter (audio-reactive vs non-audio-reactive)
+        if (!effectPassesClassFilter(eff)) return false;
+        // Target topology filter
         if (selectedTargetId === 'all') return true;
         if (eff.handles_topology && !targetHasTopology) return false;
         return true;
+    });
+
+    // Sort by rating descending (highest first), then by order for ties
+    filtered.sort((a, b) => {
+        const ra = a.rating || 0;
+        const rb = b.rating || 0;
+        if (rb !== ra) return rb - ra;
+        return (a.order || 999) - (b.order || 999);
     });
 
     // Partition into topology-specific and general when a topology target is selected
@@ -2271,7 +2371,7 @@ function renderEffectsCards() {
         const tr = document.createElement('tr');
         tr.className = 'effect-section-header';
         const td = document.createElement('td');
-        td.colSpan = 7;
+        td.colSpan = 8;
         td.textContent = label;
         tr.appendChild(td);
         tbody.appendChild(tr);
@@ -2384,6 +2484,16 @@ function renderEffectsCards() {
         });
         nameWrap.appendChild(archiveBtn);
 
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'effect-rename-btn effect-delete-btn';
+        deleteBtn.title = 'Permanently delete effect';
+        deleteBtn.innerHTML = '&#128465;';  // wastebasket icon
+        deleteBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            removeEffect(eff.name);
+        });
+        nameWrap.appendChild(deleteBtn);
+
         nameTd.appendChild(nameWrap);
         tr.appendChild(nameTd);
 
@@ -2444,11 +2554,17 @@ function renderEffectsCards() {
         tr.appendChild(sepTd);
 
         // Reference data columns
-        const refVals = [eff.ref_pattern || '\u2014', eff.ref_scope || '\u2014', eff.ref_input || '\u2014'];
-        REF_COLS.forEach((_, ci) => {
+        const refVals = [eff.ref_pattern || '\u2014', eff.ref_scope || '\u2014', eff.ref_input || '\u2014', eff.notes || ''];
+        REF_COLS.forEach((col, ci) => {
             const td = document.createElement('td');
             td.className = 'ref-data';
-            td.textContent = refVals[ci];
+            if (col === 'Notes') {
+                td.className = 'ref-data ref-notes';
+                td.textContent = refVals[ci];
+                if (refVals[ci]) td.title = refVals[ci];
+            } else {
+                td.textContent = refVals[ci];
+            }
             tr.appendChild(td);
         });
 
@@ -2543,6 +2659,13 @@ function renderEffectsCards() {
             restoreBtn.title = 'Move back to active effects';
             restoreBtn.addEventListener('click', () => restoreEffect(eff.name));
             actionTd.appendChild(restoreBtn);
+            const delBtn = document.createElement('button');
+            delBtn.className = 'effect-toggle';
+            delBtn.textContent = 'Delete';
+            delBtn.title = 'Permanently delete this effect';
+            delBtn.style.marginLeft = '4px';
+            delBtn.addEventListener('click', () => removeEffect(eff.name));
+            actionTd.appendChild(delBtn);
             tr.appendChild(actionTd);
 
             depTbody.appendChild(tr);
@@ -2560,40 +2683,51 @@ async function deprecateEffect(name) {
     const reason = prompt('Why deprecate "' + name + '"? (optional)');
     if (reason === null) return;  // cancelled
     try {
-        await fetch('/api/effects/deprecate', {
+        const resp = await fetch('/api/effects/deprecate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name, deprecated: true, reason })
         });
+        if (!resp.ok) { console.error('deprecate failed:', resp.status); return; }
         // Move from active to deprecated locally
         const idx = effectsList.findIndex(e => e.name === name);
-        if (idx >= 0) {
-            const eff = effectsList.splice(idx, 1)[0];
-            eff.deprecated = true;
-            eff.deprecated_reason = reason;
-            deprecatedEffects.push(eff);
-        }
+        if (idx >= 0) effectsList.splice(idx, 1);
+        deprecatedEffects.push({ name, deprecated_reason: reason });
         renderEffectsCards();
     } catch (e) { console.error('deprecateEffect:', e); }
 }
 
 async function restoreEffect(name) {
     try {
-        await fetch('/api/effects/deprecate', {
+        const resp = await fetch('/api/effects/deprecate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name, deprecated: false })
         });
+        if (!resp.ok) { console.error('restore failed:', resp.status); return; }
         // Move from deprecated to active locally
         const idx = deprecatedEffects.findIndex(e => e.name === name);
-        if (idx >= 0) {
-            const eff = deprecatedEffects.splice(idx, 1)[0];
-            delete eff.deprecated;
-            delete eff.deprecated_reason;
-            effectsList.push(eff);
-        }
+        if (idx >= 0) deprecatedEffects.splice(idx, 1);
+        effectsList.push({ name, order: 999, rating: 0 });
         renderEffectsCards();
     } catch (e) { console.error('restoreEffect:', e); }
+}
+
+async function removeEffect(name) {
+    if (!confirm('Permanently delete "' + name + '"? This cannot be undone.')) return;
+    try {
+        const resp = await fetch('/api/effects/remove', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+        });
+        if (!resp.ok) { console.error('remove failed:', resp.status); return; }
+        const idx = deprecatedEffects.findIndex(e => e.name === name);
+        if (idx >= 0) deprecatedEffects.splice(idx, 1);
+        const activeIdx = effectsList.findIndex(e => e.name === name);
+        if (activeIdx >= 0) effectsList.splice(activeIdx, 1);
+        renderEffectsCards();
+    } catch (e) { console.error('removeEffect:', e); }
 }
 
 async function startEffect(name, targetId, targetType) {

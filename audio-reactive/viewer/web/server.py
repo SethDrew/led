@@ -25,6 +25,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -456,17 +457,65 @@ def _save_effect_prefs(prefs):
         print(f"[effects] Save prefs failed: {e}")
 
 
+def _find_effect_file(name):
+    """Find the .py file that defines a given registry_name."""
+    for search_dir in [EFFECTS_DIR, os.path.join(EFFECTS_DIR, 'deprecated')]:
+        if not os.path.isdir(search_dir):
+            continue
+        for fname in os.listdir(search_dir):
+            if not fname.endswith('.py'):
+                continue
+            fpath = os.path.join(search_dir, fname)
+            try:
+                with open(fpath) as f:
+                    for line in f:
+                        if re.search(
+                            r"registry_name\s*=\s*['\"]" + re.escape(name) + r"['\"]",
+                            line,
+                        ):
+                            return fpath
+            except Exception:
+                continue
+    return None
+
+
+def _scan_deprecated_effects(prefs):
+    """Scan deprecated/ folder for effect files and their registry names."""
+    deprecated_dir = os.path.join(EFFECTS_DIR, 'deprecated')
+    if not os.path.isdir(deprecated_dir):
+        return []
+    results = []
+    for fname in sorted(os.listdir(deprecated_dir)):
+        if not fname.endswith('.py'):
+            continue
+        fpath = os.path.join(deprecated_dir, fname)
+        try:
+            with open(fpath) as f:
+                content = f.read()
+        except Exception:
+            continue
+        match = re.search(r"registry_name\s*=\s*['\"]([^'\"]+)['\"]", content)
+        if match:
+            name = match.group(1)
+            p = prefs.get(name, {})
+            results.append({
+                'name': name,
+                'deprecated_reason': p.get('deprecated_reason', ''),
+            })
+    return results
+
+
 def _get_effects_list():
     """Get effects list merged with preferences (ratings, order).
 
     Returns (active_effects, deprecated_effects, palettes).
-    Deprecated effects are separated from active ones.
+    Active effects come from runner.py discovery (top-level + wled_sr/).
+    Deprecated effects come from the deprecated/ subfolder.
     """
     entries, palettes = _discover_effects()
     prefs = _load_effect_prefs()
 
     effects = []
-    deprecated = []
     for entry in entries:
         name = entry['name'] if isinstance(entry, dict) else entry
         desc = entry.get('description', '') if isinstance(entry, dict) else ''
@@ -489,15 +538,10 @@ def _get_effects_list():
             e['is_signal'] = entry.get('is_signal', False)
             if entry.get('default_palette'):
                 e['default_palette'] = entry['default_palette']
-        if p.get('deprecated'):
-            e['deprecated'] = True
-            e['deprecated_reason'] = p.get('deprecated_reason', '')
-            deprecated.append(e)
-        else:
-            effects.append(e)
+        effects.append(e)
 
     effects.sort(key=lambda e: e['order'])
-    deprecated.sort(key=lambda e: e['name'])
+    deprecated = _scan_deprecated_effects(prefs)
     return effects, deprecated, palettes
 
 
@@ -1687,224 +1731,11 @@ def render_lab(filepath, variant='timbral'):
         return render_lab_mood(filepath)
     if variant == 'tempo':
         return render_lab_tempo(filepath)
-    if variant == 'novelty':
-        return render_lab_novelty(filepath)
     if variant == 'spectro-color':
         return render_lab_spectro_color(filepath)
     if variant == 'speed-signal':
         return render_lab_speed_signal(filepath)
     return render_lab_timbral(filepath)
-
-
-def render_lab_novelty(filepath):
-    """Novelty Lab — all novelty approaches side by side for comparison."""
-    cache_key = (filepath, 'lab-novelty')
-    if cache_key in _render_cache:
-        return _render_cache[cache_key]
-
-    import numpy as np
-    import librosa
-    import librosa.display
-    import matplotlib.pyplot as plt
-    import matplotlib.gridspec as gridspec
-    from scipy.signal import find_peaks
-    from scipy.ndimage import gaussian_filter1d
-
-    plt.style.use('dark_background')
-
-    y, sr = librosa.load(filepath, sr=None, mono=True)
-    duration = librosa.get_duration(y=y, sr=sr)
-    n_fft = 2048
-    hop_length = 512
-    fps = sr / hop_length
-
-    # Compute features: MFCCs + Chroma (both used as flux/Foote inputs)
-    mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, n_fft=n_fft, hop_length=hop_length)
-    chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length)
-    times = librosa.frames_to_time(np.arange(mfccs.shape[1]), sr=sr, hop_length=hop_length)
-    n = len(times)
-
-    # Compute all novelty signals
-    from viewer import (_feature_flux, _ema_deviation, _foote_novelty,
-                        _multiscale_ema_deviation, _cumulative_zscore,
-                        _knn_reservoir_novelty)
-
-    # Standard flux + EMA (both features, matching analysis overview)
-    flux_mfcc = _feature_flux(mfccs)
-    flux_chroma = _feature_flux(chroma)
-    ema_mfcc = _ema_deviation(mfccs, alpha=0.02)
-    ema_chroma = _ema_deviation(chroma, alpha=0.02)
-
-    # Foote's on both feature sets
-    print("[novelty-lab] Computing Foote's (MFCC)...")
-    foote_mfcc = _foote_novelty(mfccs)
-    print("[novelty-lab] Computing Foote's (chroma)...")
-    foote_chroma = _foote_novelty(chroma)
-
-    # New long-memory techniques (MFCC-based)
-    ema_scales_raw = _multiscale_ema_deviation(mfccs)  # 3 arrays: ~3s, ~1min, ~5min
-    zscore = _cumulative_zscore(mfccs)
-    knn = _knn_reservoir_novelty(mfccs)
-
-    # Smooth EMA deviations proportional to their timescale
-    # ~3s → sigma ~1s, ~1min → sigma ~4s, ~5min → sigma ~10s
-    ema_sigmas = [int(1.0 * fps), int(4.0 * fps), int(10.0 * fps)]
-    ema_scales = [gaussian_filter1d(sig, sigma=s) for sig, s in zip(ema_scales_raw, ema_sigmas)]
-    # Re-normalize after smoothing
-    for i in range(len(ema_scales)):
-        mx = np.max(ema_scales[i])
-        if mx > 0:
-            ema_scales[i] /= mx
-
-    # Also smooth z-score and knn lightly (~0.5s)
-    smooth_sigma = max(1, int(0.5 * fps))
-    zscore = gaussian_filter1d(zscore, sigma=smooth_sigma)
-    mx = np.max(zscore)
-    if mx > 0:
-        zscore /= mx
-    knn = gaussian_filter1d(knn, sigma=smooth_sigma)
-    mx = np.max(knn)
-    if mx > 0:
-        knn /= mx
-
-    peak_dist = max(1, int(fps * 1.5))
-
-    # Layout: 7 rows — standard flux/Foote comparison on top, new techniques below
-    fig = plt.figure(figsize=(18, 34))
-    gs = gridspec.GridSpec(7, 1, height_ratios=[0.8, 1.0, 1.2, 1.2, 1.2, 1.0, 1.0], hspace=0.35)
-
-    # ── Row 1: Waveform ──
-    ax = fig.add_subplot(gs[0])
-    librosa.display.waveshow(y, sr=sr, ax=ax, color='#888')
-    ax.set_xlim([0, duration])
-    ax.set_ylabel('Amplitude')
-    ax.set_title('Waveform', fontsize=12)
-
-    # ── Row 2: Mel Spectrogram ──
-    ax = fig.add_subplot(gs[1])
-    S_mel = librosa.feature.melspectrogram(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length)
-    S_db = librosa.power_to_db(S_mel, ref=np.max)
-    librosa.display.specshow(S_db, sr=sr, hop_length=hop_length, x_axis='time',
-                             y_axis='mel', ax=ax, cmap='magma')
-    ax.set_xlim([0, duration])
-    ax.set_title('Mel Spectrogram', fontsize=12)
-
-    # ── Row 3: Causal Flux + EMA + Foote's (dual-axis: chroma left, MFCC right) ──
-    # Matches the analysis overview novelty panel layout
-    ax = fig.add_subplot(gs[2])
-    nc = min(n, len(flux_chroma))
-    ax.plot(times[:nc], flux_chroma[:nc], color='#4DD0E1', linewidth=1.2, alpha=0.9, label='Chroma flux')
-    ax.plot(times[:nc], ema_chroma[:nc], color='#4DD0E1', linewidth=1.0, alpha=0.4, linestyle='--', label='Chroma EMA')
-    peaks_c, _ = find_peaks(flux_chroma[:nc], prominence=0.15, distance=peak_dist)
-    ax.scatter(times[peaks_c], flux_chroma[peaks_c], color='#4DD0E1', s=25, zorder=5, marker='v')
-    ax.set_xlim([0, duration])
-    ax.set_ylabel('Chroma novelty', color='#4DD0E1')
-    ax.tick_params(axis='y', labelcolor='#4DD0E1')
-    ax.grid(True, alpha=0.2)
-
-    ax2 = ax.twinx()
-    nm = min(n, len(flux_mfcc))
-    ax2.plot(times[:nm], flux_mfcc[:nm], color='#FF8A65', linewidth=1.2, alpha=0.9, label='MFCC flux')
-    ax2.plot(times[:nm], ema_mfcc[:nm], color='#FF8A65', linewidth=1.0, alpha=0.4, linestyle='--', label='MFCC EMA')
-    peaks_m, _ = find_peaks(flux_mfcc[:nm], prominence=0.15, distance=peak_dist)
-    ax2.scatter(times[peaks_m], flux_mfcc[peaks_m], color='#FF8A65', s=25, zorder=5, marker='v')
-    ax2.set_ylabel('MFCC novelty', color='#FF8A65')
-    ax2.tick_params(axis='y', labelcolor='#FF8A65')
-
-    ax.set_title('Causal Flux + EMA \u2014 chroma (teal, harmonic) + MFCC (coral, timbral)  '
-                 '[ONLINE \u00b7 O(1) \u00b7 ESP32 \u2713]', fontsize=11)
-    ax.legend(['Chroma flux', 'MFCC flux'], loc='upper right', framealpha=0.8, fontsize=8)
-
-    # ── Row 4: Foote's Checkerboard (both chroma + MFCC) ──
-    ax = fig.add_subplot(gs[3])
-    nfc = min(n, len(foote_chroma))
-    nfm = min(n, len(foote_mfcc))
-    ax.plot(times[:nfc], foote_chroma[:nfc], color='#4DD0E1', linewidth=1.5, alpha=0.9, label='Foote chroma')
-    ax.fill_between(times[:nfc], foote_chroma[:nfc], alpha=0.1, color='#4DD0E1')
-    peaks_fc, _ = find_peaks(foote_chroma[:nfc], prominence=0.15, distance=peak_dist)
-    ax.scatter(times[peaks_fc], foote_chroma[peaks_fc], color='#4DD0E1', s=25, zorder=5, marker='D')
-
-    ax.plot(times[:nfm], foote_mfcc[:nfm], color='#FFD740', linewidth=1.8, alpha=0.85, label='Foote MFCC')
-    ax.fill_between(times[:nfm], foote_mfcc[:nfm], alpha=0.1, color='#FFD740')
-    peaks_fm, _ = find_peaks(foote_mfcc[:nfm], prominence=0.15, distance=peak_dist)
-    ax.scatter(times[peaks_fm], foote_mfcc[peaks_fm], color='#FFD740', s=25, zorder=5, marker='D')
-
-    ax.set_xlim([0, duration])
-    ax.set_ylim([0, 1.1])
-    ax.set_ylabel('Novelty')
-    ax.set_title("Foote's Checkerboard \u2014 chroma (teal) + MFCC (gold)  "
-                 "[OFFLINE \u00b7 O(n\u00b2) \u00b7 ESP32 \u2717]", fontsize=11)
-    ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
-    ax.grid(True, alpha=0.2)
-
-    # ── Row 5: Multi-scale EMA ──
-    ax = fig.add_subplot(gs[4])
-    ema_colors = ['#80DEEA', '#4DD0E1', '#00ACC1']
-    ema_labels = ['~3s (\u03b1=0.004)', '~1min (\u03b1=0.0002)', '~5min (\u03b1=0.00004)']
-    for i, (ema_sig, color, label) in enumerate(zip(ema_scales, ema_colors, ema_labels)):
-        ne = min(n, len(ema_sig))
-        ax.plot(times[:ne], ema_sig[:ne], color=color, linewidth=1.5 + i * 0.3,
-                label=label, alpha=0.9)
-        ax.fill_between(times[:ne], ema_sig[:ne], alpha=0.08, color=color)
-    ax.set_xlim([0, duration])
-    ax.set_ylim([0, 1.1])
-    ax.set_ylabel('Novelty')
-    ax.set_title('Multi-scale EMA Deviation \u2014 drift from context at 3 timescales  '
-                 '[ONLINE \u00b7 O(1) \u00b7 ESP32 \u2713]', fontsize=11)
-    ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
-    ax.grid(True, alpha=0.2)
-
-    # ── Row 6: Cumulative Z-score ──
-    ax = fig.add_subplot(gs[5])
-    nz = min(n, len(zscore))
-    ax.plot(times[:nz], zscore[:nz], color='#B388FF', linewidth=1.5)
-    ax.fill_between(times[:nz], zscore[:nz], alpha=0.2, color='#B388FF')
-    ax.set_xlim([0, duration])
-    ax.set_ylim([0, 1.1])
-    ax.set_ylabel('Novelty')
-    ax.set_title('Cumulative Z-score \u2014 how unusual vs everything heard so far  '
-                 '[ONLINE \u00b7 O(1) \u00b7 ESP32 \u2713 \u00b7 dilutes over time]', fontsize=11)
-    ax.grid(True, alpha=0.2)
-
-    # ── Row 7: KNN Reservoir ──
-    ax = fig.add_subplot(gs[6])
-    nk = min(n, len(knn))
-    ax.plot(times[:nk], knn[:nk], color='#69F0AE', linewidth=1.5)
-    ax.fill_between(times[:nk], knn[:nk], alpha=0.2, color='#69F0AE')
-    peaks_k, _ = find_peaks(knn[:nk], prominence=0.15, distance=peak_dist)
-    ax.scatter(times[peaks_k], knn[peaks_k], color='#69F0AE', s=25, zorder=5, marker='D')
-    ax.set_xlim([0, duration])
-    ax.set_ylim([0, 1.1])
-    ax.set_ylabel('Novelty')
-    ax.set_xlabel('Time (s)')
-    ax.set_title("KNN Reservoir (K=5, N=500) \u2014 'have I heard this timbre before?'  "
-                 "[ONLINE \u00b7 O(N) \u00b7 ESP32 \u2713 at N\u2264500]", fontsize=11)
-    ax.grid(True, alpha=0.2)
-
-    filename = Path(filepath).name
-    fig.suptitle(f'{filename} \u2014 Novelty Lab', fontsize=14, fontweight='bold', y=0.995)
-    fig.subplots_adjust(top=0.975, bottom=0.02)
-    fig.canvas.draw()
-
-    ax0 = fig.axes[0]
-    x_left = ax0.transData.transform((0, 0))[0]
-    x_right = ax0.transData.transform((duration, 0))[0]
-    fig_width = fig.get_figwidth() * DPI
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', dpi=DPI, facecolor=fig.get_facecolor())
-    matplotlib.pyplot.close(fig)
-    png_bytes = buf.getvalue()
-
-    headers = {
-        'X-Left-Px': str(x_left),
-        'X-Right-Px': str(x_right),
-        'X-Png-Width': str(fig_width),
-        'X-Duration': str(duration),
-    }
-
-    _render_cache[cache_key] = (png_bytes, headers)
-    return png_bytes, headers
 
 
 def render_lab_mood(filepath):
@@ -3915,7 +3746,6 @@ def render_lab_timbral(filepath):
     import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
     from scipy.ndimage import gaussian_filter1d
-    from scipy.signal import find_peaks
 
     plt.style.use('dark_background')
 
@@ -3927,17 +3757,9 @@ def render_lab_timbral(filepath):
     mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, n_fft=n_fft, hop_length=hop_length)
     times = librosa.frames_to_time(np.arange(mfccs.shape[1]), sr=sr, hop_length=hop_length)
 
-    # Causal novelty: flux + EMA deviation (O(n), no similarity matrix)
-    fps = sr / hop_length
-    from viewer import _feature_flux, _ema_deviation, _foote_novelty
-    novelty = _feature_flux(mfccs)
-    ema_nov = _ema_deviation(mfccs, alpha=0.02)
-    foote_nov = _foote_novelty(mfccs)
-
-    # Layout: heatmap + 4 individual coefficients + fine texture heatmap + novelty
-    # Total 7 panels
-    fig = plt.figure(figsize=(18, 28))
-    gs = gridspec.GridSpec(7, 1, height_ratios=[1.5, 1, 1, 1, 1, 1.5, 1.2], hspace=0.35)
+    # Layout: heatmap + 4 individual coefficients + fine texture heatmap
+    fig = plt.figure(figsize=(18, 24))
+    gs = gridspec.GridSpec(6, 1, height_ratios=[1.5, 1, 1, 1, 1, 1.5], hspace=0.35)
 
     sigma = 5  # smoothing for individual coefficient plots
 
@@ -4011,32 +3833,6 @@ def render_lab_timbral(filepath):
     ax.set_yticklabels([str(i) for i in range(4, 13)])
     ax.set_title('MFCC 4-12: Fine Timbral Texture — subtle details '
                  '(buzzy vs smooth, nasal vs hollow, etc.)', fontsize=11)
-
-    # ── Panel 7: Timbral Shift (MFCC Novelty) ──
-    ax = fig.add_subplot(gs[6])
-    n = min(len(times), len(novelty))
-    ax.plot(times[:n], novelty[:n], color='#FF8A65', linewidth=1.5, label='Flux (sharp edges)')
-    ax.fill_between(times[:n], novelty[:n], alpha=0.2, color='#FF8A65')
-    ax.plot(times[:n], ema_nov[:n], color='#FFD54F', linewidth=1.2, alpha=0.7,
-            linestyle='--', label='EMA deviation (drift)')
-    peak_dist = max(1, int(fps * 1.5))
-    peaks, _ = find_peaks(novelty[:n], prominence=0.15, distance=peak_dist)
-    ax.scatter(times[peaks], novelty[peaks], color='#FF8A65', s=30, zorder=5, marker='v')
-    # Foote's offline novelty (gold standard reference)
-    n_f = min(len(times), len(foote_nov))
-    ax.plot(times[:n_f], foote_nov[:n_f], color='#FFD740', linewidth=1.8, alpha=0.85,
-            label="Foote's (offline)")
-    ax.fill_between(times[:n_f], foote_nov[:n_f], alpha=0.1, color='#FFD740')
-    peaks_f, _ = find_peaks(foote_nov[:n_f], prominence=0.15, distance=peak_dist)
-    ax.scatter(times[peaks_f], foote_nov[peaks_f], color='#FFD740', s=25, zorder=5, marker='D')
-    ax.set_xlim([0, duration])
-    ax.set_ylim([0, 1.1])
-    ax.set_ylabel('Novelty')
-    ax.set_xlabel('Time (s)')
-    ax.set_title("Timbral Shift — causal flux (orange) vs Foote's checkerboard "
-                 "(gold, offline structural boundaries)", fontsize=11)
-    ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
-    ax.grid(True, alpha=0.2)
 
     filename = Path(filepath).name
     fig.suptitle(f'{filename} — Timbral Shape (MFCC) Lab', fontsize=14,
@@ -4393,6 +4189,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._handle_effect_notes()
         elif path == '/api/effects/deprecate':
             self._handle_effect_deprecate()
+        elif path == '/api/effects/remove':
+            self._handle_effect_remove()
         elif path == '/api/effects/analyze':
             self._handle_effect_analyze()
         elif path == '/api/effects/controller':
@@ -4516,16 +4314,58 @@ class ViewerHandler(BaseHTTPRequestHandler):
         if not name:
             self.send_error(400, 'Missing effect name')
             return
+
+        deprecated_dir = os.path.join(EFFECTS_DIR, 'deprecated')
+        fpath = _find_effect_file(name)
+        if not fpath:
+            self.send_error(404, f'Effect file not found: {name}')
+            return
+
         prefs = _load_effect_prefs()
-        if name not in prefs:
-            prefs[name] = {}
+
         if deprecated:
-            prefs[name]['deprecated'] = True
+            # Move file into deprecated/
+            if os.path.dirname(os.path.abspath(fpath)) == os.path.abspath(deprecated_dir):
+                self._json_response({'ok': True})
+                return
+            os.makedirs(deprecated_dir, exist_ok=True)
+            dest = os.path.join(deprecated_dir, os.path.basename(fpath))
+            shutil.move(fpath, dest)
             if reason:
+                if name not in prefs:
+                    prefs[name] = {}
                 prefs[name]['deprecated_reason'] = reason
+            # File location is authoritative; drop legacy flag
+            if name in prefs:
+                prefs[name].pop('deprecated', None)
         else:
-            prefs[name].pop('deprecated', None)
-            prefs[name].pop('deprecated_reason', None)
+            # Restore: move file back to effects/
+            if os.path.dirname(os.path.abspath(fpath)) != os.path.abspath(deprecated_dir):
+                self._json_response({'ok': True})
+                return
+            dest = os.path.join(EFFECTS_DIR, os.path.basename(fpath))
+            shutil.move(fpath, dest)
+            if name in prefs:
+                prefs[name].pop('deprecated_reason', None)
+
+        _save_effect_prefs(prefs)
+        self._json_response({'ok': True})
+
+    def _handle_effect_remove(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        name = body.get('name', '')
+        if not name:
+            self.send_error(400, 'Missing effect name')
+            return
+        fpath = _find_effect_file(name)
+        if not fpath:
+            self.send_error(404, f'Effect file not found: {name}')
+            return
+        os.remove(fpath)
+        prefs = _load_effect_prefs()
+        prefs.pop(name, None)
         _save_effect_prefs(prefs)
         self._json_response({'ok': True})
 

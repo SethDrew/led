@@ -550,6 +550,7 @@ body {
     background: #333;
 }
 td.ref-data { color: #777; font-size: 11px; }
+td.ref-notes { text-align: left; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #999; font-style: italic; }
 .effect-section-header td {
     padding: 8px 10px 4px; color: #888; font-size: 11px; font-weight: 600;
     text-transform: uppercase; letter-spacing: 0.8px; border-bottom: 1px solid #333;
@@ -708,4 +709,63 @@ td.ref-data { color: #777; font-size: 11px; }
 }
 .target-badge:hover {
     background: rgba(233,69,96,0.4);
+}
+
+/* Class filter bar (audio-reactive / non-audio-reactive) */
+.class-filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 0 8px;
+    flex-wrap: wrap;
+}
+.class-filter-label {
+    font-size: 11px;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-right: 4px;
+    user-select: none;
+}
+.class-filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    color: #888;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid #333;
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.15s;
+}
+.class-filter-chip:hover {
+    background: rgba(255,255,255,0.08);
+    color: #ccc;
+}
+.class-filter-chip.checked {
+    color: #e0e0e0;
+    border-color: #555;
+    background: rgba(255,255,255,0.08);
+}
+.class-filter-chip input[type="checkbox"] {
+    display: none;
+}
+.class-filter-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    opacity: 0.5;
+    transition: opacity 0.15s;
+}
+.class-filter-chip.checked .class-filter-dot {
+    opacity: 1;
+}
+.class-filter-count {
+    font-size: 10px;
+    color: #555;
+    margin-left: 1px;
 }

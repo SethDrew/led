@@ -55,183 +55,6 @@ BAND_COLORS = {
 ANNOTATION_COLORS = ['#FF4081', '#40C4FF', '#69F0AE', '#FFD740', '#E040FB', '#FF6E40']
 
 
-def _feature_flux(features):
-    """Half-wave rectified feature flux — peaks at abrupt timbral/harmonic changes.
-
-    O(n) causal alternative to Foote's O(n²) checkerboard novelty.
-    """
-    norms = np.linalg.norm(features, axis=0, keepdims=True)
-    norms[norms == 0] = 1
-    normed = features / norms
-    diff = np.diff(normed, axis=1)
-    flux = np.mean(np.maximum(0, diff), axis=0)
-    flux = np.concatenate([[0], flux])
-    mx = np.max(flux)
-    if mx > 0:
-        flux /= mx
-    return flux
-
-
-def _ema_deviation(features, alpha=0.02):
-    """EMA deviation — peaks during gradual drift from recent context.
-
-    O(n) causal complement to feature flux.  Catches buildups and texture
-    shifts that flux misses.
-    """
-    # Normalize so all coefficients contribute equally (matches _feature_flux)
-    norms = np.linalg.norm(features, axis=0, keepdims=True)
-    norms[norms == 0] = 1
-    normed = features / norms
-
-    n_frames = normed.shape[1]
-    ema = normed[:, 0].copy().astype(np.float64)
-    deviation = np.zeros(n_frames)
-    for t in range(1, n_frames):
-        deviation[t] = np.linalg.norm(normed[:, t] - ema)
-        ema = alpha * normed[:, t] + (1 - alpha) * ema
-    mx = np.max(deviation)
-    if mx > 0:
-        deviation /= mx
-    return deviation
-
-
-def _foote_novelty(features, kernel_size=64):
-    """Foote's checkerboard novelty — offline O(n^2) structural boundary detector.
-
-    Builds a self-similarity matrix, convolves with a checkerboard kernel
-    along the diagonal. Peaks indicate where music before differs maximally
-    from music after — i.e., section boundaries.
-
-    Offline only — requires full audio. Cannot run in real-time.
-    """
-    # L2-normalize features (same as flux)
-    norms = np.linalg.norm(features, axis=0, keepdims=True)
-    norms[norms == 0] = 1
-    normed = features / norms
-
-    # Self-similarity matrix (cosine similarity since features are L2-normed)
-    S = normed.T @ normed  # (n_frames, n_frames)
-
-    # Checkerboard kernel (Foote 2000)
-    # Diagonal blocks (+1): within-section similarity (high at boundaries)
-    # Off-diagonal blocks (-1): cross-section similarity (low at boundaries)
-    # Result: positive at boundaries, zero in homogeneous regions
-    half = kernel_size // 2
-    kernel = -np.ones((kernel_size, kernel_size))
-    kernel[:half, :half] = 1    # top-left: before vs before
-    kernel[half:, half:] = 1    # bottom-right: after vs after
-
-    n = S.shape[0]
-    novelty = np.zeros(n)
-    for i in range(half, n - half):
-        patch = S[i - half:i + half, i - half:i + half]
-        novelty[i] = np.sum(patch * kernel)
-
-    # Half-wave rectify (only positive = boundary-like)
-    novelty = np.maximum(0, novelty)
-
-    # Normalize
-    mx = np.max(novelty)
-    if mx > 0:
-        novelty /= mx
-
-    return novelty
-
-
-def _multiscale_ema_deviation(features, alphas=(0.004, 0.0002, 0.00004)):
-    """EMA deviation at multiple timescales — drift from context at ~3s, ~1min, ~5min.
-
-    Returns list of 3 arrays, each normalized independently to [0, 1].
-    O(1) per frame per scale. ESP32-feasible.
-    """
-    norms = np.linalg.norm(features, axis=0, keepdims=True)
-    norms[norms == 0] = 1
-    normed = features / norms
-
-    n_frames = normed.shape[1]
-    results = []
-    for alpha in alphas:
-        ema = normed[:, 0].copy().astype(np.float64)
-        deviation = np.zeros(n_frames)
-        for t in range(1, n_frames):
-            deviation[t] = np.linalg.norm(normed[:, t] - ema)
-            ema = alpha * normed[:, t] + (1 - alpha) * ema
-        mx = np.max(deviation)
-        if mx > 0:
-            deviation /= mx
-        results.append(deviation)
-    return results
-
-
-def _cumulative_zscore(features):
-    """Running mean + variance z-score — how unusual vs everything heard so far.
-
-    Uses Welford's online algorithm. O(1) per frame, O(d) memory.
-    Normalized to [0, 1]. Note: z-scores dilute over time as variance grows.
-    """
-    n_dims, n_frames = features.shape
-    norms = np.linalg.norm(features, axis=0, keepdims=True)
-    norms[norms == 0] = 1
-    normed = features / norms
-
-    running_mean = np.zeros(n_dims)
-    running_var = np.zeros(n_dims)
-    scores = np.zeros(n_frames)
-
-    for t in range(n_frames):
-        x = normed[:, t]
-        if t == 0:
-            running_mean = x.copy()
-            continue
-        delta = x - running_mean
-        running_mean += delta / (t + 1)
-        running_var += delta * (x - running_mean)  # Welford's
-        if t > 1:
-            std = np.sqrt(running_var / t)
-            std[std == 0] = 1
-            scores[t] = np.linalg.norm((x - running_mean) / std)
-
-    mx = np.max(scores)
-    if mx > 0:
-        scores /= mx
-    return scores
-
-
-def _knn_reservoir_novelty(features, reservoir_size=500, k=5):
-    """Reservoir sampling + KNN distance — 'have I heard this timbre before?'
-
-    Each frame's score = distance to K-th nearest neighbor among reservoir entries.
-    Reservoir sampling ensures uniform coverage of the song's history.
-    O(N) per frame. ESP32-feasible at N<=500.
-    """
-    n_dims, n_frames = features.shape
-    norms = np.linalg.norm(features, axis=0, keepdims=True)
-    norms[norms == 0] = 1
-    normed = features / norms
-
-    reservoir = []
-    scores = np.zeros(n_frames)
-    rng = np.random.RandomState(42)  # deterministic for reproducibility
-
-    for t in range(n_frames):
-        x = normed[:, t]
-        if len(reservoir) >= k:
-            dists = np.linalg.norm(np.array(reservoir) - x, axis=1)
-            dists.sort()
-            scores[t] = dists[k - 1]  # K-th nearest
-
-        # Reservoir sampling
-        if len(reservoir) < reservoir_size:
-            reservoir.append(x.copy())
-        else:
-            j = rng.randint(0, t + 1)
-            if j < reservoir_size:
-                reservoir[j] = x.copy()
-
-    mx = np.max(scores)
-    if mx > 0:
-        scores /= mx
-    return scores
 
 
 # ── Interactive Visualizer ────────────────────────────────────────────
@@ -425,8 +248,7 @@ class SyncedVisualizer:
             np.arange(len(self.onset_env)), sr=self.sr, hop_length=self.hop_length
         )
 
-        # ── Novelty: feature flux + EMA deviation (causal, O(n)) ─────
-        print("Computing novelty...")
+        # ── MFCC, chroma, spectral flatness ─────────────────────────
         fps = self.sr / self.hop_length
         self.mfccs = librosa.feature.mfcc(
             y=self.y, sr=self.sr, n_mfcc=13,
@@ -441,14 +263,16 @@ class SyncedVisualizer:
             y=self.y, n_fft=self.n_fft, hop_length=self.hop_length
         )[0]
 
-        self.novelty_mfcc = _feature_flux(self.mfccs)
-        self.novelty_chroma = _feature_flux(self.chroma)
-        self.ema_mfcc = _ema_deviation(self.mfccs, alpha=0.02)
-        self.ema_chroma = _ema_deviation(self.chroma, alpha=0.02)
-
-        print("Computing Foote's novelty (offline)...")
-        self.foote_mfcc = _foote_novelty(self.mfccs)
-        self.foote_chroma = _foote_novelty(self.chroma)
+        # MFCC flux — half-wave rectified frame-to-frame change (used by event detection)
+        _norms = np.linalg.norm(self.mfccs, axis=0, keepdims=True)
+        _norms[_norms == 0] = 1
+        _normed = self.mfccs / _norms
+        _diff = np.diff(_normed, axis=1)
+        self.mfcc_flux = np.mean(np.maximum(0, _diff), axis=0)
+        self.mfcc_flux = np.concatenate([[0], self.mfcc_flux])
+        _mx = np.max(self.mfcc_flux)
+        if _mx > 0:
+            self.mfcc_flux /= _mx
 
         # ── Per-band normalization: asymmetric EMA + dropout detection ──
         # (ledger: per-band-normalization-with-dropout-handling)
@@ -717,8 +541,8 @@ class SyncedVisualizer:
             _effects_dir = str(Path(__file__).resolve().parent.parent / 'effects')
             if _effects_dir not in sys.path:
                 sys.path.insert(0, _effects_dir)
-            from timbral_section_detect import detect_log_eagerness
-            self.timbral_transitions = detect_log_eagerness(
+            from signals import detect_timbral_sections
+            self.timbral_transitions = detect_timbral_sections(
                 self.mfccs[0:13], fps, l2_normalize=False, power=3.0
             )
             print(f"Timbral sections: {len(self.timbral_transitions)} transitions detected")
@@ -762,7 +586,7 @@ class SyncedVisualizer:
         n = len(t)
 
         # ── Drops: additive prominence-based scoring ──
-        nov_m = self.novelty_mfcc[:n]
+        nov_m = self.mfcc_flux[:n]
         rms = self.rms_energy[:n]
         rms_max = np.max(rms) + 1e-10
 
@@ -849,7 +673,7 @@ class SyncedVisualizer:
         n = len(t)
 
         # ── Drops: multiplicative novelty-value scoring ──
-        nov_m = self.novelty_mfcc[:n]
+        nov_m = self.mfcc_flux[:n]
         rms_d = self.rms_derivative[:n]
         rms_d_norm = np.abs(rms_d) / (np.max(np.abs(rms_d)) + 1e-10)
 
@@ -1746,8 +1570,6 @@ class SyncedVisualizer:
             'band-rt': self._build_band_rt_panel,
             'band-integral': self._build_band_integral_panel,
             'mfcc': self._build_mfcc_panel,
-            'novelty': self._build_novelty_panel,
-            'foote': self._build_foote_panel,
             'band-deviation': self._build_band_deviation_panel,
             'event-drops': self._build_event_drops_panel,
             'event-risers': self._build_event_risers_panel,
@@ -1781,7 +1603,7 @@ class SyncedVisualizer:
             n_panels = len(builders)
             height_map = {'waveform': 1, 'spectrogram': 2, 'bands': 1, 'bands-aw': 1,
                           'rms-derivative': 1, 'centroid': 1, 'centroid-derivative': 1,
-                          'band-derivative': 1, 'mfcc': 1.5, 'novelty': 1.5, 'foote': 1.5,
+                          'band-derivative': 1, 'mfcc': 1.5,
                           'band-deviation': 1.5, 'annotations': None,
                           'event-drops': 1.0, 'event-risers': 0.5,
                           'event-dropouts': 1.0, 'event-harmonic': 1.0,
@@ -1813,7 +1635,7 @@ class SyncedVisualizer:
         elif has_annotations:
             n_layers = len(self.annotations) + (1 if self.annotate_layer else 0)
             ann_height = max(0.8, 0.4 * n_layers)
-            gs = gridspec.GridSpec(11, 1, height_ratios=[1, 2, 1, 1, 1, 1, 1, 1.5, 1.5, 1.5, ann_height], hspace=0.3)
+            gs = gridspec.GridSpec(10, 1, height_ratios=[1, 2, 1, 1, 1, 1, 1, 1.5, 1.5, ann_height], hspace=0.3)
             self._build_waveform_panel(self.fig.add_subplot(gs[0]))
             self._build_spectrogram_panel(self.fig.add_subplot(gs[1]))
             self._build_band_energy_panel(self.fig.add_subplot(gs[2]))
@@ -1822,11 +1644,10 @@ class SyncedVisualizer:
             self._build_centroid_derivative_panel(self.fig.add_subplot(gs[5]))
             self._build_band_derivative_panel(self.fig.add_subplot(gs[6]))
             self._build_mfcc_panel(self.fig.add_subplot(gs[7]))
-            self._build_novelty_panel(self.fig.add_subplot(gs[8]))
-            self._build_band_deviation_panel(self.fig.add_subplot(gs[9]))
-            self._build_annotation_panel(self.fig.add_subplot(gs[10]))
+            self._build_band_deviation_panel(self.fig.add_subplot(gs[8]))
+            self._build_annotation_panel(self.fig.add_subplot(gs[9]))
         else:
-            gs = gridspec.GridSpec(10, 1, height_ratios=[1, 2, 1, 1, 1, 1, 1, 1.5, 1.5, 1.5], hspace=0.3)
+            gs = gridspec.GridSpec(9, 1, height_ratios=[1, 2, 1, 1, 1, 1, 1, 1.5, 1.5], hspace=0.3)
             self._build_waveform_panel(self.fig.add_subplot(gs[0]))
             self._build_spectrogram_panel(self.fig.add_subplot(gs[1]))
             self._build_band_energy_panel(self.fig.add_subplot(gs[2]))
@@ -1835,8 +1656,7 @@ class SyncedVisualizer:
             self._build_centroid_derivative_panel(self.fig.add_subplot(gs[5]))
             self._build_band_derivative_panel(self.fig.add_subplot(gs[6]))
             self._build_mfcc_panel(self.fig.add_subplot(gs[7]))
-            self._build_novelty_panel(self.fig.add_subplot(gs[8]))
-            self._build_band_deviation_panel(self.fig.add_subplot(gs[9]))
+            self._build_band_deviation_panel(self.fig.add_subplot(gs[8]))
 
         self._finalize_figure()
 
@@ -1844,23 +1664,9 @@ class SyncedVisualizer:
         waveform_times = np.linspace(0, self.duration, len(self.y))
         ax.plot(waveform_times, self.y, color='#FFFFFF', linewidth=0.5, alpha=0.8)
 
-        # RMS energy overlay (normalized to waveform amplitude range, hidden by default)
-        rms_norm = self.rms_energy / np.max(self.rms_energy)
-        y_max = np.max(np.abs(self.y)) if np.max(np.abs(self.y)) > 0 else 1.0
-        rms_scaled = rms_norm * y_max
-        rms_line, = ax.plot(self.times, rms_scaled,
-                            color='#FFD740', linewidth=2, label='RMS [E]',
-                            alpha=0.8, visible=False)
-        # Store for feature toggle system
-        if not hasattr(self, 'feature_toggle'):
-            self.feature_toggle = {}
-            self.feature_keys = {}
-        self.feature_toggle['rms'] = {'artists': [rms_line], 'visible': False}
-        self.feature_keys['e'] = 'rms'
-
         ax.set_xlim([0, self.duration])
         ax.set_ylabel('Amplitude')
-        ax.set_title('Waveform — [E] toggle RMS overlay', fontsize=11)
+        ax.set_title('Waveform', fontsize=11)
         ax.grid(True, alpha=0.2)
         if not hasattr(self, 'axes'):
             self.axes = []
@@ -2031,114 +1837,16 @@ class SyncedVisualizer:
             self.axes = []
         self.axes.append(ax)
 
-    def _build_novelty_panel(self, ax):
-        """Causal novelty: flux (sharp edges) + EMA deviation (gradual drift)
-        + Foote's checkerboard (offline structural boundaries).
-        Chroma on left axis, MFCC + Foote on right axis (independent scales)."""
-        from scipy.signal import find_peaks
-
-        t = self.times
-        n = len(t)
-        nov_m = self.novelty_mfcc[:n]
-        nov_c = self.novelty_chroma[:n]
-        ema_m = self.ema_mfcc[:n]
-        ema_c = self.ema_chroma[:n]
-        foote_m = self.foote_mfcc[:n]
-
-        fps = self.sr / self.hop_length
-        peak_dist = max(1, int(fps * 1.5))
-
-        # Chroma on left axis
-        line_c, = ax.plot(t, nov_c, color='#4DD0E1', linewidth=1.2, alpha=0.9, label='Chroma flux')
-        ax.plot(t, ema_c, color='#4DD0E1', linewidth=1.0, alpha=0.4, linestyle='--', label='Chroma EMA')
-        peaks_c, _ = find_peaks(nov_c, prominence=0.15, distance=peak_dist)
-        ax.scatter(t[peaks_c], nov_c[peaks_c], color='#4DD0E1', s=25, zorder=5, marker='v')
-        ax.set_xlim([0, self.duration])
-        ax.set_ylabel('Chroma novelty', color='#4DD0E1')
-        ax.tick_params(axis='y', labelcolor='#4DD0E1')
-        ax.grid(True, alpha=0.2)
-
-        # MFCC on right axis (independent scale)
-        ax2 = ax.twinx()
-        line_m, = ax2.plot(t, nov_m, color='#FF8A65', linewidth=1.2, alpha=0.9, label='MFCC flux')
-        ax2.plot(t, ema_m, color='#FF8A65', linewidth=1.0, alpha=0.4, linestyle='--', label='MFCC EMA')
-        peaks_m, _ = find_peaks(nov_m, prominence=0.15, distance=peak_dist)
-        ax2.scatter(t[peaks_m], nov_m[peaks_m], color='#FF8A65', s=25, zorder=5, marker='v')
-        ax2.set_ylabel('MFCC novelty', color='#FF8A65')
-        ax2.tick_params(axis='y', labelcolor='#FF8A65')
-
-        # Foote's offline novelty (gold standard reference) on MFCC axis
-        line_f, = ax2.plot(t, foote_m, color='#FFD740', linewidth=1.8, alpha=0.85,
-                           label="Foote's (offline)")
-        ax2.fill_between(t, foote_m, alpha=0.1, color='#FFD740')
-        peaks_f, _ = find_peaks(foote_m, prominence=0.15, distance=peak_dist)
-        ax2.scatter(t[peaks_f], foote_m[peaks_f], color='#FFD740', s=25, zorder=5, marker='D')
-
-        ax.set_title(
-            "Novelty — causal flux (solid) vs Foote's checkerboard (gold, offline)  "
-            "[V] events (todo)", fontsize=11)
-        ax.legend([line_c, line_m, line_f],
-                  ['Chroma flux (harmonic)', 'MFCC flux (timbral)',
-                   "Foote's (offline, structural)"],
-                  loc='upper right', framealpha=0.8, fontsize=8)
-
-        # V:events — placeholder for future real-time event overlay (todo)
-        if not hasattr(self, 'feature_toggle'):
-            self.feature_toggle = {}
-            self.feature_keys = {}
-        self.feature_toggle['events'] = {'artists': [], 'visible': False}
-        self.feature_keys['v'] = 'events'
-
-        if not hasattr(self, 'axes'):
-            self.axes = []
-        self.axes.append(ax)
-
-    def _build_foote_panel(self, ax):
-        """Foote's checkerboard novelty — chroma (teal) + MFCC (gold), offline reference."""
-        from scipy.signal import find_peaks
-
-        t = self.times
-        n = len(t)
-        foote_m = self.foote_mfcc[:n]
-        foote_c = self.foote_chroma[:n]
-
-        fps = self.sr / self.hop_length
-        peak_dist = max(1, int(fps * 1.5))
-
-        # Chroma Foote
-        ax.plot(t, foote_c, color='#4DD0E1', linewidth=1.5, alpha=0.9, label='Foote chroma')
-        ax.fill_between(t, foote_c, alpha=0.1, color='#4DD0E1')
-        peaks_c, _ = find_peaks(foote_c, prominence=0.15, distance=peak_dist)
-        ax.scatter(t[peaks_c], foote_c[peaks_c], color='#4DD0E1', s=25, zorder=5, marker='D')
-
-        # MFCC Foote
-        ax.plot(t, foote_m, color='#FFD740', linewidth=1.8, alpha=0.85, label='Foote MFCC')
-        ax.fill_between(t, foote_m, alpha=0.1, color='#FFD740')
-        peaks_m, _ = find_peaks(foote_m, prominence=0.15, distance=peak_dist)
-        ax.scatter(t[peaks_m], foote_m[peaks_m], color='#FFD740', s=25, zorder=5, marker='D')
-
-        ax.set_xlim([0, self.duration])
-        ax.set_ylim([0, 1.1])
-        ax.set_ylabel('Novelty')
-        ax.set_title("Foote's Checkerboard — chroma (teal, harmonic) + MFCC (gold, timbral)  "
-                     "[OFFLINE · O(n²)]", fontsize=11)
-        ax.legend(loc='upper right', framealpha=0.8, fontsize=8)
-        ax.grid(True, alpha=0.2)
-
-        if not hasattr(self, 'axes'):
-            self.axes = []
-        self.axes.append(ax)
-
     # ── Event timeline panels (one per event type) ─────────────────
 
     def _build_event_drops_panel(self, ax):
-        """Drops: MFCC novelty peaks scored with RMS + deviation boosters."""
+        """Drops: MFCC flux peaks scored with RMS + deviation boosters."""
         t = self.times
         n = len(t)
-        nov_m = self.novelty_mfcc[:n]
+        nov_m = self.mfcc_flux[:n]
 
-        # MFCC novelty as context trace
-        ax.plot(t, nov_m, color='#FF8A65', linewidth=1.0, alpha=0.5, label='MFCC novelty')
+        # MFCC flux as context trace
+        ax.plot(t, nov_m, color='#FF8A65', linewidth=1.0, alpha=0.5, label='MFCC flux')
         ax.set_xlim([0, self.duration])
         ax.set_ylim([0, max(1.1, max(self.event_drop_scores) * 1.1) if self.event_drop_scores else 1.1])
 
@@ -2157,9 +1865,9 @@ class SyncedVisualizer:
                     bbox=dict(boxstyle='round,pad=0.15', facecolor='black', alpha=0.6))
 
         nd = len(self.event_drops)
-        ax.set_ylabel('Novelty / Score')
+        ax.set_ylabel('Flux / Score')
         ax.set_title(f'Drops — {nd} detected  '
-                     f'(MFCC novelty peaks, scored with RMS + deviation boosters)', fontsize=11)
+                     f'(MFCC flux peaks, scored with RMS + deviation boosters)', fontsize=11)
         ax.legend(loc='upper left', framealpha=0.8, fontsize=8)
         ax.grid(True, alpha=0.2)
         self._overlay_sections(ax)

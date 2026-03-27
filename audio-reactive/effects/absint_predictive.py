@@ -1,40 +1,49 @@
 """
-Abs-Integral Predictive — beat prediction via autocorrelation of abs-integral signal.
+Impulse Predict — beat prediction via onset-envelope tempo estimation.
 
-Builds on absint_pulse (late detection of beats via abs-integral threshold) and adds
-tempo estimation via autocorrelation + forward prediction. The late detection confirms
-beats, autocorrelation finds the period, and we predict the NEXT beat to fire on-time.
+Uses abs-integral threshold crossing for confirmed beat detection, and
+SignalFusionTempoTracker (multi-onset autocorrelation) for tempo estimation.
+Confirmed beats fire at 100% brightness, predicted beats fire on-time at 80%.
 
-Key insight: autocorrelation of the abs-integral signal over a ~5s window is far more
-robust for tempo estimation than measuring intervals between noisy threshold crossings.
-The autocorrelation naturally averages over many beats and handles occasional missed/extra
-detections gracefully.
-
-Visual: whole tree pulses on each predicted beat (80% brightness) and
-confirmed beat (100% brightness). Exponential decay. Falls back to late-only detection
-if autocorrelation can't find a confident period.
+The tempo tracker uses signal-level fusion of spectral flux, energy flux, and
+harmonic flux — validated as the best real-time tempo estimator (62% LED-acceptable
+on FMA 300-track benchmark, +9pp over onset alone).
 """
 
 import threading
 from base import ScalarSignalEffect
-from signals import OverlapFrameAccumulator, AbsIntegral, BeatPredictor
+from signals import OverlapFrameAccumulator, AbsIntegral, SignalFusionTempoTracker
 
 
 class AbsIntPredictiveEffect(ScalarSignalEffect):
-    """Whole-tree pulse with tempo prediction via autocorrelation of abs-integral."""
+    """Whole-tree pulse with tempo prediction via multi-onset autocorrelation."""
 
     registry_name = 'impulse_predict'
     default_palette = 'reds'
     ref_pattern = 'accent'
     ref_scope = 'beat'
-    ref_input = 'abs-integral + autocorr 5s'
+    ref_input = 'abs-integral + signal-fusion autocorr'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
 
         self.accum = OverlapFrameAccumulator()
         self.absint = AbsIntegral(sample_rate=sample_rate)
-        self.predictor = BeatPredictor(rms_fps=self.absint.rms_fps)
+        self.tempo = SignalFusionTempoTracker(sample_rate=sample_rate)
+
+        # Beat detection (threshold on abs-integral)
+        self.threshold = 0.30
+        self.cooldown = 0.25  # seconds
+        self.last_beat_time = -1.0
+        self.beat_count = 0
+
+        # Prediction state
+        self.predicted_strength = 0.80
+        self.next_predicted_beat = 0.0
+        self.prediction_active = False
+        self.predicted_beat_count = 0
+        self.max_missed = 4
+        self.missed_count = 0
 
         # Visual state
         self.brightness = 0.0
@@ -49,22 +58,47 @@ class AbsIntPredictiveEffect(ScalarSignalEffect):
 
     @property
     def description(self):
-        return "Combines abs-integral beat detection with autocorrelation tempo estimation to fire predicted beats on-time; confirmed at 100%, predicted at 80%."
+        return ("Combines abs-integral beat detection with multi-onset tempo "
+                "estimation to fire predicted beats on-time; confirmed at 100%, "
+                "predicted at 80%.")
 
     def process_audio(self, mono_chunk):
         for frame in self.accum.feed(mono_chunk):
             normalized = self.absint.update(frame)
-            beats = self.predictor.feed(self.absint.raw, normalized, self.absint.time_acc)
+            self.tempo.feed_frame(frame)
+            t = self.absint.time_acc
 
-            for beat in beats:
-                if beat['type'] == 'confirmed':
+            confirmed = False
+
+            # Confirmed beat: threshold crossing with cooldown
+            if normalized > self.threshold and (t - self.last_beat_time) > self.cooldown:
+                self.last_beat_time = t
+                self.beat_count += 1
+                self.missed_count = 0
+                confirmed = True
+
+                with self._lock:
+                    self.brightness = normalized
+                    self.is_predicted = False
+
+                # Phase-lock prediction to confirmed beat
+                if self.tempo.estimated_period > 0 and self.tempo.confidence >= 0.3:
+                    self.next_predicted_beat = t + self.tempo.estimated_period
+                    self.prediction_active = True
+
+            # Predicted beat: fire on-time between confirmed beats
+            if not confirmed and self.prediction_active and self.tempo.estimated_period > 0:
+                if t >= self.next_predicted_beat:
+                    self.predicted_beat_count += 1
+                    self.missed_count += 1
+                    self.next_predicted_beat += self.tempo.estimated_period
+
                     with self._lock:
-                        self.brightness = beat['strength']
-                        self.is_predicted = False
-                elif beat['type'] == 'predicted':
-                    with self._lock:
-                        self.brightness = max(self.brightness, beat['strength'])
+                        self.brightness = max(self.brightness, self.predicted_strength)
                         self.is_predicted = True
+
+                    if self.missed_count >= self.max_missed:
+                        self.prediction_active = False
 
     def get_intensity(self, dt: float) -> float:
         with self._lock:
@@ -74,13 +108,13 @@ class AbsIntPredictiveEffect(ScalarSignalEffect):
         return b
 
     def get_diagnostics(self) -> dict:
-        period_ms = self.predictor.estimated_period * 1000 if self.predictor.estimated_period > 0 else 0
+        period_ms = self.tempo.estimated_period * 1000 if self.tempo.estimated_period > 0 else 0
         return {
-            'confirmed': self.predictor.beat_count,
-            'predicted': self.predictor.predicted_beat_count,
+            'confirmed': self.beat_count,
+            'predicted': self.predicted_beat_count,
             'brightness': f'{self.brightness:.2f}',
             'period_ms': f'{period_ms:.0f}',
-            'bpm': f'{self.predictor.bpm:.1f}',
-            'ac_conf': f'{self.predictor.confidence:.2f}',
-            'predicting': self.predictor.prediction_active,
+            'bpm': f'{self.tempo.bpm:.1f}',
+            'ac_conf': f'{self.tempo.confidence:.2f}',
+            'predicting': self.prediction_active,
         }

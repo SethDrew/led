@@ -5,7 +5,7 @@
 set -euo pipefail
 
 VENV_PYTHON="/Users/sethdrew/Documents/projects/led/venv/bin/python"
-SEARCH_SCRIPT="/Users/sethdrew/Documents/projects/led/tools/search_ledger.py"
+SEARCH_SCRIPT="/Users/sethdrew/Documents/projects/led/tools/search_ledger_embeddings.py"
 
 # Read stdin (hook provides JSON with prompt)
 INPUT=$(cat)
@@ -35,12 +35,12 @@ if [ -z "$PROMPT" ]; then
 fi
 
 # Fast gate: skip search for short follow-ups and conversational messages.
-# Only run the expensive TF-IDF search when the prompt looks like a new topic
-# or implementation request (>12 words, or contains implementation signals).
+# Only run the embedding search when the prompt looks like a new topic
+# or implementation request (>25 words, or contains domain keywords).
 WORD_COUNT=$(echo "$PROMPT" | wc -w | tr -d ' ')
 if [ "$WORD_COUNT" -lt 25 ]; then
-    # Short message — check for implementation keywords before skipping
-    if ! echo "$PROMPT" | grep -qiE '(build|implement|add|create|effect|normali|fix|design|write|pulse|color|rainbow|animation|topology|brightness|gamma|blend|composit|beat|tempo|audio|led|firmware|esp32)'; then
+    # Short message — check for domain keywords before skipping
+    if ! echo "$PROMPT" | grep -qiE '(build|implement|add|create|effect|normali|fix|design|write|pulse|color|rainbow|animation|topology|brightness|gamma|blend|composit|beat|tempo|audio|led|firmware|esp32|uart|serial|buffer|hardware|sensor|power|chip|ws2812|sk6812|rgbw|dither|flicker|latency|pipeline|sculpture|neopixel|osc|web.?server|ota|deploy)'; then
         exit 0
     fi
 fi

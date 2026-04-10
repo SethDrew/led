@@ -1,5 +1,5 @@
 /*
- * RECEIVER — ESP32-C3 LED controller (stationary, near the LED strip)
+ * BULB RECEIVER — ESP32-C3 LED controller (stationary, near the LED strip)
  *
  * Receives raw sensor data via ESP-NOW from the handheld sender,
  * computes FixedRangeRMS energy + EnergyDelta onset detection locally,
@@ -9,11 +9,13 @@
  *   sparkle_burst — onset-triggered sparkle with decay
  *   fire_meld     — per-LED flame flicker, energy-driven color
  *   fire_flicker  — fire_meld + sustain-triggered blown-fire dropout
+ *   quiet_bloom   — motion-reactive bioluminescence (gyro/accel, no audio)
  *
  * Serial commands:
  *   's' — sparkle_burst
  *   'm' — fire_meld
  *   'f' — fire_flicker
+ *   'b' — quiet_bloom
  *   'c' — recalibrate rest vector
  *
  * Wiring:
@@ -33,6 +35,10 @@
 // ── LED config ───────────────────────────────────────────────────
 #define LED_PIN    10
 #define LED_COUNT  50
+
+// ── Hello Trunk (GPIO 21) ────────────────────────────────────────
+#define TRUNK_PIN   21
+#define TRUNK_COUNT 120
 
 // ── Rendering ────────────────────────────────────────────────────
 #define GAMMA 2.4f
@@ -62,6 +68,41 @@
 #define FIRE_DEADBAND       0.08f
 #define FIRE_DROPOUT_DEPTH  0.85f  // fire_flicker only
 
+// ── Quiet bloom parameters ───────────────────────────────────────
+#define BLOOM_BRIGHTNESS_CAP   0.70f
+#define BLOOM_NOISE_GATE       256    // per-channel: snap to 0 below 1 LSB in 8.8
+
+// Movement processing
+#define MOTION_NOISE_FLOOR     12.0f  // deg/s: below this = gyro noise
+#define DRAIN_SCALE            800.0f // motion above noise to drain colony in ~1s at max
+#define FLASH_MOTION_SCALE     300.0f // deg/s for full log-compressed flash brightness
+#define ENERGY_MULTIPLIER      1.4f   // flash can exceed stored energy by this factor
+#define MOTION_SETTLE_MS       300    // ms of stillness before recovery begins
+
+// Breathing (every LED, always on)
+#define BLOOM_BREATH_MIN_PERIOD 3.0f
+#define BLOOM_BREATH_MAX_PERIOD 8.0f
+#define BLOOM_BREATH_MIN_PEAK   0.50f
+#define BLOOM_BREATH_MAX_PEAK   1.00f
+#define BLOOM_BREATH_FLOOR      0.03f
+
+// Flash decay
+#define BLOOM_FLASH_DECAY_LO   0.96f
+#define BLOOM_FLASH_DECAY_HI   0.985f
+
+// Colony recovery
+#define BLOOM_RECOVERY_RAMP    0.10f  // 0→1 in ~10s
+#define BLOOM_RECOVERY_SPREAD  0.70f  // per-LED wake thresholds span 0..0.7
+
+// Color (blue/cyan palette — no R channel)
+#define BLOOM_HUE_A_G   20.0f   // deep blue green
+#define BLOOM_HUE_A_B  100.0f   // deep blue blue
+#define BLOOM_HUE_B_G   70.0f   // teal green
+#define BLOOM_HUE_B_B  110.0f   // teal blue
+#define BLOOM_FLASH_G  150.0f   // flash cyan green
+#define BLOOM_FLASH_B  170.0f   // flash cyan blue
+#define BLOOM_W_ONSET    0.5f   // glow above this adds white channel
+
 // ── ESP-NOW ──────────────────────────────────────────────────────
 #define TIMEOUT_MS     500
 
@@ -77,6 +118,7 @@ enum Algorithm {
     ALG_SPARKLE_BURST,
     ALG_FIRE_MELD,
     ALG_FIRE_FLICKER,
+    ALG_QUIET_BLOOM,
 };
 
 static Algorithm currentAlg = ALG_FIRE_FLICKER;
@@ -84,6 +126,7 @@ static Algorithm currentAlg = ALG_FIRE_FLICKER;
 // ── Global state ─────────────────────────────────────────────────
 
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRBW + NEO_KHZ800);
+Adafruit_NeoPixel trunk(TRUNK_COUNT, TRUNK_PIN, NEO_RGBW + NEO_KHZ800);
 // Delta-sigma accumulators per pixel, per channel
 static uint16_t dsR[LED_COUNT], dsG[LED_COUNT], dsB[LED_COUNT], dsW[LED_COUNT];
 
@@ -126,6 +169,18 @@ static float firePrevEnergyForDeriv = 0.0f;
 static float fireEnergyDerivSmooth = 0.0f;
 static float fireDropoutAmount = 0.0f;
 
+// ── Quiet bloom render state ─────────────────────────────────────
+static float bloomBreathPhase[LED_COUNT];
+static float bloomBreathPeriod[LED_COUNT];
+static float bloomBreathPeak[LED_COUNT];
+static float bloomHueT[LED_COUNT];        // color variation + recovery wake stagger
+static float bloomFlashGlow[LED_COUNT];
+static float bloomFlashDecay[LED_COUNT];
+static float bloomColonyEnergy = 1.0f;
+static uint32_t bloomLastMotionMs = 0;
+static float bloomMotionRate = 0.0f;
+static uint32_t bloomPrevPktCount = 0;
+
 // Simple PRNG state (xorshift32, seeded from esp_random at boot)
 static uint32_t prngState;
 
@@ -167,6 +222,72 @@ static inline float randFloat() {
     return (float)(xorshift32() & 0xFFFFFF) / 16777216.0f;
 }
 
+// ── Motion helpers (quiet bloom) ─────────────────────────────────
+
+static inline float lerpf(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
+static float computeGyroRate(int16_t gx, int16_t gy, int16_t gz) {
+    float fx = (float)gx, fy = (float)gy, fz = (float)gz;
+    return sqrtf(fx * fx + fy * fy + fz * fz) / 131.0f;  // ±250°/s range
+}
+
+static float computeAccelJolt(int16_t ax, int16_t ay, int16_t az) {
+    float fx = (float)ax, fy = (float)ay, fz = (float)az;
+    float mag = sqrtf(fx * fx + fy * fy + fz * fz);
+    return fabsf(mag - 16384.0f) / 16384.0f;  // 0 = stationary, 1 = ±1g jolt
+}
+
+// ── Trunk: W-based fire ─────────────────────────────────────────
+// Warm white phosphor carries the luminance (broadband ~3000K),
+// R channel adds saturated red for ember/hot-spot tint.
+
+static float trunkFireTime = 0.0f;
+
+static inline float trunkHeight(uint16_t i) {
+    if (i <= 29)                  return (float)i / 29.0f;
+    if (i >= 35 && i <= 57)       return (float)(57 - i) / 22.0f;
+    if (i >= 72 && i <= 103)      return (float)(i - 72) / 31.0f;
+    return -1.0f;
+}
+
+static void renderTrunkFire(float dt) {
+    trunkFireTime += dt;
+    float t = trunkFireTime;
+
+    trunk.clear();
+    for (uint16_t i = 0; i < TRUNK_COUNT; i++) {
+        float h = trunkHeight(i);
+        if (h < 0.0f) continue;
+
+        float fi = (float)i;
+
+        // Per-LED flicker: two incommensurate sine waves, faster + wider
+        float noise = fastSin(fi * 7.3f + t * 4.0f) *
+                      fastSin(fi * 3.7f + t * 2.8f) * 0.5f + 0.5f;
+
+        // Height gradient: brighter at base, dimmer at top
+        float heightDim = 1.0f - h * 0.6f;
+
+        // Base brightness with strong flicker, kept very low
+        float bright = 0.08f * heightDim * (0.3f + 0.7f * noise);
+
+        // W channel: warm broadband luminance
+        uint8_t w = (uint8_t)(bright * 255.0f);
+
+        // R channel: saturated red tint
+        float redAmount = bright * (0.5f + 0.4f * noise) * (1.0f - h * 0.3f);
+        uint8_t r = (uint8_t)(redAmount * 255.0f);
+
+        // Trace of G for slight orange shift
+        uint8_t g = (uint8_t)(redAmount * 0.15f * 255.0f);
+
+        trunk.setPixelColor(i, r, g, 0, w);
+    }
+    trunk.show();
+}
+
 // ── FixedRangeRMS: raw uint16 RMS → 0-1 energy ──────────────────
 
 static float computeEnergy(uint16_t rawRms) {
@@ -196,6 +317,9 @@ static float computeOnset(uint16_t rawRms) {
     deltaPeak = fmaxf(delta, deltaPeak * DELTA_PEAK_DECAY);
     return (deltaPeak > 1e-6f) ? (delta / deltaPeak) : 0.0f;
 }
+
+// Forward declarations (defined after setup)
+static void resetBloomState();
 
 // ── Setup ────────────────────────────────────────────────────────
 
@@ -230,6 +354,19 @@ void setup() {
         decayRates[i] = 0.92f + randFloat() * 0.05f;
     }
 
+    // Init bloom state (uses randFloat, so must be after PRNG seed)
+    resetBloomState();
+
+    // ── Hello Trunk init ──────────────────────────────────────────
+    trunk.begin();
+    trunk.setBrightness(255);
+    // Hello Trunk: 3 vertical beams on a cylinder
+    //   Beam 1 (bottom→top): LED 0-29
+    //   Beam 2 (top→bottom): LED 35-57  (reversed: 57→35 bottom→top)
+    //   Beam 3 (bottom→top): LED 72-103
+    trunk.clear();
+    trunk.show();
+
     // Boot flash — brief green
     for (uint16_t i = 0; i < LED_COUNT; i++)
         strip.setPixelColor(i, 0, 40, 0, 0);
@@ -244,7 +381,7 @@ void setup() {
     esp_now_register_recv_cb(onReceive);
 
     Serial.println("Waiting for sender... (will auto-calibrate from first 2s of data)");
-    Serial.println("Commands: 'c' recalibrate, 's' sparkle, 'm' fire_meld, 'f' fire_flicker");
+    Serial.println("Commands: 'c' recal, 's' sparkle, 'm' fire_meld, 'f' fire_flicker, 'b' bloom");
 }
 
 // ── Calibration ──────────────────────────────────────────────────
@@ -301,6 +438,130 @@ static void resetSparkleState() {
     }
     envelope = 0.0f;
     cooldownRemaining = 0.0f;
+}
+
+// ── Reset bloom state (called on algorithm switch) ───────────────
+
+static void resetBloomState() {
+    bloomColonyEnergy = 1.0f;
+    bloomLastMotionMs = 0;
+    bloomMotionRate = 0.0f;
+    bloomPrevPktCount = 0;
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        bloomBreathPhase[i] = randFloat();
+        bloomBreathPeriod[i] = BLOOM_BREATH_MIN_PERIOD
+            + randFloat() * (BLOOM_BREATH_MAX_PERIOD - BLOOM_BREATH_MIN_PERIOD);
+        bloomBreathPeak[i] = BLOOM_BREATH_MIN_PEAK
+            + randFloat() * (BLOOM_BREATH_MAX_PEAK - BLOOM_BREATH_MIN_PEAK);
+        bloomHueT[i] = randFloat();
+        bloomFlashGlow[i] = 0.0f;
+        bloomFlashDecay[i] = BLOOM_FLASH_DECAY_LO
+            + randFloat() * (BLOOM_FLASH_DECAY_HI - BLOOM_FLASH_DECAY_LO);
+    }
+}
+
+// ── Quiet bloom: motion processing (call once per new packet) ────
+
+static void bloomProcessMotion(float pktDt, uint32_t now) {
+    float gyroRate = computeGyroRate(
+        latestPacket.gx, latestPacket.gy, latestPacket.gz);
+    float accelJolt = computeAccelJolt(
+        latestPacket.ax, latestPacket.ay, latestPacket.az);
+    bloomMotionRate = gyroRate + accelJolt * 300.0f;
+
+    float motionAboveNoise = fmaxf(0.0f, bloomMotionRate - MOTION_NOISE_FLOOR);
+
+    if (motionAboveNoise > 1.0f) {
+        bloomLastMotionMs = now;
+
+        // Drain colony energy
+        float drain = (motionAboveNoise / DRAIN_SCALE) * pktDt;
+        drain = fminf(drain, bloomColonyEnergy);
+        bloomColonyEnergy -= drain;
+
+        // Flash: log-compressed motion × remaining energy × multiplier
+        float logMotion = log2f(1.0f + motionAboveNoise)
+                        / log2f(1.0f + FLASH_MOTION_SCALE);
+        float flashLevel = clampf(logMotion, 0.0f, 1.0f)
+                         * bloomColonyEnergy
+                         * ENERGY_MULTIPLIER;
+
+        for (uint16_t i = 0; i < LED_COUNT; i++) {
+            float target = flashLevel * (0.85f + 0.15f * randFloat());
+            if (target > bloomFlashGlow[i]) {
+                bloomFlashGlow[i] = target;
+                bloomFlashDecay[i] = BLOOM_FLASH_DECAY_LO
+                    + randFloat() * (BLOOM_FLASH_DECAY_HI - BLOOM_FLASH_DECAY_LO);
+            }
+        }
+    }
+}
+
+// ── Quiet bloom render ──────────────────────────────────────────
+
+static void renderQuietBloom(float dt, uint32_t now) {
+    // Colony recovery after motion settles
+    if (now - bloomLastMotionMs > MOTION_SETTLE_MS) {
+        bloomColonyEnergy = fminf(1.0f, bloomColonyEnergy + BLOOM_RECOVERY_RAMP * dt);
+    }
+
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        // Flash decay
+        bloomFlashGlow[i] *= fastDecay(bloomFlashDecay[i], dt * 30.0f);
+        if (bloomFlashGlow[i] < 0.005f) bloomFlashGlow[i] = 0.0f;
+
+        // Breathing
+        bloomBreathPhase[i] += dt / bloomBreathPeriod[i];
+        if (bloomBreathPhase[i] >= 1.0f) bloomBreathPhase[i] -= 1.0f;
+
+        // Per-LED staggered recovery
+        float wakeThresh = bloomHueT[i] * BLOOM_RECOVERY_SPREAD;
+        float ledRecovery = clampf(
+            (bloomColonyEnergy - wakeThresh) / 0.30f, 0.0f, 1.0f);
+
+        // Breathing glow × colony recovery
+        float breath = (fastSinPhase(bloomBreathPhase[i]) * 0.5f + 0.5f);
+        float breathGlow = BLOOM_BREATH_FLOOR
+            + breath * (bloomBreathPeak[i] - BLOOM_BREATH_FLOOR);
+        breathGlow *= ledRecovery;
+
+        // Composite
+        float g = fmaxf(breathGlow, bloomFlashGlow[i]);
+
+        // Color: breathing = blue, flash = cyan
+        float flashFrac = (bloomFlashGlow[i] > breathGlow) ? 1.0f : 0.0f;
+        float h = bloomHueT[i];
+        float colG = lerpf(lerpf(BLOOM_HUE_A_G, BLOOM_HUE_B_G, h),
+                           BLOOM_FLASH_G, flashFrac);
+        float colB = lerpf(lerpf(BLOOM_HUE_A_B, BLOOM_HUE_B_B, h),
+                           BLOOM_FLASH_B, flashFrac);
+
+        // Gamma + cap (bloom uses its own brightness cap)
+        float linBright = fastGamma24(g) * BLOOM_BRIGHTNESS_CAP;
+
+        float oG = colG * linBright;
+        float oB = colB * linBright;
+
+        // W channel for flash peaks
+        float wFrac = clampf((g - BLOOM_W_ONSET) / (1.0f - BLOOM_W_ONSET),
+                             0.0f, 1.0f);
+        float oW = wFrac * linBright * 200.0f;
+
+        // 8.8 fixed-point → delta-sigma
+        uint16_t tG16 = (uint16_t)clampf(oG * 256.0f, 0, 65535);
+        uint16_t tB16 = (uint16_t)clampf(oB * 256.0f, 0, 65535);
+        uint16_t tW16 = (uint16_t)clampf(oW * 256.0f, 0, 65535);
+
+        // Per-channel noise gate
+        if (tG16 < BLOOM_NOISE_GATE) tG16 = 0;
+        if (tB16 < BLOOM_NOISE_GATE) tB16 = 0;
+        if (tW16 < BLOOM_NOISE_GATE) tW16 = 0;
+
+        uint8_t gc = deltaSigma(dsG[i], tG16);
+        uint8_t b  = deltaSigma(dsB[i], tB16);
+        uint8_t w  = deltaSigma(dsW[i], tW16);
+        strip.setPixelColor(i, 0, gc, b, w);
+    }
 }
 
 // ── Sparkle burst render ─────────────────────────────────────────
@@ -625,6 +886,10 @@ void loop() {
             currentAlg = ALG_FIRE_FLICKER;
             resetFireState();
             Serial.println("Algorithm: fire_flicker");
+        } else if (c == 'b' || c == 'B') {
+            currentAlg = ALG_QUIET_BLOOM;
+            resetBloomState();
+            Serial.println("Algorithm: quiet_bloom");
         }
     }
 
@@ -652,14 +917,29 @@ void loop() {
         angleDeg = acosf(cosAngle) * (180.0f / M_PI);
     }
 
-    // ── Audio processing ─────────────────────────────────────────
-    if (connected && micOn) {
-        energy = computeEnergy(rawRms);
-        onset = computeOnset(rawRms);
-    } else if (connected && !micOn) {
-        // Mic disabled: hold a gentle base glow
-        energy = 0.15f;
-        onset = 0.0f;
+    // ── Audio processing (sparkle/fire only) ───────────────────
+    if (currentAlg != ALG_QUIET_BLOOM) {
+        if (connected && micOn) {
+            energy = computeEnergy(rawRms);
+            onset = computeOnset(rawRms);
+        } else if (connected && !micOn) {
+            energy = 0.15f;
+            onset = 0.0f;
+        }
+    }
+
+    // ── Motion processing (bloom only) ──────────────────────────
+    if (currentAlg == ALG_QUIET_BLOOM && connected) {
+        if (pktCount != bloomPrevPktCount) {
+            static uint32_t lastBloomPktMs = 0;
+            float pktDt = (lastBloomPktMs > 0)
+                ? (now - lastBloomPktMs) / 1000.0f
+                : (1.0f / SENSOR_HZ);
+            if (pktDt > 0.2f) pktDt = 0.2f;
+            lastBloomPktMs = now;
+            bloomProcessMotion(pktDt, now);
+            bloomPrevPktCount = pktCount;
+        }
     }
 
     // ── Debug telemetry (every ~1s) ──────────────────────────────
@@ -667,8 +947,15 @@ void loop() {
         const char *algName = "sparkle";
         if (currentAlg == ALG_FIRE_MELD) algName = "fire_meld";
         else if (currentAlg == ALG_FIRE_FLICKER) algName = "fire_flicker";
-        Serial.printf("[%s] angle=%.1f rms=%d energy=%.3f onset=%.3f mic=%s\n",
-            algName, angleDeg, rawRms, energy, onset, micOn ? "on" : "off");
+        else if (currentAlg == ALG_QUIET_BLOOM) algName = "bloom";
+
+        if (currentAlg == ALG_QUIET_BLOOM) {
+            Serial.printf("[%s] rate=%.1f energy=%.3f flash0=%.3f\n",
+                algName, bloomMotionRate, bloomColonyEnergy, bloomFlashGlow[0]);
+        } else {
+            Serial.printf("[%s] angle=%.1f rms=%d energy=%.3f onset=%.3f mic=%s\n",
+                algName, angleDeg, rawRms, energy, onset, micOn ? "on" : "off");
+        }
     }
 
     // ── Timeout: breathing idle ──────────────────────────────────
@@ -681,6 +968,8 @@ void loop() {
             strip.setPixelColor(i, 0, 0, 0, w);
         }
         strip.show();
+
+        renderTrunkFire(dt);
 
         delay(1);
         return;
@@ -711,9 +1000,15 @@ void loop() {
         case ALG_FIRE_FLICKER:
             renderFire(dt, true, tiltBlend);
             break;
+        case ALG_QUIET_BLOOM:
+            renderQuietBloom(dt, now);
+            break;
     }
 
     strip.show();
+
+    // ── Hello Trunk ────────────────────────────────────────────
+    renderTrunkFire(dt);
 
     // Yield to WiFi task — critical on single-core ESP32-C3
     delay(1);

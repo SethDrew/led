@@ -59,3 +59,6 @@ audio-reactive/research/vj-extraction/output/
 
 # Generated analysis plots (regenerable from scripts)
 audio-reactive/research/*.png
+
+# Audio: loose WAV files in research root (samples, debug recordings)
+audio-reactive/research/*.wav

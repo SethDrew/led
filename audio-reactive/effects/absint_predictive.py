@@ -2,17 +2,13 @@
 Impulse Predict — beat prediction via onset-envelope tempo estimation.
 
 Uses abs-integral threshold crossing for confirmed beat detection, and
-SignalFusionTempoTracker (multi-onset autocorrelation) for tempo estimation.
+OnsetTempoTracker (onset-envelope autocorrelation) for tempo estimation.
 Confirmed beats fire at 100% brightness, predicted beats fire on-time at 80%.
-
-The tempo tracker uses signal-level fusion of spectral flux, energy flux, and
-harmonic flux — validated as the best real-time tempo estimator (62% LED-acceptable
-on FMA 300-track benchmark, +9pp over onset alone).
 """
 
 import threading
 from base import ScalarSignalEffect
-from signals import OverlapFrameAccumulator, AbsIntegral, SignalFusionTempoTracker
+from signals import OverlapFrameAccumulator, AbsIntegral, OnsetTempoTracker
 
 
 class AbsIntPredictiveEffect(ScalarSignalEffect):
@@ -22,14 +18,14 @@ class AbsIntPredictiveEffect(ScalarSignalEffect):
     default_palette = 'reds'
     ref_pattern = 'accent'
     ref_scope = 'beat'
-    ref_input = 'abs-integral + signal-fusion autocorr'
+    ref_input = 'abs-integral + onset autocorr'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
 
         self.accum = OverlapFrameAccumulator()
         self.absint = AbsIntegral(sample_rate=sample_rate)
-        self.tempo = SignalFusionTempoTracker(sample_rate=sample_rate)
+        self.tempo = OnsetTempoTracker(sample_rate=sample_rate)
 
         # Beat detection (threshold on abs-integral)
         self.threshold = 0.30

@@ -3163,6 +3163,67 @@ entries:
       delta-sigma modulation, and 0↔1 floor are independent of the
       animation/effect logic upstream.
 
+  - id: per-channel-noise-gate-kills-die-strobe
+    date: 2026-04-05
+    touched: 2026-04-05
+    title: "Per-channel noise gate eliminates non-deterministic RGB die strobe on SK6812 RGBW"
+    summary: >
+      When unequal RGB channels are active at low brightness, the weaker channel's
+      target16 falls below 256 and delta-sigma dithers it between 0 and 1 — visible
+      as intermittent flashing on individual LED dies. The coordinated noise gate
+      (snap ALL channels if max < threshold) misses this because the dominant channel
+      keeps the max above threshold. Fix: snap each channel independently to 0 if
+      its target16 < 256. Validated at 249fps with bioluminescence bloom (G+B color).
+    status: validated
+    warmth: high
+    confidence: high
+    source:
+      - festicorn/bulbs/src/async_bloom_test.cpp
+      - audio-reactive/research/datasets/sk6812-pipeline-telemetry/gate_comparison_bloom_2026-04-05.csv
+    tags: [dithering, low-brightness, perception, sk6812, noise-gate, technique]
+    relates_to: [delta-sigma-eliminates-low-brightness-flicker, rgbw-pure-w-at-low-brightness]
+    notes: >
+      ## The problem
+
+      Effects that use colored light (not warm white) drive multiple RGB channels
+      with unequal values. At low brightness, the weaker channel gets a very small
+      target16 (e.g., G=50 when B=400). Delta-sigma correctly dithers this between
+      0 and 1, but the SK6812's internal 1.2kHz PWM makes value=1 a brief pulse
+      (0.4% duty cycle) — perceptually a dim flash, not a steady glow. The toggle
+      between "no pulse" and "brief pulse" is visible, especially in peripheral vision.
+
+      ## Why the coordinated gate missed it
+
+      The existing noise gate checked `if (maxCh < threshold)` and snapped ALL
+      channels to zero. With unequal channels (G=50, B=400), maxCh=400 passes
+      the gate, leaving G=50 to strobe. The gate was designed for the case where
+      the entire pixel is near-zero, not for mixed-brightness channels.
+
+      ## The fix
+
+      Per-channel gating: `if (tG16 < 256) tG16 = 0;` for each channel independently.
+      Threshold of 256 means any channel that would ever output 0 (target < 1.0 in
+      8-bit) gets snapped to full black. The dominant channel stays smooth via
+      delta-sigma. The visual effect is that the color becomes slightly purer at
+      very low brightness (e.g., losing green tint, just blue) — acceptable for
+      most effects.
+
+      ## Relationship to pure-W routing
+
+      The fire effect's pure-W crossover (shift to W-only below 10% brightness)
+      was an effect-specific workaround for this same problem — it avoided RGB
+      dies entirely at low brightness. Per-channel gating is the general solution
+      for colored effects that can't shift to warm white (e.g., bioluminescence
+      blue/teal, rainbow hues).
+
+      ## Two independent problems discovered
+
+      Testing revealed that "low-brightness strobe" was actually two stacked
+      problems: (1) insufficient frame rate for delta-sigma (solved by LUT math
+      replacing sinf/powf — 40fps → 250fps on ESP32-C3 without FPU), and
+      (2) per-channel die strobe from unequal RGB values (solved by per-channel
+      noise gate). Both fixes are needed for clean output on colored effects.
+
   # ── INMP441 MEMS Microphone Characterization ──────────────────────
 
   - id: inmp441-frequency-response
@@ -3651,4 +3712,66 @@ entries:
       polished furniture) create accidental secondary displays. Worth considering
       when choosing placement or designing effects that benefit from reflection
       (symmetry, slow color washes might look especially good doubled).
+
+  - id: spectrogram-gram-effects-need-2d
+    date: 2026-03-27
+    touched: 2026-03-28
+    title: Spectrogram/MFCC-gram effects need a 2D display, not a 1D strip
+    summary: >
+      Hypothesis tested: raw spectrograms or MFCC-grams rendered spatially across LEDs would
+      look cool. Result: not on a 1D LED strip. The core dilemma — allow fade to black and it
+      strobes; prevent fade to black and it's just colors pulsing, which isn't compelling. The
+      same data rendered on a screen (scrolling time axis) IS interesting — the time dimension
+      is what makes spectrograms readable. Two viable screen paths: (1) render as a visual layer
+      in a screen-based music visualizer (already done, looks good with timbre); (2) a 2D LED
+      matrix where scrolling history is possible.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: [audio-reactive/effects/mfcc_chroma_rainbow.py, audio-reactive/effects/mfcc_compare_dev.py]
+    tags: [effects, perception, dead-end, feature-extraction]
+    relates_to: [two-quality-axes, topology-native-effects-principle, rgb-color-gamut-limitations]
+    notes: >
+      Tested extensively by porting MFCC chroma rainbow from screen (shuffle3d) to LED strip.
+      Additional structural problems beyond the strobe/pulse dilemma: bass dominates all MFCC
+      coefficients via the DCT (harmonic series colonizes most mel bands), spatial gradient
+      doesn't read on hardware due to LED diffusion, per-coefficient detail visible in a
+      time-vs-position plot is invisible on a 60-150 LED strip at any instant.
+
+      Attempted fixes: BR_DECAY tuning (6.93→2.31, reduced flicker but didn't solve
+      representation issue), CMVN with per-mel-band EMA subtraction (per-coefficient AGC
+      downstream neutralized it — 91% correlation between variants), global normalization
+      (made treble dimmer not bass less dominant), sigmoid mapping on raw CMVN (k=1.0 improved
+      evenness but MFCC1 still brightest in 67% of frames).
+
+      The key insight: spectrograms and MFCC-grams are fundamentally time-series visualizations.
+      A single time-slice projected onto a strip loses the temporal context that makes them
+      readable. This generalizes beyond MFCCs — any frequency-decomposition-to-spatial-position
+      mapping on a 1D strip will hit the same strobe-or-pulse dilemma.
+
+  - id: groove-octave-folding
+    date: 2026-04-02
+    touched: 2026-04-02
+    title: Octave folding detected tempo into body-groove range
+    summary: >
+      When detected BPM lands outside the perceptible groove range, fold it by octave
+      (double/halve period) until it falls within [40, 140] BPM. No prior needed — just
+      octave arithmetic. 290→72.5, 160→80. This targets the metrical level where
+      people actually move their bodies, regardless of genre. Any effect that uses tempo
+      as an oscillation rate or animation speed benefits from this — raw detected BPM is
+      often at a sub-tactus or super-tactus level that doesn't match perceived groove.
+    status: validated
+    warmth: high
+    confidence: high
+    source: [audio-reactive/effects/firefly_sync.py]
+    tags: [beat-detection, tactus, perception, architecture]
+    relates_to: [no-prior-for-leds, headbangs-half-notes, accent-vs-groove-effects]
+    notes: >
+      Discovered via Kuramoto firefly sync on reggae — tempo tracker locked at 290 BPM (4x
+      actual 72 BPM groove). Effect synced at 70 BPM fallback but desynchronized at 290 BPM.
+      Generalizes beyond Kuramoto: any tempo-driven effect (pulse, sway, phase-lock) should
+      fold into this range rather than using raw detected BPM. Consistent with
+      headbangs-half-notes finding that physical response gravitates to ~87 BPM on 180 BPM
+      tracks. The [50, 140] bounds may need tuning — 140 upper could be too high for fast
+      EDM where the felt groove is half the detected rate.
 

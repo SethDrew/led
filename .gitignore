@@ -42,8 +42,9 @@ audio-reactive/research/audio-segments/separated/
 # Audio: user uploads (test files, temporary)
 audio-reactive/research/audio-segments/uploads/
 
-# Search cache (regenerated automatically by tools/search_ledger.py)
+# Search caches (regenerated automatically by tools/search_ledger*.py)
 *.search_cache.pkl
+.cache/
 
 # Festicorn local credentials
 festicorn/butterfly/src/wifi_credentials_local.h
@@ -51,6 +52,7 @@ festicorn/butterfly/src/wifi_credentials_local.h
 # Claude Code local settings
 .claude/settings.local.json
 **/.claude/settings.local.json
+.claude/worktrees/
 
 # VJ extraction output (large generated media/features/plots)
 audio-reactive/research/vj-extraction/output/

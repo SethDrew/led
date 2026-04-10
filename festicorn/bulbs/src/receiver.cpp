@@ -18,7 +18,6 @@
  *
  * Wiring:
  *   GPIO 10 → LED data (SK6812 RGBW) — "bulbs" (50 LEDs)
- *   GPIO 21 → LED data (WS2812B RGB) — "channel" (10 LEDs, slow blue fade)
  */
 
 #include <Arduino.h>
@@ -29,18 +28,17 @@
 #include <math.h>
 #include <oklch_lut.h>
 #include <delta_sigma.h>
+#include <fast_math.h>
 
 // ── LED config ───────────────────────────────────────────────────
 #define LED_PIN    10
 #define LED_COUNT  50
 
-// ── Channel strip (slow blue fade) ──────────────────────────────
-#define CHANNEL_PIN    21
-#define CHANNEL_COUNT  10
-#define CHANNEL_BREATHE_PERIOD  8.0f  // seconds per full cycle
-
 // ── Rendering ────────────────────────────────────────────────────
 #define GAMMA 2.4f
+#define BRIGHTNESS_CAP 0.30f
+#define PURE_W_CEIL    0.10f  // below this: pure W, no RGB dies
+#define PURE_W_BLEND   0.15f  // blend range above CEIL to full RGB
 
 // ── Color / tilt mapping ─────────────────────────────────────────
 #define DEADZONE_DEG    10.0f
@@ -68,7 +66,8 @@
 #define TIMEOUT_MS     500
 
 struct __attribute__((packed)) SensorPacket {
-    float ax, ay, az;       // 12 bytes: smoothed accel unit vector
+    int16_t ax, ay, az;     // 6 bytes: raw accelerometer (±2g, 16384 = 1g)
+    int16_t gx, gy, gz;     // 6 bytes: raw gyroscope (±250°/s, /131 = deg/s)
     uint16_t rawRms;        // 2 bytes: raw audio RMS
     uint8_t micEnabled;     // 1 byte: shake toggle state
 };                          // 15 bytes total
@@ -80,24 +79,19 @@ enum Algorithm {
     ALG_FIRE_FLICKER,
 };
 
-static Algorithm currentAlg = ALG_SPARKLE_BURST;
+static Algorithm currentAlg = ALG_FIRE_FLICKER;
 
 // ── Global state ─────────────────────────────────────────────────
 
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRBW + NEO_KHZ800);
-Adafruit_NeoPixel channel(CHANNEL_COUNT, CHANNEL_PIN, NEO_GRB + NEO_KHZ800);
-
 // Delta-sigma accumulators per pixel, per channel
 static uint16_t dsR[LED_COUNT], dsG[LED_COUNT], dsB[LED_COUNT], dsW[LED_COUNT];
-
-// Delta-sigma accumulators for channel strip (blue only)
-static uint16_t chDsB[CHANNEL_COUNT];
 
 // Latest received packet
 static volatile bool packetReady = false;
 static volatile uint32_t lastPacketMs = 0;
 static volatile uint32_t pktCount = 0;
-static SensorPacket latestPacket = {0, 0, 1.0f, 0, 1};
+static SensorPacket latestPacket = {0, 0, 16384, 0, 0, 0, 0, 1};
 
 // Calibration — rest vector
 static float restAx = 0, restAy = 0, restAz = 1.0f;
@@ -213,9 +207,6 @@ void setup() {
     strip.begin();
     strip.setBrightness(255);
 
-    channel.begin();
-    channel.setBrightness(255);
-
     // Seed delta-sigma accumulators
     for (uint16_t i = 0; i < LED_COUNT; i++) {
         uint16_t seed = (uint16_t)((uint32_t)i * 256 / LED_COUNT);
@@ -224,10 +215,6 @@ void setup() {
         dsB[i] = (seed + 128) & 0xFF;
         dsW[i] = (seed + 192) & 0xFF;
     }
-    for (uint16_t i = 0; i < CHANNEL_COUNT; i++) {
-        chDsB[i] = (uint16_t)((uint32_t)i * 256 / CHANNEL_COUNT);
-    }
-
     // Init sparkle state
     for (uint16_t i = 0; i < LED_COUNT; i++) {
         sparkle[i] = 0.0f;
@@ -243,18 +230,13 @@ void setup() {
         decayRates[i] = 0.92f + randFloat() * 0.05f;
     }
 
-    // Boot flash — brief green (bulbs), brief blue (channel)
+    // Boot flash — brief green
     for (uint16_t i = 0; i < LED_COUNT; i++)
         strip.setPixelColor(i, 0, 40, 0, 0);
-    for (uint16_t i = 0; i < CHANNEL_COUNT; i++)
-        channel.setPixelColor(i, 0, 0, 40);
     strip.show();
-    channel.show();
     delay(200);
     strip.clear();
-    channel.clear();
     strip.show();
-    channel.show();
 
     // ── ESP-NOW init ──────────────────────────────────────────────
     WiFi.mode(WIFI_STA);
@@ -368,7 +350,7 @@ static void renderSparkleBurst(float dt, float angleDeg, float tiltBlend,
 
     // Per-LED decay (frame-rate independent: rate^(dt*30))
     for (uint16_t i = 0; i < LED_COUNT; i++) {
-        sparkle[i] *= powf(decayRates[i], dt * 30.0f);
+        sparkle[i] *= fastDecay(decayRates[i], dt * 30.0f);
     }
 
     // Subtle shimmer jitter between onsets (only when not silent)
@@ -407,27 +389,35 @@ static void renderSparkleBurst(float dt, float angleDeg, float tiltBlend,
             colB = colB * (1.0f - tiltBlend) + tiltB * tiltBlend;
         }
 
-        // W channel: full when upright, fades with tilt
-        float colW = 255.0f * (1.0f - tiltBlend);
-
         // Apply brightness + gamma
-        float linBright = powf(bright, GAMMA);
+        float linBright = fastGamma24(bright) * BRIGHTNESS_CAP;
         float oR = colR * linBright;
         float oG = colG * linBright;
         float oB = colB * linBright;
-        float oW = colW * linBright;
+
+        // RGBW: pure W at low brightness, blend to RGB above threshold
+        // (see engineering ledger: rgbw-pure-w-at-low-brightness)
+        float maxCh_f = fmaxf(oR, fmaxf(oG, oB));
+        float bFrac = maxCh_f / 255.0f;
+        float rgbBlend = clampf((bFrac - PURE_W_CEIL) / PURE_W_BLEND, 0.0f, 1.0f);
+        float avgRGB = (oR + oG + oB) / 3.0f;
+        float fR = oR * rgbBlend;
+        float fG = oG * rgbBlend;
+        float fB = oB * rgbBlend;
+        float fW = avgRGB * (1.0f - rgbBlend) * (1.0f - tiltBlend);
 
         // Scale to 16-bit for delta-sigma dithering
-        uint16_t tR16 = (uint16_t)clampf(oR * 256.0f, 0, 65535);
-        uint16_t tG16 = (uint16_t)clampf(oG * 256.0f, 0, 65535);
-        uint16_t tB16 = (uint16_t)clampf(oB * 256.0f, 0, 65535);
-        uint16_t tW16 = (uint16_t)clampf(oW * 256.0f, 0, 65535);
+        uint16_t tR16 = (uint16_t)clampf(fR * 256.0f, 0, 65535);
+        uint16_t tG16 = (uint16_t)clampf(fG * 256.0f, 0, 65535);
+        uint16_t tB16 = (uint16_t)clampf(fB * 256.0f, 0, 65535);
+        uint16_t tW16 = (uint16_t)clampf(fW * 256.0f, 0, 65535);
 
-        // Sub-LSB noise gate
-        if (tR16 < 64) tR16 = 0;
-        if (tG16 < 64) tG16 = 0;
-        if (tB16 < 64) tB16 = 0;
-        if (tW16 < 64) tW16 = 0;
+        // Per-channel noise gate: snap each channel independently to 0
+        // if it would dither in the 0↔1 zone (target16 < 256)
+        if (tR16 < 256) tR16 = 0;
+        if (tG16 < 256) tG16 = 0;
+        if (tB16 < 256) tB16 = 0;
+        if (tW16 < 256) tW16 = 0;
 
         uint8_t r = deltaSigma(dsR[i], tR16);
         uint8_t g = deltaSigma(dsG[i], tG16);
@@ -539,8 +529,8 @@ static void renderFire(float dt, bool withDropout, float tiltBlend) {
         float fi = (float)i;
 
         // Per-LED noise: two incommensurate sines
-        float noise = sinf(fi * 7.3f + t * 2.5f) *
-                       sinf(fi * 3.7f + t * 1.4f) * 0.5f + 0.5f;
+        float noise = fastSin(fi * 7.3f + t * 2.5f) *
+                       fastSin(fi * 3.7f + t * 1.4f) * 0.5f + 0.5f;
 
         // Noise amplitude scaled by flicker_scale
         float noiseAmp = fmaxf(0.15f * s, 0.10f * s / fmaxf(base, 0.1f));
@@ -552,8 +542,8 @@ static void renderFire(float dt, bool withDropout, float tiltBlend) {
         float colorRedShift = 0.0f;
         if (withDropout && dropoutAmount > 0.0f) {
             // Slow-drifting resilience per LED
-            float resilience = sinf(fi * 13.7f + t * 0.3f) *
-                                sinf(fi * 9.1f + t * 0.2f) * 0.5f + 0.5f;
+            float resilience = fastSin(fi * 13.7f + t * 0.3f) *
+                                fastSin(fi * 9.1f + t * 0.2f) * 0.5f + 0.5f;
             perLedDim = clampf(
                 (dropoutAmount - resilience * 0.7f) / 0.3f, 0.0f, 1.0f
             ) * FIRE_DROPOUT_DEPTH;
@@ -571,27 +561,35 @@ static void renderFire(float dt, bool withDropout, float tiltBlend) {
         float colG = baseColG * (1.0f - colorRedShift) + redG * colorRedShift;
         float colB = baseColB * (1.0f - colorRedShift) + redB * colorRedShift;
 
-        // W channel: warm white proportional to brightness, fades with tilt
-        float colW = 255.0f * (1.0f - tiltBlend);
-
         // Apply brightness + gamma
-        float linBright = powf(bright, GAMMA);
+        float linBright = fastGamma24(bright) * BRIGHTNESS_CAP;
         float oR = colR * linBright;
         float oG = colG * linBright;
         float oB = colB * linBright;
-        float oW = colW * linBright;
+
+        // RGBW: pure W at low brightness, blend to RGB above threshold
+        // (see engineering ledger: rgbw-pure-w-at-low-brightness)
+        float maxCh_f = fmaxf(oR, fmaxf(oG, oB));
+        float bFrac = maxCh_f / 255.0f;
+        float rgbBlend = clampf((bFrac - PURE_W_CEIL) / PURE_W_BLEND, 0.0f, 1.0f);
+        float avgRGB = (oR + oG + oB) / 3.0f;
+        float fR = oR * rgbBlend;
+        float fG = oG * rgbBlend;
+        float fB = oB * rgbBlend;
+        float fW = avgRGB * (1.0f - rgbBlend) * (1.0f - tiltBlend);
 
         // Scale to 16-bit for delta-sigma dithering
-        uint16_t tR16 = (uint16_t)clampf(oR * 256.0f, 0, 65535);
-        uint16_t tG16 = (uint16_t)clampf(oG * 256.0f, 0, 65535);
-        uint16_t tB16 = (uint16_t)clampf(oB * 256.0f, 0, 65535);
-        uint16_t tW16 = (uint16_t)clampf(oW * 256.0f, 0, 65535);
+        uint16_t tR16 = (uint16_t)clampf(fR * 256.0f, 0, 65535);
+        uint16_t tG16 = (uint16_t)clampf(fG * 256.0f, 0, 65535);
+        uint16_t tB16 = (uint16_t)clampf(fB * 256.0f, 0, 65535);
+        uint16_t tW16 = (uint16_t)clampf(fW * 256.0f, 0, 65535);
 
-        // Sub-LSB noise gate
-        if (tR16 < 64) tR16 = 0;
-        if (tG16 < 64) tG16 = 0;
-        if (tB16 < 64) tB16 = 0;
-        if (tW16 < 64) tW16 = 0;
+        // Per-channel noise gate: snap each channel independently to 0
+        // if it would dither in the 0↔1 zone (target16 < 256)
+        if (tR16 < 256) tR16 = 0;
+        if (tG16 < 256) tG16 = 0;
+        if (tB16 < 256) tB16 = 0;
+        if (tW16 < 256) tW16 = 0;
 
         uint8_t r = deltaSigma(dsR[i], tR16);
         uint8_t g = deltaSigma(dsG[i], tG16);
@@ -605,7 +603,10 @@ static void renderFire(float dt, bool withDropout, float tiltBlend) {
 
 void loop() {
     uint32_t now = millis();
-    float dt = 1.0f / SENSOR_HZ;  // ~40ms
+    static uint32_t lastRenderMs = 0;
+    float dt = (lastRenderMs > 0) ? (now - lastRenderMs) / 1000.0f : (1.0f / SENSOR_HZ);
+    if (dt > 0.1f) dt = 0.1f;  // cap at 100ms to avoid jumps
+    lastRenderMs = now;
 
     // ── Serial commands ─────────────────────────────────────────
     if (Serial.available()) {
@@ -627,10 +628,11 @@ void loop() {
         }
     }
 
-    // ── Read latest packet ───────────────────────────────────────
-    float ax = latestPacket.ax;
-    float ay = latestPacket.ay;
-    float az = latestPacket.az;
+    // ── Read latest packet & normalize accel to unit vector ─────
+    float ax = (float)latestPacket.ax;
+    float ay = (float)latestPacket.ay;
+    float az = (float)latestPacket.az;
+    vecNormalize(ax, ay, az);
     uint16_t rawRms = latestPacket.rawRms;
     bool micOn = latestPacket.micEnabled != 0;
     bool connected = (lastPacketMs > 0) && (now - lastPacketMs < TIMEOUT_MS);
@@ -671,24 +673,14 @@ void loop() {
 
     // ── Timeout: breathing idle ──────────────────────────────────
     if (!connected) {
-        float breath = (sinf(now / 1000.0f * M_PI) + 1.0f) / 2.0f;
+        float breath = (fastSin(now / 1000.0f * M_PI) + 1.0f) / 2.0f;
         // Render breathing on pure warm white
-        uint16_t bW = (uint16_t)(powf(breath * 0.12f, GAMMA) * 65535.0f);
+        uint16_t bW = (uint16_t)(fastGamma24(breath * 0.12f) * 65535.0f);
         for (uint16_t i = 0; i < LED_COUNT; i++) {
             uint8_t w = deltaSigma(dsW[i], bW >> 8);
             strip.setPixelColor(i, 0, 0, 0, w);
         }
         strip.show();
-
-        // Channel: slow blue fade (runs regardless of connection)
-        float chPhase = now / 1000.0f * (2.0f * M_PI / CHANNEL_BREATHE_PERIOD);
-        float chBreath = (sinf(chPhase) + 1.0f) * 0.5f;
-        uint16_t chB = (uint16_t)(powf(chBreath, GAMMA) * 65535.0f);
-        for (uint16_t i = 0; i < CHANNEL_COUNT; i++) {
-            uint8_t b = deltaSigma(chDsB[i], chB >> 8);
-            channel.setPixelColor(i, 0, 0, b);
-        }
-        channel.show();
 
         delay(1);
         return;
@@ -722,18 +714,6 @@ void loop() {
     }
 
     strip.show();
-
-    // ── Channel: slow blue fade ──────────────────────────────────
-    {
-        float phase = now / 1000.0f * (2.0f * M_PI / CHANNEL_BREATHE_PERIOD);
-        float breath = (sinf(phase) + 1.0f) * 0.5f;
-        uint16_t bB = (uint16_t)(powf(breath, GAMMA) * 65535.0f);
-        for (uint16_t i = 0; i < CHANNEL_COUNT; i++) {
-            uint8_t b = deltaSigma(chDsB[i], bB >> 8);
-            channel.setPixelColor(i, 0, 0, b);
-        }
-        channel.show();
-    }
 
     // Yield to WiFi task — critical on single-core ESP32-C3
     delay(1);

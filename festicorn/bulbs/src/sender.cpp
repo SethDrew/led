@@ -37,22 +37,18 @@
 // ── Timing ───────────────────────────────────────────────────────
 #define SENSOR_HZ     25.0f
 #define SENSOR_MS     40
-#define ACCEL_TC      0.3f
 
 // ── ESP-NOW ──────────────────────────────────────────────────────
 static uint8_t broadcastAddr[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 struct __attribute__((packed)) SensorPacket {
-    float ax, ay, az;       // 12 bytes: smoothed accel unit vector
-    uint16_t rawRms;        // 2 bytes: raw audio RMS, no normalization
+    int16_t ax, ay, az;     // 6 bytes: raw accelerometer (±2g, 16384 = 1g)
+    int16_t gx, gy, gz;     // 6 bytes: raw gyroscope (±250°/s, /131 = deg/s)
+    uint16_t rawRms;        // 2 bytes: raw audio RMS
     uint8_t micEnabled;     // 1 byte: shake toggle state
 };                          // 15 bytes total
 
 // ── Global state ─────────────────────────────────────────────────
-static float alphaAccel;
-
-// Smoothed accelerometer (unit vector)
-static float smoothAx = 0, smoothAy = 0, smoothAz = 1.0f;
 
 // Shake detection
 static bool micEnabled = true;
@@ -66,8 +62,9 @@ static uint32_t shakeCooldownUntil = 0;
 #define SHAKE_WINDOW_MS   800
 #define SHAKE_COOLDOWN_MS 1500
 
-// IMU raw
+// IMU raw (accel + gyro)
 static int16_t imuAx, imuAy, imuAz;
+static int16_t imuGx, imuGy, imuGz;
 
 // Timing
 static uint32_t lastSensorMs = 0;
@@ -116,10 +113,14 @@ void readIMU() {
     Wire.beginTransmission(MPU_ADDR);
     Wire.write(0x3B);
     Wire.endTransmission(false);
-    Wire.requestFrom(MPU_ADDR, 6);
+    Wire.requestFrom(MPU_ADDR, 14);  // accel(6) + temp(2) + gyro(6)
     imuAx = (Wire.read() << 8) | Wire.read();
     imuAy = (Wire.read() << 8) | Wire.read();
     imuAz = (Wire.read() << 8) | Wire.read();
+    Wire.read(); Wire.read();  // skip temperature
+    imuGx = (Wire.read() << 8) | Wire.read();
+    imuGy = (Wire.read() << 8) | Wire.read();
+    imuGz = (Wire.read() << 8) | Wire.read();
 }
 
 // ── Audio RMS read ───────────────────────────────────────────────
@@ -177,17 +178,10 @@ void setup() {
     Wire.write(0x03);
     Wire.endTransmission(true);
 
-    // Precompute EMA alpha
-    alphaAccel = 2.0f / (ACCEL_TC * SENSOR_HZ + 1.0f);
-
-    // Seed smoothed accel from first reading
+    // Seed first IMU reading
     readIMU();
-    smoothAx = (float)imuAx;
-    smoothAy = (float)imuAy;
-    smoothAz = (float)imuAz;
-    vecNormalize(smoothAx, smoothAy, smoothAz);
 
-    Serial.println("Sending!");
+    Serial.println("Sending (raw accel+gyro)!");
     lastSensorMs = millis();
 }
 
@@ -229,22 +223,14 @@ void loop() {
         lastShakeSign = 0;
     }
 
-    // ── Smooth accelerometer ─────────────────────────────────────
-    float rawAx = (float)imuAx;
-    float rawAy = (float)imuAy;
-    float rawAz = (float)imuAz;
-    vecNormalize(rawAx, rawAy, rawAz);
-
-    smoothAx += alphaAccel * (rawAx - smoothAx);
-    smoothAy += alphaAccel * (rawAy - smoothAy);
-    smoothAz += alphaAccel * (rawAz - smoothAz);
-    vecNormalize(smoothAx, smoothAy, smoothAz);
-
-    // ── Send packet ──────────────────────────────────────────────
+    // ── Send packet (raw sensor data, no processing) ───────────
     SensorPacket pkt;
-    pkt.ax = smoothAx;
-    pkt.ay = smoothAy;
-    pkt.az = smoothAz;
+    pkt.ax = imuAx;
+    pkt.ay = imuAy;
+    pkt.az = imuAz;
+    pkt.gx = imuGx;
+    pkt.gy = imuGy;
+    pkt.gz = imuGz;
     pkt.rawRms = micEnabled ? rms : 0;
     pkt.micEnabled = micEnabled ? 1 : 0;
 
@@ -253,7 +239,8 @@ void loop() {
     // ── Debug output ─────────────────────────────────────────────
     frameCount++;
     if (frameCount % 25 == 0) {
-        Serial.printf("ax=%.3f ay=%.3f az=%.3f  rms=%5d  mic=%s\n",
-            smoothAx, smoothAy, smoothAz, rms, micEnabled ? "on" : "off");
+        float gyroMag = vecLen((float)imuGx, (float)imuGy, (float)imuGz) / 131.0f;
+        Serial.printf("a=%6d,%6d,%6d  g=%.1f°/s  rms=%5d  mic=%s\n",
+            imuAx, imuAy, imuAz, gyroMag, rms, micEnabled ? "on" : "off");
     }
 }

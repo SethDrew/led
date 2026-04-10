@@ -3,8 +3,7 @@ Tempo Pulse — onset-envelope tempo estimation drives a free-running pulse,
 brightness scaled by current amplitude.
 
 How it works:
-  1. SignalFusionTempoTracker estimates tempo from multi-onset autocorrelation
-     (spectral flux + energy flux + harmonic flux, normalized and summed).
+  1. OnsetTempoTracker estimates tempo from onset-envelope autocorrelation.
   2. Free-run a pulse oscillator at that period (no late detection needed).
   3. Each pulse's brightness = current RMS, so loud moments flash bright
      and quiet moments flash dim — but the TIMING is always on the grid.
@@ -19,7 +18,7 @@ to estimate tempo confidently (~5-10 seconds).
 import numpy as np
 import threading
 from base import ScalarSignalEffect
-from signals import OverlapFrameAccumulator, SignalFusionTempoTracker
+from signals import OverlapFrameAccumulator, OnsetTempoTracker
 
 
 class TempoPulseEffect(ScalarSignalEffect):
@@ -29,13 +28,13 @@ class TempoPulseEffect(ScalarSignalEffect):
     default_palette = 'reds'
     ref_pattern = 'groove'
     ref_scope = 'phrase'
-    ref_input = 'RMS + signal-fusion autocorr'
+    ref_input = 'RMS + onset autocorr'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
 
         self.accum = OverlapFrameAccumulator()
-        self.tempo = SignalFusionTempoTracker(sample_rate=sample_rate)
+        self.tempo = OnsetTempoTracker(sample_rate=sample_rate)
 
         # RMS state (for amplitude scaling)
         self.current_rms = 0.0

@@ -35,6 +35,7 @@ Deep-dive documents organized by the seven axes defined in ARCHITECTURE.md. Brow
 ### axis7-perceptual/
 
 - **COLOR_ENGINEERING.md** — Color pipeline: OKLCH rainbow LUT, hybrid gamma brightness, chroma/desaturation control. WS2812B-specific tuning.
+- **SK6812_OUTPUT_PIPELINE.md** — SK6812 RGBW output stage: gamma 2.4, pure-W low-brightness routing, 8.8 fixed-point delta-sigma dithering, sub-LSB noise gate. The float-to-wire pipeline.
 - **AUDIO_VISUAL_MAPPING_PATTERNS.md** — Algorithms and constants from successful audio-reactive LED projects (energy mapping, frequency-to-color, beat detection).
 - **SPECTROGRAM_BASED_COLOR.md** — Strategies for mapping mel spectrograms and MFCCs to LED color (uniform, frequency-to-position, waterfall, centroid+bandwidth).
 - **VJ_AUDIO_VISUAL_MAPPING.md** — Professional VJ conventions for audio-to-visual parameter mapping (Resolume, TouchDesigner, VDMX, etc.).
@@ -47,6 +48,7 @@ Deep-dive documents organized by the seven axes defined in ARCHITECTURE.md. Brow
 
 - **[perceptual-color-on-ws2812b.md](research-briefs/perceptual-color-on-ws2812b.md)** — Perceptual color control for WS2812B: green dominance, gamma correction, and tested compensation approaches.
 - **[divisive-normalization-for-audio-reactive-visualization.md](research-briefs/divisive-normalization-for-audio-reactive-visualization.md)** — EMA normalization outperforms peak-decay for section-aware audio-reactive LED dynamics: mean-tracking, time constants, and transition behavior.
+- **[vj-practitioner-interview-charles.md](research-briefs/vj-practitioner-interview-charles.md)** — VJ practitioner interview: ear-to-hand over auto-reactivity, 1-4 dimensions of control, gain/fall as the audio reactivity interface, "humans are smoothing machines."
 
 ## case-studies/
 

@@ -1,7 +1,7 @@
 /*
  * BLOOM TEST — Adafruit NeoPixel (blocking, proven signal) + fast_math LUTs
  *
- * Same breathing + flash math as receiver_3bulbs.
+ * Same breathing + flash math as bulb_receiver.cpp (quiet_bloom).
  * Uses Adafruit NeoPixel (known-good SK6812 timing) to isolate
  * whether flicker is signal/library or effect/math.
  *

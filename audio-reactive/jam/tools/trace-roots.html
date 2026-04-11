@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Trace Roots</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #111; color: #eee; font-family: monospace; display: flex; height: 100vh; }
+  #sidebar {
+    width: 280px; padding: 16px; overflow-y: auto; background: #1a1a1a;
+    border-right: 1px solid #333; font-size: 12px;
+  }
+  #sidebar h2 { font-size: 14px; margin-bottom: 8px; }
+  #sidebar p { margin-bottom: 8px; color: #999; line-height: 1.4; }
+  .root-item { padding: 4px 8px; margin: 2px 0; border-radius: 3px; cursor: pointer; }
+  .root-item:hover { background: #333; }
+  .root-item.active { background: #2a4a2a; }
+  #controls { margin-top: 12px; }
+  button {
+    background: #333; color: #eee; border: 1px solid #555; padding: 6px 12px;
+    border-radius: 3px; cursor: pointer; margin: 2px; font-family: monospace; font-size: 12px;
+  }
+  button:hover { background: #444; }
+  button.primary { background: #2a5a2a; border-color: #4a8a4a; }
+  #canvas-wrap { flex: 1; position: relative; overflow: hidden; }
+  canvas { position: absolute; top: 0; left: 0; cursor: crosshair; }
+  #status { position: absolute; bottom: 12px; left: 12px; background: rgba(0,0,0,0.8);
+    padding: 6px 10px; border-radius: 3px; font-size: 11px; color: #aaa; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h2>Root Tracer</h2>
+  <p>Click along each root to place waypoints.<br>
+    <b>Enter</b> = finish root, start next<br>
+    <b>Backspace</b> = undo last point<br>
+    <b>Escape</b> = cancel current root<br>
+    <b>Z</b> = delete selected root</p>
+  <p>Start each root near the trunk, end at the tip.</p>
+  <div id="root-list"></div>
+  <div id="controls">
+    <button onclick="exportJSON()" class="primary">Export JSON</button>
+    <button onclick="clearAll()">Clear All</button>
+  </div>
+  <pre id="output" style="margin-top:12px; font-size:10px; color:#666; white-space:pre-wrap;"></pre>
+</div>
+
+<div id="canvas-wrap">
+  <canvas id="canvas"></canvas>
+  <div id="status">Loading mask...</div>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const rootListEl = document.getElementById('root-list');
+const outputEl = document.getElementById('output');
+
+let img = null;
+let imgW = 0, imgH = 0;
+let scale = 1;
+let offsetX = 0, offsetY = 0;
+
+// Root data: array of { points: [{x, y}], color: string }
+// x,y are in image pixel coordinates
+let roots = [];
+let currentPoints = [];
+let selectedRoot = -1;
+
+const COLORS = [
+  '#ff6b6b','#ffa06b','#ffd06b','#a0ff6b','#6bffa0','#6bffd0',
+  '#6bd0ff','#6b8fff','#a06bff','#d06bff','#ff6bd0','#ff6ba0',
+  '#ff9999','#ffcc66','#99ff99','#66ccff','#cc99ff','#ff66cc',
+];
+
+// Load tree mask
+const maskImg = new Image();
+maskImg.onload = () => {
+  img = maskImg;
+  imgW = img.width;
+  imgH = img.height;
+  fitToScreen();
+  draw();
+  statusEl.textContent = `${imgW}×${imgH} — click to place root waypoints`;
+};
+maskImg.src = '../client/public/yggdrasil-mask.png';
+
+function fitToScreen() {
+  const wrap = document.getElementById('canvas-wrap');
+  const w = wrap.clientWidth;
+  const h = wrap.clientHeight;
+  scale = Math.min(w / imgW, h / imgH);
+  canvas.width = Math.round(imgW * scale);
+  canvas.height = Math.round(imgH * scale);
+  offsetX = (w - canvas.width) / 2;
+  offsetY = (h - canvas.height) / 2;
+  canvas.style.left = offsetX + 'px';
+  canvas.style.top = offsetY + 'px';
+}
+
+function draw() {
+  if (!img) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Draw dimmed mask
+  ctx.globalAlpha = 0.35;
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  ctx.globalAlpha = 1.0;
+
+  // Draw completed roots
+  for (let i = 0; i < roots.length; i++) {
+    const root = roots[i];
+    const color = root.color;
+    const pts = root.points;
+    if (pts.length < 2) continue;
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = i === selectedRoot ? 3 : 2;
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x * scale, pts[0].y * scale);
+    for (let j = 1; j < pts.length; j++) {
+      ctx.lineTo(pts[j].x * scale, pts[j].y * scale);
+    }
+    ctx.stroke();
+
+    // Draw points
+    for (const pt of pts) {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(pt.x * scale, pt.y * scale, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Label
+    const mid = pts[Math.floor(pts.length / 2)];
+    ctx.fillStyle = color;
+    ctx.font = '11px monospace';
+    ctx.fillText(`root_${i}`, mid.x * scale + 6, mid.y * scale - 6);
+  }
+
+  // Draw current (in-progress) root
+  if (currentPoints.length > 0) {
+    const color = COLORS[roots.length % COLORS.length];
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(currentPoints[0].x * scale, currentPoints[0].y * scale);
+    for (let j = 1; j < currentPoints.length; j++) {
+      ctx.lineTo(currentPoints[j].x * scale, currentPoints[j].y * scale);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    for (const pt of currentPoints) {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(pt.x * scale, pt.y * scale, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+function updateRootList() {
+  rootListEl.innerHTML = '';
+  for (let i = 0; i < roots.length; i++) {
+    const div = document.createElement('div');
+    div.className = 'root-item' + (i === selectedRoot ? ' active' : '');
+    div.style.borderLeft = `3px solid ${roots[i].color}`;
+    div.textContent = `root_${i} (${roots[i].points.length} pts)`;
+    div.addEventListener('click', () => { selectedRoot = i; updateRootList(); draw(); });
+    rootListEl.appendChild(div);
+  }
+}
+
+// Click to add point
+canvas.addEventListener('click', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) / scale;
+  const y = (e.clientY - rect.top) / scale;
+  currentPoints.push({ x, y });
+  statusEl.textContent = `Root ${roots.length}: ${currentPoints.length} points — Enter to finish`;
+  draw();
+});
+
+// Keyboard
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && currentPoints.length >= 2) {
+    // Finish current root
+    roots.push({
+      points: [...currentPoints],
+      color: COLORS[roots.length % COLORS.length],
+    });
+    currentPoints = [];
+    selectedRoot = roots.length - 1;
+    updateRootList();
+    draw();
+    statusEl.textContent = `Root ${roots.length - 1} saved. Click to start next root.`;
+  } else if (e.key === 'Backspace' && currentPoints.length > 0) {
+    currentPoints.pop();
+    draw();
+    statusEl.textContent = `Root ${roots.length}: ${currentPoints.length} points`;
+  } else if (e.key === 'Escape') {
+    currentPoints = [];
+    draw();
+    statusEl.textContent = 'Cancelled. Click to start a new root.';
+  } else if (e.key === 'z' || e.key === 'Z') {
+    if (selectedRoot >= 0 && selectedRoot < roots.length) {
+      roots.splice(selectedRoot, 1);
+      selectedRoot = Math.min(selectedRoot, roots.length - 1);
+      updateRootList();
+      draw();
+      statusEl.textContent = 'Root deleted.';
+    }
+  }
+});
+
+function exportJSON() {
+  // Convert pixel coords to topology coords matching extract_branch_topology.py:
+  // tx = (col / img_w) * 1.7 - 0.85
+  // ty = (1 - row / img_h) * 1.5 - 0.55
+  const branches = roots.map((root, i) => {
+    const side = root.points[root.points.length - 1].x < imgW / 2 ? 'left' : 'right';
+    const path = root.points.map(pt => {
+      const tx = (pt.x / imgW) * 1.7 - 0.85;
+      const ty = (1 - pt.y / imgH) * 1.5 - 0.55;
+      return [parseFloat(tx.toFixed(4)), parseFloat(ty.toFixed(4))];
+    });
+    return {
+      id: `root_${side}_${i}`,
+      parent: 'trunk',
+      path: path,
+    };
+  });
+
+  const json = JSON.stringify(branches, null, 2);
+  outputEl.textContent = json;
+
+  // Also copy to clipboard
+  navigator.clipboard.writeText(json).then(() => {
+    statusEl.textContent = `Exported ${roots.length} roots to clipboard!`;
+  }).catch(() => {
+    statusEl.textContent = `Exported ${roots.length} roots (see sidebar).`;
+  });
+}
+
+function clearAll() {
+  roots = [];
+  currentPoints = [];
+  selectedRoot = -1;
+  updateRootList();
+  draw();
+  statusEl.textContent = 'Cleared. Click to start tracing.';
+}
+
+window.addEventListener('resize', () => { fitToScreen(); draw(); });
+</script>
+</body>
+</html>

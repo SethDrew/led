@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LED Jam</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { background: #111; color: #ccc; font-family: monospace; }
+      #viewport { width: 100vw; height: calc(100vh - 90px); }
+      #controls {
+        padding: 8px 16px;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        background: #1a1a1a;
+        border-top: 1px solid #333;
+      }
+      #controls input[type="text"] {
+        background: #222; border: 1px solid #444; color: #ccc;
+        padding: 4px 8px; font-family: monospace; font-size: 12px;
+        width: 260px; border-radius: 3px;
+      }
+      #controls input[type="text"]::placeholder { color: #555; }
+      #controls button {
+        background: #333; border: 1px solid #555; color: #ccc;
+        padding: 4px 12px; font-family: monospace; font-size: 12px;
+        cursor: pointer; border-radius: 3px;
+      }
+      #controls button:hover { background: #444; }
+      .track-item {
+        padding: 6px 16px; cursor: pointer; font-size: 12px;
+        display: flex; justify-content: space-between; align-items: center;
+        border-bottom: 1px solid #222;
+      }
+      .track-item:hover { background: #252525; }
+      .track-item .artist { color: #888; font-size: 11px; }
+      .track-item .duration { color: #555; font-size: 11px; }
+      #controls select {
+        background: #222; border: 1px solid #444; color: #ccc;
+        padding: 4px 6px; font-family: monospace; font-size: 12px;
+        border-radius: 3px;
+      }
+      #seek-bar {
+        flex: 1; min-width: 120px; max-width: 300px;
+        accent-color: #f84; height: 4px;
+      }
+      #time-display { font-size: 11px; color: #888; min-width: 80px; }
+      #controls label { font-size: 11px; color: #666; }
+      #controls span { font-size: 12px; }
+      #status { color: #f84; }
+      .status-bar {
+        display: flex; align-items: center; gap: 12px;
+        margin-left: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="viewport"></div>
+    <div id="controls">
+      <button id="tracks-btn" title="Browse tracks">♫</button>
+      <button id="play-btn">play</button>
+      <input type="range" id="seek-bar" min="0" max="100" step="0.1" value="0" />
+      <span id="time-display">0:00 / 0:00</span>
+      <span id="track-title" style="font-size:11px;color:#999;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
+      <select id="effect-select"></select>
+      <div class="status-bar">
+        <label><span id="status">disconnected</span></label>
+        <label>fx: <span id="effect-name">none</span></label>
+        <label>users: <span id="users">-</span></label>
+      </div>
+    </div>
+    <div id="track-list" style="display:none;position:absolute;bottom:90px;left:0;right:0;max-height:50vh;overflow-y:auto;background:#1a1a1a;border-top:1px solid #333;padding:8px 0;">
+      <div style="padding:4px 16px;font-size:11px;color:#666;display:flex;justify-content:space-between;align-items:center;">
+        <span>Audius Trending</span>
+        <input type="text" id="track-url" placeholder="or paste any audio URL + Enter" style="background:#222;border:1px solid #444;color:#ccc;padding:2px 6px;font-family:monospace;font-size:11px;width:260px;border-radius:3px;" />
+      </div>
+      <div id="track-items"></div>
+    </div>
+    <audio id="audio" crossorigin="anonymous" style="display:none"></audio>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

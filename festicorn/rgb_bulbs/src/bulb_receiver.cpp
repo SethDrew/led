@@ -118,7 +118,7 @@ static Algorithm currentAlg = ALG_QUIET_BLOOM;
 
 // ── Global state ─────────────────────────────────────────────────
 
-Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_RGB + NEO_KHZ800);
 // Delta-sigma accumulators per pixel, per channel
 static uint16_t dsR[LED_COUNT], dsG[LED_COUNT], dsB[LED_COUNT];
 
@@ -905,6 +905,6 @@ void loop() {
 
     strip.show();
 
-    // Yield to WiFi task — critical on single-core ESP32-C3
+    // Yield so ESP-NOW radio can service receive callbacks
     delay(1);
 }

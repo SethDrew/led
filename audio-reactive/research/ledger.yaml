@@ -2976,15 +2976,17 @@ entries:
 
   - id: self-relative-normalization-for-integrals
     date: 2026-03-15
-    touched: 2026-03-15
-    title: "RMS-bounded normalization for pre-integrated features (not EMA)"
+    touched: 2026-04-13
+    title: "RMS-bounded normalization for sustained-energy integrals (not EMA)"
     summary: >
-      Pre-integrated features (rolling integrals of RMS, spectral flux, etc.)
-      should NOT be EMA-normalized — double-smoothing collapses dynamic range.
-      Instead, normalize by the theoretical maximum: integral / (rms_peak ×
-      window_frames), where rms_peak is a fast-tracking peak of the underlying
-      RMS signal. This achieves r=0.90-0.999 correlation with ideal output,
-      compared to r=0.05-0.74 for peak-decay on integrals.
+      Long-window energy accumulators (multi-second rolling integrals of RMS,
+      spectral flux, etc.) should NOT be EMA-normalized — double-smoothing
+      collapses dynamic range. Instead, normalize by the theoretical maximum:
+      integral / (rms_peak × window_frames). Achieves r=0.90-0.999 vs
+      r=0.05-0.74 for peak-decay. Applies to features that sum raw energy
+      over seconds. Does NOT apply to short-window derivative integrals like
+      AbsIntegral (150ms window of |d(RMS)/dt|) — those behave as
+      near-instantaneous features and benefit from EMA normalization normally.
     status: validated
     warmth: medium
     confidence: high
@@ -3005,11 +3007,13 @@ entries:
       EMA smooths the integral. The result loses both beat-level and
       section-level dynamics.
 
-      The self-relative approach preserves the integral's natural dynamics
-      (slow-building energy in builds, sustained high values in drops)
-      while keeping output in a bounded range. It's a different
-      normalization strategy for a different feature type — not a
-      contradiction of EMA for instantaneous features.
+      Boundary: the discriminator is whether the feature represents "total
+      accumulated energy" (use self-relative) vs "what is happening now"
+      (use EMA). AbsIntegral integrates the derivative over 150ms — it's
+      spiky, transient, and near-instantaneous. norm_comparison.py confirmed
+      absint with peak-decay scores r=0.91, behaving like an instantaneous
+      feature. Rolling RMS integral (10s window) scores r=0.20-0.69 with
+      peak-decay — that's where self-relative normalization is needed.
 
   - id: proportional-mapping-needs-midrange-centering
     date: 2026-03-15

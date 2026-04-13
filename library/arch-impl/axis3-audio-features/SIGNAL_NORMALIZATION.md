@@ -115,6 +115,15 @@ Different audio features have different statistical distributions and need diffe
 
 This is the practical consequence of "perception is layered by timescale" -- each feature type carries information at a different scale, and normalization must respect that. (Ledger: `perception-is-layered-by-timescale`)
 
+### The Integral Boundary
+
+The discriminator for "pre-integrated" is whether the feature represents **total accumulated energy** (use self-relative) vs **what is happening now** (use EMA). Window length and what's being integrated both matter:
+
+- **Rolling RMS integral** (5-10s window, sums raw energy): pre-integrated. Self-relative normalization: `integral / (rms_peak × window_frames)`. EMA on top double-smooths, collapsing dynamic range to r=0.05-0.74 correlation with ideal.
+- **AbsIntegral** (150ms window, sums |d(RMS)/dt|): near-instantaneous. EMA normalization works normally — the 150ms derivative window produces spiky, transient output that behaves like an instantaneous feature. Empirically confirmed: peak-decay on absint scores r=0.91, consistent with instantaneous feature behavior. (Ledger: `self-relative-normalization-for-integrals`)
+
+The name "integral" is misleading for AbsIntegral — it integrates the *derivative* over a very short window. The output is percussive and frame-rate-scale, not section-scale.
+
 ---
 
 ## 6. EMA Ratio as Section Boundary Detector

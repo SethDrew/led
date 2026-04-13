@@ -1,0 +1,180 @@
+{
+  "name": "yggdrasil",
+  "numLeds": 191,
+  "branches": [
+    {
+      "id": "trunk",
+      "parent": null,
+      "path": [[-0.02, -0.1], [-0.01, 0.0], [0.0, 0.1], [0.01, 0.2], [0.0, 0.3]],
+      "ledCount": 18
+    },
+
+    {
+      "id": "limb_left_main",
+      "parent": "trunk",
+      "path": [[0.0, 0.3], [-0.08, 0.38], [-0.2, 0.48], [-0.35, 0.55], [-0.48, 0.6]],
+      "ledCount": 12
+    },
+    {
+      "id": "branch_left_upper",
+      "parent": "limb_left_main",
+      "path": [[-0.2, 0.48], [-0.28, 0.6], [-0.32, 0.72], [-0.3, 0.8]],
+      "ledCount": 8
+    },
+    {
+      "id": "branch_left_outer",
+      "parent": "limb_left_main",
+      "path": [[-0.48, 0.6], [-0.55, 0.68], [-0.62, 0.72], [-0.68, 0.7]],
+      "ledCount": 6
+    },
+    {
+      "id": "branch_left_droop",
+      "parent": "limb_left_main",
+      "path": [[-0.35, 0.55], [-0.45, 0.5], [-0.55, 0.42], [-0.62, 0.35]],
+      "ledCount": 6
+    },
+    {
+      "id": "twig_left_top",
+      "parent": "branch_left_upper",
+      "path": [[-0.3, 0.8], [-0.25, 0.86], [-0.18, 0.88]],
+      "ledCount": 4
+    },
+    {
+      "id": "twig_left_outer_tip",
+      "parent": "branch_left_outer",
+      "path": [[-0.68, 0.7], [-0.72, 0.76], [-0.7, 0.82]],
+      "ledCount": 3
+    },
+
+    {
+      "id": "limb_center",
+      "parent": "trunk",
+      "path": [[0.0, 0.3], [0.02, 0.42], [0.0, 0.55], [-0.02, 0.68], [0.0, 0.8], [0.02, 0.88]],
+      "ledCount": 12
+    },
+    {
+      "id": "branch_center_left",
+      "parent": "limb_center",
+      "path": [[0.0, 0.55], [-0.1, 0.65], [-0.15, 0.75]],
+      "ledCount": 5
+    },
+    {
+      "id": "branch_center_right",
+      "parent": "limb_center",
+      "path": [[-0.02, 0.68], [0.1, 0.76], [0.18, 0.82]],
+      "ledCount": 5
+    },
+
+    {
+      "id": "limb_right_main",
+      "parent": "trunk",
+      "path": [[0.0, 0.3], [0.1, 0.4], [0.25, 0.5], [0.4, 0.55], [0.52, 0.58]],
+      "ledCount": 12
+    },
+    {
+      "id": "branch_right_upper",
+      "parent": "limb_right_main",
+      "path": [[0.25, 0.5], [0.3, 0.62], [0.32, 0.74], [0.28, 0.82]],
+      "ledCount": 8
+    },
+    {
+      "id": "branch_right_outer",
+      "parent": "limb_right_main",
+      "path": [[0.52, 0.58], [0.58, 0.65], [0.65, 0.7], [0.7, 0.68]],
+      "ledCount": 6
+    },
+    {
+      "id": "branch_right_rise",
+      "parent": "limb_right_main",
+      "path": [[0.4, 0.55], [0.48, 0.65], [0.52, 0.76], [0.5, 0.84]],
+      "ledCount": 7
+    },
+    {
+      "id": "branch_right_droop",
+      "parent": "limb_right_main",
+      "path": [[0.4, 0.55], [0.5, 0.48], [0.6, 0.4], [0.65, 0.32]],
+      "ledCount": 6
+    },
+    {
+      "id": "twig_right_top",
+      "parent": "branch_right_upper",
+      "path": [[0.28, 0.82], [0.2, 0.87], [0.12, 0.88]],
+      "ledCount": 4
+    },
+    {
+      "id": "twig_right_outer_tip",
+      "parent": "branch_right_outer",
+      "path": [[0.7, 0.68], [0.74, 0.74], [0.72, 0.8]],
+      "ledCount": 3
+    },
+
+    {
+      "id": "limb_right_low",
+      "parent": "trunk",
+      "path": [[0.0, 0.3], [0.12, 0.32], [0.28, 0.3], [0.42, 0.25]],
+      "ledCount": 8
+    },
+    {
+      "id": "branch_right_low_up",
+      "parent": "limb_right_low",
+      "path": [[0.28, 0.3], [0.35, 0.38], [0.42, 0.42]],
+      "ledCount": 4
+    },
+    {
+      "id": "branch_right_low_out",
+      "parent": "limb_right_low",
+      "path": [[0.42, 0.25], [0.52, 0.22], [0.6, 0.18]],
+      "ledCount": 4
+    },
+
+    {
+      "id": "root_left_main",
+      "parent": "trunk",
+      "path": [[-0.02, -0.1], [-0.1, -0.16], [-0.22, -0.22], [-0.38, -0.28], [-0.52, -0.3]],
+      "ledCount": 10
+    },
+    {
+      "id": "root_left_deep",
+      "parent": "root_left_main",
+      "path": [[-0.22, -0.22], [-0.28, -0.32], [-0.32, -0.42], [-0.3, -0.5]],
+      "ledCount": 6
+    },
+    {
+      "id": "root_left_tip",
+      "parent": "root_left_main",
+      "path": [[-0.52, -0.3], [-0.6, -0.35], [-0.66, -0.42]],
+      "ledCount": 4
+    },
+    {
+      "id": "root_left_shallow",
+      "parent": "root_left_main",
+      "path": [[-0.38, -0.28], [-0.45, -0.2], [-0.55, -0.16], [-0.62, -0.14]],
+      "ledCount": 5
+    },
+
+    {
+      "id": "root_right_main",
+      "parent": "trunk",
+      "path": [[-0.02, -0.1], [0.08, -0.15], [0.2, -0.2], [0.35, -0.26], [0.5, -0.28]],
+      "ledCount": 10
+    },
+    {
+      "id": "root_right_deep",
+      "parent": "root_right_main",
+      "path": [[0.2, -0.2], [0.26, -0.3], [0.3, -0.4], [0.28, -0.5]],
+      "ledCount": 6
+    },
+    {
+      "id": "root_right_tip",
+      "parent": "root_right_main",
+      "path": [[0.5, -0.28], [0.58, -0.34], [0.64, -0.42]],
+      "ledCount": 4
+    },
+    {
+      "id": "root_right_shallow",
+      "parent": "root_right_main",
+      "path": [[0.35, -0.26], [0.44, -0.2], [0.55, -0.15], [0.62, -0.12]],
+      "ledCount": 5
+    }
+  ]
+}

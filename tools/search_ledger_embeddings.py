@@ -261,13 +261,14 @@ def match_reference_docs(query: str) -> list[tuple[str, str]]:
 # ── Search ───────────────────────────────────────────────────────────
 
 
-def search(query: str, top_k: int = 5) -> str:
-    """Search both ledgers and return formatted results."""
-    lines = []
+def search_raw(query: str, top_k: int = 5) -> list[tuple[str, str, dict, float]]:
+    """Return raw search results as (entry_id, source, entry_dict, score) tuples.
 
+    This is the interface used by the combined search script.
+    """
     entries, embeddings = get_embeddings()
     if not entries or embeddings.size == 0:
-        return ""
+        return []
 
     # Embed query
     query_emb = embed_texts([query])  # (1, D)
@@ -301,38 +302,55 @@ def search(query: str, top_k: int = 5) -> str:
 
     ranked = sorted(boosted, key=lambda x: x[1], reverse=True)[:top_k]
 
-    if ranked:
+    results = []
+    for idx, score in ranked:
+        source, entry = entries[idx]
+        eid = entry.get("id", "unknown")
+        results.append((eid, source, entry, float(score)))
+    return results
+
+
+def format_results(results: list[tuple[str, str, dict, float]]) -> list[str]:
+    """Format raw results into output lines (no header)."""
+    lines = []
+    for eid, source, entry, score in results:
+        status = entry.get("status", "?")
+
+        if source == "research":
+            warmth = entry.get("warmth", "?")
+            confidence = entry.get("confidence", "?")
+            meta = f"[{source}, {status}, warmth:{warmth}, confidence:{confidence}]"
+        else:
+            severity = entry.get("severity", "?")
+            scope = entry.get("scope", "?")
+            meta = f"[{source}, {status}, severity:{severity}, scope:{scope}]"
+
+        summary = entry.get("summary", "").strip()
+        if not summary:
+            summary = entry.get("title", "(no summary)")
+
+        relates = entry.get("relates_to", [])
+        if relates and isinstance(relates, list):
+            relates_str = ", ".join(str(r) for r in relates)
+        else:
+            relates_str = ""
+
+        lines.append(f"**{eid}** {meta}")
+        lines.append(f"{summary}")
+        if relates_str:
+            lines.append(f"Related: [{relates_str}]")
+        lines.append("")
+    return lines
+
+
+def search(query: str, top_k: int = 5) -> str:
+    """Search both ledgers and return formatted results."""
+    results = search_raw(query, top_k=top_k)
+    lines = []
+
+    if results:
         lines.append("## Relevant ledger entries:\n")
-        for idx, score in ranked:
-            source, entry = entries[idx]
-            eid = entry.get("id", "unknown")
-            status = entry.get("status", "?")
-
-            # Format metadata depending on source
-            if source == "research":
-                warmth = entry.get("warmth", "?")
-                confidence = entry.get("confidence", "?")
-                meta = f"[{source}, {status}, warmth:{warmth}, confidence:{confidence}]"
-            else:
-                severity = entry.get("severity", "?")
-                scope = entry.get("scope", "?")
-                meta = f"[{source}, {status}, severity:{severity}, scope:{scope}]"
-
-            summary = entry.get("summary", "").strip()
-            if not summary:
-                summary = entry.get("title", "(no summary)")
-
-            relates = entry.get("relates_to", [])
-            if relates and isinstance(relates, list):
-                relates_str = ", ".join(str(r) for r in relates)
-            else:
-                relates_str = ""
-
-            lines.append(f"**{eid}** {meta}")
-            lines.append(f"{summary}")
-            if relates_str:
-                lines.append(f"Related: [{relates_str}]")
-            lines.append("")
+        lines.extend(format_results(results))
 
     # Reference docs
     ref_matches = match_reference_docs(query)

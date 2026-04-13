@@ -5,7 +5,7 @@
 set -euo pipefail
 
 VENV_PYTHON="/Users/sethdrew/Documents/projects/led/venv/bin/python"
-SEARCH_SCRIPT="/Users/sethdrew/Documents/projects/led/tools/search_ledger_embeddings.py"
+SEARCH_SCRIPT="/Users/sethdrew/Documents/projects/led/tools/search_ledger_combined.py"
 
 # Read stdin (hook provides JSON with prompt)
 INPUT=$(cat)

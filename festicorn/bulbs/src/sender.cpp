@@ -18,11 +18,12 @@
 #include <driver/i2s.h>
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 #include <math.h>
 
 // ── Pin assignments ──────────────────────────────────────────────
-#define SDA_PIN    20
-#define SCL_PIN    21
+#define SDA_PIN    8
+#define SCL_PIN    7
 #define I2S_SCK    6
 #define I2S_WS     5
 #define I2S_SD     0
@@ -65,6 +66,7 @@ static uint32_t shakeCooldownUntil = 0;
 // IMU raw (accel + gyro)
 static int16_t imuAx, imuAy, imuAz;
 static int16_t imuGx, imuGy, imuGz;
+static bool imuPresent = false;
 
 // Timing
 static uint32_t lastSensorMs = 0;
@@ -150,7 +152,12 @@ void setup() {
 
     // ── ESP-NOW init ──────────────────────────────────────────────
     WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);  // C3 Super Mini regulator brownout fix (see engineering ledger)
+    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
     esp_now_init();
+    Serial.printf("Sender ch=%d MAC=%s\n", WiFi.channel(), WiFi.macAddress().c_str());
 
     esp_now_peer_info_t peer;
     memset(&peer, 0, sizeof(peer));
@@ -165,23 +172,28 @@ void setup() {
     Wire.begin(SDA_PIN, SCL_PIN);
     Wire.setClock(400000);
 
-    // Wake MPU-6050
+    // Check for MPU-6050
     Wire.beginTransmission(MPU_ADDR);
-    Wire.write(0x6B);
-    Wire.write(0x00);
-    Wire.endTransmission(true);
-    delay(100);
+    if (Wire.endTransmission() == 0) {
+        imuPresent = true;
+        // Wake MPU-6050
+        Wire.beginTransmission(MPU_ADDR);
+        Wire.write(0x6B);
+        Wire.write(0x00);
+        Wire.endTransmission(true);
+        delay(100);
 
-    // Enable DLPF (accel 44 Hz, gyro 42 Hz)
-    Wire.beginTransmission(MPU_ADDR);
-    Wire.write(0x1A);
-    Wire.write(0x03);
-    Wire.endTransmission(true);
+        // Enable DLPF (accel 44 Hz, gyro 42 Hz)
+        Wire.beginTransmission(MPU_ADDR);
+        Wire.write(0x1A);
+        Wire.write(0x03);
+        Wire.endTransmission(true);
 
-    // Seed first IMU reading
-    readIMU();
-
-    Serial.println("Sending (raw accel+gyro)!");
+        readIMU();
+        Serial.println("Sending (raw accel+gyro)!");
+    } else {
+        Serial.println("No IMU found — sending audio only");
+    }
     lastSensorMs = millis();
 }
 
@@ -193,7 +205,7 @@ void loop() {
     if (now - lastSensorMs < SENSOR_MS) return;
     lastSensorMs = now;
 
-    readIMU();
+    if (imuPresent) readIMU();
     uint16_t rms = readAudioRMS();
 
     // ── Shake detection ──────────────────────────────────────────
@@ -240,7 +252,9 @@ void loop() {
     frameCount++;
     if (frameCount % 25 == 0) {
         float gyroMag = vecLen((float)imuGx, (float)imuGy, (float)imuGz) / 131.0f;
-        Serial.printf("a=%6d,%6d,%6d  g=%.1f°/s  rms=%5d  mic=%s\n",
-            imuAx, imuAy, imuAz, gyroMag, rms, micEnabled ? "on" : "off");
+        esp_err_t lastSendResult = esp_now_send(broadcastAddr, (uint8_t*)&pkt, sizeof(pkt));
+    Serial.printf("a=%6d,%6d,%6d  g=%.1f°/s  rms=%5d  mic=%s  send=%d  ch=%d\n",
+            imuAx, imuAy, imuAz, gyroMag, rms, micEnabled ? "on" : "off",
+            lastSendResult, WiFi.channel());
     }
 }

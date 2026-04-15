@@ -25,6 +25,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 #include <esp_random.h>
 #include <Adafruit_NeoPixel.h>
 #include <math.h>
@@ -33,7 +34,11 @@
 #include <fast_math.h>
 
 // ── LED config ───────────────────────────────────────────────────
+#ifndef LED_PIN_OVERRIDE
 #define LED_PIN    10
+#else
+#define LED_PIN    LED_PIN_OVERRIDE
+#endif
 #define LED_COUNT  50
 
 // ── Rendering ────────────────────────────────────────────────────
@@ -69,7 +74,9 @@
 #define BLOOM_NOISE_GATE       256    // per-channel: snap to 0 below 1 LSB in 8.8
 
 // Movement processing
-#define MOTION_NOISE_FLOOR     80.0f  // deg/s: ignore casual movement, only real shakes
+#define SURPRISE_EMA_UP        0.05f  // slow rise — spikes don't inflate baseline
+#define SURPRISE_EMA_DOWN      0.2f   // fast fall — tracks decay
+#define SURPRISE_RATIO         3.0f   // motion must exceed EMA * ratio to trigger
 #define DRAIN_SCALE            100.0f // cubic drain normalizer: ~300 deg/s dumps colony
 #define FLASH_MOTION_SCALE     300.0f // deg/s for full log-compressed flash brightness
 #define ENERGY_MULTIPLIER      1.4f   // flash can exceed stored energy by this factor
@@ -174,6 +181,7 @@ static float bloomFlashDecay[LED_COUNT];
 static float bloomColonyEnergy = 1.0f;
 static uint32_t bloomLastMotionMs = 0;
 static float bloomMotionRate = 0.0f;
+static float motionEMA = 0.0f;
 static uint32_t bloomPrevPktCount = 0;
 
 // Simple PRNG state (xorshift32, seeded from esp_random at boot)
@@ -313,8 +321,18 @@ void setup() {
 
     // ── ESP-NOW init ──────────────────────────────────────────────
     WiFi.mode(WIFI_STA);
-    esp_now_init();
-    esp_now_register_recv_cb(onReceive);
+    WiFi.disconnect();
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);  // C3 Super Mini regulator brownout fix (see engineering ledger)
+
+    // Enable promiscuous mode — required on some ESP32 variants for broadcast rx
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_promiscuous(false);
+
+    esp_err_t initResult = esp_now_init();
+    esp_err_t cbResult = esp_now_register_recv_cb(onReceive);
+    Serial.printf("ESP-NOW init=%d, cb=%d, ch=%d, MAC=%s\n",
+        initResult, cbResult, WiFi.channel(), WiFi.macAddress().c_str());
 
     Serial.println("Waiting for sender... (will auto-calibrate from first 2s of data)");
     Serial.println("Commands: 'c' recal, 's' sparkle, 'm' fire_meld, 'f' fire_flicker, 'b' bloom");
@@ -382,6 +400,7 @@ static void resetBloomState() {
     bloomColonyEnergy = 1.0f;
     bloomLastMotionMs = 0;
     bloomMotionRate = 0.0f;
+    motionEMA = 0.0f;
     bloomPrevPktCount = 0;
     for (uint16_t i = 0; i < LED_COUNT; i++) {
         bloomBreathPhase[i] = randFloat();
@@ -405,33 +424,47 @@ static void bloomProcessMotion(float pktDt, uint32_t now) {
         latestPacket.ax, latestPacket.ay, latestPacket.az);
     bloomMotionRate = fmaxf(gyroRate, accelJolt * 300.0f);
 
-    float motionAboveNoise = fmaxf(0.0f, bloomMotionRate - MOTION_NOISE_FLOOR);
+    // Surprise detector: compare BEFORE updating EMA so spike doesn't dilute itself
+    float surprise = fmaxf(0.0f, bloomMotionRate - motionEMA * SURPRISE_RATIO);
 
-    if (motionAboveNoise > 1.0f) {
+    // Asymmetric EMA: rise slowly (spikes don't inflate baseline), fall normally
+    float alpha = (bloomMotionRate > motionEMA) ? SURPRISE_EMA_UP : SURPRISE_EMA_DOWN;
+    motionEMA += alpha * (bloomMotionRate - motionEMA);
+
+    if (surprise > 1.0f) {
         bloomLastMotionMs = now;
 
-        // Drain colony energy — cubic: gentle motion barely drains,
-        // hard shakes collapse the colony in one hit
-        float normMotion = motionAboveNoise / DRAIN_SCALE;
-        float drain = normMotion * normMotion * normMotion * pktDt;
-        drain = fminf(drain, bloomColonyEnergy);
-        bloomColonyEnergy -= drain;
+        // Hit intensity: how hard, 0-1 (log-compressed)
+        float hitIntensity = clampf(
+            log2f(1.0f + surprise) / log2f(1.0f + FLASH_MOTION_SCALE),
+            0.0f, 1.0f);
 
-        // Flash: log-compressed motion × remaining energy × multiplier
-        float logMotion = log2f(1.0f + motionAboveNoise)
-                        / log2f(1.0f + FLASH_MOTION_SCALE);
-        float flashLevel = clampf(logMotion, 0.0f, 1.0f)
-                         * bloomColonyEnergy
-                         * ENERGY_MULTIPLIER;
-
+        // Per-LED flash: each LED releases its current breathing energy
         for (uint16_t i = 0; i < LED_COUNT; i++) {
-            float target = flashLevel * (0.85f + 0.15f * randFloat());
+            // Compute this LED's current brightness (same as render path)
+            float wakeThresh = bloomHueT[i] * BLOOM_RECOVERY_SPREAD;
+            float ledRecovery = clampf(
+                (bloomColonyEnergy - wakeThresh) / 0.30f, 0.0f, 1.0f);
+            float breath = (fastSinPhase(bloomBreathPhase[i]) * 0.5f + 0.5f);
+            float breathGlow = BLOOM_BREATH_FLOOR
+                + breath * (bloomBreathPeak[i] - BLOOM_BREATH_FLOOR);
+            breathGlow *= ledRecovery;
+
+            // Flash = this LED's current glow amplified by hit intensity
+            float target = breathGlow * hitIntensity * ENERGY_MULTIPLIER;
             if (target > bloomFlashGlow[i]) {
                 bloomFlashGlow[i] = target;
                 bloomFlashDecay[i] = BLOOM_FLASH_DECAY_LO
                     + randFloat() * (BLOOM_FLASH_DECAY_HI - BLOOM_FLASH_DECAY_LO);
             }
         }
+
+        // Global colony drain — cubic: gentle motion barely drains,
+        // hard shakes collapse the colony in one hit
+        float normMotion = surprise / DRAIN_SCALE;
+        float drain = normMotion * normMotion * normMotion * pktDt;
+        drain = fminf(drain, bloomColonyEnergy);
+        bloomColonyEnergy -= drain;
     }
 }
 

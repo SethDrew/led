@@ -67,7 +67,9 @@
 #define BLOOM_NOISE_GATE       256    // per-channel: snap to 0 below 1 LSB in 8.8
 
 // Movement processing
-#define MOTION_NOISE_FLOOR     80.0f  // deg/s: ignore casual movement, only real shakes
+#define SURPRISE_EMA_UP        0.05f  // slow rise — spikes don't inflate baseline
+#define SURPRISE_EMA_DOWN      0.2f   // fast fall — tracks decay
+#define SURPRISE_RATIO         3.0f   // motion must exceed EMA * ratio to trigger
 #define DRAIN_SCALE            100.0f // cubic drain normalizer: ~300 deg/s dumps colony
 #define FLASH_MOTION_SCALE     300.0f // deg/s for full log-compressed flash brightness
 #define ENERGY_MULTIPLIER      1.4f   // flash can exceed stored energy by this factor
@@ -88,13 +90,15 @@
 #define BLOOM_RECOVERY_RAMP    0.033f // 0→1 in ~30s (3x slower)
 #define BLOOM_RECOVERY_SPREAD  0.70f  // per-LED wake thresholds span 0..0.7
 
-// Color (blue/cyan palette — no R channel)
+// Color (blue/cyan/purple palette)
 #define BLOOM_HUE_A_G   20.0f   // deep blue green
 #define BLOOM_HUE_A_B  100.0f   // deep blue blue
 #define BLOOM_HUE_B_G   70.0f   // teal green
 #define BLOOM_HUE_B_B  110.0f   // teal blue
 #define BLOOM_FLASH_G  150.0f   // flash cyan green
 #define BLOOM_FLASH_B  170.0f   // flash cyan blue
+#define BLOOM_PURPLE_MAX  60.0f // max red channel for purple tint
+#define BLOOM_PURPLE_RATE 0.15f // color drift speed (Hz-ish)
 
 // ── ESP-NOW ──────────────────────────────────────────────────────
 #define TIMEOUT_MS     500
@@ -171,6 +175,7 @@ static float bloomFlashDecay[LED_COUNT];
 static float bloomColonyEnergy = 1.0f;
 static uint32_t bloomLastMotionMs = 0;
 static float bloomMotionRate = 0.0f;
+static float motionEMA = 0.0f;
 static uint32_t bloomPrevPktCount = 0;
 
 // Simple PRNG state (xorshift32, seeded from esp_random at boot)
@@ -309,6 +314,7 @@ void setup() {
 
     // ── ESP-NOW init ──────────────────────────────────────────────
     WiFi.mode(WIFI_STA);
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);  // C3 Super Mini regulator brownout fix
     esp_now_init();
     esp_now_register_recv_cb(onReceive);
 
@@ -378,6 +384,7 @@ static void resetBloomState() {
     bloomColonyEnergy = 1.0f;
     bloomLastMotionMs = 0;
     bloomMotionRate = 0.0f;
+    motionEMA = 0.0f;
     bloomPrevPktCount = 0;
     for (uint16_t i = 0; i < LED_COUNT; i++) {
         bloomBreathPhase[i] = randFloat();
@@ -401,33 +408,47 @@ static void bloomProcessMotion(float pktDt, uint32_t now) {
         latestPacket.ax, latestPacket.ay, latestPacket.az);
     bloomMotionRate = fmaxf(gyroRate, accelJolt * 300.0f);
 
-    float motionAboveNoise = fmaxf(0.0f, bloomMotionRate - MOTION_NOISE_FLOOR);
+    // Surprise detector: compare BEFORE updating EMA so spike doesn't dilute itself
+    float surprise = fmaxf(0.0f, bloomMotionRate - motionEMA * SURPRISE_RATIO);
 
-    if (motionAboveNoise > 1.0f) {
+    // Asymmetric EMA: rise slowly (spikes don't inflate baseline), fall normally
+    float alpha = (bloomMotionRate > motionEMA) ? SURPRISE_EMA_UP : SURPRISE_EMA_DOWN;
+    motionEMA += alpha * (bloomMotionRate - motionEMA);
+
+    if (surprise > 1.0f) {
         bloomLastMotionMs = now;
 
-        // Drain colony energy — cubic: gentle motion barely drains,
-        // hard shakes collapse the colony in one hit
-        float normMotion = motionAboveNoise / DRAIN_SCALE;
-        float drain = normMotion * normMotion * normMotion * pktDt;
-        drain = fminf(drain, bloomColonyEnergy);
-        bloomColonyEnergy -= drain;
+        // Hit intensity: how hard, 0-1 (log-compressed)
+        float hitIntensity = clampf(
+            log2f(1.0f + surprise) / log2f(1.0f + FLASH_MOTION_SCALE),
+            0.0f, 1.0f);
 
-        // Flash: log-compressed motion × remaining energy × multiplier
-        float logMotion = log2f(1.0f + motionAboveNoise)
-                        / log2f(1.0f + FLASH_MOTION_SCALE);
-        float flashLevel = clampf(logMotion, 0.0f, 1.0f)
-                         * bloomColonyEnergy
-                         * ENERGY_MULTIPLIER;
-
+        // Per-LED flash: each LED releases its current breathing energy
         for (uint16_t i = 0; i < LED_COUNT; i++) {
-            float target = flashLevel * (0.85f + 0.15f * randFloat());
+            // Compute this LED's current brightness (same as render path)
+            float wakeThresh = bloomHueT[i] * BLOOM_RECOVERY_SPREAD;
+            float ledRecovery = clampf(
+                (bloomColonyEnergy - wakeThresh) / 0.30f, 0.0f, 1.0f);
+            float breath = (fastSinPhase(bloomBreathPhase[i]) * 0.5f + 0.5f);
+            float breathGlow = BLOOM_BREATH_FLOOR
+                + breath * (bloomBreathPeak[i] - BLOOM_BREATH_FLOOR);
+            breathGlow *= ledRecovery;
+
+            // Flash = this LED's current glow amplified by hit intensity
+            float target = breathGlow * hitIntensity * ENERGY_MULTIPLIER;
             if (target > bloomFlashGlow[i]) {
                 bloomFlashGlow[i] = target;
                 bloomFlashDecay[i] = BLOOM_FLASH_DECAY_LO
                     + randFloat() * (BLOOM_FLASH_DECAY_HI - BLOOM_FLASH_DECAY_LO);
             }
         }
+
+        // Global colony drain — cubic: gentle motion barely drains,
+        // hard shakes collapse the colony in one hit
+        float normMotion = surprise / DRAIN_SCALE;
+        float drain = normMotion * normMotion * normMotion * pktDt;
+        drain = fminf(drain, bloomColonyEnergy);
+        bloomColonyEnergy -= drain;
     }
 }
 
@@ -470,23 +491,32 @@ static void renderQuietBloom(float dt, uint32_t now) {
         float colB = lerpf(lerpf(BLOOM_HUE_A_B, BLOOM_HUE_B_B, h),
                            BLOOM_FLASH_B, flashFrac);
 
+        // Slow purple drift per bulb
+        float purplePhase = (float)now / 1000.0f * BLOOM_PURPLE_RATE + bloomHueT[i] * 4.0f;
+        float purpleMix = (fastSin(purplePhase) + 1.0f) / 2.0f;
+        float colR = purpleMix * BLOOM_PURPLE_MAX;
+
         // Gamma + cap (bloom uses its own brightness cap)
         float linBright = fastGamma24(g) * BLOOM_BRIGHTNESS_CAP;
 
+        float oR = colR * linBright;
         float oG = colG * linBright;
         float oB = colB * linBright;
 
         // 8.8 fixed-point → delta-sigma
+        uint16_t tR16 = (uint16_t)clampf(oR * 256.0f, 0, 65535);
         uint16_t tG16 = (uint16_t)clampf(oG * 256.0f, 0, 65535);
         uint16_t tB16 = (uint16_t)clampf(oB * 256.0f, 0, 65535);
 
         // Per-channel noise gate
+        if (tR16 < BLOOM_NOISE_GATE) tR16 = 0;
         if (tG16 < BLOOM_NOISE_GATE) tG16 = 0;
         if (tB16 < BLOOM_NOISE_GATE) tB16 = 0;
 
+        uint8_t rc = deltaSigma(dsR[i], tR16);
         uint8_t gc = deltaSigma(dsG[i], tG16);
         uint8_t b  = deltaSigma(dsB[i], tB16);
-        strip.setPixelColor(i, 0, gc, b);
+        strip.setPixelColor(i, rc, gc, b);
     }
 }
 
@@ -854,23 +884,6 @@ void loop() {
             Serial.printf("[%s] angle=%.1f rms=%d energy=%.3f onset=%.3f mic=%s\n",
                 algName, angleDeg, rawRms, energy, onset, micOn ? "on" : "off");
         }
-    }
-
-    // ── Timeout: breathing idle ──────────────────────────────────
-    if (!connected) {
-        float breath = (fastSin(now / 1000.0f * M_PI) + 1.0f) / 2.0f;
-        // Render breathing as dim amber (RGB, no W channel)
-        float linBright = fastGamma24(breath * 0.12f);
-        uint8_t r = (uint8_t)(linBright * 255.0f);
-        uint8_t g = (uint8_t)(linBright * 140.0f);
-        uint8_t b = (uint8_t)(linBright * 30.0f);
-        for (uint16_t i = 0; i < LED_COUNT; i++) {
-            strip.setPixelColor(i, r, g, b);
-        }
-        strip.show();
-
-        delay(1);
-        return;
     }
 
     // ── Tilt → OKLCH hue (shared by all algorithms) ─────────────

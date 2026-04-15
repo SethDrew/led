@@ -497,3 +497,59 @@ entries:
       Discovered during interactive bulb effect tuning. With unequal RGB
       (180,170,160), firmware RGBW conversion extracts min=160 as W,
       leaving residual R=20, G=10, B=0. Green toggles 0↔1 visibly.
+
+  # ── Hardware Constraints: ESP32-C3 Super Mini RF ────────────────
+
+  - id: esp32-c3-super-mini-tx-defect
+    date: 2026-04-14
+    touched: 2026-04-14
+    title: ESP32-C3 Super Mini has batch PCB antenna defect causing dead TX at full power
+    summary: >
+      Cheap ESP32-C3 Super Mini clones have a known batch defect: the crystal is
+      placed ~0.3mm from the ceramic antenna (spec minimum: 1.0mm). At full TX
+      power (20dBm, ~500mA peak), the marginal 3.3V regulator sags, corrupting RF
+      output. Boards receive perfectly but transmit nothing. Fix: reduce TX power
+      to 8.5dBm with WiFi.setTxPower(WIFI_POWER_8_5dBm) — restores TX from 0% to
+      98-99% delivery. 35dB link margin at 10m indoor, so range is not a concern.
+    status: mitigated
+    severity: high
+    scope: hardware
+    source:
+      - festicorn/bulbs/src/espnow_lowpower_test.cpp
+    tags: [esp32, esp32-c3, super-mini, antenna, constraint, esp-now]
+    relates_to: [esp32-hardware-selection-rationale]
+    notes: >
+      Confirmed 2026-04-14 on C3-BoardB (MAC 10:00:3B:B0:6E:04). At default 20dBm:
+      SoftAP beacons invisible to all scanners, ESP-NOW 0/50+ packets delivered
+      (send callback falsely reports SUCCESS — broadcast has no ACK). At 8.5dBm:
+      350/354 packets = 99% delivery. Tested across two independent ESP32 receivers.
+
+      The defect is TX-only and power-dependent: the PA drives enough energy that the
+      crystal couples with the antenna, creating destructive interference. Lower power
+      stays below the coupling threshold. SoftAP beacons remain invisible even at
+      8.5dBm (frame-type dependent — management frames more affected than data frames).
+
+      Board-by-board status (2026-04-14):
+        C3-BoardA (D9:CC): works at full power, 93-95% at 8.5dBm
+        C3-BoardB (6E:04): dead at full power, 98-99% at 8.5dBm (confirmed defect)
+        C3-New (5D:10): works at full power, 98-99% at 8.5dBm
+        C3 F5:F8: dead TX (not retested, likely same defect)
+
+      TX power threshold on C3-BoardB: 15.75dBm works (99%), 16.0dBm breaks (0%).
+      This is a cliff edge, not gradual — confirms regulator brownout, not antenna
+      attenuation. ESP32 driver may quantize internally (63→60, 64→68), so the real
+      safe maximum is WIFI_POWER_15dBm (txPow=60). Using 8.5dBm gives 7dBm headroom.
+
+      Workaround: add WiFi.setTxPower(WIFI_POWER_8_5dBm) to ALL C3 Super Mini
+      firmware as standard. Screen boards with SoftAP test at full power to identify
+      affected units. For future orders, consider Seeed XIAO ESP32-C3 (~$5, external
+      antenna, proper QC) or C3 Super Mini Plus (IPEX connector for external antenna).
+
+      Link budget at 8.5dBm, 10m indoor: 8.5 - 60 (FSPL) - 10 (indoor margin) =
+      -61.5 dBm received. ESP32 sensitivity ~-97 dBm. Margin = 35.5 dB. Sufficient
+      for interactive sculpture with people crowding around it.
+
+      The initial 5-board simultaneous test produced a misleading "marginal TX"
+      diagnosis for C3-New — this was actually broadcast collision congestion from
+      5 simultaneous broadcasters, not hardware weakness. In isolated pair testing,
+      C3-New delivers 93-99%.

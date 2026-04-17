@@ -71,6 +71,7 @@
 #define SURPRISE_EMA_DOWN      0.2f   // fast fall — tracks decay
 #define SURPRISE_RATIO         3.0f   // motion must exceed EMA * ratio to trigger
 #define DRAIN_SCALE            100.0f // cubic drain normalizer: ~300 deg/s dumps colony
+#define DRAIN_ENVELOPE_DECAY   0.85f  // per-frame decay: most drain in ~0.5s (12 frames)
 #define FLASH_MOTION_SCALE     300.0f // deg/s for full log-compressed flash brightness
 #define ENERGY_MULTIPLIER      1.4f   // flash can exceed stored energy by this factor
 #define MOTION_SETTLE_MS       300    // ms of stillness before recovery begins
@@ -176,6 +177,8 @@ static float bloomColonyEnergy = 1.0f;
 static uint32_t bloomLastMotionMs = 0;
 static float bloomMotionRate = 0.0f;
 static float motionEMA = 0.0f;
+static float drainEnvelope = 0.0f;
+static float bloomHitIntensity = 0.0f;
 static uint32_t bloomPrevPktCount = 0;
 
 // Simple PRNG state (xorshift32, seeded from esp_random at boot)
@@ -385,6 +388,8 @@ static void resetBloomState() {
     bloomLastMotionMs = 0;
     bloomMotionRate = 0.0f;
     motionEMA = 0.0f;
+    drainEnvelope = 0.0f;
+    bloomHitIntensity = 0.0f;
     bloomPrevPktCount = 0;
     for (uint16_t i = 0; i < LED_COUNT; i++) {
         bloomBreathPhase[i] = randFloat();
@@ -418,52 +423,42 @@ static void bloomProcessMotion(float pktDt, uint32_t now) {
     if (surprise > 1.0f) {
         bloomLastMotionMs = now;
 
-        // Hit intensity: how hard, 0-1 (log-compressed)
+        // Store hit intensity for sustained flash in render path
         float hitIntensity = clampf(
             log2f(1.0f + surprise) / log2f(1.0f + FLASH_MOTION_SCALE),
             0.0f, 1.0f);
+        if (hitIntensity > bloomHitIntensity) bloomHitIntensity = hitIntensity;
 
-        // Per-LED flash: each LED releases its current breathing energy
-        for (uint16_t i = 0; i < LED_COUNT; i++) {
-            // Compute this LED's current brightness (same as render path)
-            float wakeThresh = bloomHueT[i] * BLOOM_RECOVERY_SPREAD;
-            float ledRecovery = clampf(
-                (bloomColonyEnergy - wakeThresh) / 0.30f, 0.0f, 1.0f);
-            float breath = (fastSinPhase(bloomBreathPhase[i]) * 0.5f + 0.5f);
-            float breathGlow = BLOOM_BREATH_FLOOR
-                + breath * (bloomBreathPeak[i] - BLOOM_BREATH_FLOOR);
-            breathGlow *= ledRecovery;
-
-            // Flash = this LED's current glow amplified by hit intensity
-            float target = breathGlow * hitIntensity * ENERGY_MULTIPLIER;
-            if (target > bloomFlashGlow[i]) {
-                bloomFlashGlow[i] = target;
-                bloomFlashDecay[i] = BLOOM_FLASH_DECAY_LO
-                    + randFloat() * (BLOOM_FLASH_DECAY_HI - BLOOM_FLASH_DECAY_LO);
-            }
-        }
-
-        // Global colony drain — cubic: gentle motion barely drains,
-        // hard shakes collapse the colony in one hit
+        // Set drain envelope — scaled so total geometric sum matches intended drain
+        // Old instant: drain = norm³ × pktDt.  Envelope sum = env₀ × dt/(1-decay).
+        // So env₀ = norm³ × pktDt × (1-decay) / dt = norm³ × (1-decay)
         float normMotion = surprise / DRAIN_SCALE;
-        float drain = normMotion * normMotion * normMotion * pktDt;
-        drain = fminf(drain, bloomColonyEnergy);
-        bloomColonyEnergy -= drain;
+        float newDrain = normMotion * normMotion * normMotion
+                       * (1.0f - DRAIN_ENVELOPE_DECAY);
+        if (newDrain > drainEnvelope) drainEnvelope = newDrain;
     }
 }
 
 // ── Quiet bloom render ──────────────────────────────────────────
 
 static void renderQuietBloom(float dt, uint32_t now) {
+    // Check drain state (drain applied AFTER rendering so flash sees pre-drain energy)
+    bool draining = drainEnvelope > 0.001f;
+    if (!draining) {
+        bloomHitIntensity = 0.0f;
+    }
+
     // Colony recovery after motion settles
     if (now - bloomLastMotionMs > MOTION_SETTLE_MS) {
         bloomColonyEnergy = fminf(1.0f, bloomColonyEnergy + BLOOM_RECOVERY_RAMP * dt);
     }
 
     for (uint16_t i = 0; i < LED_COUNT; i++) {
-        // Flash decay
-        bloomFlashGlow[i] *= fastDecay(bloomFlashDecay[i], dt * 30.0f);
-        if (bloomFlashGlow[i] < 0.005f) bloomFlashGlow[i] = 0.0f;
+        // Flash decay (only when NOT being sustained by drain envelope)
+        if (!draining) {
+            bloomFlashGlow[i] *= fastDecay(bloomFlashDecay[i], dt * 30.0f);
+            if (bloomFlashGlow[i] < 0.005f) bloomFlashGlow[i] = 0.0f;
+        }
 
         // Breathing
         bloomBreathPhase[i] += dt / bloomBreathPeriod[i];
@@ -479,6 +474,16 @@ static void renderQuietBloom(float dt, uint32_t now) {
         float breathGlow = BLOOM_BREATH_FLOOR
             + breath * (bloomBreathPeak[i] - BLOOM_BREATH_FLOOR);
         breathGlow *= ledRecovery;
+
+        // Sustained flash: while drain is active, refresh flash from breathing
+        if (draining) {
+            float target = breathGlow * bloomHitIntensity * ENERGY_MULTIPLIER;
+            if (target > bloomFlashGlow[i]) {
+                bloomFlashGlow[i] = target;
+                bloomFlashDecay[i] = BLOOM_FLASH_DECAY_LO
+                    + randFloat() * (BLOOM_FLASH_DECAY_HI - BLOOM_FLASH_DECAY_LO);
+            }
+        }
 
         // Composite
         float g = fmaxf(breathGlow, bloomFlashGlow[i]);
@@ -517,6 +522,15 @@ static void renderQuietBloom(float dt, uint32_t now) {
         uint8_t gc = deltaSigma(dsG[i], tG16);
         uint8_t b  = deltaSigma(dsB[i], tB16);
         strip.setPixelColor(i, rc, gc, b);
+    }
+
+    // Apply drain AFTER rendering so flash uses pre-drain energy
+    if (draining) {
+        float drain = drainEnvelope * dt;
+        drain = fminf(drain, bloomColonyEnergy);
+        bloomColonyEnergy -= drain;
+        drainEnvelope *= DRAIN_ENVELOPE_DECAY;
+        if (drainEnvelope <= 0.001f) drainEnvelope = 0.0f;
     }
 }
 

@@ -553,3 +553,236 @@ entries:
       diagnosis for C3-New — this was actually broadcast collision congestion from
       5 simultaneous broadcasters, not hardware weakness. In isolated pair testing,
       C3-New delivers 93-99%.
+
+  # ── ESP32 RMT Throughput for WS2812B ───────────────────────────
+
+  - id: esp32-rmt-8-channel-parallel-ws2812b
+    date: 2026-04-17
+    touched: 2026-04-17
+    title: "ESP32 RMT drives 8 WS2812B channels in true parallel"
+    summary: >
+      Classic ESP32 (Xtensa) has 8 independent RMT channels, each with its own
+      GPIO mux, clock divider, and block RAM. Eight WS2812B strips driven from
+      eight channels transmit concurrently with no hardware contention — total
+      wire time equals a single strip's wire time, not 8× summed. Measured on
+      ESP32-D0WD-V3, 8 strips × 100 LEDs: 3.14ms total transmit (vs 3.05ms
+      WS2812B floor for 100 LEDs). ESP32-S3: 4 TX channels. ESP32-C3: 2 TX.
+    status: resolved
+    severity: medium
+    scope: hardware
+    source: []
+    tags: [esp32, rmt, ws2812b, parallel, throughput, measurement]
+    relates_to: [ws2812b-timing-architecture, esp32-hardware-selection-rationale]
+    notes: >
+      WS2812B physical floor: 24 bits × 1.25µs = 30µs per LED, plus a 50µs
+      reset. For 100 LEDs: 100 × 30µs + 50µs = 3.05ms minimum. Measured 3.14ms
+      includes Show() call overhead and wait_tx_done sync.
+
+      Throughput ceiling at 100 LEDs/strip is therefore ~318 fps regardless of
+      CPU speed. To go faster: fewer LEDs per strip, more channels, or a
+      faster IC family (APA102/SK9822 SPI is not bound by 800kHz one-wire).
+
+      Channel-count availability is a variant-selection axis for
+      parallel-strip installations: classic ESP32 → 8, S3 → 4 TX + 4 RX,
+      C3 → 2 TX.
+
+  - id: esp32-rmt-isr-cpu-overhead
+    date: 2026-04-17
+    touched: 2026-04-17
+    title: "ESP32 RMT block-refill ISRs steal CPU on the core that initialized the driver"
+    summary: >
+      RMT block memory is 64 32-bit slots per channel. WS2812B frames longer
+      than ~32 LEDs require block-refill (half-empty) ISRs to stream the rest.
+      The ISR is bound to whichever core called rmt_driver_install(). Measured
+      on classic ESP32 driving 8 strips × 100 LEDs: ~37 refills per channel ×
+      8 channels = ~296 ISR entries during the 3ms transmit window, costing
+      ~1.2ms of CPU on the issuing core.
+    status: resolved
+    severity: medium
+    scope: hardware
+    source: []
+    tags: [esp32, rmt, isr, cpu, measurement]
+    relates_to: [esp32-rmt-8-channel-parallel-ws2812b, esp32-dual-core-rmt-render-overlap]
+    notes: >
+      Each WS2812B bit consumes one RMT slot. 100 LEDs × 24 bits = 2400 slots
+      needed vs 64 available, so the driver refills mid-transmission. Half-empty
+      threshold gives ~2400/64 ≈ 37 ISR fires per channel per frame.
+
+      Measured on classic ESP32 (ESP32-D0WD-V3), 8 strips × 100 LEDs each, ~3ms
+      wire time: render-only 1.56ms vs render-while-transmitting 2.76ms on the
+      same core → ~1.2ms ISR steal.
+
+      Core affinity for these ISRs is fixed at rmt_driver_install() time, not
+      Show() time — relevant when planning which core hosts the driver.
+
+  - id: esp32-dual-core-rmt-render-overlap
+    date: 2026-04-17
+    touched: 2026-04-17
+    title: "ESP32 dual-core allows render and RMT transmit on separate cores"
+    summary: >
+      Classic ESP32 has two Xtensa LX6 cores at 240MHz. With the RMT driver
+      (and its refill ISRs) installed on one core and render running on the
+      other, compute and LED transmission overlap rather than serialize.
+      Measured on classic ESP32 driving 8 strips × 100 WS2812B: 169fps
+      single-core → 204fps dual-core. Practical ceiling at this config is
+      ~210fps because the 6-channel RMT concurrency cliff (see
+      esp32-rmt-6-channel-concurrency-cliff) forces Show() to serialize the
+      last two channels behind wire time. ESP32-C3 (single RISC-V core)
+      cannot overlap; ESP32-S3 (dual LX7) can.
+    status: resolved
+    severity: medium
+    scope: hardware
+    source: []
+    tags: [esp32, dual-core, rmt, fps, measurement]
+    relates_to: [esp32-rmt-isr-cpu-overhead, esp32-rmt-8-channel-parallel-ws2812b, esp32-rmt-6-channel-concurrency-cliff, esp32-c3-single-core-web-blocking]
+    notes: >
+      Hardware fact: the second core is genuinely free for application work.
+      Arduino's loop() runs on core 1 by default; core 0 hosts WiFi/BT stacks
+      when active but is otherwise available. RMT ISRs run on whichever core
+      installed the driver (see esp32-rmt-isr-cpu-overhead), so placement is
+      a setup-time decision.
+
+      Measured frame times, classic ESP32 (ESP32-D0WD-V3), 8 strips × 100
+      WS2812B each, no WiFi active:
+        single-core: render(2.76ms with ISR steal) + show(3.14ms) ≈ 5.9ms → 169fps
+        dual-core measured: 4.88ms → 204fps  (render 1.72ms, show 3.16ms)
+        structural floor: render(1.72ms overlapped) + show(3.16ms) ≈ 4.88ms → 205fps
+
+      The earlier 318fps wire-time ceiling was wrong for this config — it
+      assumed all 8 channels kick truly in parallel, but classic ESP32 RMT has
+      a 6-channel concurrency cliff: the 7th rmt_write_sample() call blocks
+      for the full wire time of an already-running channel. So total Show()
+      cost = wire_time + small overhead, even when render fully overlaps.
+      Measured 204fps is within 0.5% of the structural floor for this path.
+
+  - id: esp32-rmt-6-channel-concurrency-cliff
+    date: 2026-04-17
+    touched: 2026-04-17
+    title: "Classic ESP32 RMT sustains only 6 channels in true parallel; 7th blocks"
+    summary: >
+      Classic ESP32 (ESP32-D0WD-V3) has 8 RMT channels and each has its own
+      GPIO mux, but the peripheral's internal transmit arbiter sustains at
+      most ~6 concurrent channels. Queueing a 7th rmt_write_sample() while
+      six are already transmitting blocks the caller for ~full wire time of
+      one channel before returning. This collapses the "8 parallel kicks"
+      assumption for any fan-out beyond 6.
+    status: resolved
+    severity: high
+    scope: hardware
+    source: []
+    tags: [esp32, rmt, ws2812b, parallel, throughput, measurement, cliff]
+    relates_to: [esp32-rmt-8-channel-parallel-ws2812b, esp32-dual-core-rmt-render-overlap]
+    notes: >
+      Measured kick-to-completion of rmt_write_sample() back-to-back across
+      N channels on classic ESP32, 100 LEDs × 24 bits per channel:
+
+        N=1 →   22µs   (kick only)
+        N=2 →   48µs
+        N=4 →   91µs
+        N=5 →  165µs
+        N=6 →  311µs
+        N=7 → 3060µs   ← cliff (wire-time of one full WS2812B frame)
+        N=8 → 3121µs
+
+      Up to 6, each successive call adds small queueing overhead and all run
+      concurrently. The 7th call cannot queue — it waits for one of the busy
+      channels to finish. After one finishes at T≈3050µs, channel 7 kicks
+      and adds ~60µs for channel 8 (which finds a free slot).
+
+      Implication for 8-channel fan-out: effective Show() cost ≥ wire_time,
+      not parallel-kick_time. For N≤6 strips, the "true parallel" model
+      holds and throughput is bounded by max(render, wire_time). Beyond 6,
+      total show = wire_time + overhead regardless of channel count.
+
+      Practical mitigation: split 8 pins across RMT (first 6) + I2S parallel
+      (remaining 2), or use a 4-channel-per-half scheme. Or accept the
+      wire-time floor and prioritize render quality within it. ESP32-S3 has
+      only 4 TX channels so it cannot hit this cliff at 8 strips — it hits
+      a harder wall earlier.
+
+  - id: neopixelbus-i2s1x8-ws2812b-fill-serialization
+    date: 2026-04-17
+    touched: 2026-04-17
+    title: "NeoPixelBus I2s1X8 method serializes buffer fills per bus instance"
+    summary: >
+      The NeoEsp32I2s1X8Ws2812xMethod driver in NeoPixelBus 2.8.4 uses a
+      single I2S1 DMA stream to drive up to 8 GPIO bits in true parallel,
+      but exposes the API as 8 independent NeoPixelBus<> instances. Each
+      instance's Show() calls FillBuffers() to write its bit-column into
+      the shared DMA buffer serially. For 8 strips × 100 LEDs this costs
+      ~2.8ms of CPU fill time per frame, on top of wire time — making it
+      slower than 8-channel RMT for this size on classic ESP32.
+    status: resolved
+    severity: medium
+    scope: hardware
+    source: []
+    tags: [esp32, i2s, ws2812b, neopixelbus, measurement]
+    relates_to: [esp32-rmt-8-channel-parallel-ws2812b, esp32-rmt-6-channel-concurrency-cliff]
+    notes: >
+      Measured on classic ESP32, 8 strips × 100 LEDs, swapping only the
+      NeoPixelBus method type (RMT → I2s1X8):
+
+        RMT 8-channel:  render 1.72ms + show 3.16ms →  204fps
+        I2s1X8 8-inst:  render 1.72ms + show 4.42ms →  162fps
+          per-strip fill µs: [1897, 353, 361, 357, 356, 362, 354, 355]
+
+      Fill cost per instance ≈ 355µs × 8 = 2840µs, plus a ~1500µs wait on
+      the first strip for prior DMA to complete. The I2S peripheral itself
+      is transmitting at wire-time floor (3.05ms), but the library pattern
+      requires traversing 2400 WS2812 symbols once per instance to write
+      the bit-column for that pin, which is serial CPU work.
+
+      Where I2S1X8 wins: fewer pins (2-4) sharing the single DMA stream —
+      fill count drops proportionally. For 4 strips × 100 LEDs, expected
+      fill ~1.4ms < RMT's 4-channel parallel overhead. Not measured here.
+
+      Alternative: a single I2S driver that takes a packed [LEDs × strips]
+      array and writes one bit-column loop (no per-instance API) would
+      reclaim the 2.8ms fill cost. Not available in NeoPixelBus.
+
+  - id: esp32-rmt-i2s-hybrid-does-not-dodge-cliff
+    date: 2026-04-21
+    touched: 2026-04-21
+    title: "Hybrid 6 RMT + 2 I2S does not beat 8-channel RMT on classic ESP32"
+    summary: >
+      Tested the hypothesis that putting 6 strips on RMT (within the
+      concurrency-safe band) plus 2 strips on the I2S1 mux would let both
+      peripherals transmit concurrently and break the ~205fps ceiling on
+      classic ESP32. Measured 161fps — worse than pure-RMT 204fps. The
+      per-channel scaling shows the 7th call (first I2S strip) still costs
+      ~3.4ms, matching the RMT-only cliff. The two peripherals do not run
+      truly concurrent through the NeoPixelBus library; I2S FillBuffers()
+      spins on i2sWriteDone() each call, serializing the I2S side against
+      itself at wire-time granularity.
+    status: resolved
+    severity: medium
+    scope: hardware
+    source: festicorn/biolum/src/hybrid_bench.cpp
+    tags: [esp32, rmt, i2s, ws2812b, neopixelbus, measurement, hybrid]
+    relates_to: [esp32-rmt-6-channel-concurrency-cliff, neopixelbus-i2s1x8-ws2812b-fill-serialization, esp32-dual-core-rmt-render-overlap]
+    notes: >
+      Config: 6 strips on NeoEsp32Rmt{0..5}Ws2812xMethod, 2 strips on
+      NeoEsp32I2s1X8Ws2812xMethod (sparse instantiation of 2 of 8 mux slots).
+      All strips 100 WS2812B LEDs.
+
+      Show() scaling, fresh boot, prior frame fully settled (delay 15ms):
+        N=1 RMT:        19µs
+        N=2 RMT:        37µs
+        N=4 RMT:        92µs
+        N=6 RMT:       311µs   (cliff-free within 6 channels)
+        N=7 (+1 I2S): 3439µs   ← first I2S call blocks ~full wire time
+        N=8 (+2 I2S): 3768µs
+
+        Pipelined: 161fps, render 2285µs (simulated), show 3900µs.
+
+      The I2S cost is paid even when StartWrite() does not actually kick
+      (only 1 of 2 mux slots filled) — FillBuffers() itself spins on
+      i2sWriteDone(), and that flag apparently doesn't clear for ~wire time
+      after the previous kick regardless of elapsed wall-clock.
+
+      Takeaway: you cannot compose RMT and I2S through NeoPixelBus to get
+      parallel peripheral throughput. Breaking past 205fps on classic ESP32
+      at 8×100 WS2812B requires one of: (a) a custom I2S driver that packs
+      all pins into one fill pass and synchronizes only once per frame,
+      (b) fewer LEDs/strip (wire-time scales), (c) SPI-clocked LED family
+      (APA102/SK9822), or (d) different MCU.

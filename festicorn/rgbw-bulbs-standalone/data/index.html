@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RGBW Bulbs</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0d0d1a; color: #e0e0e0;
+    min-height: 100vh; padding: 20px;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  h1 { font-size: 1.8em; margin-bottom: 4px; color: #fff; }
+  h2 { font-size: 1.0em; margin-bottom: 32px; color: #666; font-weight: 400; }
+  .section { width: 100%; max-width: 420px; margin-bottom: 28px; }
+  .section-label {
+    font-size: 0.8em; color: #888; text-transform: uppercase;
+    letter-spacing: 1px; margin-bottom: 10px;
+  }
+  .slider-container { display: flex; align-items: center; gap: 12px; }
+  .slider-container input[type=range] { flex: 1; accent-color: #7b9fe0; height: 6px; }
+  .slider-val {
+    min-width: 48px; text-align: right;
+    font-variant-numeric: tabular-nums; font-size: 1.1em;
+  }
+
+  /* ── Collapsible effect picker ───────────────────────────────── */
+  .effect-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 14px; background: #16213e; border: 2px solid #333;
+    border-radius: 8px; cursor: pointer; user-select: none;
+    transition: border-color 0.15s;
+  }
+  .effect-header:hover { border-color: #555; }
+  .effect-header.open { border-color: #7b9fe0; border-radius: 8px 8px 0 0; }
+  .effect-header-label { font-size: 0.78em; color: #888; margin-bottom: 2px; }
+  .effect-header-name  { font-size: 1.05em; color: #e0e0e0; font-weight: 500; }
+  .effect-chevron { font-size: 0.8em; color: #666; transition: transform 0.2s; flex-shrink: 0; }
+  .effect-header.open .effect-chevron { transform: rotate(180deg); }
+
+  .effect-panel {
+    display: none; border: 2px solid #7b9fe0; border-top: none;
+    border-radius: 0 0 8px 8px; background: #0f1a2e; padding: 10px; gap: 8px;
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .effect-panel.open { display: grid; }
+
+  /* ── Effect cards ────────────────────────────────────────────── */
+  .effect-card {
+    border: 2px solid #2a2a3e; border-radius: 8px; overflow: hidden;
+    cursor: pointer; transition: border-color 0.15s, background 0.15s;
+    background: #16213e;
+  }
+  .effect-card:hover { border-color: #555; }
+  .effect-card.active { border-color: #7b9fe0; background: #1a2a4a; }
+  .effect-card:focus-visible { outline: 2px solid #7b9fe0; outline-offset: 2px; }
+
+  .card-thumb {
+    width: 100%; aspect-ratio: 16/7; overflow: hidden; position: relative;
+    background: #0d0d1a;
+  }
+  .card-thumb img {
+    width: 100%; height: 100%; object-fit: cover; display: block;
+    position: relative; z-index: 1;
+  }
+  .card-grad {
+    position: absolute; inset: 0; z-index: 0;
+  }
+  .grad-bloom     { background: linear-gradient(to bottom, #1a0a4a, #6040a0, #c0b0e8); }
+  .grad-fire      { background: linear-gradient(to bottom, #8b0000, #ff4500, #ffd700); }
+  .grad-leaf-wind { background: linear-gradient(to bottom, #0d4a1a, #2a8c2e, #b8e060); }
+
+  .card-name {
+    font-size: 0.75em; text-align: center; padding: 5px 4px;
+    color: #ccc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* ── Status bar ──────────────────────────────────────────────── */
+  .status {
+    margin-top: 8px; padding: 12px; background: #111827;
+    border-radius: 8px; font-size: 0.82em; color: #666;
+    text-align: center; width: 100%; max-width: 420px;
+  }
+</style>
+</head>
+<body>
+<h1>RGBW Bulbs</h1>
+<h2>lighting control</h2>
+
+<!-- Effect picker (collapsible) -->
+<div class="section">
+  <div class="section-label">Effect</div>
+  <div class="effect-header" id="effect-header" role="button" tabindex="0"
+       aria-expanded="false" aria-controls="effect-panel"
+       onclick="togglePanel()"
+       onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();togglePanel();}">
+    <div>
+      <div class="effect-header-label">Current effect</div>
+      <div class="effect-header-name" id="effect-header-name">—</div>
+    </div>
+    <span class="effect-chevron">&#9660;</span>
+  </div>
+  <div class="effect-panel" id="effect-panel" role="region" aria-label="Effect selection">
+    <!-- Cards injected by JS -->
+  </div>
+</div>
+
+<!-- Brightness -->
+<div class="section">
+  <div class="section-label">Brightness</div>
+  <div class="slider-container">
+    <input type="range" id="brightness" min="0" max="100" value="10"
+      oninput="document.getElementById('br-val').textContent=this.value+'%';
+               postValDebounced('/brightness','brightness',this.value)">
+    <span class="slider-val" id="br-val">10%</span>
+  </div>
+</div>
+
+<!-- Speed -->
+<div class="section">
+  <div class="section-label">Speed</div>
+  <div class="slider-container">
+    <input type="range" id="speed" min="0" max="100" value="30" step="1"
+      oninput="var v=sliderToSpeed(this.value);
+               document.getElementById('sp-val').textContent=v.toFixed(2)+'x';
+               postValDebounced('/speed','speed',v.toFixed(3))">
+    <span class="slider-val" id="sp-val">1.00x</span>
+  </div>
+</div>
+
+<div class="status" id="status">Connecting...</div>
+
+<script>
+var currentEffect = null;
+var panelOpen = false;
+
+// Per-effect display metadata (label + gradient CSS class)
+var EFFECT_META = {
+  'bloom':     { label: 'Bloom',     grad: 'grad-bloom' },
+  'fire':      { label: 'Fire',      grad: 'grad-fire' },
+  'leaf_wind': { label: 'Leaf Wind', grad: 'grad-leaf-wind' },
+};
+
+function togglePanel() {
+  panelOpen = !panelOpen;
+  var hdr   = document.getElementById('effect-header');
+  var panel = document.getElementById('effect-panel');
+  hdr.setAttribute('aria-expanded', panelOpen ? 'true' : 'false');
+  hdr.classList.toggle('open', panelOpen);
+  panel.classList.toggle('open', panelOpen);
+}
+
+function closePanel() {
+  panelOpen = false;
+  var hdr = document.getElementById('effect-header');
+  hdr.setAttribute('aria-expanded', 'false');
+  hdr.classList.remove('open');
+  document.getElementById('effect-panel').classList.remove('open');
+}
+
+// Build effect cards dynamically from /effects
+fetch('/effects').then(function(r){return r.json();}).then(function(effects) {
+  var container = document.getElementById('effect-panel');
+  effects.forEach(function(name) {
+    var meta = EFFECT_META[name] || {
+      label: name.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase();}),
+      grad:  'grad-bloom'
+    };
+
+    var card = document.createElement('div');
+    card.className = 'effect-card';
+    card.id = 'card-' + name;
+    card.setAttribute('tabindex', '0');
+    card.setAttribute('role', 'button');
+    card.setAttribute('aria-label', 'Select effect: ' + meta.label);
+    card.setAttribute('aria-pressed', 'false');
+
+    // Thumbnail: snapshot PNG over CSS gradient fallback
+    var thumb = document.createElement('div');
+    thumb.className = 'card-thumb';
+
+    var grad = document.createElement('div');
+    grad.className = 'card-grad ' + meta.grad;
+    thumb.appendChild(grad);
+
+    var img = document.createElement('img');
+    img.alt = '';
+    img.style.display = 'none';
+    img.onload = function() { img.style.display = 'block'; };
+    img.src = '/snapshots/' + name + '.png';
+    thumb.appendChild(img);
+
+    var label = document.createElement('div');
+    label.className = 'card-name';
+    label.textContent = meta.label;
+
+    card.appendChild(thumb);
+    card.appendChild(label);
+
+    card.onclick = function() { selectEffect(name); };
+    card.onkeydown = function(e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectEffect(name); }
+    };
+
+    container.appendChild(card);
+  });
+});
+
+function selectEffect(name) {
+  fetch('/effect', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'effect=' + encodeURIComponent(name)
+  }).then(function() {
+    setActiveCard(name);
+    closePanel();
+    pollStatus();
+  });
+}
+
+function setActiveCard(name) {
+  if (name === currentEffect) return;
+  currentEffect = name;
+  var meta = EFFECT_META[name] || {};
+  document.getElementById('effect-header-name').textContent = meta.label || name;
+  document.querySelectorAll('#effect-panel .effect-card').forEach(function(c) {
+    var active = c.id === 'card-' + name;
+    c.classList.toggle('active', active);
+    c.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
+// Speed slider: 0..100 maps to 0.25..4.0 on a log scale
+function sliderToSpeed(pos) {
+  pos = Number(pos);
+  return 0.25 * Math.pow(16, pos / 100);
+}
+function speedToSlider(speed) {
+  return Math.round(100 * Math.log(speed / 0.25) / Math.log(16));
+}
+
+function postVal(path, key, val) {
+  fetch(path, {method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body: key+'='+encodeURIComponent(val)});
+}
+var _debounce = {};
+function postValDebounced(path, key, val, delay) {
+  if (!delay) delay = 60;
+  clearTimeout(_debounce[path]);
+  _debounce[path] = setTimeout(function(){ postVal(path, key, val); }, delay);
+}
+
+function updateUI(s) {
+  document.getElementById('brightness').value = s.brightness;
+  document.getElementById('br-val').textContent = s.brightness + '%';
+  var sliderPos = speedToSlider(s.speed);
+  document.getElementById('speed').value = sliderPos;
+  document.getElementById('sp-val').textContent = s.speed.toFixed(2) + 'x';
+  if (s.effect) setActiveCard(s.effect);
+  var parts = [];
+  if (s.ip) parts.push('IP: ' + s.ip);
+  if (s.rssi) parts.push('Signal: ' + s.rssi + ' dBm');
+  if (s.fps)  parts.push('FPS: ' + s.fps);
+  if (s.uptime_s != null) {
+    var u = s.uptime_s;
+    var h = Math.floor(u/3600), m = Math.floor((u%3600)/60), sec = u%60;
+    parts.push('Up: ' + (h?h+'h ':'') + (m?m+'m ':'') + sec+'s');
+  }
+  document.getElementById('status').textContent = parts.join(' | ') || 'Connected';
+}
+
+function pollStatus() {
+  fetch('/status').then(function(r){return r.json();}).then(updateUI).catch(function(){
+    document.getElementById('status').textContent = 'Disconnected';
+  });
+}
+pollStatus();
+setInterval(pollStatus, 5000);
+</script>
+</body>
+</html>

@@ -13,7 +13,10 @@ import os
 
 import numpy as np
 
-USER_PALETTES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_palettes.json')
+# user_palettes.json lives in the effects/ dir (parent of color/), where it
+# was when palette.py was a sibling of the effect modules.
+_EFFECTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+USER_PALETTES_PATH = os.path.join(_EFFECTS_DIR, 'user_palettes.json')
 
 
 def fibonacci_sections(total_leds):

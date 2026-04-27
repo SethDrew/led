@@ -2517,7 +2517,7 @@ entries:
     status: validated
     warmth: high
     confidence: high
-    source: [festicorn/src/effects.cpp, festicorn/gen_oklch_varL_lut.py, firmware/tree/src/tree_rainbow_test.cpp]
+    source: [festicorn/src/effects.cpp, audio-reactive/effects/color/oklch.py, audio-reactive/effects/color/gen_firmware_lut.py, firmware/tree/src/tree_rainbow_test.cpp]
     tags: [color, perception, hardware, oklch, validated]
     relates_to: [rgb-color-gamut-limitations, hue-shift-low-brightness]
     notes: >
@@ -2543,7 +2543,8 @@ entries:
         to L=0.75 for green/cyan/yellow.
       - Per-hue max chroma via binary search at 98% gamut boundary.
       - 256-entry precomputed LUT. Zero runtime cost vs HSV.
-      - Generator script: festicorn/gen_oklch_varL_lut.py
+      - Generator script: audio-reactive/effects/color/gen_firmware_lut.py
+        (single source of truth: audio-reactive/effects/color/oklch.py)
 
       ## Root cause of HSV rainbow problems (three stacked)
       1. HSV is perceptually non-uniform — blue/green dominate perceptual space

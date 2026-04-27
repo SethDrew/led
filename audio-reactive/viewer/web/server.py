@@ -808,7 +808,7 @@ _kill_stale_runners()
 def _palette_module():
     """Import palette module from effects directory."""
     import importlib.util
-    spec = importlib.util.spec_from_file_location('palette', os.path.join(EFFECTS_DIR, 'palette.py'))
+    spec = importlib.util.spec_from_file_location('palette', os.path.join(EFFECTS_DIR, 'color', 'palette.py'))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

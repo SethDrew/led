@@ -34,7 +34,8 @@ What we learned from testing on actual strips:
 
 | File | Purpose |
 |------|---------|
-| `festicorn/gen_oklch_varL_lut.py` | Rainbow LUT generator |
+| `audio-reactive/effects/color/oklch.py` | OKLCH math + `RAINBOW_LUT` (single source of truth) |
+| `audio-reactive/effects/color/gen_firmware_lut.py` | Emits `festicorn/lib/oklch_lut/oklch_lut.cpp` from `oklch.py` |
 | `festicorn/gen_palettes.py` | Chroma sweep palette generator |
 | `festicorn/src/effects.cpp` | LUT arrays, rendering, palette data |
 | `firmware/tree/src/tree_rainbow_test.cpp` | Runtime chroma + gamma, web UI slider |

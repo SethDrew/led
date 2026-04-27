@@ -17,8 +17,10 @@ Umbrella project for all LED installation firmware. Each installation is a separ
 ## Python Tooling
 
 - `gen_palettes.py` — generates OKLCH hue-arc gradients and chroma sweeps
-- `gen_oklch_varL_lut.py` — generates the OKLCH rainbow LUT header into `lib/oklch_lut/`
 - `gradient_server.py` — web UI gradient picker that streams frames to a Nano over serial
+
+The OKLCH rainbow LUT (`lib/oklch_lut/oklch_lut.cpp`) is generated from the
+shared Python module — see `audio-reactive/effects/color/gen_firmware_lut.py`.
 
 ## Build
 

@@ -2,7 +2,7 @@
 """
 Generate OKLCH-based palettes for festicorn effects.
 
-Uses the same OKLab math as gen_oklch_varL_lut.py to produce:
+Uses the same OKLab math as audio-reactive/effects/color/oklch.py to produce:
   Category 2: Two-color hue-arc gradients through OKLCH space (16 stops each)
   Category 3: Single-hue chroma sweeps from max saturation to gray (8 stops each)
 
@@ -12,7 +12,7 @@ Output: C arrays + CSS gradients for the web UI.
 import math
 
 
-# ── OKLab / OKLCH conversion (same as gen_oklch_varL_lut.py) ────────
+# ── OKLab / OKLCH conversion (same as audio-reactive/effects/color/oklch.py) ────────
 
 def oklch_to_oklab(L, C, h_deg):
     h = math.radians(h_deg)
@@ -60,7 +60,7 @@ def oklch_to_srgb8(L, C, h_deg):
     return (int(round(r * 255)), int(round(g * 255)), int(round(b * 255)))
 
 
-# ── Hue-dependent lightness (same as gen_oklch_varL_lut.py) ─────────
+# ── Hue-dependent lightness (same as audio-reactive/effects/color/oklch.py) ─────────
 
 def lightness_for_hue(h_deg):
     L_base = 0.75

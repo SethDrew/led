@@ -45,7 +45,7 @@ import numpy as np
 import sounddevice as sd
 
 from base import AudioReactiveEffect, ScalarSignalEffect
-from palette import PALETTE_PRESETS, all_palettes, palette_to_dict, resolve_palette_name
+from color.palette import PALETTE_PRESETS, all_palettes, palette_to_dict, resolve_palette_name
 from composed import ComposedEffect
 
 # ── Settings ───────────────────────────────────────────────────────
@@ -226,7 +226,7 @@ def get_effect_registry():
     effects = {}
 
     # Infrastructure files to skip
-    _SKIP = {'base', 'signals', 'composed', 'palette', 'runner', 'feature_computer', '__init__'}
+    _SKIP = {'base', 'signals', 'composed', 'runner', 'feature_computer', '__init__'}
 
     effects_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -786,7 +786,7 @@ def list_json():
         d['name'] = name
         d['is_builtin'] = True
         palettes.append(d)
-    from palette import load_user_palettes
+    from color.palette import load_user_palettes
     for name, pal in load_user_palettes().items():
         if name not in PALETTE_PRESETS:
             d = palette_to_dict(pal)

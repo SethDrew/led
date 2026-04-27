@@ -11,79 +11,10 @@ boundary lines rush toward edges and flare bright. Decay → boundaries
 drift back to rest. Sustained bass keeps boundaries compressed and lit.
 """
 
-import math
 import numpy as np
 import threading
 from base import AudioReactiveEffect
-
-
-# ── OKLCH rainbow LUT generation (from festicorn/gen_oklch_varL_lut.py) ──
-
-def _oklch_to_oklab(L, C, h_deg):
-    h = math.radians(h_deg)
-    return (L, C * math.cos(h), C * math.sin(h))
-
-
-def _oklab_to_linear_srgb(L, a, b):
-    l_ = L + 0.3963377774 * a + 0.2158037573 * b
-    m_ = L - 0.1055613458 * a - 0.0638541728 * b
-    s_ = L - 0.0894841775 * a - 1.2914855480 * b
-    l = l_ * l_ * l_
-    m = m_ * m_ * m_
-    s = s_ * s_ * s_
-    r = +4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s
-    g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s
-    b_out = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
-    return (r, g, b_out)
-
-
-def _in_srgb_gamut(L, C, h_deg):
-    lab = _oklch_to_oklab(L, C, h_deg)
-    r, g, b = _oklab_to_linear_srgb(*lab)
-    return -0.001 <= r <= 1.001 and -0.001 <= g <= 1.001 and -0.001 <= b <= 1.001
-
-
-def _max_chroma_for(L, h_deg):
-    lo, hi = 0.0, 0.4
-    for _ in range(40):
-        mid = (lo + hi) / 2.0
-        if _in_srgb_gamut(L, mid, h_deg):
-            lo = mid
-        else:
-            hi = mid
-    return lo * 0.98
-
-
-def _lightness_for_hue(h_deg):
-    L_base = 0.75
-    def cosine_bump(h, center, depth, half_width):
-        diff = (h - center + 180) % 360 - 180
-        if abs(diff) >= half_width:
-            return 0.0
-        return depth * 0.5 * (1.0 + math.cos(math.pi * diff / half_width))
-    dip = cosine_bump(h_deg, 30.0, 0.23, 55.0)
-    dip += cosine_bump(h_deg, 300.0, 0.37, 50.0)
-    return L_base - dip
-
-
-def _build_rainbow_lut():
-    """Generate 256-entry OKLCH rainbow as (256, 3) uint8 numpy array."""
-    lut = np.zeros((256, 3), dtype=np.uint8)
-    for i in range(256):
-        h_deg = i * 360.0 / 256.0
-        L = _lightness_for_hue(h_deg)
-        C = _max_chroma_for(L, h_deg)
-        lab = _oklch_to_oklab(L, C, h_deg)
-        r, g, b = _oklab_to_linear_srgb(*lab)
-        lut[i] = (
-            int(round(max(0, min(1, r)) * 255)),
-            int(round(max(0, min(1, g)) * 255)),
-            int(round(max(0, min(1, b)) * 255)),
-        )
-    return lut
-
-
-_RAINBOW_LUT = _build_rainbow_lut()
+from color.oklch import RAINBOW_LUT
 
 
 # ── Worley Collision effect ──────────────────────────────────────────
@@ -267,7 +198,7 @@ class WorleyCollisionEffect(AudioReactiveEffect):
         brightness = np.maximum(brightness, self.CELL_DIM)
 
         # Color from OKLCH rainbow
-        base_colors = _RAINBOW_LUT[self.hues[nearest]].astype(np.float32)
+        base_colors = RAINBOW_LUT[self.hues[nearest]].astype(np.float32)
         frame = (base_colors * brightness[:, np.newaxis]).clip(0, 255).astype(np.uint8)
 
         return frame

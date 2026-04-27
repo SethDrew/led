@@ -9,34 +9,33 @@ A/B test different audio-reactive algorithms on the same audio through the same 
 python runner.py --list
 
 # Run an effect on live audio (BlackHole)
-python runner.py wled_volume
-python runner.py wled_geq
-python runner.py wled_beat
+python runner.py bass_pulse
+python runner.py energy_color
 
 # Terminal-only (no LEDs)
-python runner.py wled_volume --no-leds
+python runner.py bass_pulse --no-leds
 
 # WAV file playback
-python runner.py wled_geq --wav ../audio-segments/fa_br_drop1.wav --no-leds
+python runner.py bass_pulse --wav ../audio-segments/fa_br_drop1.wav --no-leds
 ```
 
 ## Available Effects
 
-### WLED Sound Reactive (`wled_sr/`)
-Reimplementation of WLED's audio processing algorithms in Python.
-See `wled_sr/notes.md` for full algorithm analysis.
+Run `python runner.py --list` for the current registry.
 
-- **wled_volume** — RMS volume → brightness (simplest baseline)
-- **wled_geq** — 16 FFT bands → colored bars per frequency range
-- **wled_beat** — Dominant FFT bin threshold → pulse/decay flash
+### WLED Sound Reactive (`wled_sr/`)
+Reimplementation of WLED's audio processing algorithms in Python — kept as a
+research reference. Classes here do not register as runnable effects; see
+`wled_sr/notes.md` for the algorithm analysis.
 
 ## Architecture
 
 ```
 base.py      — AudioReactiveEffect abstract class
 runner.py    — Audio capture + LED driving loop
-wled_sr/     — WLED Sound Reactive algorithms
-ours/        — Our custom detectors (TODO: wrap in same interface)
+color/       — Shared OKLCH color machinery (RAINBOW_LUT, swatch, palette)
+wled_sr/     — WLED Sound Reactive reference algorithms
+deprecated/  — Soft-archived effects (managed by the viewer UI)
 ```
 
 Key constraint (from WS2812B timing): audio processing and LED rendering

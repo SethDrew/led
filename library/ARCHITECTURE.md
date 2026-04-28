@@ -189,7 +189,7 @@ Effects declare abstract input roles, not specific signals. The same role can be
 - **E: Space + Position + Phase** (spatial animation) -- spatially-distributed animation with cyclic motion.
 - **F: Intensity + Texture + Mood** (ambient character) -- continuous ambient texture with no discrete events.
 
-Full P/S mapping table across all effects in `INPUT_ROLE_MATRIX.md` (library). Per-band peak-decay normalization — the shared preprocessing that puts all INTENSITY sources on a 0-1 scale — in `PER_BAND_NORMALIZATION.md` (library).
+Full P/S mapping table across all effects in `INPUT_ROLE_MATRIX.md` (library). Per-band EMA normalization — the shared preprocessing that puts all INTENSITY sources on a 0-1 scale — in `PER_BAND_NORMALIZATION.md` (library).
 
 ---
 

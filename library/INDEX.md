@@ -6,6 +6,7 @@ Reference documents for the synchronous LED system. Organized by the seven desig
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — The design space framework: seven axes, key principles, input roles, show architecture.
 - **[visual-qa-preview-system.md](visual-qa-preview-system.md)** — Internal tooling: composite PNG preview for AI-driven effect QA, team pattern, iteration protocol.
+- **[BULB_INTERACTION_TELEMETRY.md](BULB_INTERACTION_TELEMETRY.md)** — Hanging-bulb gesture pipeline: IMU capture, gesture taxonomy (kind × severity), locked 16 B / 25 Hz / 400 B/s ESP-NOW wire schema, classifier validation, residual gaps.
 
 ## arch-impl/
 
@@ -20,6 +21,7 @@ Deep-dive documents organized by the seven axes defined in ARCHITECTURE.md. Brow
 - **AUDIO_FEATURES.md** — Full catalog of computable audio features.
 - **AUDIO_ANALYSIS_ALGORITHMS.md** — Algorithm details for audio analysis.
 - **SIGNAL_NORMALIZATION.md** — The normalization primitive: EMA multi-output design (peak_normalized, ema_ratio, sigmoid), time constants in wall-clock seconds, feature-specific normalization strategies.
+- **PER_BAND_NORMALIZATION.md** — Per-band EMA-ratio normalization with noise-floor gating. Standard pipeline (PerBandEMANormalize → PerBandAbsIntegral → PulseDriver) for band-decomposition RMS amplitude effects.
 
 ### axis4-led-behaviors/
 
@@ -28,7 +30,6 @@ Deep-dive documents organized by the seven axes defined in ARCHITECTURE.md. Brow
 
 ### axis6-composition/
 
-- **PER_BAND_NORMALIZATION.md** — Per-band peak-decay normalization as composition preprocessing (0-1 scaling across frequency bands).
 - **INPUT_ROLE_MATRIX.md** — Primary/secondary input role assignments across all effects.
 - **SHOW_AUTOMATION.md** — Show automation and VJ replacement architecture.
 
@@ -43,6 +44,10 @@ Deep-dive documents organized by the seven axes defined in ARCHITECTURE.md. Brow
 ## datasets/
 
 - *(Moved to `audio-reactive/research/datasets/harmonix/`)*
+
+## test-vectors/
+
+- **[inmp441-validation/](test-vectors/inmp441-validation/README.md)** — INMP441 vs system-audio synchronized 60s captures (ambient and near-field). Reusable WAV test vectors plus per-band frequency-response analysis. Validates the `inmp441-frequency-response` ledger entry: bass loss reproduces robustly with distance-dependence; "treble comparable" claim does NOT reproduce.
 
 ## research-briefs/
 

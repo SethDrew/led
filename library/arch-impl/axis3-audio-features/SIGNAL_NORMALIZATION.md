@@ -2,7 +2,7 @@
 
 How raw audio features become usable effect inputs. A single normalization primitive exposes multiple outputs tuned to different consumer needs.
 
-**Relationship to PER_BAND_NORMALIZATION.md (library, Axis 6):** That document covers per-band peak-decay as a composition concern -- putting all frequency bands on a common 0-1 scale. This document covers the normalization primitive itself: why EMA (mean-tracking) supersedes peak-decay (max-tracking) for section-aware work, and how one primitive serves multiple consumers through different output taps.
+**Relationship to PER_BAND_NORMALIZATION.md (library, Axis 3):** That document covers per-band EMA-ratio normalization as the standard preprocessing for band-decomposition RMS amplitude effects, plus the composable pipeline (PerBandEMANormalize → PerBandAbsIntegral → PulseDriver) and noise-floor gating. This document covers the broadband normalization primitive itself: why EMA (mean-tracking) supersedes peak-decay (max-tracking) for section-aware work, and how one primitive serves multiple consumers through different output taps.
 
 ---
 

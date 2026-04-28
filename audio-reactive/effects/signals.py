@@ -10,6 +10,13 @@ Building blocks that effects compose via has-a:
   SpeedSignal             — spectral evolution rate (ambient-friendly 0-1 speed)
   detect_timbral_sections — batch MFCC novelty detector with eagerness curve
 
+Per-band pipeline for band-decomposition RMS amplitude effects (see
+library/arch-impl/axis3-audio-features/PER_BAND_NORMALIZATION.md):
+
+  PerBandEMANormalize  — per-band EMA-ratio normalization with noise floor gate
+  PerBandAbsIntegral   — per-band |d/dt| integrated over a sliding window
+  PulseDriver          — max-of-N + argmax with threshold + cooldown for pulses
+
 Usage:
     accum = OverlapFrameAccumulator()
     absint = AbsIntegral(sample_rate=44100)
@@ -210,6 +217,188 @@ class AbsIntegral:
     def current_rms(self):
         """Last computed RMS value."""
         return self.prev_rms
+
+
+class PerBandEMANormalize:
+    """Per-band EMA-ratio normalization with optional noise floor gate.
+
+    For each band, maintains a running mean of RMS via exponential moving
+    average. Outputs the *deviation above the section mean*, scaled to [0, 1]:
+
+        output = clip((rms / ema - 1) / (max_ratio - 1), 0, 1)
+
+    A band sitting at its section mean reads 0 (dark). At max_ratio× the
+    mean it reads 1.0 (full brightness). Below-mean energy is clipped to 0
+    rather than producing a half-bright floor — the right tap for transient-
+    driven visualizations that want dark space punctuated by activity.
+
+    See library/arch-impl/axis3-audio-features/PER_BAND_NORMALIZATION.md
+    for the full design rationale.
+
+    The EMA always adapts to raw RMS (including during noise-gated periods)
+    so the running mean tracks the actual ambient floor. Only the output
+    is gated.
+    """
+
+    def __init__(self, num_bands: int, fps: float,
+                 ema_tc: float = 30.0, max_ratio: float = 3.0,
+                 noise_floor_rms=0.0,
+                 warmup_silence_floor: float = 1e-8):
+        """
+        Args:
+            num_bands:            Number of frequency bands.
+            fps:                  Frame rate at which update() is called.
+            ema_tc:               EMA time constant in seconds (~0.5-0.7× section length).
+            max_ratio:            Ratio that maps to 1.0. Default 3.0 → "3× the
+                                  running mean = full brightness." Section mean
+                                  (ratio=1.0) always maps to 0.
+            noise_floor_rms:      Scalar or per-band array. Below this raw RMS,
+                                  output is gated to 0. Default 0.0 = no gate.
+            warmup_silence_floor: Frames where max(band_rms) is below this don't
+                                  count toward warm-up — prevents leading digital
+                                  silence (FFT of zero) from seeding EMA at zero.
+                                  Default 1e-8 catches only literal silence.
+        """
+        self.num_bands = num_bands
+        self._fps = float(fps)
+        self._ema_tc = float(ema_tc)
+        # Validated formula: alpha = 2 / (tc * fps + 1). Matches StickyFloorRMS,
+        # SpeedSignal, band_tendrils, leaf_gust, leaf_wind, diamond_voices, etc.
+        self._alpha = 2.0 / (ema_tc * fps + 1.0)
+        self._max_ratio = float(max_ratio)
+        self._span = float(max_ratio) - 1.0
+        self._ema = np.zeros(num_bands, dtype=np.float32)
+        # Warm-up: time-varying alpha = max(steady_alpha, 1/(n+1)) so the first
+        # ~ema_tc seconds of non-silent frames seed EMA from a running mean.
+        self._warmup_floor = float(warmup_silence_floor)
+        self._warmup_target = int(round(ema_tc * fps))
+        self._n_warm = 0
+
+        floor = np.asarray(noise_floor_rms, dtype=np.float32)
+        if floor.ndim == 0:
+            floor = np.full(num_bands, float(floor), dtype=np.float32)
+        self._noise_floor = floor
+
+        self.value = np.zeros(num_bands, dtype=np.float32)
+
+    def update(self, band_rms: np.ndarray) -> np.ndarray:
+        """Process per-band RMS values, return normalized 0-1 array."""
+        band_rms = np.asarray(band_rms, dtype=np.float32)
+
+        # Skip silent frames so leading silence doesn't seed EMA at zero.
+        # The running-mean warm-up alpha (1/(n+1)) makes EMA converge to a
+        # true mean from the first non-silent frame, then transitions
+        # smoothly to the steady-state alpha as n grows.
+        is_silent = float(band_rms.max()) < self._warmup_floor
+        if not is_silent:
+            warm_alpha = max(self._alpha, 1.0 / (self._n_warm + 1))
+            self._ema += warm_alpha * (band_rms - self._ema)
+            self._n_warm += 1
+
+        if self._n_warm == 0:
+            self.value = np.zeros(self.num_bands, dtype=np.float32)
+            return self.value
+
+        ratio = band_rms / np.maximum(self._ema, 1e-10)
+        normalized = np.clip((ratio - 1.0) / self._span, 0.0, 1.0)
+        normalized[band_rms < self._noise_floor] = 0.0
+
+        self.value = normalized.astype(np.float32)
+        return self.value
+
+
+class PerBandAbsIntegral:
+    """Per-band absolute integral of derivative over a sliding window.
+
+    Vectorized AbsIntegral over multiple bands. Computes |d/dt| of each
+    band's input signal, integrated over `window_sec` (default 150ms),
+    peak-decay normalized per-band to 0-1.
+
+    Designed to consume the output of PerBandEMANormalize — feeding the
+    normalized signal makes the resulting transients context-relative.
+    """
+
+    def __init__(self, num_bands: int, fps: float,
+                 window_sec: float = 0.15, peak_decay: float = 0.998):
+        """
+        Args:
+            num_bands:   Number of bands.
+            fps:         Frame rate at which update() is called.
+            window_sec:  Integration window. 150ms matches AbsIntegral.
+            peak_decay:  Per-frame decay for per-band normalization peak.
+        """
+        self.num_bands = num_bands
+        self.dt = 1.0 / fps
+        self.window_frames = max(1, int(window_sec * fps))
+        self._buf = np.zeros((self.window_frames, num_bands), dtype=np.float32)
+        self._buf_pos = 0
+        self._prev = np.zeros(num_bands, dtype=np.float32)
+        self._initialized = False
+        self._peak = np.full(num_bands, 1e-10, dtype=np.float32)
+        self._peak_decay = float(peak_decay)
+
+        self.value = np.zeros(num_bands, dtype=np.float32)
+
+    def update(self, band_signal: np.ndarray) -> np.ndarray:
+        """Process per-band signal values, return normalized 0-1 array."""
+        band_signal = np.asarray(band_signal, dtype=np.float32)
+
+        if not self._initialized:
+            self._prev = band_signal.copy()
+            self._initialized = True
+            return self.value
+
+        deriv = (band_signal - self._prev) / self.dt
+        self._prev = band_signal
+
+        self._buf[self._buf_pos % self.window_frames] = np.abs(deriv)
+        self._buf_pos += 1
+
+        raw = np.sum(self._buf, axis=0) * self.dt
+
+        self._peak = np.maximum(raw, self._peak * self._peak_decay)
+        self.value = (raw / np.maximum(self._peak, 1e-10)).astype(np.float32)
+        return self.value
+
+
+class PulseDriver:
+    """Max-of-N pulse driver with argmax dominant-band selection.
+
+    Combines per-band transient signals into a single pulse stream. Each
+    update returns the max value, the dominant (argmax) band index, and
+    a `fired` flag latched when the max crosses `threshold` (with cooldown).
+
+    Typical pipeline:
+        per-band absint → PulseDriver → effect emission
+    """
+
+    def __init__(self, threshold: float = 0.5, cooldown_sec: float = 0.1):
+        """
+        Args:
+            threshold:    Pulse fires when max(value) crosses this.
+            cooldown_sec: Minimum time between consecutive pulses.
+        """
+        self.threshold = float(threshold)
+        self.cooldown_sec = float(cooldown_sec)
+        self._last_fire_time = -1e9
+        self.value = 0.0
+        self.dominant = 0
+        self.fired = False
+
+    def update(self, band_values: np.ndarray, time_acc: float) -> bool:
+        """Process per-band transient values. Returns True iff pulse fired."""
+        band_values = np.asarray(band_values, dtype=np.float32)
+        self.value = float(np.max(band_values))
+        self.dominant = int(np.argmax(band_values))
+
+        if (self.value > self.threshold and
+                (time_acc - self._last_fire_time) > self.cooldown_sec):
+            self._last_fire_time = float(time_acc)
+            self.fired = True
+        else:
+            self.fired = False
+
+        return self.fired
 
 
 class BeatPredictor:

@@ -1,35 +1,28 @@
 """
-Band Tendrils v2 — three-metric hybrid onset detection.
+Band Tendrils — AbsInt-driven percussion detection.
 
-Evolved from band_tendrils (v1) based on analysis of five failure modes:
+Per-band trigger uses |d(band_rms)/dt| integrated over a 150ms window (AbsInt).
+A trigger requires BOTH:
+  - Absolute floor: AbsInt exceeds a per-band threshold (rejects ambient texture)
+  - Ratio gate: AbsInt exceeds k × per-band EMA (rejects sustained loud signals)
 
-1. TRIGGER: Log-energy onset strength (not raw spectral flux).
-   Per-band: FFT → band energy → log1p → first-difference → half-wave rectify.
-   Log compression naturally favors transients over gradual harmonic changes,
-   reducing the ~30% harmonic false positives seen with raw spectral flux
-   (see ledger: hpss-vs-flux-empirical). EMA-normalized per band with global
-   EMA, per-band cooldown.
+The earlier log-energy onset trigger fired on ambient music because its
+ratio-only gate adapted its baseline DOWN during quiet sections. AbsInt is
+linear (not log-compressed), so absolute floors have physical meaning.
 
-2. LENGTH: Per-band RMS at the trigger frame.
-   Separate metric from trigger. Maps to tendril max_length through a wider
-   dynamic range than v1's clipped 0.35-1.0 strength. A ghost kick spawns a
-   short tendril; a full kick fills the branch.
+Length and best-of-frame pick are also driven by AbsInt magnitude, so loud
+percussion produces longer tendrils than quiet hits. Decay continues to use
+the per-band normalized AbsInt for fast/slow modulation (kick fades quickly,
+cymbal sustains).
 
-3. DECAY: Per-band AbsInt sampled continuously after trigger.
-   Each tendril stores its source band. Each render frame, the band's current
-   AbsInt level interpolates decay between fast (0.75 for percussive) and slow
-   (0.85 for sustained). A kick tendril fades in ~150ms; a cymbal tendril
-   sustains for ~500ms.
-
-Everything else from band_tendrils v1: BFS topology, origin drift, color
-rotation with 120-degree band offsets, global EMA, per-band cooldown.
+Topology, origin drift, BFS path expansion, and 120-degree band hue offsets
+are unchanged from earlier versions.
 
 Usage:
-    python runner.py band_tendrils_v2 --sculpture cob_diamond --no-leds
-    python runner.py band_tendrils_v2 --sculpture cob_diamond
+    python runner.py band_tendrils --sculpture cob_diamond --no-leds
+    python runner.py band_tendrils --sculpture cob_diamond
 """
 
-import math
 import threading
 import numpy as np
 from base import AudioReactiveEffect
@@ -38,7 +31,7 @@ from signals import OverlapFrameAccumulator
 
 
 # ── Tendril constants ──
-MAX_TENDRILS = 8
+MAX_TENDRILS = 2
 TENDRIL_MIN_LENGTH = 3       # LEDs for weakest hit
 TENDRIL_MAX_LENGTH = 20      # LEDs for strongest hit
 TENDRIL_EXPAND_SPEED = 40.0  # LEDs per second expansion rate
@@ -58,26 +51,37 @@ SPATIAL_HUE_SPREAD = 0.08    # hue offset along tendril length
 # ── Origin drift ──
 ORIGIN_DRIFT_INTERVAL = 8.0  # seconds between origin changes
 
-# ── Onset detection ──
-ONSET_EMA_TIME_CONSTANT = 5.0  # seconds — stable baseline
-ONSET_THRESHOLD = 3.3           # ratio above EMA mean to trigger
-ONSET_COOLDOWN_S = 0.45         # per-band cooldown in seconds
-RMS_FLOOR = 0.005               # minimum RMS to allow any onset detection
+# ── Onset detection (AbsInt-based) ──
+# Trigger requires BOTH:
+#   1. Absolute floor: AbsInt above per-band level (rejects quiet ambient)
+#   2. Ratio gate: AbsInt > k × recent per-band EMA (rejects sustained loud signals)
+#
+# Calibration methodology (one-off, ran in audio-reactive/research/audio-segments):
+#   Reference tracks chosen for perceptual goals —
+#     ambient.wav         (Fred Again "tayla")  — must NOT fire (quiet pads)
+#     opiate_intro.wav    (Tool, rock beat)     — must fire ~1-3/s
+#     electronic_beat.wav (Fred Again "Tanya")  — must fire ~1-3/s
+#     fa_br_drop1.wav     (build → drop)        — silent in build, many in drop
+#   Per-band AbsInt percentile sweep with config: FFT=2048, hop=512, AbsInt
+#   window=0.15s, AbsInt EMA tau=2.0s, single-best-per-frame with 0.45s cooldown.
+#   Floors picked between ambient p100 and percussive p95; ratio chosen so
+#   sustained loud signals (steady drone, sustained drop) don't keep retriggering.
+ABSINT_FLOOR_PER_BAND = [20.0, 7.0, 1.4]    # LOW, MID, HIGH absolute thresholds
+ABSINT_RATIO_THRESHOLD = 2.0   # AbsInt must be 2x its own recent baseline
+ONSET_COOLDOWN_S = 0.45        # per-band cooldown in seconds
 
 # ── Frequency bands for per-band onset detection ──
 BAND_EDGES_HZ = [0, 250, 2000]  # low: 0-250, mid: 250-2000, high: 2000+
 BAND_HUE_OFFSETS = [0.0, 0.333, 0.667]  # 120 degrees apart
 
-# ── Per-band AbsInt constants ──
-ABSINT_WINDOW_SEC = 0.15     # 150ms integration window (matches signals.AbsIntegral)
-# AbsInt EMA for normalization (per-band, for decay modulation)
-ABSINT_EMA_TIME_CONSTANT = 2.0  # shorter than onset EMA — tracks energy envelope
+# ── Per-band AbsInt ──
+ABSINT_WINDOW_SEC = 0.15       # 150ms integration window
+ABSINT_EMA_TIME_CONSTANT = 2.0 # tracks per-band energy envelope (for ratio + decay)
 
-# ── RMS-to-length mapping (v2: wider dynamic range) ──
-# Instead of v1's 0.35-1.0 clip on flux ratio, we use per-band RMS
-# with a log mapping to preserve dynamic range across 40+ dB
-RMS_LENGTH_FLOOR = 0.003     # below this RMS, minimum length
-RMS_LENGTH_CEIL = 0.20       # above this RMS, maximum length
+# ── AbsInt-to-length mapping ──
+# Length scales by how much the AbsInt exceeds the trigger floor.
+# At floor → MIN length, at LENGTH_CEIL × floor → MAX length.
+ABSINT_LENGTH_CEIL_MULT = 2.0  # raw AbsInt at this multiple of floor → max length
 
 
 def hsv_to_rgb(h, s, v):
@@ -132,7 +136,7 @@ class BandTendrilsEffect(AudioReactiveEffect):
         self.freq_bins = np.fft.rfftfreq(self.n_fft, 1.0 / sample_rate)
         frames_per_sec = sample_rate / 512.0
 
-        # ── Per-band onset detection (log-energy onset strength) ──
+        # ── Per-band frequency slices ──
         self.n_bands = len(BAND_EDGES_HZ)  # 3
         self.band_slices = []
         for b in range(self.n_bands):
@@ -142,22 +146,14 @@ class BandTendrilsEffect(AudioReactiveEffect):
             hi_bin = int(np.searchsorted(self.freq_bins, hi_hz))
             self.band_slices.append(slice(lo_bin, hi_bin))
 
-        # Previous frame's per-band log energy (for first-difference)
-        self._prev_band_log_energy = np.zeros(self.n_bands, dtype=np.float64)
-        self._prev_frame_valid = False
-
-        # Global EMA for onset strength normalization
-        self.onset_ema_alpha = 1.0 / (ONSET_EMA_TIME_CONSTANT * frames_per_sec)
-        self.global_onset_ema = 0.0
-        self.global_ema_initialized = False
-
         # Per-band cooldown
         self._cooldown_frames = max(1, int(ONSET_COOLDOWN_S * frames_per_sec))
         self.band_cooldown = np.zeros(self.n_bands, dtype=np.int32)
 
-        # ── Per-band AbsInt (for decay modulation) ──
-        # Each band tracks |d(band_rms)/dt| integrated over ABSINT_WINDOW_SEC
-        absint_window_frames = max(1, int(ABSINT_WINDOW_SEC / (1.0 / frames_per_sec)))
+        # ── Per-band AbsInt: trigger metric, length input, decay modulator ──
+        # AbsInt = integral of |d(band_rms)/dt| over ABSINT_WINDOW_SEC.
+        # Sustained signals have small derivatives → low AbsInt; transients spike.
+        absint_window_frames = max(1, int(ABSINT_WINDOW_SEC * frames_per_sec))
         self._absint_window_frames = absint_window_frames
         self._absint_deriv_buf = np.zeros((self.n_bands, absint_window_frames),
                                           dtype=np.float32)
@@ -166,23 +162,15 @@ class BandTendrilsEffect(AudioReactiveEffect):
         self._absint_raw = np.zeros(self.n_bands, dtype=np.float32)
         self._absint_dt = 1.0 / frames_per_sec  # seconds per frame
 
-        # Per-band AbsInt EMA for normalization (so we can get a 0-1 signal)
+        # Per-band AbsInt EMA — used for both the trigger ratio gate and decay.
         self._absint_ema_alpha = 1.0 / (ABSINT_EMA_TIME_CONSTANT * frames_per_sec)
         self._absint_ema = np.zeros(self.n_bands, dtype=np.float32)
         self._absint_ema_initialized = np.zeros(self.n_bands, dtype=bool)
-        # Normalized per-band absint (0-1 ish), shared with render thread
+        # Normalized per-band absint (ratio/(ratio+1), in [0,1)) — drives decay.
         self._absint_normalized = np.zeros(self.n_bands, dtype=np.float32)
 
-        # ── Per-band RMS (for tendril length) ──
-        self._band_rms = np.zeros(self.n_bands, dtype=np.float32)
-
-        # ── RMS energy gate ──
-        self.rms_ema_alpha = 1.0 / (1.0 * frames_per_sec)  # 1s time constant
-        self.rms_ema = 0.0
-        self.rms_ema_initialized = False
-
         # ── Shared state (audio -> render) ──
-        # hits carry (band_rms, band_index) — length comes from RMS, not flux ratio
+        # hits carry (absint_raw, band_index)
         self._pending_hits = []
         self._lock = threading.Lock()
 
@@ -312,30 +300,13 @@ class BandTendrilsEffect(AudioReactiveEffect):
     def _process_frame(self, frame):
         spec = np.abs(np.fft.rfft(frame * self.window))
 
-        # ── RMS energy gate ──
-        rms = float(np.sqrt(np.mean(frame ** 2)))
-        if not self.rms_ema_initialized:
-            self.rms_ema = rms
-            self.rms_ema_initialized = True
-        else:
-            self.rms_ema += self.rms_ema_alpha * (rms - self.rms_ema)
-
-        # ── Per-band computations ──
-        band_log_energy = np.zeros(self.n_bands, dtype=np.float64)
+        # ── Per-band RMS (input to AbsInt) ──
         band_rms = np.zeros(self.n_bands, dtype=np.float32)
-
         for b in range(self.n_bands):
-            sl = self.band_slices[b]
-            band_spec = spec[sl]
-            # Log-energy for onset detection (matches OnsetTempoTracker approach)
-            band_log_energy[b] = np.log1p(np.sum(band_spec ** 2))
-            # Linear RMS for tendril length mapping
+            band_spec = spec[self.band_slices[b]]
             band_rms[b] = float(np.sqrt(np.mean(band_spec ** 2))) if len(band_spec) > 0 else 0.0
 
-        self._band_rms = band_rms
-
-        # ── Per-band AbsInt update ──
-        # |d(band_rms)/dt| integrated over 150ms window
+        # ── Per-band AbsInt update + EMA ──
         buf_idx = self._absint_buf_pos % self._absint_window_frames
         for b in range(self.n_bands):
             deriv = (band_rms[b] - self._absint_prev_band_rms[b]) / self._absint_dt
@@ -343,72 +314,41 @@ class BandTendrilsEffect(AudioReactiveEffect):
             raw = float(np.sum(self._absint_deriv_buf[b])) * self._absint_dt
             self._absint_raw[b] = raw
 
-            # EMA normalization of absint (for 0-1 signal)
             if not self._absint_ema_initialized[b]:
                 self._absint_ema[b] = raw
                 self._absint_ema_initialized[b] = True
             else:
                 self._absint_ema[b] += self._absint_ema_alpha * (raw - self._absint_ema[b])
 
-            # Ratio: raw / ema gives ~1.0 at average activity, >1 during transients
-            # We want 0-1 for decay interpolation, so use sigmoid-like mapping:
-            # ratio / (ratio + 1) maps [0, inf) -> [0, 1)
             ema_val = self._absint_ema[b]
-            if ema_val > 1e-10:
-                ratio = raw / ema_val
-            else:
-                ratio = 0.0
+            ratio = raw / ema_val if ema_val > 1e-10 else 0.0
+            # Normalized form for decay (saturates smoothly into [0, 1))
             self._absint_normalized[b] = ratio / (ratio + 1.0)
 
         self._absint_prev_band_rms = band_rms.copy()
         self._absint_buf_pos += 1
 
-        # ── Log-energy onset strength (trigger metric) ──
-        if self._prev_frame_valid:
-            # First-difference of log energy per band
-            flux = band_log_energy - self._prev_band_log_energy
-            # Half-wave rectify: only energy increases are onsets
-            onset_per_band = np.maximum(flux, 0)
+        # ── Trigger gate: absolute floor AND ratio>k, per band ──
+        self.band_cooldown = np.maximum(self.band_cooldown - 1, 0)
+        hits_this_frame = []
+        for b in range(self.n_bands):
+            raw = self._absint_raw[b]
+            ema_val = self._absint_ema[b]
+            ratio = raw / ema_val if ema_val > 1e-10 else 0.0
+            floor_ok = raw > ABSINT_FLOOR_PER_BAND[b]
+            ratio_ok = ratio > ABSINT_RATIO_THRESHOLD
+            cooldown_ok = self.band_cooldown[b] == 0
+            if floor_ok and ratio_ok and cooldown_ok:
+                hits_this_frame.append((raw, b))
+                self.band_cooldown[b] = self._cooldown_frames
 
-            # Tick all band cooldowns
-            self.band_cooldown = np.maximum(self.band_cooldown - 1, 0)
-
-            # Global EMA: mean onset strength across all bands
-            total_onset = float(np.mean(onset_per_band))
-            if not self.global_ema_initialized:
-                self.global_onset_ema = total_onset
-                self.global_ema_initialized = True
-            else:
-                self.global_onset_ema += self.onset_ema_alpha * (
-                    total_onset - self.global_onset_ema)
-
-            hits_this_frame = []
-
-            for b in range(self.n_bands):
-                band_onset = float(onset_per_band[b])
-
-                # Normalize against global EMA (cross-band suppression)
-                band_share = self.global_onset_ema  # each band compared to global mean
-                normalized = band_onset / (band_share + 1e-10)
-
-                # Three-gate onset detection
-                energy_ok = rms > RMS_FLOOR
-                onset_ok = normalized > ONSET_THRESHOLD
-                cooldown_ok = self.band_cooldown[b] == 0
-
-                if energy_ok and onset_ok and cooldown_ok:
-                    # v2: pass band RMS for length, not flux-derived strength
-                    hits_this_frame.append((band_rms[b], b))
-                    self.band_cooldown[b] = self._cooldown_frames
-
-            if hits_this_frame:
-                # Take the strongest hit if multiple bands fire simultaneously
-                best_rms, best_band = max(hits_this_frame, key=lambda x: x[0])
-                with self._lock:
-                    self._pending_hits.append((best_rms, best_band))
-
-        self._prev_band_log_energy = band_log_energy.copy()
-        self._prev_frame_valid = True
+        if hits_this_frame:
+            # Pick the band whose AbsInt is largest relative to its own floor
+            # (comparable across bands with very different absolute scales).
+            best = max(hits_this_frame,
+                       key=lambda x: x[0] / ABSINT_FLOOR_PER_BAND[x[1]])
+            with self._lock:
+                self._pending_hits.append(best)
 
     # ── Rendering ───────────────────────────────────────────────────
 
@@ -429,8 +369,8 @@ class BandTendrilsEffect(AudioReactiveEffect):
             # Snapshot per-band absint for decay modulation
             absint_snapshot = self._absint_normalized.copy()
 
-        for band_rms_val, band in hits:
-            self._spawn_tendril(band_rms_val, band)
+        for absint_val, band in hits:
+            self._spawn_tendril(absint_val, band)
 
         # Update tendrils
         alive = []
@@ -486,23 +426,19 @@ class BandTendrilsEffect(AudioReactiveEffect):
 
         return np.clip(frame, 0, 255).astype(np.uint8)
 
-    def _spawn_tendril(self, band_rms_val, band):
-        """Spawn a new tendril. Length from band RMS, not flux ratio."""
+    def _spawn_tendril(self, absint_val, band):
+        """Spawn a new tendril. Length scales with AbsInt above the band's floor."""
         if self._origin_timer >= ORIGIN_DRIFT_INTERVAL:
             self._origin_timer = 0.0
         origin = self._next_origin()
 
-        # v2: Log-mapped RMS to length (wider dynamic range)
-        # log mapping: a 20dB range of RMS maps linearly to tendril length
-        if band_rms_val < RMS_LENGTH_FLOOR:
-            length_frac = 0.0
-        elif band_rms_val > RMS_LENGTH_CEIL:
-            length_frac = 1.0
-        else:
-            # Log-scale mapping: equal perceptual steps across dynamic range
-            log_floor = math.log(RMS_LENGTH_FLOOR)
-            log_ceil = math.log(RMS_LENGTH_CEIL)
-            length_frac = (math.log(band_rms_val) - log_floor) / (log_ceil - log_floor)
+        # AbsInt at the floor → MIN length; at LENGTH_CEIL_MULT × floor → MAX length.
+        # Per-band scaling makes the mapping comparable across bands of different
+        # absolute magnitudes (LOW band is ~20× larger than HIGH band).
+        floor = ABSINT_FLOOR_PER_BAND[band]
+        ceil = floor * ABSINT_LENGTH_CEIL_MULT
+        length_frac = (absint_val - floor) / (ceil - floor)
+        length_frac = max(0.0, min(1.0, length_frac))
 
         base_len = TENDRIL_MIN_LENGTH + length_frac * (TENDRIL_MAX_LENGTH - TENDRIL_MIN_LENGTH)
         max_len = int(base_len * self._pot_scale)
@@ -534,13 +470,13 @@ class BandTendrilsEffect(AudioReactiveEffect):
         n = len(self.tendrils)
         hue_deg = int(self._hue_phase * 360)
         origins = [t['origin'] for t in self.tendrils[:4]]
-        band_absint = [f'{v:.2f}' for v in self._absint_normalized]
+        absint_raw = [f'{v:.1f}' for v in self._absint_raw]
+        absint_norm = [f'{v:.2f}' for v in self._absint_normalized]
         return {
             'tendrils': n,
             'hue': f'{hue_deg}\u00b0',
             'pot': f'{self._pot_scale:.1f}x',
             'origins': str(origins),
-            'global_ema': f'{self.global_onset_ema:.3f}',
-            'rms_ema': f'{self.rms_ema:.4f}',
-            'absint': str(band_absint),
+            'absint_raw': str(absint_raw),
+            'absint_norm': str(absint_norm),
         }

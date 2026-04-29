@@ -540,7 +540,6 @@ entries:
     scope: hardware
     source:
       - audio-reactive/effects/compare.py
-      - festicorn/bulbs/src/receiver.cpp
     tags: [sk6812, rgbw, low-brightness, constraint]
     relates_to: [sk6812-w-channel-worse-low-brightness]
     notes: >
@@ -573,8 +572,7 @@ entries:
     status: mitigated
     severity: high
     scope: hardware
-    source:
-      - festicorn/bulbs/src/espnow_lowpower_test.cpp
+    source: empirical bench measurement (2026-04, super-mini ESP32-C3, ESP-NOW TX-power sweep)
     tags: [esp32, esp32-c3, super-mini, antenna, constraint, esp-now]
     relates_to: [esp32-hardware-selection-rationale]
     notes: >
@@ -945,7 +943,7 @@ entries:
     status: resolved
     severity: medium
     scope: hardware
-    source: festicorn/bulbs/data/recordings/gesture_taxonomy.md
+    source: festicorn/gyro-sense/data/recordings/duck_gestures/20260426T210735_labels.json
     tags: [esp32-c3, mpu6050, esp-now, telemetry, protocol, bulbs]
     relates_to: [bulb-gesture-taxonomy-methodology]
     notes: >
@@ -1016,10 +1014,7 @@ entries:
       rules 1/2/3 of the classifier, and 18% wire error is enough to
       flip a borderline episode if any future capture lands close to a
       threshold. The 13/12 results survive only because none of these
-      episodes sit on the ac_strength boundaries. See
-      library/BULB_INTERACTION_TELEMETRY.md for the full story;
-      gesture_taxonomy.md "Wire Schema Validation" for per-feature
-      error tables.
+      episodes sit on the ac_strength boundaries.
 
       Hardware context (validated in same session): stream_sender on
       ESP32-C3 + stream_bridge on ESP32-classic over USB CDC achieves
@@ -1044,7 +1039,7 @@ entries:
     status: resolved
     severity: medium
     scope: hardware
-    source: festicorn/bulbs/data/recordings/range_capture_protocol.md
+    source: festicorn/gyro-sense/data/recordings/range_ext_hanging_stream/, festicorn/gyro-sense/data/recordings/range_ext_duck_stream/
     tags: [mpu6050, esp32-c3, range, calibration, bulbs]
     relates_to: [bulb-imu-telemetry-wire-schema-v1, bulb-gesture-taxonomy-methodology]
     notes: >

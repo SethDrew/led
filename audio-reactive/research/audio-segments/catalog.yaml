@@ -337,3 +337,23 @@
   id: ten_ambient
   recorded: 2026-03-18 21:31
   sample_rate: 44100
+- duration_seconds: 74.8
+  filename: fp_falaise.wav
+  id: fp_falaise
+  recorded: 2026-04-25 20:41
+  sample_rate: 44100
+- duration_seconds: 84.9
+  filename: face.wav
+  id: face
+  recorded: 2026-04-25 21:06
+  sample_rate: 44100
+- artist: Aphex Twin
+  channels: 2
+  duration_seconds: 346.1
+  filename: aphex_formula.wav
+  genre: IDM
+  id: aphex_formula
+  notes: 'Track from Windowlicker EP (1999). Famous for hidden face image in spectrogram around 5:30 mark. Source: youtube m8UCZfaYACo.'
+  recorded: 2026-04-25 20:50
+  sample_rate: 48000
+  song: ΔMi−1 = −αΣn=1NDi[n] (Formula / Equation)

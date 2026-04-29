@@ -6,7 +6,6 @@ Reference documents for the synchronous LED system. Organized by the seven desig
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — The design space framework: seven axes, key principles, input roles, show architecture.
 - **[visual-qa-preview-system.md](visual-qa-preview-system.md)** — Internal tooling: composite PNG preview for AI-driven effect QA, team pattern, iteration protocol.
-- **[BULB_INTERACTION_TELEMETRY.md](BULB_INTERACTION_TELEMETRY.md)** — Hanging-bulb gesture pipeline: IMU capture, gesture taxonomy (kind × severity), locked 16 B / 25 Hz / 400 B/s ESP-NOW wire schema, classifier validation, residual gaps.
 
 ## arch-impl/
 

@@ -2873,6 +2873,57 @@ entries:
       essentially a derivative signal (rate of change relative to recent
       context) embedded in the normalization itself.
 
+  - id: two-stage-ema-section-contrast
+    date: 2026-04-29
+    touched: 2026-04-29
+    title: "Two-stage EMA (per-band fast + broadband slow) widens dynamic range on long tracks"
+    summary: >
+      Adding a second-stage broadband EMA (TC2 ≈ 120s) on top of the existing
+      per-band EMA (TC ≈ 30s) measurably widens the dynamic range on long
+      tracks. With clip_sum recombiner on jcole (214s) and fa_br_drop1 (129s):
+      std rises 0.335 → 0.391 (+17%), peak-frame fraction (>0.7) grows
+      17.2% → 24.0%, dark-frame fraction (<0.3) grows 57.4% → 65.3%. The
+      signal visits both ends of [0,1] more — that's section-level contrast
+      added on top of within-section beat dynamics. Slowing the per-band TC
+      alone (30s → 60s) does NOT deliver the same effect; the second stage
+      is what produces the dynamic-range widening. Pre-validation only —
+      not yet implemented in any shipping effect.
+    status: validated
+    warmth: medium
+    confidence: medium
+    tags: [feature-extraction, normalization, architecture, section-contrast]
+    relates_to: [ema-normalization-replaces-peak-decay, ema-time-constant-is-section-relative, ema-section-boundary-contrast, perception-is-layered-by-timescale]
+    notes: >
+      Architecture: per-band EMA produces band-normalized values; recombiner
+      (clip_sum, prob_or, etc.) merges to single broadband signal; second-stage
+      EMA divides that broadband signal by its own slow running mean (TC2).
+      The per-band stage handles within-section dynamics (beat visibility);
+      the broadband stage handles inter-section dynamics (this section vs the
+      previous one).
+
+      Default recommendation: TC2 = 120s. TC2 = 90s is a more aggressive
+      alternative; both win on long tracks. Per the broader EMA principle
+      (ema-time-constant-is-section-relative), TC2 should scale with typical
+      passage length — DJ sets and ambient may want 120s+, 3-min pop tracks
+      60-90s.
+
+      Recombiner choice is largely orthogonal to the 2-EMA decision: clip_sum
+      and prob_or sit within ±0.02 mean / ±0.01 std at any fixed config.
+
+      Track-length caveat: short tracks (≤60s) cannot fully evaluate 2-EMA at
+      TC2 ≥ 60s — most of the track is the slow-EMA warm-up transient.
+      Steady-state stats require duration substantially > TC2.
+
+      Open question (not yet validated): order of operations when an effect
+      applies its own nonlinearity. Should 2-EMA second stage run BEFORE the
+      per-effect nonlinearity (recombined → 2-EMA → final) or AFTER? If a
+      downstream sigmoid is intended, the order matters perceptually.
+
+      Open question (perceptual): distribution stats say more dark frames is
+      "more contrast", but visual A/B determines whether dark frames feel
+      like rest (good) or feel like dropouts (bad). Reserve final ship
+      decision for LED-o-grams.
+
   - id: frame-rate-normalization-bug
     date: 2026-03-15
     touched: 2026-03-15
@@ -3183,7 +3234,6 @@ entries:
     warmth: high
     confidence: high
     source:
-      - festicorn/bulbs/src/async_bloom_test.cpp
       - audio-reactive/research/datasets/sk6812-pipeline-telemetry/gate_comparison_bloom_2026-04-05.csv
     tags: [dithering, low-brightness, perception, sk6812, noise-gate, technique]
     relates_to: [delta-sigma-eliminates-low-brightness-flicker, rgbw-pure-w-at-low-brightness]
@@ -3387,9 +3437,8 @@ entries:
       experiment fully.
 
       The full pipeline is reproducible from source: firmware variant
-      raw_audio_sender (festicorn/bulbs/src/), capture script
-      dual_capture.py and comparison script compare_inmp441_vs_system.py
-      (audio-reactive/tools/). Re-flashing the Duck and running
+      raw_audio_sender, capture script dual_capture.py and comparison
+      script compare_inmp441_vs_system.py. Re-flashing the Duck and running
       dual_capture.py reproduces the WAV pairs end-to-end.
 
   - id: inmp441-amplifies-source-bass-tilt
@@ -3969,7 +4018,7 @@ entries:
     status: validated
     warmth: high
     confidence: medium
-    source: festicorn/bulbs/data/recordings/gesture_taxonomy.md
+    source: festicorn/gyro-sense/data/recordings/duck_gestures/20260426T210735_labels.json
     tags: [imu, gesture, classification, bulbs, input-roles, severity]
     relates_to: [feelings-are-contextual, derivatives-over-absolutes]
     notes: >

@@ -1,0 +1,7 @@
+{
+  "header_version": 2,
+  "sample_hz": 200,
+  "sample_count": 35877,
+  "accel_g": 2,
+  "gyro_dps": 250
+}

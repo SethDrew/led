@@ -46,10 +46,8 @@ audio-reactive/research/audio-segments/uploads/
 *.search_cache.pkl
 .cache/
 
-# Festicorn local credentials
-festicorn/butterfly/src/wifi_credentials_local.h
-festicorn/biolum/src/wifi_credentials_local.h
-festicorn/sender_rnd/src/wifi_credentials_local.h
+# Festicorn local credentials (any subdir)
+**/wifi_credentials_local.h
 
 # Claude Code local settings
 .claude/settings.local.json
@@ -68,3 +66,9 @@ audio-reactive/research/*.wav
 
 # Audio: dual-capture test vectors (large; reproducible from dual_capture_continuous.py)
 library/test-vectors/**/*.wav
+
+# Gyro-sense: derivatives of .bin captures (regenerable via harvest.py / analysis tools)
+festicorn/gyro-sense/data/recordings/**/*.csv
+festicorn/gyro-sense/data/recordings/**/*.png
+festicorn/gyro-sense/data/recordings/**/_episodes.json
+festicorn/gyro-sense/data/recordings/wire_packets/*.json

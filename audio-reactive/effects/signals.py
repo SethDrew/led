@@ -1,21 +1,47 @@
 """
 Reusable signal processing primitives for audio-reactive effects.
 
-Building blocks that effects compose via has-a:
+== Building blocks for band-decomposition (or broadband, num_bands=1) ==
+
+Two first-class metrics for RMS-derived signals, each composable with
+EMARatioNormalize to get a section-relative output. In conversation we
+call these the "rms path" and "abs-int path" — but in code there are
+just the two metric stages and the normalization stage:
+
+  rms path:      band_rms                       → EMARatioNormalize
+                 "level relative to running mean"
+
+  abs-int path:  band_rms → AbsIntegralMetric   → EMARatioNormalize
+                 "change relative to typical change"
+
+Both are agnostic to band count — pass num_bands=1 for broadband.
+
+Stages:
+
+  AbsIntegralMetric    — sliding |d/dt| over a window. Raw output (no norm).
+  EMARatioNormalize    — running-mean ratio: emits current/EMA, raw.
+  PulseDriver          — max-of-N + argmax with threshold + cooldown.
+
+See library/arch-impl/axis3-audio-features/PER_BAND_NORMALIZATION.md.
+
+== Other primitives ==
 
   OverlapFrameAccumulator — feeds audio chunks, yields overlapped frames
-  AbsIntegral             — computes normalized abs-integral of RMS derivative
+  RollingIntegral         — windowed mean of broadband RMS
+  AbsIntegral             — single-band |d/dt| with peak-decay normalization
   BeatPredictor           — autocorrelation tempo + predicted/confirmed beats
   OnsetTempoTracker       — onset-envelope autocorrelation for tempo estimation
   SpeedSignal             — spectral evolution rate (ambient-friendly 0-1 speed)
+  StickyFloorRMS          — sticky-floor noise-gate normalization
+  FixedRangeRMS           — fixed-range log RMS mapping (no adaptive floor)
+  EnergyDelta             — frame-to-frame RMS change with peak normalization
   detect_timbral_sections — batch MFCC novelty detector with eagerness curve
 
-Per-band pipeline for band-decomposition RMS amplitude effects (see
-library/arch-impl/axis3-audio-features/PER_BAND_NORMALIZATION.md):
+== Legacy ==
 
-  PerBandEMANormalize  — per-band EMA-ratio normalization with noise floor gate
-  PerBandAbsIntegral   — per-band |d/dt| integrated over a sliding window
-  PulseDriver          — max-of-N + argmax with threshold + cooldown for pulses
+  PerBandAbsIntegral     — peak-decay-normalized per-band absint. New code:
+                           prefer AbsIntegralMetric → EMARatioNormalize
+                           (the abs-int path).
 
 Usage:
     accum = OverlapFrameAccumulator()
@@ -155,6 +181,30 @@ class StickyFloorRMS:
         return self.value
 
 
+class RollingIntegral:
+    """Windowed average of RMS over a configurable time window.
+
+    Maintains a ring buffer of per-frame RMS values and returns the
+    running mean. Useful as a smoothed energy envelope — less noisy
+    than single-frame RMS, less laggy than EMA at long time constants.
+    """
+
+    def __init__(self, window_sec: float = 0.3, fps: float = 86.0):
+        self._window_size = max(1, int(window_sec * fps))
+        self._buf = np.zeros(self._window_size, dtype=np.float32)
+        self._pos = 0
+        self._filled = 0
+        self.value = 0.0
+
+    def update(self, frame: np.ndarray) -> float:
+        rms = float(np.sqrt(np.mean(frame ** 2)))
+        self._buf[self._pos % self._window_size] = rms
+        self._pos += 1
+        self._filled = min(self._filled + 1, self._window_size)
+        self.value = float(np.sum(self._buf[:self._filled]) / self._filled)
+        return self.value
+
+
 class AbsIntegral:
     """Computes normalized absolute integral of RMS derivative.
 
@@ -219,103 +269,156 @@ class AbsIntegral:
         return self.prev_rms
 
 
-class PerBandEMANormalize:
-    """Per-band EMA-ratio normalization with optional noise floor gate.
+class AbsIntegralMetric:
+    """Sliding |d/dt| over a window. Raw output (no normalization).
 
-    For each band, maintains a running mean of RMS via exponential moving
-    average. Outputs the *deviation above the section mean*, scaled to [0, 1]:
+    Per-band or broadband — pass `num_bands=1` for a broadband single-channel
+    signal, or `num_bands=N` for vectorized per-band processing. Computes
+    |d/dt| of the input signal each frame, sums over `window_sec`, and
+    multiplies by dt — the same sliding-window absolute-derivative integral
+    used as the "events" metric in Path B.
 
-        output = clip((rms / ema - 1) / (max_ratio - 1), 0, 1)
+    Use directly when you want to apply your own downstream normalization
+    (peak-decay, EMA-ratio, etc.). Compose with EMARatioNormalize for the
+    "abs-int path" — events relative to typical change rate.
 
-    A band sitting at its section mean reads 0 (dark). At max_ratio× the
-    mean it reads 1.0 (full brightness). Below-mean energy is clipped to 0
-    rather than producing a half-bright floor — the right tap for transient-
-    driven visualizations that want dark space punctuated by activity.
+    Note: this returns the *raw* metric. Most callers want either:
+      - EMARatioNormalize on top — events relative to typical change rate.
+      - PerBandAbsIntegral(...) — legacy peak-decay normalization (events
+        relative to recent peak).
 
-    See library/arch-impl/axis3-audio-features/PER_BAND_NORMALIZATION.md
-    for the full design rationale.
-
-    The EMA always adapts to raw RMS (including during noise-gated periods)
-    so the running mean tracks the actual ambient floor. Only the output
-    is gated.
+    Initialization behavior: on the very first update() call, prev is
+    seeded from the input and the buffer remains zero, so the first frame
+    returns zeros. Output stabilizes within `window_sec` frames.
     """
 
-    def __init__(self, num_bands: int, fps: float,
-                 ema_tc: float = 30.0, max_ratio: float = 3.0,
+    def __init__(self, num_bands: int, fps: float, window_sec: float = 0.15):
+        """
+        Args:
+            num_bands:  Number of bands. Use 1 for broadband.
+            fps:        Frame rate at which update() is called.
+            window_sec: Integration window. Default 150ms.
+        """
+        self.num_bands = int(num_bands)
+        self.fps = float(fps)
+        self.dt = 1.0 / float(fps)
+        self.window_frames = max(1, int(window_sec * fps))
+        self._buf = np.zeros((self.window_frames, self.num_bands),
+                             dtype=np.float32)
+        self._buf_pos = 0
+        self._prev = np.zeros(self.num_bands, dtype=np.float32)
+        self._initialized = False
+
+        self.value = np.zeros(self.num_bands, dtype=np.float32)
+
+    def update(self, signal: np.ndarray) -> np.ndarray:
+        """Process per-band (or broadband) signal values. Return raw |d/dt|
+        sliding-window integral (not normalized)."""
+        signal = np.atleast_1d(np.asarray(signal, dtype=np.float32))
+
+        if not self._initialized:
+            self._prev = signal.copy()
+            self._initialized = True
+            return self.value
+
+        deriv = (signal - self._prev) / self.dt
+        self._prev = signal.copy()
+
+        self._buf[self._buf_pos % self.window_frames] = np.abs(deriv)
+        self._buf_pos += 1
+
+        raw = np.sum(self._buf, axis=0) * self.dt
+        self.value = raw.astype(np.float32)
+        return self.value
+
+
+class EMARatioNormalize:
+    """RMS → EMA → ratio. Emits raw current/EMA per band.
+
+    For each band (or broadband if num_bands=1), maintains a running mean
+    via exponential moving average and emits `current / EMA`. The output
+    sits around 1.0 at the running mean, rises above when input is above
+    mean, falls below when input is below.
+
+    The EMA always adapts to raw input (including during noise-gated
+    periods) so the running mean tracks the actual ambient floor. Only
+    the output is gated.
+
+    See library/arch-impl/axis3-audio-features/PER_BAND_NORMALIZATION.md
+    for design rationale.
+    """
+
+    def __init__(self, num_bands: int, fps: float, ema_tc: float = 30.0,
                  noise_floor_rms=0.0,
                  warmup_silence_floor: float = 1e-8):
         """
         Args:
-            num_bands:            Number of frequency bands.
+            num_bands:            Number of bands. Use 1 for broadband.
             fps:                  Frame rate at which update() is called.
-            ema_tc:               EMA time constant in seconds (~0.5-0.7× section length).
-            max_ratio:            Ratio that maps to 1.0. Default 3.0 → "3× the
-                                  running mean = full brightness." Section mean
-                                  (ratio=1.0) always maps to 0.
-            noise_floor_rms:      Scalar or per-band array. Below this raw RMS,
-                                  output is gated to 0. Default 0.0 = no gate.
-            warmup_silence_floor: Frames where max(band_rms) is below this don't
-                                  count toward warm-up — prevents leading digital
-                                  silence (FFT of zero) from seeding EMA at zero.
-                                  Default 1e-8 catches only literal silence.
+            ema_tc:               EMA time constant in seconds
+                                  (~0.5-0.7× typical section length).
+            noise_floor_rms:      Scalar or per-band array. Below this raw
+                                  input, output is gated to 0. Default 0.0
+                                  = no gate.
+            warmup_silence_floor: Frames where max(input) is below this
+                                  don't count toward warm-up — prevents
+                                  leading digital silence from seeding
+                                  EMA at zero. Default 1e-8.
         """
-        self.num_bands = num_bands
-        self._fps = float(fps)
-        self._ema_tc = float(ema_tc)
+        self.num_bands = int(num_bands)
         # Validated formula: alpha = 2 / (tc * fps + 1). Matches StickyFloorRMS,
         # SpeedSignal, band_tendrils, leaf_gust, leaf_wind, diamond_voices, etc.
         self._alpha = 2.0 / (ema_tc * fps + 1.0)
-        self._max_ratio = float(max_ratio)
-        self._span = float(max_ratio) - 1.0
-        self._ema = np.zeros(num_bands, dtype=np.float32)
+        self._ema = np.zeros(self.num_bands, dtype=np.float32)
         # Warm-up: time-varying alpha = max(steady_alpha, 1/(n+1)) so the first
         # ~ema_tc seconds of non-silent frames seed EMA from a running mean.
         self._warmup_floor = float(warmup_silence_floor)
-        self._warmup_target = int(round(ema_tc * fps))
         self._n_warm = 0
 
         floor = np.asarray(noise_floor_rms, dtype=np.float32)
         if floor.ndim == 0:
-            floor = np.full(num_bands, float(floor), dtype=np.float32)
+            floor = np.full(self.num_bands, float(floor), dtype=np.float32)
         self._noise_floor = floor
 
-        self.value = np.zeros(num_bands, dtype=np.float32)
+        # Pre-warmup default: mean ratio = 1.0.
+        self.value = np.ones(self.num_bands, dtype=np.float32)
 
-    def update(self, band_rms: np.ndarray) -> np.ndarray:
-        """Process per-band RMS values, return normalized 0-1 array."""
-        band_rms = np.asarray(band_rms, dtype=np.float32)
+    def update(self, signal: np.ndarray) -> np.ndarray:
+        """Process input values. Return shape-(num_bands,) raw ratio array."""
+        signal = np.atleast_1d(np.asarray(signal, dtype=np.float32))
 
         # Skip silent frames so leading silence doesn't seed EMA at zero.
-        # The running-mean warm-up alpha (1/(n+1)) makes EMA converge to a
-        # true mean from the first non-silent frame, then transitions
-        # smoothly to the steady-state alpha as n grows.
-        is_silent = float(band_rms.max()) < self._warmup_floor
+        # Time-varying warm-up alpha (1/(n+1)) makes EMA converge to a
+        # true mean from the first non-silent frame, then eases toward the
+        # steady-state alpha as n grows.
+        is_silent = float(signal.max()) < self._warmup_floor
         if not is_silent:
             warm_alpha = max(self._alpha, 1.0 / (self._n_warm + 1))
-            self._ema += warm_alpha * (band_rms - self._ema)
+            self._ema += warm_alpha * (signal - self._ema)
             self._n_warm += 1
 
         if self._n_warm == 0:
-            self.value = np.zeros(self.num_bands, dtype=np.float32)
             return self.value
 
-        ratio = band_rms / np.maximum(self._ema, 1e-10)
-        normalized = np.clip((ratio - 1.0) / self._span, 0.0, 1.0)
-        normalized[band_rms < self._noise_floor] = 0.0
-
-        self.value = normalized.astype(np.float32)
+        ema_safe = np.maximum(self._ema, 1e-10)
+        ratio = signal / ema_safe
+        ratio[signal < self._noise_floor] = 0.0
+        self.value = ratio.astype(np.float32)
         return self.value
 
 
 class PerBandAbsIntegral:
     """Per-band absolute integral of derivative over a sliding window.
 
+    LEGACY for new code: prefer composing `AbsIntegralMetric` with
+    `EMARatioNormalize` (the abs-int path), which uses EMA-ratio
+    normalization (events relative to typical change) instead of peak-decay
+    (events relative to recent peak). This class is kept as-is because
+    ~17 effects depend on the peak-decay flavor.
+
     Vectorized AbsIntegral over multiple bands. Computes |d/dt| of each
     band's input signal, integrated over `window_sec` (default 150ms),
     peak-decay normalized per-band to 0-1.
-
-    Designed to consume the output of PerBandEMANormalize — feeding the
-    normalized signal makes the resulting transients context-relative.
     """
 
     def __init__(self, num_bands: int, fps: float,
@@ -1044,39 +1147,6 @@ class EnergyDelta:
         self._peak = max(delta, self._peak * self._peak_decay)
         self.value = delta / self._peak if self._peak > 1e-10 else 0.0
 
-        return self.value
-
-
-class RollingIntegral:
-    """Windowed average of RMS over a configurable time window.
-
-    Maintains a ring buffer of per-frame RMS values and returns the
-    running mean. Useful as a smoothed energy envelope — less noisy
-    than single-frame RMS, less laggy than EMA at long time constants.
-    """
-
-    def __init__(self, window_sec: float = 0.3, fps: float = 86.0):
-        """
-        Args:
-            window_sec: Window duration in seconds.
-            fps:        Rate at which update() is called (frames/sec).
-                        Default 86 ≈ 44100/512 for standard hop.
-        """
-        self._window_size = max(1, int(window_sec * fps))
-        self._buf = np.zeros(self._window_size, dtype=np.float32)
-        self._pos = 0
-        self._filled = 0
-        self.value = 0.0  # latest output (average RMS over window)
-
-    def update(self, frame: np.ndarray) -> float:
-        """Process one audio frame, return average RMS over window."""
-        rms = float(np.sqrt(np.mean(frame ** 2)))
-
-        self._buf[self._pos % self._window_size] = rms
-        self._pos += 1
-        self._filled = min(self._filled + 1, self._window_size)
-
-        self.value = float(np.sum(self._buf[:self._filled]) / self._filled)
         return self.value
 
 

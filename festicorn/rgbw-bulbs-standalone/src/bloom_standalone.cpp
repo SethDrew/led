@@ -76,7 +76,7 @@ static inline float computeBreathFloor(float cap) {
 #define BLOOM_W_ONSET        0.5f   // glow above this adds white channel
 #define BLOOM_W_GAIN         200.0f // scales the W channel into 0..255*BRIGHTNESS_CAP
 
-// ── Fire parameters (ported from festicorn/bulbs/src/bulb_receiver.cpp) ─────
+// ── Fire parameters (ported from bulb_receiver.cpp) ─────
 #define FIRE_FLICKER_SCALE  3.0f
 #define FIRE_DEADBAND       0.08f
 // W-channel blending thresholds for RGBW output
@@ -157,10 +157,30 @@ static void resetLeafWindState() {
     for (uint8_t i = 0; i < LW_MAX_LEAVES; i++) lwLeaves[i].active = false;
 }
 
+// ── Crawler parameters (single warm-white orb that bounces) ─────────────────
+// Ported in spirit from static-animations/effects/CrawlingStarsForeground:
+// warm-white target (R255 G240 B200), uint8 trail buffer with multiplicative
+// decay, but with one orb that reverses at each end instead of wrapping.
+#define CRAWLER_SPEED       18.0f   // LEDs/sec at speed=1.0
+#define CRAWLER_TRAIL_TC    0.18f   // seconds — trail e^-1 decay time constant
+#define CRAWLER_SIGMA       0.9f    // Gaussian splat width at head
+
+static float   crawlerPos = 0.0f;
+static float   crawlerDir = 1.0f;   // +1 or -1
+static uint8_t crawlerTrail[LEDS_TOTAL];
+
+static void resetCrawlerState() {
+    crawlerPos = 0.0f;
+    crawlerDir = 1.0f;
+    for (uint16_t i = 0; i < LEDS_TOTAL; i++) crawlerTrail[i] = 0;
+}
+
 // ── Web server + runtime state ───────────────────────────────────
-enum Effect : uint8_t { EFFECT_BLOOM = 0, EFFECT_FIRE = 1, EFFECT_LEAF_WIND = 2 };
-static const char *EFFECT_NAMES[] = { "bloom", "fire", "leaf_wind" };
-static const uint8_t NUM_EFFECTS = 3;
+enum Effect : uint8_t {
+    EFFECT_BLOOM = 0, EFFECT_FIRE = 1, EFFECT_LEAF_WIND = 2, EFFECT_CRAWLER = 3
+};
+static const char *EFFECT_NAMES[] = { "bloom", "fire", "leaf_wind", "crawler" };
+static const uint8_t NUM_EFFECTS = 4;
 
 struct WebState {
     int      brightness = 10;      // 0–100; slider=10 → C0=0.10,C1=0.06 (default); slider=100 → C0=1.0,C1=0.60
@@ -244,6 +264,7 @@ static void setupWebServer() {
                         state.effect = (Effect)i;
                         if (state.effect == EFFECT_FIRE)      resetFireState();
                         if (state.effect == EFFECT_LEAF_WIND) resetLeafWindState();
+                        if (state.effect == EFFECT_CRAWLER)   resetCrawlerState();
                     }
                     break;
                 }
@@ -286,6 +307,7 @@ static void setupWebServer() {
                     state.effect = (Effect)i;
                     if (state.effect == EFFECT_FIRE)      resetFireState();
                     if (state.effect == EFFECT_LEAF_WIND) resetLeafWindState();
+                    if (state.effect == EFFECT_CRAWLER)   resetCrawlerState();
                     break;
                 }
             }
@@ -420,7 +442,7 @@ static void renderQuietBloom(float dt, uint32_t now) {
     }
 }
 
-// ── Autonomous fire render (ported from festicorn/bulbs/src/bulb_receiver.cpp) ──
+// ── Autonomous fire render (ported from bulb_receiver.cpp) ──
 // Audio inputs (energy/onset) replaced with fixed autonomous values:
 //   fireBaseBrightness held at 0.5 (mid-flame); speed slider drives flicker tempo.
 static void renderFire(float dt) {
@@ -626,6 +648,74 @@ static void renderLeafWind(float dt) {
     }
 }
 
+// ── Crawler render: one warm-white orb that bounces end-to-end ──────────────
+// Trail buffer holds normalized intensity (0..255). Each frame: decay buffer
+// multiplicatively, then splat a tight Gaussian at the head. Ends invert
+// direction. Output uses min(R,G,B)→W extraction so the warm white stays warm
+// and dies cleanly into pure W at low brightness.
+static void renderCrawler(float dt) {
+    crawlerPos += crawlerDir * CRAWLER_SPEED * state.speed * dt;
+    const float maxPos = (float)(TOTAL_LEDS - 1);
+    if (crawlerPos >= maxPos) {
+        crawlerPos = maxPos - (crawlerPos - maxPos);
+        crawlerDir = -1.0f;
+    } else if (crawlerPos <= 0.0f) {
+        crawlerPos = -crawlerPos;
+        crawlerDir = 1.0f;
+    }
+
+    uint16_t decay8 = (uint16_t)(expf(-dt / CRAWLER_TRAIL_TC) * 256.0f);
+    for (uint16_t i = 0; i < TOTAL_LEDS; i++) {
+        crawlerTrail[i] = ((uint16_t)crawlerTrail[i] * decay8) >> 8;
+    }
+
+    float sigma_sq2 = 2.0f * CRAWLER_SIGMA * CRAWLER_SIGMA;
+    int16_t center = (int16_t)crawlerPos;
+    for (int16_t di = -3; di <= 3; di++) {
+        int16_t idx = center + di;
+        if (idx < 0 || idx >= (int16_t)TOTAL_LEDS) continue;
+        float d = (float)idx - crawlerPos;
+        uint16_t v = (uint16_t)(expf(-(d * d) / sigma_sq2) * 255.0f);
+        if (v > crawlerTrail[idx]) crawlerTrail[idx] = (uint8_t)v;
+    }
+
+    float cap = state.brightness / 100.0f;
+    if (cap < 0.001f) cap = 0.001f;
+
+    for (uint16_t i = 0; i < TOTAL_LEDS; i++) {
+        uint8_t tv = crawlerTrail[i];
+        uint16_t tR16 = 0, tG16 = 0, tB16 = 0, tW16 = 0;
+
+        if (tv > 1) {
+            float t = (float)tv * (1.0f / 255.0f);
+            float linBright = fastGamma24(t) * cap;
+            float oR = 255.0f * linBright;
+            float oG = 240.0f * linBright;
+            float oB = 200.0f * linBright;
+
+            float wMin = fminf(oR, fminf(oG, oB));
+            float fR = oR - wMin;
+            float fG = oG - wMin;
+            float fB = oB - wMin;
+            tR16 = (uint16_t)clampf(fR  * 256.0f, 0, 65535);
+            tG16 = (uint16_t)clampf(fG  * 256.0f, 0, 65535);
+            tB16 = (uint16_t)clampf(fB  * 256.0f, 0, 65535);
+            tW16 = (uint16_t)clampf(wMin * 256.0f, 0, 65535);
+
+            if (tR16 < 256) tR16 = 0;
+            if (tG16 < 256) tG16 = 0;
+            if (tB16 < 256) tB16 = 0;
+            if (tW16 < 256) tW16 = 0;
+        }
+
+        strip.SetPixelColor(i, RgbwColor(
+            deltaSigma(dsR[i], tR16),
+            deltaSigma(dsG[i], tG16),
+            deltaSigma(dsB[i], tB16),
+            deltaSigma(dsW[i], tW16)));
+    }
+}
+
 // ── WiFi + OTA setup ────────────────────────────────────────────
 static void onWiFiDisconnect(WiFiEvent_t, WiFiEventInfo_t) {
     Serial.println("[wifi] disconnected — reconnecting");
@@ -730,6 +820,7 @@ void loop() {
     switch (state.effect) {
         case EFFECT_FIRE:      renderFire(dt);            break;
         case EFFECT_LEAF_WIND: renderLeafWind(dt);        break;
+        case EFFECT_CRAWLER:   renderCrawler(dt);         break;
         default:               renderQuietBloom(dt, now); break;
     }
     uint32_t renderUs = micros() - t0;

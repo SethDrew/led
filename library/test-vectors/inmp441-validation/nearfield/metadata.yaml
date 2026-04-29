@@ -1,0 +1,36 @@
+# INMP441 frequency-response validation — NEAR-FIELD condition
+condition: near-field
+mic_position: "literally on the speaker face (~0 cm)"
+distance_cm: 0
+volume: "unspecified by user"
+music_playing: "unspecified by user"
+speaker: "same as ambient run"
+room: "small bedroom"
+ledger_reference: inmp441-frequency-response
+
+timestamp_iso: "2026-04-26T18:38:45"
+firmware_variant: raw_audio_sender
+firmware_git_sha: f096e5907d4945109cf056a739b447a65fefad8b
+firmware_dirty: true   # platformio.ini modified, raw_audio_sender.cpp untracked
+sample_rate_hz: 16000
+channels: 1
+duration_s: 60.10
+
+wav_files:
+  inmp441: nearfield/inmp441_20260426_183845.wav
+  system:  nearfield/system_20260426_183845.wav
+
+alignment_lag_ms: 110.0
+envelope_pearson: 0.824
+
+broadband_db:
+  inmp441: -36.31   # dBFS RMS
+  system:  -20.65   # dBFS RMS
+  delta:   -15.66   # inmp441 - system
+
+per_band_db:        # delta = inmp441 - system (negative = mic quieter)
+  sub_bass:  {lo_hz:   20, hi_hz:   80, system_db: -28.16, inmp441_db: -40.56, delta_db: -12.40}
+  bass:      {lo_hz:   80, hi_hz:  250, system_db: -23.59, inmp441_db: -40.02, delta_db: -16.43}
+  mids:      {lo_hz:  250, hi_hz: 2000, system_db: -28.21, inmp441_db: -44.42, delta_db: -16.21}
+  high_mid:  {lo_hz: 2000, hi_hz: 6000, system_db: -33.06, inmp441_db: -60.74, delta_db: -27.68}
+  treble:    {lo_hz: 6000, hi_hz: 8000, system_db: -35.71, inmp441_db: -71.82, delta_db: -36.11}

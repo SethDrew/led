@@ -54,34 +54,6 @@
 #define GYRO_RANGE_DPS 1000
 #endif
 
-// ── Wi-Fi TX power (build-time, tenths of a dBm) ─────────────────
-// 85 = 8.5 dBm (default, validated 99% delivery on C3 SuperMini).
-// Override via -DTX_POWER_TENTHS_DBM=<n> for thermal/range sweeps.
-#ifndef TX_POWER_TENTHS_DBM
-#define TX_POWER_TENTHS_DBM 85
-#endif
-
-// ── Die-temperature logging cadence (ms; 0 disables) ─────────────
-#ifndef TEMP_LOG_PERIOD_MS
-#define TEMP_LOG_PERIOD_MS 1000
-#endif
-
-// ── Heat-driver sweep flags (build-time, all default OFF) ────────
-// Used by tools/thermal_drivers_sweep.py to identify what subsystem
-// dominates board temperature. Production builds leave these all 0.
-#ifndef DISABLE_WIFI
-#define DISABLE_WIFI 0
-#endif
-#ifndef DISABLE_ESPNOW_TX
-#define DISABLE_ESPNOW_TX 0
-#endif
-#ifndef CPU_FREQ_MHZ_OVERRIDE
-#define CPU_FREQ_MHZ_OVERRIDE 0
-#endif
-#ifndef LOOP_DELAY_MS
-#define LOOP_DELAY_MS 0
-#endif
-
 #if   ACCEL_RANGE_G == 2
   #define ACCEL_AFS_SEL 0
 #elif ACCEL_RANGE_G == 4
@@ -452,12 +424,7 @@ static void finalizeAndEmit() {
     pkt.gmag_mean = companding_encode(win.gmagSum / WINDOW_SAMPLES, GMAG_FS);
     pkt.flags    = (uint8_t)((win.accelClips << 4) | (win.gyroSats & 0x0F));
 
-#if DISABLE_WIFI || DISABLE_ESPNOW_TX
-    (void)broadcastAddr;
-    esp_err_t r = ESP_OK;
-#else
     esp_err_t r = esp_now_send(broadcastAddr, (uint8_t*)&pkt, sizeof(pkt));
-#endif
     if (r != ESP_OK) sendErrs++;
     windowsSent++;
 
@@ -486,12 +453,7 @@ static void finalizeAndEmit() {
             ax_mean_g, ay_mean_g, az_mean_g,
             pkt.flags >> 4, pkt.flags & 0x0F,
             (unsigned)sendErrs, (unsigned)imuFails, (unsigned)i2cResets,
-#if DISABLE_WIFI
-            -1
-#else
-            WiFi.channel()
-#endif
-            );
+            WiFi.channel());
     }
 
     resetWindow();
@@ -502,41 +464,19 @@ static void onSent(const uint8_t * /*mac*/, esp_now_send_status_t status) {
     if (status != ESP_NOW_SEND_SUCCESS) sendErrs++;
 }
 
-// ── TX-power tenths-of-dBm → wifi_power_t ────────────────────────
-static wifi_power_t tx_power_from_tenths(int t) {
-    if (t >= 195) return WIFI_POWER_19_5dBm;
-    if (t >= 190) return WIFI_POWER_19dBm;
-    if (t >= 185) return WIFI_POWER_18_5dBm;
-    if (t >= 170) return WIFI_POWER_17dBm;
-    if (t >= 150) return WIFI_POWER_15dBm;
-    if (t >= 130) return WIFI_POWER_13dBm;
-    if (t >= 110) return WIFI_POWER_11dBm;
-    if (t >=  85) return WIFI_POWER_8_5dBm;
-    if (t >=  70) return WIFI_POWER_7dBm;
-    if (t >=  50) return WIFI_POWER_5dBm;
-    if (t >=  20) return WIFI_POWER_2dBm;
-    return WIFI_POWER_MINUS_1dBm;
-}
-
 // ── Setup ────────────────────────────────────────────────────────
 
 void setup() {
     Serial.begin(460800);
     delay(300);
 
-#if CPU_FREQ_MHZ_OVERRIDE > 0
-    setCpuFrequencyMhz(CPU_FREQ_MHZ_OVERRIDE);
-    Serial.printf("[thermal] CPU clock set to %d MHz (actual=%lu)\n",
-                  CPU_FREQ_MHZ_OVERRIDE, (unsigned long)getCpuFrequencyMhz());
-#endif
-
-#if DISABLE_WIFI
-    Serial.println("[thermal] WiFi DISABLED — radio off for whole run");
-#else
     // ── ESP-NOW init ──────────────────────────────────────────────
+    // 8.5 dBm TX is the validated production value; see engineering ledger
+    // entry esp32-c3-super-mini-tx-defect for why full power breaks TX on
+    // the C3 Super Mini batches we use.
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
-    WiFi.setTxPower(tx_power_from_tenths(TX_POWER_TENTHS_DBM));
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
     esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
 
     Serial.printf("Scanning for '%s'...\n", WIFI_SSID);
@@ -563,11 +503,6 @@ void setup() {
     peer.channel = 0;
     peer.encrypt = false;
     esp_now_add_peer(&peer);
-#endif
-
-#if DISABLE_ESPNOW_TX && !DISABLE_WIFI
-    Serial.println("[thermal] ESP-NOW TX DISABLED — radio idle (no broadcasts)");
-#endif
 
     // ── I2C / MPU-6050 ────────────────────────────────────────────
     pinMode(AD0_PIN, OUTPUT);
@@ -630,7 +565,6 @@ static void sampleTick() {
 void loop() {
     uint32_t nowMs = millis();
 
-#if !DISABLE_WIFI
     // Periodic channel rescan — heals if router moved channel since boot.
     // Sync scan freezes the loop ~2-3s; receiver tolerates the gap. Window
     // accumulator is reset after the rescan to avoid emitting a packet
@@ -644,24 +578,6 @@ void loop() {
         lastScanMs = millis();
         resetWindow();
     }
-#endif
-
-    // Die-temperature log — separate cadence from packet emit; line is
-    // grep-friendly for thermal sweeps. T_die is silicon temperature,
-    // hotter than the package surface but tracks it.
-#if TEMP_LOG_PERIOD_MS > 0
-    static uint32_t lastTempLogMs = 0;
-    if (nowMs - lastTempLogMs >= TEMP_LOG_PERIOD_MS) {
-        lastTempLogMs = nowMs;
-        Serial.printf("T_die=%.2f tx_tenths=%d errs=%u\n",
-                      temperatureRead(), TX_POWER_TENTHS_DBM,
-                      (unsigned)sendErrs);
-    }
-#endif
 
     sampleTick();
-
-#if LOOP_DELAY_MS > 0
-    delay(LOOP_DELAY_MS);
-#endif
 }

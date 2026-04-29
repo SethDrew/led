@@ -283,6 +283,65 @@ entries:
       assignment (see ch340-no-unique-serial) since that requires a
       successful flash first.
 
+  - id: esp32-devkit-bridge-power-sequencing
+    date: 2026-04-23
+    touched: 2026-04-28
+    title: "ESP32 DevKit boards fail USB enumeration when external 5V is up before USB"
+    summary: >
+      On classic ESP32 DevKit boards (ESP32-D0WD-V3 with CH340 or CP2102 USB-UART
+      bridge), the host computer fails to enumerate the board if external 5V is
+      applied before the USB cable is plugged in. The board appears dead — no
+      /dev/cu.usbserial-* device. Plugging USB first, then powering the external
+      supply, works fine. This is the inverse-flavor twin of nano-5v-power-required.
+    status: mitigated
+    severity: medium
+    scope: electrical
+    source:
+      - festicorn/rgbw-bulbs-standalone/
+    tags: [esp32, esp32-d0wd-v3, ch340, cp2102, usb, power, sequencing, enumeration, constraint, deployment]
+    relates_to: [nano-5v-power-required, esp32-hardware-selection-rationale]
+    notes: >
+      Root cause: the USB-UART bridge chip's VCC is wired to the board's
+      post-diode 5V rail (or to the 3.3V regulator output derived from it),
+      not directly to USB VBUS. When external power is applied first, the
+      bridge is already running and has already asserted its D+ pull-up.
+      When USB is then plugged in, the host never sees the "device attach"
+      edge — the pull-up was already there before VBUS rose, so no
+      enumeration event fires.
+
+      Diagnosed 2026-04-23 on the rgbw-bulbs-standalone install
+      (ESP32-D0WD-V3, 100 SK6812 RGBW). Confirmed by test: plugging USB
+      first kept the port visible after external power came on, ruling out
+      VBUS backfeed and ground-offset hypotheses. A forward diode on the
+      external supply +V rail prevents backfeed but does not solve this —
+      it actually enables it, by ensuring the bridge stays alive on the
+      post-diode rail.
+
+      Operational workaround (in use): plug USB *before* powering the
+      external supply, or briefly unplug/replug USB after external power
+      is on. Free, but only practical when a human is on-site for flashing.
+      Once a board is installed, OTA replaces the need for USB anyway.
+
+      Proper electrical fix (declined as too invasive for cost-benefit):
+      lift CH340 pin 16 (VCC) from the 5V trace and jumper it directly to
+      the USB connector's VBUS pin, plus 1–4.7kΩ series resistors on the
+      TX/RX lines between ESP32 and bridge to prevent ESP32-side phantom-
+      powering through the bridge's GPIO protection diodes. Ranked
+      "complicated and unnecessary" by the user given how rarely
+      installations are reflashed via USB.
+
+      Alternative fix for future revisions: native-USB ESP32 variants
+      (S3/C3/S2) handle VBUS detection internally with no bridge chip,
+      eliminating this class of problem entirely. Note Seeed XIAO ESP32-C3
+      uses CDC-ACM directly; cheap C3 SuperMini clones still have a USB-
+      UART bridge and the problem may persist (untested).
+
+      Implication for remote installs: any deployment where a developer
+      friend may need to physically debug requires either (a) documented
+      "plug USB first" procedure, (b) dedicated service-port FTDI cable
+      wired to U0TXD/U0RXD/GND that enumerates independently, or
+      (c) reliable OTA path so USB is never needed in the field.
+
   # ── WS2812B Color & Gamma ────────────────────────────────────────
 
   - id: ws2812b-gamma-correction
@@ -554,6 +613,88 @@ entries:
       5 simultaneous broadcasters, not hardware weakness. In isolated pair testing,
       C3-New delivers 93-99%.
 
+  - id: esp32-c3-super-mini-thermal-decomposition
+    date: 2026-04-29
+    touched: 2026-04-29
+    title: ESP32-C3 Super Mini thermal budget — WiFi radio dominates, TX activity is noise
+    summary: >
+      Bench thermal sweeps on a single bulb-sender (canonical wiring,
+      MPU-6050 @ 200 Hz I²C, ESP-NOW @ 25 Hz, USB-CDC, CPU 160 MHz, 8.5 dBm)
+      decompose steady-state T_die. Floor with nothing running (WiFi+IMU
+      off, just CPU + USB-CDC + 1 Hz temperatureRead): 62.2 °C. Full
+      production firmware: 85.6 °C. WiFi radio-on alone accounts for
+      ~14 °C of the 23 °C budget; IMU I²C polling adds ~9 °C; the
+      ESP-NOW broadcasts and TX-power level themselves are at the sensor
+      noise floor (~1 °C across a 9.5 dB power swing).
+    status: resolved
+    severity: medium
+    scope: hardware
+    source:
+      - festicorn/gyro-sense/data/thermal_sweep/20260428T204627/
+      - festicorn/gyro-sense/data/thermal_sweep/drivers_20260428T222135/
+      - festicorn/gyro-sense/data/thermal_sweep/drivers_20260429T081805/
+      - festicorn/gyro-sense/tools/thermal_sweep.py
+      - festicorn/gyro-sense/tools/thermal_drivers_sweep.py
+    tags: [esp32, esp32-c3, super-mini, thermal, measurement, esp-now, wifi, constraint]
+    relates_to: [esp32-c3-super-mini-tx-defect]
+    notes: >
+      Methodology: each condition flashes a build-flag variant of sender.cpp
+      via PLATFORMIO_BUILD_FLAGS, runs 15 min warmup + 5 min steady-state
+      capture (300 samples @ 1 Hz of Arduino temperatureRead()). C3 internal
+      temp sensor is quantized to ~1 °C steps and ±5–10 °C absolute /
+      ~±1 °C relative — deltas under ~1 °C are at the noise floor. Single
+      board on bench (~22 °C ambient), no airflow, no enclosure.
+
+      TX-power sweep (firmware otherwise stock; 4 levels):
+        +8.5 dBm: 86.32 °C   (baseline, 0 errs)
+        +5.0 dBm: 85.12 °C   (Δ -1.20 °C, 0 errs)
+        +2.0 dBm: 84.91 °C   (Δ -1.41 °C, 0 errs)
+        -1.0 dBm: 85.91 °C   (Δ -0.41 °C, 0 errs)
+      Conclusion: TX power is not a thermal lever within the supported
+      range. 9.5 dB swing → ~1 °C, sub-noise. Link is robust at all levels
+      on the bench.
+
+      5-condition driver sweep (one subsystem toggled per condition, all
+      held at 8.5 dBm baseline):
+        baseline (production firmware):       85.55 °C
+        wifi_off  (radio fully off):          71.20 °C   (Δ -14.35 °C)
+        espnow_off (radio on, no broadcasts): 84.61 °C   (Δ  -0.94 °C)
+        cpu_80mhz  (CPU 80 vs 160 MHz):       82.24 °C   (Δ  -3.31 °C)
+        loop_delay (delay(2) at loop end):    81.30 °C   (Δ  -4.25 °C)
+      Conclusion: heat is dominated by the WiFi PHY/baseband being
+      initialized, not by packet TX. The cost is paid the moment
+      WiFi.mode(WIFI_STA) is called, regardless of whether esp_now_send()
+      is invoked. CPU work is real but secondary.
+
+      Nothing-running floor (DISABLE_WIFI=1 + DISABLE_IMU=1; CPU @ 160 MHz
+      busy-loop + USB-CDC + 1 Hz temperatureRead): 62.20 °C exactly,
+      stdev 0.00 across 301 samples (sensor pinned at one quantization
+      step). Implies a layered decomposition above this floor:
+        CPU + USB-CDC at 160 MHz busy:    ~62 °C  (the floor; well above ambient)
+        +IMU (I²C @ 200 Hz, MPU-6050):    ~+9 °C
+        +WiFi STA initialized:            ~+14 °C
+        +ESP-NOW @ 25 Hz + 8.5 dBm TX:    ~0 (noise)
+
+      Practical levers for the waterproof bulb thermal budget, ranked:
+      1. WiFi modem-sleep / light-sleep — largest untested lever (~14 °C
+         headroom). ESP-NOW + power-save is non-trivial; needs its own
+         sweep.
+      2. delay(2) at the bottom of loop() — costs nothing, saves ~4 °C,
+         0 packet errors at 25 Hz emit.
+      3. CPU @ 80 MHz saves ~3 °C. Combines with #2.
+      4. Lowering TX power is NOT a thermal lever (sub-noise). Keep
+         8.5 dBm for the link-margin reasons in
+         esp32-c3-super-mini-tx-defect.
+
+      Build-flag harness baked into sender.cpp (all default OFF in
+      production):
+        TX_POWER_TENTHS_DBM, TEMP_LOG_PERIOD_MS, DISABLE_WIFI,
+        DISABLE_ESPNOW_TX, CPU_FREQ_MHZ_OVERRIDE, LOOP_DELAY_MS,
+        DISABLE_IMU.
+      Pass via PLATFORMIO_BUILD_FLAGS at build time; orchestrators
+      thermal_sweep.py and thermal_drivers_sweep.py automate the
+      flash/capture/parse cycle.
+
   # ── ESP32 RMT Throughput for WS2812B ───────────────────────────
 
   - id: esp32-rmt-8-channel-parallel-ws2812b
@@ -786,3 +927,159 @@ entries:
       all pins into one fill pass and synchronizes only once per frame,
       (b) fewer LEDs/strip (wire-time scales), (c) SPI-clocked LED family
       (APA102/SK9822), or (d) different MCU.
+
+  # ── Wireless Telemetry Protocol ──────────────────────────────────
+
+  - id: bulb-imu-telemetry-wire-schema-v1
+    date: 2026-04-26
+    touched: 2026-04-28
+    title: "Bulb IMU telemetry wire schema — 16 B / 25 Hz / 400 B/s over ESP-NOW"
+    summary: >
+      Locked the on-device-sender → downstream-classifier wire format for
+      hanging interactive bulbs. MPU-6050 sampled at 200 Hz internally;
+      summarized into 16-byte packets at 25 Hz (8 samples per 40 ms window)
+      and broadcast over ESP-NOW. The sender does NOT classify gestures —
+      the schema is general-purpose telemetry chosen so any future
+      classifier downstream can recover the features it needs without
+      re-flashing.
+    status: resolved
+    severity: medium
+    scope: hardware
+    source: festicorn/bulbs/data/recordings/gesture_taxonomy.md
+    tags: [esp32-c3, mpu6050, esp-now, telemetry, protocol, bulbs]
+    relates_to: [bulb-gesture-taxonomy-methodology]
+    notes: >
+      Packet layout (16 bytes, little-endian):
+        0–1   uint16 seq                  packet sequence (wraps)
+        2–4   int8   ax_max, ay_max, az_max     ((rawMax - rawMean) >> 8) — AC component, gravity removed
+        5–7   int8   ax_min, ay_min, az_min     ((rawMin - rawMean) >> 8) — AC component, gravity removed
+        8–10  int8   ax_mean, ay_mean, az_mean  (rawMean >> 8) — gravity INCLUDED
+        11    uint8  amag_max              |a| max, sqrt-companded, FS=57000 — gravity INCLUDED
+        12    uint8  amag_mean             |a| mean, sqrt-companded, FS=57000 — gravity INCLUDED
+        13    uint8  gmag_max              |gyro| max, sqrt-companded
+        14    uint8  gmag_mean             |gyro| mean, sqrt-companded
+        15    uint8  flags                 hi-nibble: accel-clip count
+                                           lo-nibble: gyro-saturate count
+
+      Bandwidth: 16 B × 25 Hz = 400 B/s; ESP-NOW max payload 250 B leaves
+      ample headroom for header/CRC framing already present in the
+      stream_sender / stream_bridge pipeline.
+
+      Design choices and rejected alternatives:
+
+      1. Per-axis min/max/mean over jerk. Jerk is a derived quantity that
+         bakes a smoothing-window choice into the wire. min/max/mean
+         preserves the same information without committing to a filter,
+         and lets the downstream recover crest, axis-dominance, AC range,
+         and gravity direction independently.
+
+      2. sqrt-companding on |a|. Acceleration magnitude is long-tailed:
+         floor near 1 g (~16k counts on ±2g range), taps spike past 50k.
+         A linear uint8 wastes resolution on the floor; sqrt-companding
+         keeps the floor distinguishable while encoding hard strikes up
+         to ~80k counts (the sensor saturation rail).
+
+      3. Flags byte as 4+4 sample-counts, not opaque condition bits. A
+         clip-count "how many of 8 samples saturated" encodes its own
+         threshold — downstream picks "≥1" or "≥4" without re-flashing.
+         A bit-packed `clip` boolean would force the threshold onto the
+         sender at compile time. (Earlier draft had bgMotion / clip /
+         sat as separate bits — dropped: bgMotion is recoverable from
+         amag_mean+amag_max, and clip/sat as counts is strictly more
+         information than as bits.)
+
+      4. 25 Hz packet rate, 200 Hz internal sample rate. 200 Hz preserves
+         the ~50 ms rise time of finger-tap impulses (the 100 Hz Nyquist
+         floor would smear them). 25 Hz packets keeps the ESP-NOW link
+         comfortable (broadcast at high rates is unreliable on shared
+         channels) and matches the timescale of LED-effect decision
+         loops.
+
+      5. Option A semantics: per-axis means and amag fields carry gravity
+         (gravity INCLUDED). Per-axis max/min are gravity-removed (AC only).
+         Trade-off: at-rest the per-axis _mean bytes give a clean gravity
+         direction; under sustained dynamic motion the 40 ms window mean
+         drifts away from true gravity and amag_mean is no longer 1 g.
+         Receivers requiring clean gravity during dynamic motion should EMA
+         the per-axis _mean bytes over multiple packets (~1–2 s tau) on the
+         receiver — recovers a long-baseline gravity vector without adding
+         wire bytes.
+
+      Validation: ran the locked decision-tree classifier on (a) features
+      from raw 200 Hz CSV and (b) features re-extracted after pushing the
+      CSV through this 16-byte format. Result: 13/13 kind agreement,
+      12/13 severity agreement on real captures. The single severity miss
+      is one episode at a Mode-A/Mode-B classifier boundary, not a wire
+      flaw. Per-feature mean relative error: peak_amag 0.6%, grav_angle
+      2.7%, rms_amag 4.9%, crest 5.7%, ac_strength 18%, n_peaks 28%,
+      stroke_rate_hz 28%. ac_strength is the worrying one — it gates
+      rules 1/2/3 of the classifier, and 18% wire error is enough to
+      flip a borderline episode if any future capture lands close to a
+      threshold. The 13/12 results survive only because none of these
+      episodes sit on the ac_strength boundaries. See
+      library/BULB_INTERACTION_TELEMETRY.md for the full story;
+      gesture_taxonomy.md "Wire Schema Validation" for per-feature
+      error tables.
+
+      Hardware context (validated in same session): stream_sender on
+      ESP32-C3 + stream_bridge on ESP32-classic over USB CDC achieves
+      ~199.8 Hz effective sample rate with ~1% packet loss when sender
+      and bridge are co-located on a desk. The 18% loss seen in one
+      capture is consistent with bridge being briefly out of range
+      (still acceptable: classification is per-episode, not per-packet).
+
+  - id: bulb-imu-range-decision-4g-1000dps
+    date: 2026-04-27
+    touched: 2026-04-27
+    title: "MPU-6050 range locked at ±4g / ±1000 dps for interactive bulbs"
+    summary: >
+      Validated ±4g / ±1000 dps as the operating range for hanging and
+      stuffed-animal bulb installs. Default ±2g / ±250 dps clipped 10–26%
+      of samples on severe taps and drumming bouts in prior captures;
+      the new range eliminates clipping for the duck install and reduces
+      it to <1% for the hanging install. ESP32-C3 sender writes AFS_SEL=1
+      to MPU register 0x1C and FS_SEL=2 to register 0x1B; cfg byte/word
+      propagated through file headers and ESP-NOW stream packets so the
+      analysis pipeline auto-scales counts → physical units.
+    status: resolved
+    severity: medium
+    scope: hardware
+    source: festicorn/bulbs/data/recordings/range_capture_protocol.md
+    tags: [mpu6050, esp32-c3, range, calibration, bulbs]
+    relates_to: [bulb-imu-telemetry-wire-schema-v1, bulb-gesture-taxonomy-methodology]
+    notes: >
+      Captures used to validate (90 s each, ESP-NOW stream at ±4g/±1000 dps):
+        - range_ext_hanging_stream/20260427T123309 (light/medium/hard/severe taps + rotation)
+        - range_ext_duck_stream/20260427T124051   (same taps + beat/groove dancing)
+
+      Headline metrics:
+                              hanging      duck
+        peak |a_ac|             6.5 g      7.6 g
+        peak |gyro|            1732 dps   1456 dps   ← rail at 1000 dps still hit (briefly)
+        accel saturation       0.46 %     0.65 %
+        gyro saturation        0.58 %     0.09 %
+        ESP-NOW packet drops    21.5 %     13.6 %
+
+      Severe-tap peak (7.6 g, 1732 dps) still rails the gyro briefly in
+      hanging install. Decision to live with this rather than bump to
+      ±2000 dps: gyro saturation is 0.6% of samples — does not affect
+      classification (severe is severe whether the gyro reads 1000 or
+      1700 dps; the per-window flags byte counts saturated samples). If
+      future severity sub-classes require finer high-end resolution, bump
+      to ±2000 dps. For ±8g accel: severe taps reach 7.6 g, well below
+      the 8 g rail; ±4g is acceptable but on the edge.
+
+      Implementation: ACCEL_RANGE_G and GYRO_RANGE_DPS build flags in
+      `recorder_*_ext` and `stream_sender_*_ext` PlatformIO envs.
+      Header schema bumped to ver=2 carrying cfg word; stream packets
+      carry cfg byte (low nibble AFS_SEL, high nibble FS_SEL). Backward
+      compatible: ver=1 / cfg=0 → legacy ±2g/±250 dps.
+
+      Open: schema-v1 (16 B / 25 Hz) companding constants need a retune
+      for the new range — `amag_max` was sqrt-companded against FS≈80k
+      counts (±2g rail); ±4g rail is ~57k counts, and observed peak
+      |a_ac| during severe is 62k counts. `gmag_max` byte similarly
+      needs FS≈57k for ±1000 dps. Per-axis int8 (/256) saturates at
+      ±3.98 g at the new range; severe-tap saturation events are
+      preserved via flags byte's accel-clip count, not via int8 value.
+

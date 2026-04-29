@@ -3,10 +3,20 @@ start_iso: '2026-04-29T00:16:20.213988+00:00'
 sample_rate_hz: 16000
 global_stream_lag_s: 2.25
 segments:
-- index: '01'
-  label: voice_near_mic
-  dir: 01_voice_near_mic
-  duration_s: 7.0
+- index: 01a
+  label: voice_balanced
+  dir: 01a_voice_balanced
+  duration_s: 0.50
+  system_audio: false
+- index: 01b
+  label: voice_at_mic
+  dir: 01b_voice_at_mic
+  duration_s: 1.30
+  system_audio: false
+- index: 01c
+  label: voice_away
+  dir: 01c_voice_away
+  duration_s: 0.80
   system_audio: false
 - index: '02'
   label: rock

@@ -1,0 +1,13 @@
+index: 01b
+label: voice_at_mic
+mic_position: at_mic
+system_audio: false
+duration_s: 1.30
+parent_segment_t_start_s: 0.78
+parent_segment_t_end_s: 1.99
+characterization: proximity-effect dominated (LF 93% / MF 6% / HF 1%, centroid 86 Hz, peak -48 dBFS)
+notes: >
+  Calibration gold for at-mic / proximity-effect testing. Loudest of the three
+  voice events by ~10 dB; HF totally rolled off. Pairs with sibling 01c_voice_away
+  for opposite-spectral-tilt comparison. Spectral signature is also consistent
+  with a low hum/vocalization — labeled at_mic per recording-session intent.

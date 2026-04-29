@@ -1,0 +1,12 @@
+index: 01c
+label: voice_away
+mic_position: away
+system_audio: false
+duration_s: 0.80
+parent_segment_t_start_s: 2.23
+parent_segment_t_end_s: 3.00
+characterization: off-axis / away from mic (LF 26% / MF 38% / HF 34%, centroid 657 Hz)
+notes: >
+  Away-from-mic / off-axis reference. HF tilt is the inverse of sibling
+  01b_voice_at_mic — bright, consonant-heavy, ~10 dB dimmer. The 01b/01c pair
+  is the calibration set for any effect designer testing mic-distance behavior.

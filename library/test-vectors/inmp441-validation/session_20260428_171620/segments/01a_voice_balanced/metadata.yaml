@@ -1,0 +1,13 @@
+index: 01a
+label: voice_balanced
+mic_position: ambient
+system_audio: false
+duration_s: 0.50
+parent_segment_t_start_s: 0.01
+parent_segment_t_end_s: 0.42
+characterization: normal-distance speech, full bandwidth (LF 60% / MF 18% / HF 20%, centroid 219 Hz)
+notes: >
+  Balanced-distance voice reference. First of three voice events split out from
+  the original 01_voice_near_mic clip (7 s) which actually contained three
+  distinct distance/orientation conditions. See sibling 01b/01c for at-mic and
+  away-from-mic counterparts. Trailing silence (3.0–7.0s of original) discarded.

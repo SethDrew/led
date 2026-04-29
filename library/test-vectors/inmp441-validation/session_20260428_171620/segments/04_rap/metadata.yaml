@@ -1,0 +1,13 @@
+index: '04'
+label: rap
+mic_position: ambient
+system_audio: true
+duration_s: 70.0
+t_offset_s_start: 1884.96
+t_offset_s_end: 1954.96
+mic_lag_ms: 30.0
+mic_gain_db: 11.36
+narration_marker_t_offset_s: 1880.86
+global_stream_lag_s: 2.25
+local_xcorr_peak_z: 3.802
+lag_refinement_trusted: true

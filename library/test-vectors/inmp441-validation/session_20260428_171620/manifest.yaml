@@ -1,0 +1,46 @@
+session_dir: /Users/sethdrew/Documents/projects/led/library/test-vectors/inmp441-validation/session_20260428_171620
+start_iso: '2026-04-29T00:16:20.213988+00:00'
+sample_rate_hz: 16000
+global_stream_lag_s: 2.25
+segments:
+- index: '01'
+  label: voice_near_mic
+  dir: 01_voice_near_mic
+  duration_s: 7.0
+  system_audio: false
+- index: '02'
+  label: rock
+  dir: 02_rock
+  duration_s: 101.9
+  system_audio: true
+- index: '03'
+  label: folk
+  dir: 03_folk
+  duration_s: 41.0
+  system_audio: true
+- index: '04'
+  label: rap
+  dir: 04_rap
+  duration_s: 70.0
+  system_audio: true
+- index: '05'
+  label: experimental_metallic_electronic
+  dir: 05_experimental_metallic_electronic
+  duration_s: 42.4
+  system_audio: true
+- index: '06'
+  label: electronic_ambient
+  dir: 06_electronic_ambient
+  duration_s: 42.4
+  system_audio: true
+- index: '07'
+  label: classical
+  dir: 07_classical
+  duration_s: 146.318
+  system_audio: true
+- index: 08
+  label: dnb
+  dir: 08_dnb
+  duration_s: 0.0
+  system_audio: true
+  skipped: true

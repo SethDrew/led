@@ -1,0 +1,14 @@
+index: 08
+label: dnb
+mic_position: ambient
+system_audio: true
+duration_s: 0.0
+t_offset_s_start: 2485.5
+t_offset_s_end: 2688.1
+mic_lag_ms: null
+mic_gain_db: null
+narration_marker_t_offset_s: 2486.5
+global_stream_lag_s: 2.25
+skipped: true
+skipped_reason: mic stream did not cover the song span sys [2485.5,2688.1]; mic covers
+  sys-time [2.2,2465.6].

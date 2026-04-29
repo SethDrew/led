@@ -4144,3 +4144,54 @@ entries:
       (bulb-tap-quiet-floor-gate, dormant) is the next step. Until
       then, do not preemptively add it.
 
+  - id: four-band-decomposition-hypothesis
+    date: 2026-04-29
+    touched: 2026-04-29
+    title: "Four-band split (20/80/250/2000/8000 Hz) — hypothesis for the next default decomposition"
+    summary: >
+      Working hypothesis, not a conclusion. Splitting the legacy 3-band
+      decomposition (20/250/2000/8000) by adding a sub-bass edge at 80 Hz
+      may better serve two distinct goals at once: (1) mic handling —
+      separating the bass region the INMP441 amplifies from the very low
+      end where the mic's response is more variable, and (2) reduction of
+      single-band dominance in effects — giving the kick its own routable
+      stream so it stops slamming the same band as the bassline. Untested
+      on real LED output.
+    status: spark
+    warmth: medium
+    confidence: low
+    source: []
+    tags: [normalization, frequency-bands, decomposition, hypothesis, inmp441]
+    relates_to: [per-band-normalization-with-dropout-handling, per-band-feature-expansion, inmp441-amplifies-source-bass-tilt, inmp441-signal-impact, band-zone-pulse-effect]
+    notes: >
+      ## What this is
+
+      A candidate edge layout for the band decomposer feeding effects:
+      sub-bass 20-80, bass 80-250, mids 250-2000, treble 2000-8000.
+      Same EMA-ratio normalizer per band as today; one extra coefficient
+      out, one extra band edge in. Minimum-viable change to the existing
+      pipeline.
+
+      ## Two goals this is meant to serve
+
+      1. **Mic handling.** INMP441 amplifies bass tilt and rolls off
+         treble (see inmp441-amplifies-source-bass-tilt,
+         inmp441-frequency-response). A sub-bass split lets us reason
+         about / gate / re-weight the very-low region independently of
+         the rest of the bass region, instead of folding mic-rumble and
+         kick energy into one bucket.
+      2. **Reduction of single-band dominance.** The legacy 3-band
+         split lumps kick and bassline into one bass channel, so the
+         dominant instrument's envelope wins and the rest visually
+         disappears. A sub-bass band gives the kick its own routable
+         stream, which is the prerequisite for any effect that wants
+         to drive different visual elements from kick vs bassline
+         (cf. band-zone-pulse-effect's per-band peak detection).
+
+      Both goals point the same way; that's what makes this worth
+      trying first.
+
+      ## Other directions worth trying if 4-band falls short
+
+      Energy-equalized edges (eq3 at 113/266 Hz), Bark/mel pre-normalization aggregated to broad bands, overlapping/Hann-tapered soft edges, sqrt(f) whitening pre-split, or a per-band noise-floor gate.
+

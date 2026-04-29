@@ -1,0 +1,13 @@
+index: '02'
+label: rock
+mic_position: ambient
+system_audio: true
+duration_s: 101.9
+t_offset_s_start: 1703.83
+t_offset_s_end: 1805.73
+mic_lag_ms: 0.0
+mic_gain_db: 31.74
+narration_marker_t_offset_s: 1686.83
+global_stream_lag_s: 2.25
+local_xcorr_peak_z: 1.994
+lag_refinement_trusted: false

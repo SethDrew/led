@@ -1,0 +1,13 @@
+index: '05'
+label: experimental_metallic_electronic
+mic_position: ambient
+system_audio: true
+duration_s: 42.4
+t_offset_s_start: 1985.37
+t_offset_s_end: 2027.77
+mic_lag_ms: 190.0
+mic_gain_db: 11.37
+narration_marker_t_offset_s: 1975.37
+global_stream_lag_s: 2.25
+local_xcorr_peak_z: 3.314
+lag_refinement_trusted: true

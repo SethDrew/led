@@ -1,0 +1,8 @@
+{"idx": 1, "t_offset_s": 1631.61, "iso": "2026-04-29T00:43:31.821473+00:00", "label": "voice_near_mic", "text": "user talking near mic, no system audio", "has_system_audio": false, "mic_position": "ambient"}
+{"idx": 2, "t_offset_s": 1686.83, "iso": "2026-04-29T00:44:27.045487+00:00", "label": "rock", "text": "rock music", "has_system_audio": true, "mic_position": "ambient"}
+{"idx": 3, "t_offset_s": 1806.74, "iso": "2026-04-29T00:46:26.950678+00:00", "label": "folk", "text": "folk music", "has_system_audio": true, "mic_position": "ambient"}
+{"idx": 4, "t_offset_s": 1880.86, "iso": "2026-04-29T00:47:41.070535+00:00", "label": "rap", "text": "rap music", "has_system_audio": true, "mic_position": "ambient"}
+{"idx": 5, "t_offset_s": 1975.37, "iso": "2026-04-29T00:49:15.588145+00:00", "label": "experimental_metallic_electronic", "text": "weird experimental metallic electronic music", "has_system_audio": true, "mic_position": "ambient"}
+{"t_offset_s": 2216.3, "label": "electronic_ambient", "system_audio": true, "iso": "2026-04-29T00:53:16.497553+00:00", "mic_position": "ambient"}
+{"t_offset_s": 2315.7, "label": "classical", "system_audio": true, "iso": "2026-04-29T00:54:55.903907+00:00", "mic_position": "ambient"}
+{"t_offset_s": 2486.5, "label": "dnb", "system_audio": true, "mic_position": "ambient", "iso": "2026-04-29T00:57:46.691036+00:00"}

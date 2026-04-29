@@ -1,0 +1,13 @@
+index: '07'
+label: classical
+mic_position: ambient
+system_audio: true
+duration_s: 146.318
+t_offset_s_start: 2318.3
+t_offset_s_end: 2464.618
+mic_lag_ms: 0.0
+mic_gain_db: 22.95
+narration_marker_t_offset_s: 2315.7
+global_stream_lag_s: 2.25
+local_xcorr_peak_z: 2.572
+lag_refinement_trusted: false

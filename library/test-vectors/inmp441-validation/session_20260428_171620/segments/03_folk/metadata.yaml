@@ -1,0 +1,13 @@
+index: '03'
+label: folk
+mic_position: ambient
+system_audio: true
+duration_s: 41.0
+t_offset_s_start: 1833.04
+t_offset_s_end: 1874.04
+mic_lag_ms: -20.0
+mic_gain_db: 22.34
+narration_marker_t_offset_s: 1806.74
+global_stream_lag_s: 2.25
+local_xcorr_peak_z: 3.893
+lag_refinement_trusted: true

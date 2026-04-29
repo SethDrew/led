@@ -1,0 +1,8 @@
+blackhole_in_rate_hz: 44100
+blackhole_index: 3
+port: /dev/cu.usbmodem114301
+sample_rate_hz: 16000
+start_iso: '2026-04-29T00:16:20.213988+00:00'
+wav_files:
+  inmp441: inmp441.wav
+  system: system.wav

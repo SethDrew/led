@@ -120,20 +120,10 @@ static inline uint8_t ledColony(uint8_t s, uint16_t li) {
 #define WP_COOLDOWN_MS    120
 
 // ── ESP-NOW v1 packet ────────────────────────────────────────────
-#define TIMEOUT_MS     500
+// TelemetryPacketV1 lives in lib/v1_telemetry/v1_packet.h (shared with sender).
+#include "v1_packet.h"
 
-struct __attribute__((packed)) TelemetryPacketV1 {
-    uint16_t seq;
-    int8_t   ax_max, ax_min, ax_mean;
-    int8_t   ay_max, ay_min, ay_mean;
-    int8_t   az_max, az_min, az_mean;
-    uint8_t  amag_max;
-    uint8_t  amag_mean;
-    uint8_t  gmag_max;
-    uint8_t  gmag_mean;
-    uint8_t  flags;
-};
-static_assert(sizeof(TelemetryPacketV1) == 16, "v1 packet must be exactly 16 bytes");
+#define TIMEOUT_MS     500
 
 static volatile uint32_t pktCount = 0;
 static volatile uint32_t lastPacketMs = 0;

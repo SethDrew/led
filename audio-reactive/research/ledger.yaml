@@ -2517,7 +2517,7 @@ entries:
     status: validated
     warmth: high
     confidence: high
-    source: [festicorn/src/effects.cpp, audio-reactive/effects/color/oklch.py, audio-reactive/effects/color/gen_firmware_lut.py, firmware/tree/src/tree_rainbow_test.cpp]
+    source: [festicorn/src/effects.cpp, audio-reactive/effects/color/oklch.py, audio-reactive/effects/color/gen_firmware_lut.py, festicorn/bench-tree/src/tree_rainbow_test.cpp]
     tags: [color, perception, hardware, oklch, validated]
     relates_to: [rgb-color-gamut-limitations, hue-shift-low-brightness]
     notes: >
@@ -2676,7 +2676,7 @@ entries:
     status: validated
     warmth: high
     confidence: high
-    source: [firmware/tree/src/gamma_test.cpp]
+    source: [festicorn/bench-tree/src/gamma_test.cpp]
     tags: [color, perception, gamma, brightness, validated]
     relates_to: [oklch-perceptual-rainbow, rgb-color-gamut-limitations]
     notes: >
@@ -3233,21 +3233,24 @@ entries:
 
   - id: inmp441-frequency-response
     date: 2026-03-17
-    touched: 2026-03-17
-    title: "INMP441 MEMS mic has severe bass/mid deficit vs system audio — treble only is comparable"
+    touched: 2026-04-26
+    title: "INMP441 MEMS mic has heavy bass/mid deficit vs system audio (distance-dependent); 'treble comparable' is unreproduced"
     summary: >
       Dual-capture comparison (BlackHole system loopback vs INMP441 acoustic
-      pickup near speaker) shows the INMP441 is ~24 dB quieter overall, with
-      catastrophic bass loss. Per-band deltas vs system audio: sub-bass
-      (20-80 Hz) -15 dB, bass (80-250 Hz) -28 dB, mids (250-2 kHz) -21 dB,
-      treble (6-8 kHz) comparable. Envelope correlation between sources is
-      only 0.29 and SNR is 3.9 dB.
+      pickup) shows the INMP441 is ~16-22 dB quieter overall with heavy
+      bass loss whose magnitude depends on mic distance. The original
+      2026-03-17 measurement reported sub-bass -15, bass -28, mids -21,
+      treble "comparable". A 2026-04-26 re-validation reproduced the bass
+      loss (-30 dB at 3 ft, -16 dB at 0 cm — proximity effect) but found
+      treble 36-43 dB down in BOTH ambient and near-field conditions, so
+      the "treble comparable" claim is treated as unreproduced. See
+      inmp441-validation-2026-04-26.
     status: validated
     warmth: high
     confidence: high
-    source: dual-capture measurement (BlackHole vs INMP441 acoustic, same music)
+    source: dual-capture measurements — original 2026-03-17, re-validation 2026-04-26 (library/test-vectors/inmp441-validation/)
     tags: [hardware, microphone, inmp441, frequency-response, esp32, measurement]
-    relates_to: [taps-track-bass-peaks, equal-loudness-weighting-dead-end]
+    relates_to: [taps-track-bass-peaks, equal-loudness-weighting-dead-end, inmp441-validation-2026-04-26]
     notes: >
       The 24 dB overall level difference is fixable with gain or normalization.
       The frequency imbalance is the real problem — it is a property of the
@@ -3258,7 +3261,7 @@ entries:
       acoustic pickup (off-axis, room reflections, speaker directivity) adds
       significant additional roll-off below 250 Hz.
 
-      Key numbers:
+      Key numbers (original 2026-03-17 measurement):
         Sub-bass (20-80 Hz):    -15 dB  (attenuated but present)
         Bass (80-250 Hz):       -28 dB  (essentially absent)
         Mids (250-2 kHz):       -21 dB  (heavily attenuated)
@@ -3272,6 +3275,171 @@ entries:
       where kick drums live — the primary beat-tracking target (see
       taps-track-bass-peaks). The INMP441 essentially cannot see the
       signal that drives most of our beat detection.
+
+      ## 2026-04-26 re-validation update
+
+      Re-ran the dual-capture experiment with two distance conditions to
+      isolate proximity effects and produce reusable test vectors. Full
+      methodology and 60s WAV pairs at library/test-vectors/inmp441-validation/.
+      See inmp441-validation-2026-04-26 for the standalone entry.
+
+      Per-band Δ dB (INMP441 − system; negative = mic quieter):
+
+        band      | original | ambient (3 ft) | near-field (0 cm)
+        ----------|----------|----------------|-------------------
+        sub-bass  | -15      | -16.5          | -12.4
+        bass      | -28      | -30.5          | -16.4
+        mids      | -21      | -35.8          | -16.2
+        high-mid  | (n/a)    | -40.5          | -27.7
+        treble    | "comp."  | -43.0          | -36.1
+
+      What reproduced:
+      - Bass loss at 3 ft matches the original -28 dB closely (-30.5 dB).
+        The original "near speaker" condition was likely ~1 m, not literally
+        on the cone.
+      - Sub-bass loss reproduces at both distances.
+      - Bass loss is real and dominant across deployments — qualitative
+        claim holds even though magnitude is distance-dependent.
+
+      What did NOT reproduce:
+      - "Treble comparable" — treble is 36-43 dB down even with the mic
+        touching the speaker. INMP441's high-frequency roll-off above
+        ~6 kHz at moderate SPL is consistent with this; the original
+        "comparable" reading is treated as an outlier or methodology
+        artifact.
+
+      Caveat: system reference peak shifted between the two re-validation
+      runs (0.58 → 0.37), so cross-run absolute magnitudes have a few dB
+      of slop. Per-band ratios within each run are clean.
+
+  - id: inmp441-validation-2026-04-26
+    date: 2026-04-26
+    touched: 2026-04-26
+    title: "Dual-capture re-validation of INMP441 vs system audio in two distance conditions"
+    summary: >
+      Re-ran the original inmp441-frequency-response measurement under
+      ambient (mic 3 ft from speaker on a table) and near-field (mic
+      touching speaker face, ≈0 cm) conditions to isolate distance
+      dependence and produce reusable test vectors. Bass-loss claim
+      reproduces with strong distance dependence (~30 dB at 3 ft,
+      ~16 dB at 0 cm). "Treble comparable" claim does NOT reproduce —
+      treble is 36-43 dB down in both conditions.
+    status: validated
+    warmth: medium
+    confidence: high
+    source: library/test-vectors/inmp441-validation/{ambient,nearfield}/
+    tags: [hardware, microphone, inmp441, frequency-response, measurement, test-vectors, validation]
+    relates_to: [inmp441-frequency-response, inmp441-signal-impact, inmp441-normalization-limits]
+    notes: >
+      ## Methodology
+
+      Wrote a new firmware variant raw_audio_sender that streams 16 kHz
+      int16 PCM from the INMP441 over USB CDC at 460800 baud (vs the
+      production stream_sender which only emits ~100 Hz RMS). Captured
+      synchronized BlackHole loopback + INMP441 acoustic pairs via a
+      dual_capture.py host script (threading.Event for sync). 60 s per
+      condition. Per-band FFT comparison via compare_inmp441_vs_system.py
+      reproduces the original ledger table format.
+
+      ## Conditions
+
+      - Ambient: mic on a table 3 ft from speaker, NOT in direct point
+        source path. Subjective volume "ambient". Small bedroom.
+      - Near-field: mic literally on the speaker face (≈0 cm). Same
+        speaker, same room.
+
+      Same INMP441 hardware, same speaker, same room across both runs.
+      Music routed through BlackHole loopback for system reference.
+
+      ## Headline numbers
+
+      Per-band Δ dB (INMP441 − system; see frequency-response entry table).
+
+      Envelope Pearson: ambient 0.575, near-field 0.824 — both higher
+      than the original 0.29, suggesting the INMP441 actually tracks the
+      source meaningfully even in heavily-attenuated bands. The original
+      0.29 may reflect a noisier room or different averaging window.
+
+      Alignment lag: ambient 270 ms, near-field 110 ms. Consistent with
+      acoustic propagation (3 ft ≈ 3 ms) plus DMA buffering — most of the
+      lag is buffering, with distance contributing the differential.
+
+      ## Implication for signal design
+
+      Across all three reference conditions (system audio, INMP441 ambient,
+      INMP441 near-field), bass is the *strongest* relative band on the
+      mic — not the weakest as inmp441-signal-impact suggested. The
+      bass-dominance problem we'd been thinking about as a system-audio
+      issue applies equally on INMP441, for different physical reasons
+      (room acoustics + proximity effect, not signal energy).
+
+      Per-band normalization on a transient primitive (per-band absint)
+      is the correct design move in all conditions. Treble band on
+      INMP441 needs SNR gating because per-band normalization on a
+      near-noise band would amplify noise to full scale.
+
+      ## Reusable artifacts
+
+      WAV pairs in library/test-vectors/inmp441-validation/ are reusable
+      test vectors for offline signal design — analyze candidate
+      decomposition pipelines against both conditions without re-running
+      hardware capture. README in the same directory documents the
+      experiment fully.
+
+      The full pipeline is reproducible from source: firmware variant
+      raw_audio_sender (festicorn/bulbs/src/), capture script
+      dual_capture.py and comparison script compare_inmp441_vs_system.py
+      (audio-reactive/tools/). Re-flashing the Duck and running
+      dual_capture.py reproduces the WAV pairs end-to-end.
+
+  - id: inmp441-amplifies-source-bass-tilt
+    date: 2026-04-28
+    touched: 2026-04-28
+    title: "INMP441 amplifies the source's bass dominance — bass-heavy mixes get more bass-heavy at the mic"
+    summary: >
+      Extends inmp441-validation-2026-04-26: bass dominance on the mic
+      is not fixed coloration — it scales with source tilt. The mic
+      intensifies whatever bass tilt the source already has. On rap
+      (bass-heavy mix) source bass/mids = 2.6x but mic bass/mids = 14.6x
+      (5.6x intensification). On mids-dominant classical the ratio is
+      preserved (source 0.16x, mic 0.27x). Implication: the per-band
+      EMA-ratio normalizer designed for system audio bass dominance is
+      MORE important on the mic, not less.
+    status: validated
+    warmth: high
+    confidence: medium
+    source: library/test-vectors/inmp441-validation/session_20260428_171620/
+    tags: [hardware, microphone, inmp441, frequency-response, normalization, validation]
+    relates_to: [inmp441-frequency-response, inmp441-validation-2026-04-26, inmp441-normalization-limits]
+    notes: >
+      ## Bass-tilt amplification
+
+      Source bass/mids ratio is multiplicatively intensified at the mic:
+
+        material            source bass/mids   mic bass/mids   amp
+        ------------------  -----------------  --------------  -----
+        rap (bass-heavy)    2.6x               14.6x           5.6x
+        classical (mids)    0.16x              0.27x           1.7x
+
+      Likely cause: bass wraps around the mic body and reflects off
+      room surfaces; mids/treble are more directional and lose more in
+      free-field propagation.
+
+      ## Per-band response is flat at near-ambient distance
+
+      Classical (most spectrally-flat segment), per-band Δ dB:
+      sub-bass -20, bass -19, mids -24, high-mid -24, treble -26.
+      Spread 7 dB band-to-band — much flatter than the 3 ft validation
+      (28 dB spread; see inmp441-validation-2026-04-26). No band falls
+      into noise floor; per-band SNR gating is not required at this
+      placement.
+
+      ## Genre-dependent broadband makeup gain
+
+      Peak-match gain to system: +11 dB (rap, bass-heavy) to +32 dB
+      (rock, treble-rich). Follows from the mic's HF rolloff
+      compounding with the bass-tilt amplification — a single broadband
+      gain cannot normalize across genres, per-band normalization can.
 
   - id: inmp441-signal-impact
     date: 2026-03-17
@@ -3779,4 +3947,200 @@ entries:
       headbangs-half-notes finding that physical response gravitates to ~87 BPM on 180 BPM
       tracks. The [50, 140] bounds may need tuning — 140 upper could be too high for fast
       EDM where the felt groove is half the detected rate.
+
+  # ── Gesture / IMU input (interactive bulb) ───────────────────────
+
+  - id: bulb-gesture-taxonomy-methodology
+    date: 2026-04-26
+    touched: 2026-04-26
+    title: Gesture taxonomy for interactive hanging bulb — kind × severity, with a hybrid severity rule
+    summary: >
+      Locked an event schema for IMU-driven gestures on a hanging bulb:
+      kind ∈ {tap, shake, movement} × severity ∈ {light, medium, hard,
+      severe}, plus extras for periodicity, dominant axis, and concurrent
+      reorientation. Drumming is not a separate kind or flag — it's just
+      multiple tap events in sequence. Key conceptual finding: severity
+      needs a hybrid rule — peak \|a\| for short single-impulse taps (RMS
+      undersells a 50ms strike inside a 3s window), RMS \|a\| for sustained
+      gestures (peak clips at the sensor rail above light). Validated on
+      13 real episodes from two captures (MPU-6050 @ 200 Hz). The
+      classifier that implements these rules is example code, not a locked
+      artifact; thresholds will evolve as more recordings come in.
+    status: validated
+    warmth: high
+    confidence: medium
+    source: festicorn/bulbs/data/recordings/gesture_taxonomy.md
+    tags: [imu, gesture, classification, bulbs, input-roles, severity]
+    relates_to: [feelings-are-contextual, derivatives-over-absolutes]
+    notes: >
+      Why this trichotomy fits the data:
+        - tap separates cleanly when crest ≥ 4.5 OR (n_peaks ≥ 5 AND stroke_rate
+          ≥ 1.8). Catches single strikes and sustained drumming.
+        - movement separates cleanly when grav_angle ≥ 25° AND ac_strength
+          < 0.55 AND crest < 4.0. The ac_strength gate is the critical part —
+          a pendulum swing rotates gravity but is *oscillation*, not active
+          reorientation.
+        - shake is the default. Pendulum swing-decay lands here by stipulation:
+          the gravity vector may rotate during a swing, but the motion is
+          driven by oscillation, not active hand-rotation.
+
+      Why hybrid severity:
+        - peak_amag clips at ~58k counts (1.78 g) on the ±2g range; useless
+          above light for any sustained gesture (clipped in 8/13 episodes).
+        - RMS_amag does not clip in any episode here, but for short single-
+          impulse taps it is dominated by the silent portion of the window
+          and undersells the strike. Example: one episode had peak 14k counts
+          but RMS only 1519 because the strike was ~50ms inside a 3.4s window.
+        - Mode A (peak-based, used when kind=tap AND crest≥6 AND
+          stroke_rate<1.8) catches single hard strikes. Mode B (RMS-based)
+          catches everything else including drumming.
+
+      Honest limits of the schema:
+        - Above the saturation ceiling, hard and severe cannot be reliably
+          distinguished without a wider-range sensor.
+        - Drumming-vs-fast-shake is not separable by these features. A 2×
+          time-stretched shake misclassifies as tap because the stroke rate
+          crosses the drumming threshold. Open: do they need to be separated
+          perceptually? Maybe they don't.
+        - tap+movement composites (drumming while reorienting) are a real
+          thing; we resolve by calling the kind tap and flagging
+          concurrent_movement=true.
+
+      Methodological observations:
+        - User-labeled gesture intent at capture time is essential.
+          Reverse-engineering the trichotomy from features alone would have
+          missed soft-touch as a distinct sub-category of light movement.
+        - Calibration ladders (12 single taps at labeled intensities) are
+          worth more than another freeform 60s capture. The current data has
+          0–2 examples per (kind, severity) cell with 4 cells empty; ladders
+          would let us validate thresholds against intent.
+
+      Coverage matrix (real + 16 synthetic transforms):
+                light    medium   hard     severe
+        tap     EMPTY    ✓        ✓        ✓
+        shake   ✓        ✓ (synth) ✓       ✓
+        movement ✓       ✓        ✓        EMPTY (need real, geometric)
+
+  - id: bulb-tap-quiet-floor-gate
+    date: 2026-04-28
+    touched: 2026-04-28
+    title: Quiet-floor gate separates isolated taps + drumming from sustained motion
+    summary: >
+      A single shape feature — "did the signal touch quiet within the past
+      200 ms?" — cleanly separates discrete strikes (taps, drumming) from
+      sustained motion (shaking, dancing, swinging). Rule: fire when
+      peak_axis_ac_g ≥ 0.50 g AND min(peak over last 5 packets) < 0.15 g.
+      Validated on the 13-episode duck capture; preserves 95–96% of
+      labeled tap/drum strikes while suppressing 71% of shake-segment
+      false-fires. Not currently integrated — the production receiver
+      (festicorn/biolum, festicorn/bench-bulbs) keeps the simpler hard
+      0.50 g threshold because the installations only need to react to
+      "movement happened," not to distinguish kinds. Park here for when
+      we want different LED responses for "you tapped me" vs "you're
+      shaking me."
+    status: dormant
+    warmth: medium
+    confidence: high
+    source: festicorn/gyro-sense/data/recordings/duck_gestures/20260426T210735.csv
+    tags: [imu, gesture, classification, bulbs, shape-features, future]
+    relates_to: [bulb-gesture-taxonomy-methodology, derivatives-over-absolutes]
+    notes: >
+      Why this works mechanically: a tap deposits a brief impulse (2–10 ms)
+      followed by quiet; drumming has 50–150 ms of quiet between strikes;
+      sustained motion (shake, dance, free-pendulum decay) keeps the
+      per-window peak floor elevated above ~0.15 g for the entire bout.
+      Rolling MIN over a short past window picks up the difference cheaply.
+      Rolling MEAN over 1 s does NOT — drumming + shaking have similar
+      time-averaged energy; the gap only opens up when you look at how
+      *recently* the signal touched zero.
+
+      Survival on the duck capture (per user-reported segments):
+        ep1 pick it up    movement    0/0  fires
+        ep2 hold it       movement    0/0
+        ep3 shake it      movement   28→8  (71% suppressed)
+        ep4 tap it        tap        23→22 (96% kept)
+        ep5a drum on it   tap        40→38 (95% kept)
+        ep5b dance        movement   12→7  (42% suppressed)
+        ep5c free-decay   movement    5→2  (60% suppressed)
+
+      What it does NOT solve:
+        - Free-pendulum decay (ep5c) and dance (ep5b) leak ~40–60% because
+          the bulb passes through low-energy moments at oscillation
+          turnarounds — looks indistinguishable from "tap on a quiet bulb."
+          A pendulum-aware filter would need gyro magnitude (rotation rate
+          gives away "swinging" vs "struck") or a longer history.
+        - The first few hits of a sustained shake still fire because the
+          baseline hasn't built up yet. Arguably correct: "the gesture that
+          starts the swing" is a real tap.
+
+      Implementation cost is trivial: one 5-element ring buffer of recent
+      peaks (~20 bytes RAM), scan-for-min on each packet (~5 comparisons).
+      No new wire fields; the per-axis max/min the v1 schema already ships
+      is sufficient. Plot at /tmp/duck_quietfloor.png in the analysis
+      session that derived this; analysis script /tmp/plot_duck_quietfloor.py.
+
+      Companion finding: rolling-MEAN baselines (1 s window) do NOT
+      separate drumming from shaking — both produce similar time-averaged
+      energy. The mechanism is "return-to-floor between events," not
+      "average energy level," so a MIN tracker is the right primitive.
+      Recorded so we don't have to rediscover this if we revisit
+      classifier work.
+
+  - id: bulb-movement-hard-gate-sufficient
+    date: 2026-04-28
+    touched: 2026-04-28
+    title: A single 0.50 g hard gate captures every bulb-interaction need we currently have
+    summary: >
+      For every interactive bulb installation we are running today
+      (festicorn/biolum, festicorn/bench-bulbs), "movement detected" is
+      the only gesture distinction the LED behavior actually needs.
+      A single hard gate — peak_axis_ac_g ≥ 0.50 g, computed from the
+      v1 wire schema's per-axis AC max/min on each 40 ms packet — fires
+      cleanly on intentional human contact (tap, drum, shake, pick-up)
+      while staying silent on a hanging-pendulum baseline (~0.25 g
+      ambient, swinging-after-let-go ~0.30 g). No normalization, no
+      shape features, no classifier. The architectural point is that
+      this is *enough* — and recognizing that it is enough, before
+      adding machinery, is the choice that matters.
+    status: integrated
+    warmth: high
+    confidence: high
+    source: festicorn/biolum/src/bloom.cpp, festicorn/bench-bulbs/src/bench.cpp
+    tags: [imu, gesture, bulbs, input-roles, simplicity, architecture]
+    relates_to: [bulb-gesture-taxonomy-methodology, bulb-tap-quiet-floor-gate, derivatives-over-absolutes, feelings-are-contextual]
+    notes: >
+      Why 0.50 g is the right number: the hanging-bulb idle floor on the
+      ±2 g range sits around 0.20–0.30 g (small breeze, residual sway,
+      sensor noise); a deliberate human tap or shake delivers ≥0.75 g
+      on the per-axis AC excursion. 0.50 g lands in the middle of that
+      gap, comfortably away from both. The same threshold works for
+      bench-bulbs because the duck-shaped sender produces the same
+      per-axis AC characteristic when handled.
+
+      Why this is architectural, not implementation:
+        - It validates the v1 wire schema's per-stat layout (ax_max,
+          ay_max, az_max, then mins, then means) as the right level of
+          detail. We have NOT needed to add fields, change cadence, or
+          revisit the 16-byte budget.
+        - It validates the input-role assignment for bulbs: bulbs are
+          a binary "I am being touched / I am at rest" sensor, not a
+          gesture-classification problem. The complexity ceiling for
+          this input role is therefore low.
+        - It validates a working stance for the project: ship the
+          simple thing that captures what's needed; defer the classifier
+          until a concrete LED behavior requires the distinction.
+
+      What the simple gate gives up: it cannot distinguish a tap from a
+      shake from a pick-up. It fires once per packet whenever any of
+      those happens. For both current installations that is the desired
+      behavior — biolum's bloom effect treats any contact as "wake up
+      and bloom"; bench-bulbs' v1 indicator treats any contact as
+      "show that the sender is alive." Neither asks the question that
+      a classifier would answer.
+
+      When this assumption breaks: when an installation needs different
+      LED responses for "you tapped me" vs "you're holding/shaking me"
+      vs "you let go and I'm swinging" — the quiet-floor gate
+      (bulb-tap-quiet-floor-gate, dormant) is the next step. Until
+      then, do not preemptively add it.
 

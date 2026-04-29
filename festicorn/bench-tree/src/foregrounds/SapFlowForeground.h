@@ -9,36 +9,47 @@ class SapFlowForeground : public TreeForegroundEffect {
 private:
   struct SapParticle {
     float depth;
-    float velocity;
+    float velocityPerSec;
     uint8_t brightness;
     bool active;
   };
 
-  static const uint8_t MAX_PARTICLES = 12;  // More particles for denser flow
+  static const uint8_t MAX_PARTICLES = 12;
   SapParticle particles[MAX_PARTICLES];
 
   uint8_t r, g, b;
-  uint16_t frameCount;
-  uint8_t spawnChance;
-  uint8_t framesSinceLastSpawn;
-  uint8_t minFramesBetweenSpawn;
-  uint8_t maxFramesBetweenSpawn;
+  uint32_t frameCount;
 
-  // Background color state for smooth 1-value-per-step transitions
+  // Time-based spawn control — everything in seconds, independent of FPS.
+  // Defaults captured from the frame-based implementation at delay(40)/~21fps.
+  float defaultVelocityPerSec;
+  float minSpawnIntervalSec;
+  float maxSpawnIntervalSec;
+  float spawnRatePerSec;
+  float timeSinceLastSpawnSec;
+  unsigned long lastUpdateMs;
+
+  // Legacy background color state (currently unused; render() uses a fixed bg).
   uint8_t currentR, currentG, currentB;
   int8_t directionR, directionG, directionB;
 
 public:
-  SapFlowForeground(Tree* tree, uint8_t red, uint8_t green, uint8_t blue, uint8_t spawn = 5)
+  SapFlowForeground(Tree* tree, uint8_t red, uint8_t green, uint8_t blue,
+                    float velocityPerSec = 7.25f,
+                    float minIntervalSec = 1.91f,
+                    float maxIntervalSec = 12.73f,
+                    float spawnRate = 1.68f)
     : TreeForegroundEffect(tree),
       r(red), g(green), b(blue),
       frameCount(0),
-      spawnChance(spawn),
-      framesSinceLastSpawn(0),
-      minFramesBetweenSpawn(27),   // Scaled for 0.3 velocity (was 20 at 0.4)
-      maxFramesBetweenSpawn(160),  // Scaled for 0.3 velocity (was 120 at 0.4)
-      currentR(200), currentG(255), currentB(100),  // Start at bright lime green
-      directionR(-1), directionG(-1), directionB(-1) { // Start moving toward dark green
+      defaultVelocityPerSec(velocityPerSec),
+      minSpawnIntervalSec(minIntervalSec),
+      maxSpawnIntervalSec(maxIntervalSec),
+      spawnRatePerSec(spawnRate),
+      timeSinceLastSpawnSec(0),
+      lastUpdateMs(0),
+      currentR(200), currentG(255), currentB(100),
+      directionR(-1), directionG(-1), directionB(-1) {
 
     for (uint8_t i = 0; i < MAX_PARTICLES; i++) {
       particles[i].active = false;
@@ -46,18 +57,24 @@ public:
   }
 
   void update() override {
+    unsigned long now = millis();
+    if (lastUpdateMs == 0) lastUpdateMs = now;
+    float dt = (now - lastUpdateMs) / 1000.0f;
+    if (dt > 0.1f) dt = 0.1f;  // clamp on long pauses (e.g. WiFi blips)
+    lastUpdateMs = now;
+
     frameCount++;
-    framesSinceLastSpawn++;
+    timeSinceLastSpawnSec += dt;
 
-    // Try to spawn new particle with timing constraints
     bool shouldSpawn = false;
-
-    if (framesSinceLastSpawn >= maxFramesBetweenSpawn) {
-      // Force spawn if max time exceeded
+    if (timeSinceLastSpawnSec >= maxSpawnIntervalSec) {
       shouldSpawn = true;
-    } else if (framesSinceLastSpawn >= minFramesBetweenSpawn && random(100) < spawnChance) {
-      // Random spawn if minimum time met
-      shouldSpawn = true;
+    } else if (timeSinceLastSpawnSec >= minSpawnIntervalSec) {
+      // Poisson-ish: P(spawn this frame) = rate * dt
+      long threshold = (long)(spawnRatePerSec * dt * 1000000.0f);
+      if (random(1000000) < threshold) {
+        shouldSpawn = true;
+      }
     }
 
     if (shouldSpawn) {
@@ -65,24 +82,40 @@ public:
         if (!particles[i].active) {
           particles[i].active = true;
           particles[i].depth = 0;
-          particles[i].velocity = 0.3;  // Slower rise
+          particles[i].velocityPerSec = defaultVelocityPerSec;
           particles[i].brightness = 80 + random(70);
-          framesSinceLastSpawn = 0;
+          timeSinceLastSpawnSec = 0;
+#ifdef DIAG_LOG
+          Serial.print("S "); Serial.print(now);
+          Serial.print(" "); Serial.println(i);
+#endif
           break;
         }
       }
     }
 
-    // Update particles
     for (uint8_t i = 0; i < MAX_PARTICLES; i++) {
       if (!particles[i].active) continue;
-
-      particles[i].depth += particles[i].velocity;
-
+      particles[i].depth += particles[i].velocityPerSec * dt;
       if (particles[i].depth > MAX_DEPTH + 5) {
         particles[i].active = false;
       }
     }
+
+#ifdef DIAG_LOG
+    uint8_t ac = 0;
+    float minDepth = 999;
+    for (uint8_t i = 0; i < MAX_PARTICLES; i++) {
+      if (particles[i].active) {
+        ac++;
+        if (particles[i].depth < minDepth) minDepth = particles[i].depth;
+      }
+    }
+    Serial.print("F "); Serial.print(now);
+    Serial.print(" "); Serial.print(ac);
+    Serial.print(" "); Serial.print(timeSinceLastSpawnSec, 3);
+    Serial.print(" "); Serial.println(minDepth, 2);
+#endif
   }
 
   void render() override {

@@ -38,7 +38,7 @@ What we learned from testing on actual strips:
 | `audio-reactive/effects/color/gen_firmware_lut.py` | Emits `festicorn/lib/oklch_lut/oklch_lut.cpp` from `oklch.py` |
 | `festicorn/gen_palettes.py` | Chroma sweep palette generator |
 | `festicorn/src/effects.cpp` | LUT arrays, rendering, palette data |
-| `firmware/tree/src/tree_rainbow_test.cpp` | Runtime chroma + gamma, web UI slider |
+| `festicorn/bench-tree/src/tree_rainbow_test.cpp` | Runtime chroma + gamma, web UI slider |
 
 ## Ledger references
 

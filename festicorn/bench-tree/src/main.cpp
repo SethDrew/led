@@ -30,7 +30,8 @@ void classicWaveAnimation() {
 
 // Animation 2: Forest green sap flow
 void sapFlowAnimation() {
-  static SapFlowForeground sap(&tree, 34, 139, 34, 8);  // Forest green, moderate spawn rate
+  // Time-based defaults captured from prior frame-based version (delay(40), ~21fps).
+  static SapFlowForeground sap(&tree, 34, 139, 34);
   sap.update();
   sap.render();
 }
@@ -51,7 +52,8 @@ void orangeWaveAnimation() {
 
 // Animation 5: White sap
 void whiteSapAnimation() {
-  static SapFlowForeground sap(&tree, 255, 255, 255, 6);  // White
+  // ~75% of forest sap rate (old spawnChance=6 vs 8).
+  static SapFlowForeground sap(&tree, 255, 255, 255, 7.25f, 1.91f, 12.73f, 1.26f);
   sap.update();
   sap.render();
 }
@@ -86,7 +88,8 @@ void setup() {
 
 void loop() {
   sapFlowAnimation();
-  delay(40);  // ~25 FPS
+  // No artificial frame cap. Adafruit_NeoPixel::show() blocks during WS2812
+  // transmission (~6ms across 3 strips), giving a natural ~120fps ceiling.
 }
 
 #endif  // !STREAMING_MODE

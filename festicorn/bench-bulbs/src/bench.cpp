@@ -173,7 +173,15 @@ static void applyChannel(uint8_t ch) {
 #define DUCK_SENSOR_HZ       25.0f
 
 // ── FixedRangeRMS parameters ─────────────────────────────────────
-#define DUCK_RMS_FLOOR       4000.0f
+// Floor=10000 picked empirically: bench INMP441 ambient peaks ~12k
+// (1Hz×35s sample, max=12324, p99=10170). 10k cleanly clears the noise
+// distribution while still admitting close-talked / shouted voice and any
+// musical environment (music sits 20k+, fully into uint16 saturation
+// territory). Quiet conversational voice at arm's length will not trigger —
+// expected behavior; user can move closer or speak up to engage the duck.
+// See library/test-vectors/inmp441-validation/session_20260428_171620 for
+// per-condition RMS distributions used to pick this number.
+#define DUCK_RMS_FLOOR       10000.0f
 #define DUCK_RMS_CEILING     50000.0f
 #define DUCK_RMS_PEAK_DECAY  0.9999f
 

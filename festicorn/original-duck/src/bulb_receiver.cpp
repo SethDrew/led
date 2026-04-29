@@ -54,7 +54,14 @@
 #define SENSOR_HZ       25.0f
 
 // ── FixedRangeRMS parameters (scaled to 24-bit I2S integer range) ─
-#define RMS_FLOOR       4000.0f   // above INMP441 ambient (~2400-3400)
+// Floor=10000 chosen empirically from INMP441 ambient distribution at the
+// bench (max ~12k, p99 ~10k). Cleanly clears the noise floor while still
+// admitting close-talked / shouted voice and any musical environment
+// (music RMS sits at 20k+, often saturating uint16). Quiet conversational
+// voice at arm's length will not trigger — expected; user moves closer or
+// speaks up to engage the duck. See library/test-vectors/inmp441-validation
+// for per-condition distributions used to pick this number.
+#define RMS_FLOOR       10000.0f
 #define RMS_CEILING     50000.0f  // loud speech/clapping into mic
 #define RMS_PEAK_DECAY  0.9999f
 
@@ -109,6 +116,38 @@
 
 // ── ESP-NOW ──────────────────────────────────────────────────────
 #define TIMEOUT_MS     500
+
+// ── Wi-Fi channel discovery (matches bench-bulbs + v1 sender) ────
+// Lock radio to whatever channel SSID `cuteplant` advertises on, with a
+// 5-min rescan to heal AP channel drift. No AP join — ESP-NOW only.
+#define CHANNEL_FALLBACK   1
+#define CHANNEL_RESCAN_MS  (5UL * 60UL * 1000UL)
+static const char* WIFI_SSID_TARGET = "cuteplant";
+static uint8_t  currentChannel = CHANNEL_FALLBACK;
+static uint32_t lastScanMs     = 0;
+
+static uint8_t scanForSsidChannel(const char* ssid) {
+    int n = WiFi.scanNetworks(/*async=*/false, /*show_hidden=*/false,
+                              /*passive=*/true, /*max_ms_per_chan=*/120);
+    uint8_t found = 0;
+    int8_t bestRssi = -127;
+    for (int i = 0; i < n; i++) {
+        if (WiFi.SSID(i) == ssid) {
+            int8_t rssi = WiFi.RSSI(i);
+            if (rssi > bestRssi) { bestRssi = rssi; found = WiFi.channel(i); }
+        }
+    }
+    WiFi.scanDelete();
+    return found;
+}
+
+static void applyChannel(uint8_t ch) {
+    if (ch == 0) ch = CHANNEL_FALLBACK;
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_promiscuous(false);
+    currentChannel = ch;
+}
 
 // LEGACY: 15-byte v0.1 SensorPacket. Will go silent the moment a v1 sender
 // (festicorn/sender_rnd) is flashed nearby, since v1 packets are 16 B and
@@ -326,20 +365,25 @@ void setup() {
     strip.clear();
     strip.show();
 
-    // ── ESP-NOW init ──────────────────────────────────────────────
+    // ── Wi-Fi: STA mode + SSID-based channel discovery (no AP join) ──
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
     WiFi.setTxPower(WIFI_POWER_8_5dBm);  // C3 Super Mini regulator brownout fix (see engineering ledger)
 
-    // Enable promiscuous mode — required on some ESP32 variants for broadcast rx
-    esp_wifi_set_promiscuous(true);
-    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
-    esp_wifi_set_promiscuous(false);
+    uint8_t ch = scanForSsidChannel(WIFI_SSID_TARGET);
+    if (ch) {
+        Serial.printf("Found '%s' on ch=%u\n", WIFI_SSID_TARGET, ch);
+    } else {
+        Serial.printf("'%s' not visible — falling back to ch=%u\n",
+                      WIFI_SSID_TARGET, CHANNEL_FALLBACK);
+    }
+    applyChannel(ch ? ch : CHANNEL_FALLBACK);
+    lastScanMs = millis();
 
     esp_err_t initResult = esp_now_init();
     esp_err_t cbResult = esp_now_register_recv_cb(onReceive);
-    Serial.printf("ESP-NOW init=%d, cb=%d, ch=%d, MAC=%s\n",
-        initResult, cbResult, WiFi.channel(), WiFi.macAddress().c_str());
+    Serial.printf("ESP-NOW init=%d, cb=%d, ch=%u, MAC=%s\n",
+        initResult, cbResult, currentChannel, WiFi.macAddress().c_str());
 
     Serial.println("Waiting for sender... (will auto-calibrate from first 2s of data)");
     Serial.println("Commands: 'c' recal, 's' sparkle, 'm' fire_meld, 'f' fire_flicker, 'b' bloom");
@@ -868,6 +912,16 @@ void loop() {
     float dt = (lastRenderMs > 0) ? (now - lastRenderMs) / 1000.0f : (1.0f / SENSOR_HZ);
     if (dt > 0.1f) dt = 0.1f;  // cap at 100ms to avoid jumps
     lastRenderMs = now;
+
+    // Periodic SSID rescan — heals if the AP moves channel.
+    if (now - lastScanMs > CHANNEL_RESCAN_MS) {
+        uint8_t newCh = scanForSsidChannel(WIFI_SSID_TARGET);
+        if (newCh && newCh != currentChannel) {
+            Serial.printf("[heal] channel drift %u -> %u\n", currentChannel, newCh);
+            applyChannel(newCh);
+        }
+        lastScanMs = millis();
+    }
 
     // ── Serial commands ─────────────────────────────────────────
     if (Serial.available()) {

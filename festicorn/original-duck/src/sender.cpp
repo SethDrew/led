@@ -18,6 +18,7 @@
 #include <driver/i2s.h>
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 #include <math.h>
 
 // ── Pin assignments ──────────────────────────────────────────────
@@ -40,6 +41,40 @@
 
 // ── ESP-NOW ──────────────────────────────────────────────────────
 static uint8_t broadcastAddr[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+// ── Wi-Fi channel discovery (matches bench-bulbs receiver + v1 sender) ──
+// Receiver locks its radio to whatever channel SSID `cuteplant` advertises
+// on. Sender does the same scan so both ends agree without configuration.
+// Senders that skip this end up stuck on the radio's default channel and
+// never reach a receiver that's locked elsewhere.
+#define CHANNEL_FALLBACK   1
+#define CHANNEL_RESCAN_MS  (5UL * 60UL * 1000UL)
+static const char* WIFI_SSID_TARGET = "cuteplant";
+static uint8_t  currentChannel = CHANNEL_FALLBACK;
+static uint32_t lastScanMs     = 0;
+
+static uint8_t scanForSsidChannel(const char* ssid) {
+    int n = WiFi.scanNetworks(/*async=*/false, /*show_hidden=*/false,
+                              /*passive=*/true, /*max_ms_per_chan=*/120);
+    uint8_t found = 0;
+    int8_t bestRssi = -127;
+    for (int i = 0; i < n; i++) {
+        if (WiFi.SSID(i) == ssid) {
+            int8_t rssi = WiFi.RSSI(i);
+            if (rssi > bestRssi) { bestRssi = rssi; found = WiFi.channel(i); }
+        }
+    }
+    WiFi.scanDelete();
+    return found;
+}
+
+static void applyChannel(uint8_t ch) {
+    if (ch == 0) ch = CHANNEL_FALLBACK;
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_promiscuous(false);
+    currentChannel = ch;
+}
 
 struct __attribute__((packed)) SensorPacket {
     int16_t ax, ay, az;     // 6 bytes: raw accelerometer (±2g, 16384 = 1g)
@@ -148,8 +183,21 @@ void setup() {
     Serial.begin(460800);
     delay(300);
 
-    // ── ESP-NOW init ──────────────────────────────────────────────
+    // ── Wi-Fi: STA mode + SSID-based channel discovery (no AP join) ──
     WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+
+    uint8_t ch = scanForSsidChannel(WIFI_SSID_TARGET);
+    if (ch) {
+        Serial.printf("Found '%s' on ch=%u\n", WIFI_SSID_TARGET, ch);
+    } else {
+        Serial.printf("'%s' not visible — falling back to ch=%u\n",
+                      WIFI_SSID_TARGET, CHANNEL_FALLBACK);
+    }
+    applyChannel(ch ? ch : CHANNEL_FALLBACK);
+    lastScanMs = millis();
+
+    // ── ESP-NOW init ──────────────────────────────────────────────
     esp_now_init();
 
     esp_now_peer_info_t peer;
@@ -158,6 +206,8 @@ void setup() {
     peer.channel = 0;
     peer.encrypt = false;
     esp_now_add_peer(&peer);
+    Serial.printf("ESP-NOW ready ch=%u MAC=%s\n",
+        currentChannel, WiFi.macAddress().c_str());
 
     // ── Sensors (I2S before I2C — known ESP32-C3 bus conflict) ────
     setupI2S();
@@ -189,6 +239,16 @@ void setup() {
 
 void loop() {
     uint32_t now = millis();
+
+    // Periodic SSID rescan — heals if the AP moves channel.
+    if (now - lastScanMs > CHANNEL_RESCAN_MS) {
+        uint8_t newCh = scanForSsidChannel(WIFI_SSID_TARGET);
+        if (newCh && newCh != currentChannel) {
+            Serial.printf("[heal] channel drift %u -> %u\n", currentChannel, newCh);
+            applyChannel(newCh);
+        }
+        lastScanMs = millis();
+    }
 
     if (now - lastSensorMs < SENSOR_MS) return;
     lastSensorMs = now;

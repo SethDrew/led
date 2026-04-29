@@ -1,0 +1,217 @@
+schema_version: 2
+
+# Festicorn benchtop board fleet — physical boards keyed by MAC address.
+# Track by MAC, not serial port: macOS usbmodem suffixes reshuffle when boards move.
+#
+# Multi-role: each board's `role` selects firmware via `firmware_by_role` below.
+# `festicorn/gyro-sense/tools/register.py` upserts bulb-senders into this file
+# after flashing the v1 telemetry firmware. Other roles are registered manually.
+
+firmware_by_role:
+  bulb-sender:
+    source: festicorn/gyro-sense/src/sender.cpp
+    packet_format: v1-telemetry-16B
+    ranges:
+      accel_g: 4
+      gyro_dps: 1000
+  duck-sender:
+    source: festicorn/original-duck/src/sender.cpp
+    packet_format: v0.1-mic-gyro
+    notes: |
+      Outlier wiring (SDA=20, SCL=21). INMP441 mic + MPU-6050 IMU.
+      Festival v0.1 deploy. Pairs with rgbw-receiver.
+  rgbw-receiver:
+    source: festicorn/original-duck/src/bulb_receiver.cpp
+    packet_format: v0.1-receiver
+    notes: |
+      50× SK6812 RGBW on GPIO 10. Pairs with duck-sender.
+  test-receiver:
+    source: null
+    packet_format: tx_test_recv
+    notes: |
+      Classic-ESP32 fixture used during bulb-sender RX validation.
+
+boards:
+
+# ── v1 bulb-senders (gyro-sense/src/sender.cpp) ──────────────────────
+- mac: 14:63:93:70:0B:88
+  id: ''
+  chip: esp32-c3
+  role: bulb-sender
+  i2c_addr: 104
+  who_am_i: 112
+  first_seen: 2026-04-27 00:00:00+00:00
+  last_validated:
+    utc: 2026-04-27 00:00:00+00:00
+    port: /dev/cu.usbmodem114401
+    channel: 11
+    imu_status: ok
+    first_seq: 24
+    last_seq: 249
+    git_sha: ca6d5e5
+    dirty: true
+  notes: First board validated this session (solo run, before 3-batch).
+- mac: 14:63:93:6E:93:B0
+  id: ''
+  chip: esp32-c3
+  role: bulb-sender
+  i2c_addr: 104
+  first_seen: 2026-04-27 00:00:00+00:00
+  last_validated:
+    utc: 2026-04-27 00:00:00+00:00
+    port: /dev/cu.usbmodem114201
+    channel: 11
+    imu_status: ok
+    first_seq: 24
+    last_seq: 99
+    git_sha: ca6d5e5
+    dirty: true
+  notes: Batch 1, port 114201.
+- mac: 14:63:93:6E:AE:4C
+  id: ''
+  chip: esp32-c3
+  role: bulb-sender
+  i2c_addr: 104
+  first_seen: 2026-04-27 00:00:00+00:00
+  last_validated:
+    utc: 2026-04-27 00:00:00+00:00
+    port: /dev/cu.usbmodem114301
+    channel: 11
+    imu_status: ok
+    first_seq: 24
+    last_seq: 99
+    git_sha: ca6d5e5
+    dirty: true
+  notes: |
+    Batch 1, port 114301 originally. Confirmed on /dev/cu.usbmodem112101 on
+    2026-04-28 (MAC scan). Used as 2 dBm TX-power thermal-test target.
+- mac: 14:63:93:6E:AA:2C
+  id: ''
+  chip: esp32-c3
+  role: bulb-sender
+  i2c_addr: 104
+  first_seen: 2026-04-27 00:00:00+00:00
+  last_validated:
+    utc: 2026-04-27 00:00:00+00:00
+    port: /dev/cu.usbmodem114401
+    channel: 11
+    imu_status: ok
+    first_seq: 24
+    last_seq: 99
+    git_sha: ca6d5e5
+    dirty: true
+  notes: Batch 1, port 114401.
+- mac: 10:00:3B:B0:F5:F8
+  id: ''
+  chip: esp32-c3
+  role: bulb-sender
+  i2c_addr: 104
+  first_seen: '2026-04-28T05:53:49Z'
+  last_validated:
+    utc: '2026-04-28T05:53:49Z'
+    port: /dev/cu.usbmodem114201
+    channel: 11
+    imu_status: ok
+    first_seq: null
+    last_seq: null
+    git_sha: ca6d5e5
+    dirty: true
+  rx_check:
+    utc: '2026-04-28T06:05:00Z'
+    receiver_mac: F4:2D:C9:6D:B2:58
+    receiver_firmware: tx_test_recv
+    rate_pkts_per_sec: 25
+    payload_len: 16
+    result: pass
+  notes: |
+    Shares OUI prefix 10:00:3B with the historically-broken-TX rgbw-receiver
+    (10:00:3B:B0:6E:04). Verified clean: delivered 25 pkt/s to the test-receiver
+    over ESP-NOW, equal rate to the known-good 14:63:93:6E:A2:38 sender in the
+    same window.
+- mac: 14:63:93:6E:A2:38
+  id: ''
+  chip: esp32-c3
+  role: bulb-sender
+  i2c_addr: 104
+  first_seen: '2026-04-28T05:54:00Z'
+  last_validated:
+    utc: '2026-04-28T05:54:00Z'
+    port: /dev/cu.usbmodem114301
+    channel: 11
+    imu_status: ok
+    first_seq: 24
+    last_seq: 24
+    git_sha: ca6d5e5
+    dirty: true
+  notes: ''
+- mac: 14:63:93:6F:F8:08
+  id: ''
+  chip: esp32-c3
+  role: bulb-sender
+  i2c_addr: 104
+  first_seen: '2026-04-28T05:54:11Z'
+  last_validated:
+    utc: '2026-04-28T05:54:11Z'
+    port: /dev/cu.usbmodem114401
+    channel: 11
+    imu_status: ok
+    first_seq: 24
+    last_seq: 24
+    git_sha: ca6d5e5
+    dirty: true
+  notes: ''
+
+# ── v0.1 duck installation (original-duck/) ──────────────────────────
+- mac: 38:44:BE:45:D9:CC
+  id: 'duck'
+  chip: esp32-c3
+  role: duck-sender
+  notes: |
+    Festival v0.1 deploy. Currently bench-connected on /dev/cu.usbmodem114301
+    (unverified by direct MAC scan — board was running and did not drop into
+    bootloader). Working WiFi TX/RX (was "Board A" in gyro-sense platformio
+    header).
+- mac: 10:00:3B:B0:6E:04
+  id: ''
+  chip: esp32-c3
+  role: rgbw-receiver
+  first_seen: '2026-04-28T18:00:00Z'
+  last_validated:
+    utc: '2026-04-28T18:00:00Z'
+    port: /dev/cu.usbmodem114401
+    notes: MAC confirmed via esptool chip_id scan.
+  notes: |
+    "Board B" in the historical gyro-sense platformio header — broken WiFi TX,
+    RX-only role suits it. Drives 50× SK6812 RGBW on GPIO 10.
+
+# ── spare / untyped C3 ───────────────────────────────────────────────
+- mac: 10:00:3B:B1:5D:10
+  id: ''
+  chip: esp32-c3
+  role: spare
+  notes: |
+    Listed in gyro-sense/platformio.ini header as "C3-New" with working
+    WiFi TX/RX. Not currently assigned a deployment role.
+
+# ── classic-ESP32 fixtures ───────────────────────────────────────────
+- mac: F4:2D:C9:6D:B2:58
+  id: ''
+  chip: esp32
+  role: test-receiver
+  notes: |
+    Classic ESP32 used as the bulb-sender RX-validation receiver
+    (see rx_check entries above). Runs `tx_test_recv` firmware.
+- mac: null
+  id: 'unknown-classic-1110'
+  chip: esp32
+  role: unknown
+  notes: |
+    Classic ESP32 on /dev/cu.usbserial-1110 — failed esptool sync; likely
+    running active firmware. Capture MAC manually with BOOT-button reset.
+- mac: null
+  id: 'unknown-classic-1120'
+  chip: esp32
+  role: unknown
+  notes: |
+    Classic ESP32 on /dev/cu.usbserial-1120 — failed esptool sync; likely
+    running active firmware. Capture MAC manually with BOOT-button reset.

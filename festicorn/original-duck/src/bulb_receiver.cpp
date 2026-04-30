@@ -735,7 +735,10 @@ static void renderSparkleBurst(float dt, float angleDeg, float tiltBlend,
 // ── Fire render (shared by fire_meld and fire_flicker) ───────────
 
 static void renderFire(float dt, bool withDropout, float tiltBlend) {
-    fireTime += dt;
+    // Wrap at 1000·2π so float32 precision never collapses dt into a no-op
+    // (would freeze flicker after ~1 day if user sat on fire algorithm).
+    // t feeds only fastSin(); phase jump at wrap is invisible in chaotic noise.
+    fireTime = fmodf(fireTime + dt, 6283.1853f);
     float t = fireTime;
 
     bool isSilent = energy < 0.001f;

@@ -534,7 +534,10 @@ static void wavePulseProcessMotion(uint32_t now, float angleDeg) {
 }
 
 static void renderWavePulse(float dt) {
-    wpTime += dt;
+    // Wrap at 1000·2π so float32 precision never collapses dt into a no-op
+    // (would freeze noise after ~1 day if user sat on this algorithm).
+    // t feeds only fastSin(); phase jump at wrap is invisible.
+    wpTime = fmodf(wpTime + dt, 6283.1853f);
     float t = wpTime;
 
     float boostDecay = expf(-dt / WP_BOOST_TC);

@@ -446,7 +446,10 @@ static void renderQuietBloom(float dt, uint32_t now) {
 // Audio inputs (energy/onset) replaced with fixed autonomous values:
 //   fireBaseBrightness held at 0.5 (mid-flame); speed slider drives flicker tempo.
 static void renderFire(float dt) {
-    fireTime += dt * state.speed;
+    // Wrap at 1000·2π so float32 precision never collapses dt into a no-op
+    // (would freeze flicker after ~1–3 days). t feeds only fastSin(); phase
+    // jump at wrap is invisible in chaotic noise.
+    fireTime = fmodf(fireTime + dt * state.speed, 6283.1853f);
     float t = fireTime;
 
     float base = fireBaseBrightness;
@@ -520,7 +523,8 @@ static void renderFire(float dt) {
 // Onset detection replaced by a timer-based spawn modulated by a slow sine so
 // arrivals feel uneven. Speed slider scales spawn rate and wind speed.
 static void renderLeafWind(float dt) {
-    lwTime += dt;
+    // Same float32-precision guard as fire; t only feeds fastSin().
+    lwTime = fmodf(lwTime + dt, 6283.1853f);
     float t = lwTime;
 
     // --- Autonomous spawn ---

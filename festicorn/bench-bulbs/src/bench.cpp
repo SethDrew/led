@@ -1103,7 +1103,10 @@ static void bioWavePulseProcessMotion(uint32_t now, float angleDeg) {
 }
 
 static void bioRenderWavePulse(float dt) {
-    bioWpTime += dt;
+    // Wrap at 1000·2π so float32 precision never collapses dt into a no-op
+    // (would freeze noise after ~1 day). t feeds only fastSin(); phase jump
+    // at wrap is invisible in chaotic noise.
+    bioWpTime = fmodf(bioWpTime + dt, 6283.1853f);
     float t = bioWpTime;
 
     float boostDecay = expf(-dt / BIO_WP_BOOST_TC);

@@ -297,7 +297,7 @@ entries:
     severity: medium
     scope: electrical
     source:
-      - festicorn/rgbw-bulbs-standalone/
+      - festicorn/budget-skylight/
     tags: [esp32, esp32-d0wd-v3, ch340, cp2102, usb, power, sequencing, enumeration, constraint, deployment]
     relates_to: [nano-5v-power-required, esp32-hardware-selection-rationale]
     notes: >
@@ -309,7 +309,7 @@ entries:
       edge — the pull-up was already there before VBUS rose, so no
       enumeration event fires.
 
-      Diagnosed 2026-04-23 on the rgbw-bulbs-standalone install
+      Diagnosed 2026-04-23 on the budget-skylight install (then named rgbw-bulbs-standalone)
       (ESP32-D0WD-V3, 100 SK6812 RGBW). Confirmed by test: plugging USB
       first kept the port visible after external power came on, ruling out
       VBUS backfeed and ground-offset hypotheses. A forward diode on the

@@ -161,7 +161,7 @@ The original A/B test showed W-alone is sufficient for warm white fades — mult
 |------|------|
 | `festicorn/lib/delta_sigma/delta_sigma.h` | Shared delta-sigma function |
 | `festicorn/original-duck/src/gyro_mic_fade.cpp` | Standalone gyro+mic with full pipeline |
-| `festicorn/rgbw-bulbs-standalone/src/bloom_standalone.cpp` | Bloom/fire/leaf-wind/crawler effects with full pipeline |
+| `festicorn/budget-skylight/src/bloom_standalone.cpp` | Bloom/fire/leaf-wind/crawler effects with full pipeline |
 
 ## Ledger references
 

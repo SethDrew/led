@@ -6,7 +6,7 @@ Umbrella project for all LED installation firmware. Each installation is a separ
 - **original-duck/** — v0.1 deployable installation: handheld mic+gyro sender (outlier SDA=20/SCL=21 pinout) paired with an SK6812 RGBW receiver. Frozen, in the field.
 - **gyro-sense/** — v1 IMU telemetry project: 16-byte gyro-only sender (canonical SDA=8/SCL=7), fleet registry, LittleFS recorder, ESP-NOW streaming pipeline, dataset captures, and the analysis that derived the v1 wire schema.
 - **biolum/** — v1 production receiver. Bioluminescence installation: 6 strips × 100 LEDs (or RGBW variant) on classic ESP32. Pairs with `gyro-sense/`'s sender.cpp; renders quiet_bloom and tap-driven wave_pulse.
-- **rgbw-bulbs-standalone/** — autonomous SK6812 RGBW bloom on classic ESP32 (no sender, WiFi+OTA, web UI). Independent of the duck/bulbs ecosystems.
+- **budget-skylight/** — autonomous SK6812 RGBW bloom on classic ESP32 (no sender, WiFi+OTA, web UI). Independent of the duck/bulbs ecosystems.
 - **stick/** — Dual-strip diffuser stick. Streams audio-reactive frames over serial from a host.
 
 ## Shared Libraries
@@ -32,6 +32,6 @@ cd festicorn/butterfly && pio run -e butterfly
 cd festicorn/original-duck && pio run -e receiver
 cd festicorn/gyro-sense && pio run -e sender
 cd festicorn/biolum && pio run
-cd festicorn/rgbw-bulbs-standalone && pio run
+cd festicorn/budget-skylight && pio run
 cd festicorn/stick && pio run
 ```

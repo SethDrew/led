@@ -1,5 +1,5 @@
 /*
- * RGBW BULBS STANDALONE — classic ESP32, 1 SK6812 RGBW strip, 2 colonies
+ * BUDGET SKYLIGHT — classic ESP32, 1 SK6812 RGBW strip, 2 colonies
  *
  * Autonomous port of festicorn/biolum/src/bloom_rgbw.cpp. No ESP-NOW receiver;
  * runs the breath cycle purely from internal state. WiFi station mode + ArduinoOTA
@@ -40,7 +40,7 @@ static const uint16_t LEDS_PER_COLONY    = TOTAL_LEDS / COLONIES_PER_STRIP;
 // ── WiFi / OTA ──────────────────────────────────────────────────
 static const char *WIFI_SSID = "cuteplant";
 static const char *WIFI_PASS = "bigboiredwood";
-static const char *OTA_HOSTNAME = "rgbw-bulbs";
+static const char *OTA_HOSTNAME = "budget-skylight";
 
 // ── Bloom parameters ────────────────────────────────────────────
 #define BLOOM_BRIGHTNESS_CAP_C0  0.10f   // first 75 LEDs
@@ -768,7 +768,7 @@ void setup() {
     Serial.begin(115200);
     delay(300);
     Serial.println();
-    Serial.printf("rgbw-bulbs-standalone — 1 strip × %u LEDs on GPIO %u (2 colonies)\n",
+    Serial.printf("budget-skylight — 1 strip × %u LEDs on GPIO %u (2 colonies)\n",
                   TOTAL_LEDS, LED_PIN);
     // Reset reason: 1=POWERON 3=SW 4=OWDT 5=DEEPSLEEP 6=SDIO 7=TG0WDT 8=TG1WDT
     // 9=RTCWDT_SYS 14=BROWNOUT 15=SDIO — 14 = PSU dipped under BOD threshold.

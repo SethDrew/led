@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Capture LED frame data from the RGBW bulbs device and render ledogram snapshots.
+Capture LED frame data from the budget-skylight device and render ledogram snapshots.
 
 Usage:
     python3 capture_snapshots.py --ip 192.168.4.25 --effect bloom --seconds 5
@@ -99,7 +99,7 @@ def render_snapshot(frames: np.ndarray, fps: float, out_path: Path) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Capture LED snapshots from RGBW bulbs device')
+    parser = argparse.ArgumentParser(description='Capture LED snapshots from budget-skylight device')
     parser.add_argument('--ip',      default='192.168.4.25', help='Device IP')
     parser.add_argument('--effect',  choices=EFFECTS,        help='Single effect to capture')
     parser.add_argument('--all',     action='store_true',    help='Capture all effects')

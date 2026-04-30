@@ -1,4 +1,4 @@
-"""Smoke test for rgbw-bulbs-standalone web UI at http://192.168.4.25
+"""Smoke test for budget-skylight web UI at http://192.168.4.25
 
 macOS TCC / Local Network note
 -------------------------------

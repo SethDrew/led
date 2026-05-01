@@ -6,37 +6,72 @@ schema_version: 2
 # Multi-role: each board's `role` selects firmware via `firmware_by_role` below.
 # `festicorn/gyro-sense/tools/register.py` upserts bulb-senders into this file
 # after flashing the v1 telemetry firmware. Other roles are registered manually.
+#
+# Deployment modes:
+#   static  — `source` pins one firmware. Board is dedicated; flashing always
+#             builds the same code. Use the `notes` to describe behavior.
+#   dynamic — `source: null`. Board is a hardware fixture (breadboard, dev
+#             rig) hosting whatever experiment is current. Catalog describes
+#             the wiring + hazards, NOT the firmware. Per-board notes may
+#             record what's currently flashed for traceability, but it is
+#             not authoritative — read the board to know.
 
 firmware_by_role:
   bulb-sender:
+    deployment: static
     source: festicorn/gyro-sense/src/sender.cpp
     packet_format: v1-telemetry-16B
     ranges:
       accel_g: 4
       gyro_dps: 1000
   duck-sender:
+    deployment: static
     source: festicorn/original-duck/src/sender.cpp
     packet_format: v0.1-mic-gyro
     notes: |
       Outlier wiring (SDA=20, SCL=21). INMP441 mic + MPU-6050 IMU.
       Festival v0.1 deploy. Pairs with rgbw-receiver.
   rgbw-receiver:
+    deployment: static
     source: festicorn/original-duck/src/bulb_receiver.cpp
     packet_format: v0.1-receiver
     notes: |
-      50× SK6812 RGBW on GPIO 10. Pairs with duck-sender.
+      50× SK6812 RGBW bullet nodes (12mm, 3000K W, IP68, 3-pin green wire,
+      DC5V) on GPIO 10. Wire order: GRBW (NEO_GRBW). Pairs with duck-sender.
+      NB: bullet-node order GRBW differs from the take-root flex strips,
+      which are RGBW — same chip, different product, different byte order.
   test-receiver:
+    deployment: static
     source: null
     packet_format: tx_test_recv
     notes: |
       Classic-ESP32 fixture used during bulb-sender RX validation.
   bench-tree:
+    deployment: static
     source: festicorn/bench-tree/src/main.cpp
     packet_format: standalone
     notes: |
       Standalone sap-flow animation on a 3-strip 197-LED tree topology
       (pins 27/13/14 via build flags). No network. Sap-flow particle
       effect lives at festicorn/bench-tree/src/foregrounds/SapFlowForeground.h.
+  take-root:
+    deployment: dynamic
+    source: null
+    packet_format: standalone
+    hardware:
+      chip: esp32-d0wd-v3 (HW-394 / DevKit V1, 30-pin clone, CH340)
+      strips: 3× SK6812 RGBW flex strip — wire order RGBW (NEO_RGBW)
+      pins: GPIO 13 / 12 / 25 (strip 1 / 2 / 3 data)
+      level_shifter: 74HCT245 (HCT only — never HC)
+      power: 5 V buck rail shared with strips
+      hazards: |
+        GPIO 12 is the MTDI flash-voltage strapping pin. Must read LOW at
+        boot. Safe pattern: 74HCT245 input is high-Z so ESP32 internal
+        pull-down wins; NeoPixel begin() configures OUTPUT after strapping
+        latches. Never INPUT_PULLUP on GPIO 12; never drive HIGH pre-boot.
+    notes: |
+      Bring-up + experimentation breadboard. Not pinned to one firmware —
+      reflash freely. Per-board `last_flashed` may record current state.
 
 boards:
 
@@ -213,6 +248,16 @@ boards:
   notes: |
     Classic ESP32-D0WD-V3 driving the standalone bench-tree sap-flow
     animation. 3 strips: pins 27/13/14 (build flags), 197 LEDs total.
+
+# ── take-root (hardware bring-up breadboard) ─────────────────────────
+- mac: B0:CB:D8:8A:85:F4
+  id: 'take-root'
+  chip: esp32-d0wd-v3
+  role: take-root
+  notes: |
+    See firmware_by_role.take-root for hardware spec. Currently on
+    /dev/cu.usbserial-8 (CH340 enumerates differently each plug — verify
+    with esptool chip_id if uncertain).
 
 # ── classic-ESP32 fixtures ───────────────────────────────────────────
 - mac: F4:2D:C9:6D:B2:58

@@ -151,7 +151,7 @@
 #define FADEOUT_WINDOW_MS     4000
 #define FADEOUT_FLOOR         0.05f
 
-// ── Wi-Fi channel discovery (matches bench-bulbs + v1 sender) ────
+// ── Wi-Fi channel discovery (matches bench-bulbs sender) ─────────
 // Lock radio to whatever channel SSID `cuteplant` advertises on, with a
 // 5-min rescan to heal AP channel drift. No AP join — ESP-NOW only.
 #define CHANNEL_FALLBACK   1
@@ -183,10 +183,6 @@ static void applyChannel(uint8_t ch) {
     currentChannel = ch;
 }
 
-// LEGACY: 15-byte v0.1 SensorPacket. Will go silent the moment a v1 sender
-// (festicorn/sender_rnd) is flashed nearby, since v1 packets are 16 B and
-// onReceive's len-check will reject them. Kept here for the held-duck
-// firmware that still uses audio RMS + shake-toggle.
 struct __attribute__((packed)) SensorPacket {
     int16_t ax, ay, az;     // 6 bytes: raw accelerometer (±2g, 16384 = 1g)
     int16_t gx, gy, gz;     // 6 bytes: raw gyroscope (±250°/s, /131 = deg/s)
@@ -1206,7 +1202,17 @@ void loop() {
             (float)oklchVarL[hueIdx][1] * idleLin * 256.0f, 0, 65535);
         uint16_t idleB16 = (uint16_t)clampf(
             (float)oklchVarL[hueIdx][2] * idleLin * 256.0f, 0, 65535);
-        uint16_t idleW16 = 0;  // RGB-only rainbow
+        // W ramps up only across the yellow region of the hue wheel
+        // (idx 40..80, peak at 60) using a raised-cosine bump. Adds a warm
+        // "white stop" in the rainbow without washing other hues.
+        // Amplitude tracks idleLin so brightness stays in lockstep with RGB.
+        float wBump = 0.0f;
+        if (hueIdx >= 40 && hueIdx <= 80) {
+            float t = ((float)hueIdx - 60.0f) / 20.0f;  // -1..+1 across window
+            wBump = 0.5f * (1.0f + cosf((float)M_PI * t));
+        }
+        uint16_t idleW16 = (uint16_t)clampf(
+            wBump * 255.0f * idleLin * 256.0f, 0, 65535);
 
         // No per-channel min-floor clamp: at PEAK=0.15 most LUT-derived
         // channels are < 512, so clamping UP would equalize all nonzero
@@ -1218,10 +1224,13 @@ void loop() {
             uint16_t r16 = (uint16_t)((float)idleR16 * m);
             uint16_t g16 = (uint16_t)((float)idleG16 * m);
             uint16_t b16 = (uint16_t)((float)idleB16 * m);
+            uint16_t w16 = (uint16_t)((float)idleW16 * m);
+            // No sub-LSB gate: accept low-brightness flicker as the
+            // baseline; user prefers it over the channel-dropout look.
             uint8_t r = deltaSigma(dsR[i], r16);
             uint8_t g = deltaSigma(dsG[i], g16);
             uint8_t b = deltaSigma(dsB[i], b16);
-            uint8_t w = deltaSigma(dsW[i], idleW16);
+            uint8_t w = deltaSigma(dsW[i], w16);
             strip.setPixelColor(i, r, g, b, w);
         }
         strip.show();

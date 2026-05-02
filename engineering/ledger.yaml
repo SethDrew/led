@@ -1078,3 +1078,52 @@ entries:
       ±3.98 g at the new range; severe-tap saturation events are
       preserved via flags byte's accel-clip count, not via int8 value.
 
+  - id: mpu6050-wom-hpf-reserved-value
+    date: 2026-05-01
+    touched: 2026-05-01
+    title: MPU-6050 wake-on-motion requires HPF=0x01, not 0x05
+    summary: >
+      MPU-6050 ACCEL_CONFIG bits [2:0] select the accelerometer high-pass
+      filter cutoff. Value 0x01 = 5 Hz; value 0x05 is reserved/undefined per
+      the InvenSense datasheet. Writing 0x05 silently fails to engage the
+      HPF, so the motion-detection path never sees AC-coupled accel data
+      and INT_STATUS bit 0x40 (MOT_INT) does not trigger on shake.
+    status: resolved
+    severity: high
+    scope: hardware
+    source: []
+    tags: [mpu6050, imu, wake-on-motion, interrupt, register, datasheet, gotcha]
+    relates_to: []
+    notes: >
+      Working WOM register sequence (verified by polling INT_STATUS while
+      shaking the IMU):
+
+        PWR_MGMT_1 (0x6B)       = 0x00   wake
+        SIGNAL_PATH_RESET(0x68) = 0x07   reset accel/gyro/temp paths
+        CONFIG (0x1A)           = 0x00   DLPF off
+        ACCEL_CONFIG (0x1C)     = 0x01   FS=±2g, HPF=5 Hz (THE FIX — was 0x05)
+        INT_PIN_CFG (0x37)      = 0x20   LATCH_INT_EN
+        INT_ENABLE (0x38)       = 0x40   MOT_EN
+        MOT_THR (0x1F)          = N      threshold (5 ≈ 160 mg)
+        MOT_DUR (0x20)          = 1      1 ms above threshold
+        MOT_DETECT_CTRL (0x69)  = 0x15   1 ms motion counter (REQUIRED — easy
+                                         to omit; without it the latch fires
+                                         unreliably even with HPF correct)
+        delay 200 ms                     let HPF settle around current
+                                         orientation before HOLD
+        ACCEL_CONFIG (0x1C)     = 0x07   HPF=Hold (freeze reference)
+        PWR_MGMT_2 (0x6C)       = 0xC7   gyro standby + LP_WAKE=11 (40 Hz)
+        PWR_MGMT_1 (0x6B)       = 0x20   CYCLE=1
+
+      On wake: read INT_STATUS (0x3A) once to clear the latch. To return
+      the IMU to normal sampling mode, also clear PWR_MGMT_2 = 0x00 — a
+      bare PWR_MGMT_1 wake-write does NOT re-enable gyro axes that were
+      placed in standby, and the gyro will read zero indefinitely.
+
+      The 0x05 vs 0x01 typo is a plausible misreading of the datasheet
+      table where the HPF column lists "5 Hz" — easy to assume the bit
+      pattern is the decimal 5. It isn't. This bites any LLM-assisted
+      register configuration based on memory rather than direct datasheet
+      lookup, and cost multiple debug sessions before being isolated by a
+      standalone polling fixture (no sleep, no GPIO routing — just
+      register write + INT_STATUS poll).

@@ -1,9 +1,10 @@
 /*
  * SENDER — ESP32-C3 handheld sensor pipe (goes inside the duck)
  *
- * Reads MPU-6050 (I2C) + INMP441 (I2S), streams raw sensor data
- * to receiver via ESP-NOW at 25 Hz. No calibration, no color logic —
- * all interpretation lives on the receiver.
+ * Dumb pipe: reads MPU-6050 (I2C) + INMP441 (I2S), broadcasts a 15-byte
+ * SensorPacket via ESP-NOW at 25 Hz. Always transmits — engage/disengage
+ * lives on the receiver. Only sender-local UI gesture is shake-to-toggle
+ * the mic-enabled flag (rawRms zeroed at TX when disabled).
  *
  * Wiring:
  *   GPIO 21 → SCL (MPU-6050)
@@ -22,12 +23,12 @@
 #include <math.h>
 
 // ── Pin assignments ──────────────────────────────────────────────
-#define SDA_PIN    20
-#define SCL_PIN    21
-#define I2S_SCK    6
-#define I2S_WS     5
-#define I2S_SD     0
-#define MPU_ADDR   0x68
+#define SDA_PIN     20
+#define SCL_PIN     21
+#define I2S_SCK     6
+#define I2S_WS      5
+#define I2S_SD      0
+#define MPU_ADDR    0x68
 
 // ── I2S config ───────────────────────────────────────────────────
 #define I2S_PORT      I2S_NUM_0
@@ -36,17 +37,14 @@
 #define DMA_BUF_COUNT 4
 
 // ── Timing ───────────────────────────────────────────────────────
-#define SENSOR_HZ     25.0f
-#define SENSOR_MS     40
+#define SENSOR_MS     40   // 25 Hz
 
 // ── ESP-NOW ──────────────────────────────────────────────────────
 static uint8_t broadcastAddr[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-// ── Wi-Fi channel discovery (matches bench-bulbs receiver + v1 sender) ──
+// ── Wi-Fi channel discovery ──────────────────────────────────────
 // Receiver locks its radio to whatever channel SSID `cuteplant` advertises
 // on. Sender does the same scan so both ends agree without configuration.
-// Senders that skip this end up stuck on the radio's default channel and
-// never reach a receiver that's locked elsewhere.
 #define CHANNEL_FALLBACK   1
 #define CHANNEL_RESCAN_MS  (5UL * 60UL * 1000UL)
 static const char* WIFI_SSID_TARGET = "cuteplant";
@@ -79,13 +77,13 @@ static void applyChannel(uint8_t ch) {
 struct __attribute__((packed)) SensorPacket {
     int16_t ax, ay, az;     // 6 bytes: raw accelerometer (±2g, 16384 = 1g)
     int16_t gx, gy, gz;     // 6 bytes: raw gyroscope (±250°/s, /131 = deg/s)
-    uint16_t rawRms;        // 2 bytes: raw audio RMS
+    uint16_t rawRms;        // 2 bytes: raw audio RMS (0 when micEnabled=0)
     uint8_t micEnabled;     // 1 byte: shake toggle state
 };                          // 15 bytes total
 
 // ── Global state ─────────────────────────────────────────────────
 
-// Shake detection
+// Shake detection (sender-local UI gesture: 3 reversals in 800 ms toggles mic)
 static bool micEnabled = true;
 static float gravityEma = 16384.0f;
 static int8_t lastShakeSign = 0;
@@ -109,11 +107,6 @@ static uint32_t frameCount = 0;
 
 static inline float vecLen(float x, float y, float z) {
     return sqrtf(x*x + y*y + z*z);
-}
-
-static void vecNormalize(float &x, float &y, float &z) {
-    float len = vecLen(x, y, z);
-    if (len > 0) { x /= len; y /= len; z /= len; }
 }
 
 // ── I2S setup ────────────────────────────────────────────────────
@@ -206,8 +199,6 @@ void setup() {
     peer.channel = 0;
     peer.encrypt = false;
     esp_now_add_peer(&peer);
-    Serial.printf("ESP-NOW ready ch=%u MAC=%s\n",
-        currentChannel, WiFi.macAddress().c_str());
 
     // ── Sensors (I2S before I2C — known ESP32-C3 bus conflict) ────
     setupI2S();
@@ -215,30 +206,76 @@ void setup() {
     Wire.begin(SDA_PIN, SCL_PIN);
     Wire.setClock(400000);
 
-    // Wake MPU-6050
-    Wire.beginTransmission(MPU_ADDR);
-    Wire.write(0x6B);
-    Wire.write(0x00);
-    Wire.endTransmission(true);
-    delay(100);
+    // Wake MPU-6050 — retry, since a prior session may have left it in
+    // CYCLE mode (low-power wake @5Hz), so most I2C transactions miss the
+    // wake window. Pulse the wake write every 50ms for up to 2s until a
+    // WHO_AM_I read returns a valid ID.
+    for (int attempt = 0; attempt < 40; attempt++) {
+        Wire.beginTransmission(MPU_ADDR);
+        Wire.write(0x6B);
+        Wire.write(0x00);
+        Wire.endTransmission(true);
+        delay(50);
+        Wire.beginTransmission(MPU_ADDR);
+        Wire.write(0x75);  // WHO_AM_I
+        if (Wire.endTransmission(false) == 0) {
+            Wire.requestFrom(MPU_ADDR, (uint8_t)1);
+            if (Wire.available()) {
+                uint8_t v = Wire.read();
+                if (v == 0x68 || v == 0x71) {
+                    Serial.printf("MPU awake after %d attempts (WHO=0x%02x)\n",
+                                  attempt + 1, v);
+                    break;
+                }
+            }
+        }
+    }
 
-    // Enable DLPF (accel 44 Hz, gyro 42 Hz)
+    // Full register restore. A previous session may have left the MPU in
+    // WOM-cycle mode with PWR_MGMT_2=0xC7 (gyro standby + LP_WAKE), and
+    // the wake-write above only clears PWR_MGMT_1 — gyro stays standby
+    // and reads zero unless we explicitly clear PWR_MGMT_2.
+    Wire.beginTransmission(MPU_ADDR);
+    Wire.write(0x6C);
+    Wire.write(0x00);                  // PWR_MGMT_2: all axes on, no cycle
+    Wire.endTransmission(true);
     Wire.beginTransmission(MPU_ADDR);
     Wire.write(0x1A);
-    Wire.write(0x03);
+    Wire.write(0x03);                  // CONFIG: DLPF (accel 44Hz, gyro 42Hz)
+    Wire.endTransmission(true);
+    Wire.beginTransmission(MPU_ADDR);
+    Wire.write(0x1B);
+    Wire.write(0x00);                  // GYRO_CONFIG: ±250°/s
+    Wire.endTransmission(true);
+    Wire.beginTransmission(MPU_ADDR);
+    Wire.write(0x1C);
+    Wire.write(0x00);                  // ACCEL_CONFIG: ±2g, no HPF
     Wire.endTransmission(true);
 
-    // Seed first IMU reading
-    readIMU();
-
-    Serial.println("Sending (raw accel+gyro)!");
+    Serial.printf("ESP-NOW ready ch=%u\n", currentChannel);
+    Serial.printf("[BOOT] role=duck MAC=%s fw=sender\n",
+                  WiFi.macAddress().c_str());
     lastSensorMs = millis();
+}
+
+// ── Serial query: '?' re-prints the boot banner so a tailer attached
+// mid-run can identify which board it's looking at without resetting it.
+static void handleSerialQuery() {
+    while (Serial.available()) {
+        char c = Serial.read();
+        if (c == '?') {
+            Serial.printf("[BOOT] role=duck MAC=%s fw=sender mic=%d\n",
+                WiFi.macAddress().c_str(), micEnabled ? 1 : 0);
+        }
+    }
 }
 
 // ── Main loop ────────────────────────────────────────────────────
 
 void loop() {
     uint32_t now = millis();
+
+    handleSerialQuery();
 
     // Periodic SSID rescan — heals if the AP moves channel.
     if (now - lastScanMs > CHANNEL_RESCAN_MS) {
@@ -256,7 +293,7 @@ void loop() {
     readIMU();
     uint16_t rms = readAudioRMS();
 
-    // ── Shake detection ──────────────────────────────────────────
+    // ── Shake detection (toggles mic) ────────────────────────────
     float rawMag = vecLen((float)imuAx, (float)imuAy, (float)imuAz);
     gravityEma += 0.01f * (rawMag - gravityEma);
     float dynamic = rawMag - gravityEma;
@@ -273,6 +310,7 @@ void loop() {
                     shakeCooldownUntil = now + SHAKE_COOLDOWN_MS;
                     reversalCount = 0;
                     lastShakeSign = 0;
+                    Serial.printf("[shake] mic=%d\n", micEnabled ? 1 : 0);
                 }
             }
             lastShakeSign = sign;
@@ -283,7 +321,7 @@ void loop() {
         lastShakeSign = 0;
     }
 
-    // ── Send packet (raw sensor data, no processing) ───────────
+    // ── Send packet — always ─────────────────────────────────────
     SensorPacket pkt;
     pkt.ax = imuAx;
     pkt.ay = imuAy;
@@ -293,14 +331,13 @@ void loop() {
     pkt.gz = imuGz;
     pkt.rawRms = micEnabled ? rms : 0;
     pkt.micEnabled = micEnabled ? 1 : 0;
-
     esp_now_send(broadcastAddr, (uint8_t*)&pkt, sizeof(pkt));
 
-    // ── Debug output ─────────────────────────────────────────────
+    // ── Debug output (1 Hz) ──────────────────────────────────────
     frameCount++;
     if (frameCount % 25 == 0) {
         float gyroMag = vecLen((float)imuGx, (float)imuGy, (float)imuGz) / 131.0f;
-        Serial.printf("a=%6d,%6d,%6d  g=%.1f°/s  rms=%5d  mic=%s\n",
-            imuAx, imuAy, imuAz, gyroMag, rms, micEnabled ? "on" : "off");
+        Serial.printf("a=%6d,%6d,%6d  g=%.1f°/s  rms=%5d  mic=%d\n",
+            imuAx, imuAy, imuAz, gyroMag, rms, micEnabled ? 1 : 0);
     }
 }

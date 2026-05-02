@@ -44,6 +44,7 @@
 // ── Rendering ────────────────────────────────────────────────────
 #define GAMMA 2.4f
 #define BRIGHTNESS_CAP 0.10f
+#define SPARKLE_BRIGHTNESS_CAP 0.05f  // sparkle-only; fires keep BRIGHTNESS_CAP
 #define PURE_W_CEIL    0.10f  // below this: pure W, no RGB dies
 #define PURE_W_BLEND   0.15f  // blend range above CEIL to full RGB
 
@@ -77,7 +78,7 @@
 #define FIRE_DROPOUT_DEPTH  0.85f  // fire_flicker only
 
 // ── Quiet bloom parameters ───────────────────────────────────────
-#define BLOOM_BRIGHTNESS_CAP   0.70f
+#define BLOOM_BRIGHTNESS_CAP   0.25f
 #define BLOOM_NOISE_GATE       256    // per-channel: snap to 0 below 1 LSB in 8.8
 
 // Movement processing
@@ -116,6 +117,39 @@
 
 // ── ESP-NOW ──────────────────────────────────────────────────────
 #define TIMEOUT_MS     500
+
+// ── Idle fade (no-sender white breathing) ────────────────────────
+// `connected` (TIMEOUT_MS=500) gates audio/motion processing — short so we
+// don't render stale data. `idleVisualActive` uses a longer grace so a brief
+// Wi-Fi flake doesn't drop the duck into idle on screen.
+#define IDLE_GRACE_MS   2000
+#define IDLE_PERIOD_S   30.0f
+
+// ── Engage/disengage (orientation-driven, runs on receiver) ──────
+// Sender is now a dumb pipe — always TX. Receiver decides engaged vs idle
+// from gravity dot product against the calibrated upright rest vector.
+// dot ≈ +1 = upright (idle), dot ≈ -1 = inverted (engaged).
+// Asymmetric debounce: snap engage on inversion, slow disengage so a
+// brief peek upright doesn't kick out of an active session.
+#define ENGAGE_DOT_THRESH    -0.6f
+#define DISENGAGE_DOT_THRESH +0.6f
+#define ENGAGE_HOLD_MS       300
+#define DISENGAGE_HOLD_MS    10000
+// Pre-gamma idle envelope. At PEAK=0.15 idleLin≈0.0072, blue B16 (B≈200)
+// ~370 — borderline gate-clear, dithers value 1↔2. At FLOOR=0.07 idleLin≈
+// 0.0012, RGB gates to 0; W still ~309 (value 1↔2). Idle fades through pure-
+// W at floor, color appears near peak — matches "slow white fade" intent.
+#define IDLE_PEAK       0.15f
+
+// ── Disengage spatial fadeout (sparkle only) ─────────────────────
+// During the 10s DISENGAGE_HOLD_MS, each LED ramps 1→FADEOUT_FLOOR over its
+// own FADEOUT_WINDOW_MS slice; start times are linearly spaced 0..(HOLD-
+// WINDOW) in shuffled order so one LED starts dimming every ~120ms. On re-
+// engage mid-fade, the same stagger plays in reverse: the LED that started
+// fading last is the first to come back, each ramping from its current
+// dimmed value back to 1.0 over FADEOUT_WINDOW_MS.
+#define FADEOUT_WINDOW_MS     4000
+#define FADEOUT_FLOOR         0.05f
 
 // ── Wi-Fi channel discovery (matches bench-bulbs + v1 sender) ────
 // Lock radio to whatever channel SSID `cuteplant` advertises on, with a
@@ -233,6 +267,38 @@ static uint32_t bloomPrevPktCount = 0;
 // Simple PRNG state (xorshift32, seeded from esp_random at boot)
 static uint32_t prngState;
 
+// Engage state (boot: disengaged — quiet idle until duck flipped upside down).
+static bool engaged = false;
+// Timestamp of the first packet that satisfied the OPPOSITE-state predicate;
+// used to enforce hold-time before flipping. 0 = no candidate transition.
+static uint32_t engageCandidateMs = 0;
+
+// Unified per-LED brightness envelope. Decoupled from algorithm selection:
+// algorithm flips instantly on engage edge, but `fadeoutMult[i]` ramps
+// smoothly between FADEOUT_FLOOR and 1.0. Direction is DOWN while in the
+// disengage hold (engaged && engageCandidateMs > 0); UP otherwise.
+// Stagger: fadeStartMs[i] ∈ [0, span] is the LED's offset into the active
+// direction window (DOWN uses fadeStartMs[i]; UP uses span - fadeStartMs[i]).
+// Each LED's ramp lasts FADEOUT_WINDOW_MS; total envelope traversal =
+// span + FADEOUT_WINDOW_MS = DISENGAGE_HOLD_MS.
+// On any direction flip we snapshot current values into envDirStartVal[i]
+// and reset envDirStartMs = now, so transitions are continuous from the
+// pixel's current brightness.
+static uint16_t fadeStartMs[LED_COUNT];
+static float fadeoutMult[LED_COUNT];
+static float envDirStartVal[LED_COUNT];
+static uint32_t envDirStartMs = 0;
+static bool envDirIsDown = false;
+
+// Hue offset captured at engage (rising edge of `engaged`). Sets the zero
+// point for orientation→hue mapping so the rainbow idle acts as a color
+// selector dial — whatever hue was showing at flip time becomes neutral.
+static uint8_t engageHueOffset = 0;
+static bool prevEngaged = false;
+// Live rainbow hue index, written by idle render every frame so the engage
+// edge can sample it. Updated even while engaged (idle keeps phasing).
+static uint8_t currentIdleHueIdx = 0;
+
 // ── ESP-NOW receive callback ─────────────────────────────────────
 
 void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
@@ -344,7 +410,6 @@ void setup() {
         sparkle[i] = 0.0f;
         decayRates[i] = 0.94f;
     }
-
     // Seed PRNG from hardware RNG
     prngState = esp_random();
     if (prngState == 0) prngState = 1;  // xorshift can't have 0 state
@@ -352,6 +417,33 @@ void setup() {
     // Pre-seed decay rates with some variation
     for (uint16_t i = 0; i < LED_COUNT; i++) {
         decayRates[i] = 0.92f + randFloat() * 0.05f;
+    }
+
+    // Shuffled linear stagger: assign evenly-spaced fade-start times across
+    // [0, DISENGAGE_HOLD_MS - FADEOUT_WINDOW_MS] in random LED order. One
+    // LED starts fading every ~120ms — steady stream, not a trickle then
+    // a rush.
+    {
+        uint16_t order[LED_COUNT];
+        for (uint16_t i = 0; i < LED_COUNT; i++) order[i] = i;
+        // Fisher-Yates shuffle
+        for (uint16_t i = LED_COUNT - 1; i > 0; i--) {
+            uint16_t j = (uint16_t)(randFloat() * (float)(i + 1));
+            if (j > i) j = i;
+            uint16_t tmp = order[i]; order[i] = order[j]; order[j] = tmp;
+        }
+        const uint32_t span = DISENGAGE_HOLD_MS - FADEOUT_WINDOW_MS;
+        for (uint16_t k = 0; k < LED_COUNT; k++) {
+            fadeStartMs[order[k]] = (uint16_t)((uint32_t)k * span / (LED_COUNT - 1));
+        }
+        // Boot: envelope at FLOOR everywhere, direction UP (disengaged →
+        // ramp up from dim over the next ~10s).
+        for (uint16_t i = 0; i < LED_COUNT; i++) {
+            fadeoutMult[i] = FADEOUT_FLOOR;
+            envDirStartVal[i] = FADEOUT_FLOOR;
+        }
+        envDirStartMs = millis();
+        envDirIsDown = false;
     }
 
     // Init bloom state (uses randFloat, so must be after PRNG seed)
@@ -386,7 +478,8 @@ void setup() {
         initResult, cbResult, currentChannel, WiFi.macAddress().c_str());
 
     Serial.println("Waiting for sender... (will auto-calibrate from first 2s of data)");
-    Serial.println("Commands: 'c' recal, 's' sparkle, 'm' fire_meld, 'f' fire_flicker, 'b' bloom");
+    Serial.println("Commands: 'c' recal, 's' sparkle, 'm' fire_meld, 'f' fire_flicker, 'b' bloom, '?' identify");
+    Serial.printf("[BOOT] role=bulbs MAC=%s fw=bulb_receiver\n", WiFi.macAddress().c_str());
 }
 
 // ── Calibration ──────────────────────────────────────────────────
@@ -672,6 +765,9 @@ static void renderSparkleBurst(float dt, float angleDeg, float tiltBlend,
     sparkPeakLin = 0.0f;
 
     // ── Per-LED color + brightness → RGBW output ─────────────────
+    // Brightness envelope (fadeoutMult) is updated centrally in the main
+    // loop and applied post-render via applyBrightnessEnvelope(); this
+    // function leaves it alone.
     for (uint16_t i = 0; i < LED_COUNT; i++) {
         float s = sparkle[i];
 
@@ -697,7 +793,7 @@ static void renderSparkleBurst(float dt, float angleDeg, float tiltBlend,
         // full at upright, fades with tilt so OKLCH color takes over. RGB
         // carries warm-amber tint on top. The pure-W-at-low-brightness
         // curve used by bloom/fire isn't needed here — W always loaded.
-        float linBright = fastGamma24(bright) * BRIGHTNESS_CAP;
+        float linBright = fastGamma24(bright) * SPARKLE_BRIGHTNESS_CAP;
         float colW = 255.0f * (1.0f - tiltBlend);
         float fR = colR * linBright;
         float fG = colG * linBright;
@@ -947,6 +1043,9 @@ void loop() {
             currentAlg = ALG_QUIET_BLOOM;
             resetBloomState();
             Serial.println("Algorithm: quiet_bloom");
+        } else if (c == '?') {
+            Serial.printf("[BOOT] role=bulbs MAC=%s fw=bulb_receiver ch=%u\n",
+                WiFi.macAddress().c_str(), currentChannel);
         }
     }
 
@@ -966,12 +1065,79 @@ void loop() {
 
     // ── Compute tilt angle from rest ─────────────────────────────
     float angleDeg = 0;
+    float dot = restAx * ax + restAy * ay + restAz * az;  // -1=inverted, +1=upright
     if (calibrated && connected) {
-        float cosAngle = clampf(
-            restAx * ax + restAy * ay + restAz * az,
-            -1.0f, 1.0f
-        );
-        angleDeg = acosf(cosAngle) * (180.0f / M_PI);
+        angleDeg = acosf(clampf(dot, -1.0f, 1.0f)) * (180.0f / M_PI);
+    }
+
+    // ── Engage / disengage state machine ─────────────────────────
+    // Only run while we have fresh, calibrated packets — otherwise hold
+    // current state. The candidate timer arms when dot crosses into the
+    // opposite-state zone, and a flip happens once it's been there for
+    // long enough. Returning to the current-state zone resets the timer.
+    if (calibrated && connected) {
+        if (engaged) {
+            if (dot > DISENGAGE_DOT_THRESH) {
+                if (engageCandidateMs == 0) engageCandidateMs = now;
+                else if (now - engageCandidateMs >= DISENGAGE_HOLD_MS) {
+                    engaged = false;
+                    engageCandidateMs = 0;
+                }
+            } else {
+                engageCandidateMs = 0;
+            }
+        } else {
+            if (dot < ENGAGE_DOT_THRESH) {
+                if (engageCandidateMs == 0) engageCandidateMs = now;
+                else if (now - engageCandidateMs >= ENGAGE_HOLD_MS) {
+                    engaged = true;
+                    engageCandidateMs = 0;
+                }
+            } else {
+                engageCandidateMs = 0;
+            }
+        }
+    }
+
+    // ── Engage edge: capture rainbow hue ─────────────────────────
+    // Live idle hue runs even while engaged so it can be sampled on the
+    // rising edge as the zero-point for orientation→color mapping.
+    {
+        float liveIdlePhase = fmodf(now / 1000.0f / IDLE_PERIOD_S, 1.0f);
+        currentIdleHueIdx = (uint8_t)(liveIdlePhase * 256.0f) & 0xFF;
+    }
+    bool engagedRisingEdge = engaged && !prevEngaged;
+    if (engagedRisingEdge) {
+        engageHueOffset = currentIdleHueIdx;
+    }
+    prevEngaged = engaged;
+
+    // ── Unified brightness envelope ──────────────────────────────
+    // Direction is DOWN while disengage hold is armed, UP otherwise.
+    // On any direction change, snapshot current values and reset the
+    // direction clock so each LED's ramp continues smoothly from its
+    // current brightness through its own staggered window.
+    bool envWantDown = engaged && (engageCandidateMs > 0);
+    if (envWantDown != envDirIsDown) {
+        envDirIsDown = envWantDown;
+        envDirStartMs = now;
+        for (uint16_t i = 0; i < LED_COUNT; i++) envDirStartVal[i] = fadeoutMult[i];
+        Serial.printf("[ENV] dir flip: down=%d t=%u v[0]=%.3f v[25]=%.3f v[49]=%.3f\n",
+                      (int)envDirIsDown, envDirStartMs,
+                      envDirStartVal[0], envDirStartVal[25], envDirStartVal[LED_COUNT-1]);
+    }
+    {
+        const uint32_t span = DISENGAGE_HOLD_MS - FADEOUT_WINDOW_MS;
+        uint32_t elapsed = now - envDirStartMs;
+        float target = envDirIsDown ? FADEOUT_FLOOR : 1.0f;
+        for (uint16_t i = 0; i < LED_COUNT; i++) {
+            uint32_t offset = envDirIsDown
+                ? fadeStartMs[i]
+                : (span - fadeStartMs[i]);
+            int32_t windowMs = (int32_t)elapsed - (int32_t)offset;
+            float p = clampf((float)windowMs / (float)FADEOUT_WINDOW_MS, 0.0f, 1.0f);
+            fadeoutMult[i] = envDirStartVal[i] + p * (target - envDirStartVal[i]);
+        }
     }
 
     // ── Audio processing (sparkle/fire only) ───────────────────
@@ -1020,28 +1186,56 @@ void loop() {
         }
     }
 
-    // ── Timeout: breathing idle ──────────────────────────────────
-    if (!connected) {
-        float breath = (fastSin(now / 1000.0f * M_PI) + 1.0f) / 2.0f;
-        // Render breathing on pure warm white
-        uint16_t bW = (uint16_t)(fastGamma24(breath * 0.12f) * 65535.0f);
+    // ── Algorithm selection: instant cut on engage edge ─────────
+    // Disengaged → rainbow idle path (renders directly into the strip
+    // and returns). Engaged → run the selected effect algorithm. Both
+    // paths are then post-multiplied by the unified brightness envelope.
+    bool packetTimeout =
+        (lastPacketMs == 0) || (now - lastPacketMs > IDLE_GRACE_MS);
+    bool useRainbowIdle = !engaged || packetTimeout;
+
+    if (useRainbowIdle) {
+        // Rainbow idle: full-saturation hue at PEAK pre-gamma; the
+        // brightness envelope handles the dim-up/breath behavior.
+        float idlePhase = fmodf(now / 1000.0f / IDLE_PERIOD_S, 1.0f);
+        float idleLin = fastGamma24(IDLE_PEAK);
+        uint8_t hueIdx = (uint8_t)(idlePhase * 256.0f) & 0xFF;
+        uint16_t idleR16 = (uint16_t)clampf(
+            (float)oklchVarL[hueIdx][0] * idleLin * 256.0f, 0, 65535);
+        uint16_t idleG16 = (uint16_t)clampf(
+            (float)oklchVarL[hueIdx][1] * idleLin * 256.0f, 0, 65535);
+        uint16_t idleB16 = (uint16_t)clampf(
+            (float)oklchVarL[hueIdx][2] * idleLin * 256.0f, 0, 65535);
+        uint16_t idleW16 = 0;  // RGB-only rainbow
+
+        // No per-channel min-floor clamp: at PEAK=0.15 most LUT-derived
+        // channels are < 512, so clamping UP would equalize all nonzero
+        // channels and destroy the hue ratio (white mush). Delta-sigma
+        // dither handles sub-LSB values at high FPS; the envelope keeps
+        // brightness moving so channels don't dwell in the value=1 zone.
         for (uint16_t i = 0; i < LED_COUNT; i++) {
-            uint8_t w = deltaSigma(dsW[i], bW >> 8);
-            strip.setPixelColor(i, 0, 0, 0, w);
+            float m = fadeoutMult[i];
+            uint16_t r16 = (uint16_t)((float)idleR16 * m);
+            uint16_t g16 = (uint16_t)((float)idleG16 * m);
+            uint16_t b16 = (uint16_t)((float)idleB16 * m);
+            uint8_t r = deltaSigma(dsR[i], r16);
+            uint8_t g = deltaSigma(dsG[i], g16);
+            uint8_t b = deltaSigma(dsB[i], b16);
+            uint8_t w = deltaSigma(dsW[i], idleW16);
+            strip.setPixelColor(i, r, g, b, w);
         }
         strip.show();
-
         delay(1);
         return;
     }
 
-    // ── Tilt → OKLCH hue (shared by all algorithms) ─────────────
+    // ── Tilt → OKLCH hue (shared by all engaged algorithms) ─────
     float tiltR = 0, tiltG = 0, tiltB = 0;
     float tiltBlend = 0.0f;
     if (angleDeg > DEADZONE_DEG) {
         float hueFrac = (angleDeg - DEADZONE_DEG) / (MAX_ANGLE_DEG - DEADZONE_DEG);
         if (hueFrac > 1.0f) hueFrac = 1.0f;
-        uint8_t hueIdx = (uint8_t)(hueFrac * 255) % 256;
+        uint8_t hueIdx = (uint8_t)(((uint32_t)(hueFrac * 255) + engageHueOffset) & 0xFF);
         tiltR = (float)oklchVarL[hueIdx][0];
         tiltG = (float)oklchVarL[hueIdx][1];
         tiltB = (float)oklchVarL[hueIdx][2];
@@ -1049,7 +1243,7 @@ void loop() {
         if (tiltBlend > 1.0f) tiltBlend = 1.0f;
     }
 
-    // ── Render current algorithm ─────────────────────────────────
+    // ── Render engaged algorithm ────────────────────────────────
     switch (currentAlg) {
         case ALG_SPARKLE_BURST:
             renderSparkleBurst(dt, angleDeg, tiltBlend, tiltR, tiltG, tiltB);
@@ -1063,6 +1257,27 @@ void loop() {
         case ALG_QUIET_BLOOM:
             renderQuietBloom(dt, now);
             break;
+    }
+
+    // ── Apply unified brightness envelope to engaged-path output ─
+    // Engaged algorithms write 8-bit pixels into the strip; multiply each
+    // channel by fadeoutMult[i] in linear 8-bit space. (Idle path multiplies
+    // in 16-bit pre-dither above; this is post-render so 8-bit is what we
+    // have.) Ceiling: any LED at FLOOR=0.05 retains 5% of its rendered
+    // brightness — embers fade to dim, not off.
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        float m = fadeoutMult[i];
+        if (m >= 0.999f) continue;  // no scaling needed
+        uint32_t c = strip.getPixelColor(i);
+        uint8_t w = (c >> 24) & 0xFF;
+        uint8_t r = (c >> 16) & 0xFF;
+        uint8_t g = (c >>  8) & 0xFF;
+        uint8_t b =  c        & 0xFF;
+        r = (uint8_t)((float)r * m);
+        g = (uint8_t)((float)g * m);
+        b = (uint8_t)((float)b * m);
+        w = (uint8_t)((float)w * m);
+        strip.setPixelColor(i, r, g, b, w);
     }
 
     strip.show();

@@ -54,6 +54,9 @@ static NeoPixelBus<NeoGrbFeature,  NeoEsp32Rmt1Ws2812xMethod> stripBio (BIO_LED_
 #define CHANNEL_RESCAN_MS  (5UL * 60UL * 1000UL)
 static const char* WIFI_SSID_TARGET = "cuteplant";
 
+// ── CONTROL TEST: disable duck pipeline to isolate stutter source ──
+#define CONTROL_DISABLE_DUCK 0
+
 static uint8_t  currentChannel = CHANNEL_FALLBACK;
 static uint32_t lastScanMs     = 0;
 
@@ -994,7 +997,12 @@ static void bioBloomProcessMotion(uint32_t now) {
 #define BIO_WP_MAX_LEAVES       16
 #define BIO_WP_WIND_SPEED        6.0f
 #define BIO_WP_TURBULENCE        0.5f
-#define BIO_WP_DAMPING           0.92f
+// Velocity-smoothing time constant. Exposed as a τ so the math is dt-scaled:
+//   damp = exp(-dt/τ),  vel ← vel*damp + force*(1-damp)
+// τ ≈ 0.06 s reproduces the original per-frame factor of 0.92 at the 200 fps
+// idle rate; under load (50 fps) it now behaves the SAME, so pulses move
+// uniformly regardless of how many other leaves are alive.
+#define BIO_WP_DAMPING_TC        0.06f
 #define BIO_WP_BOOST_SPEED      28.0f
 #define BIO_WP_BOOST_TC          1.5f
 #define BIO_WP_LEAF_SIGMA        1.5f
@@ -1007,7 +1015,7 @@ static void bioBloomProcessMotion(uint32_t now) {
 #define BIO_WP_DEFAULT_G       200.0f
 #define BIO_WP_DEFAULT_B        80.0f
 #define BIO_WP_TAP_THRESH_G      0.50f
-#define BIO_WP_COOLDOWN_MS       120
+#define BIO_WP_COOLDOWN_MS        60
 
 struct BioWPLeaf {
     float pos;
@@ -1069,8 +1077,8 @@ static void bioWavePulseProcessMotion(uint32_t now, float angleDeg) {
 
     float overshoot = (peak_axis_ac_g - BIO_WP_TAP_THRESH_G) / 2.5f;
     float hitIntensity = clampf(overshoot, 0.0f, 1.0f);
-    int nLeaves = 1 + (int)(hitIntensity * 3.0f + 0.5f);
-    if (nLeaves > 4) nLeaves = 4;
+    int nLeaves = 1 + (int)(hitIntensity + 0.5f);  // hard taps spawn 2; soft taps spawn 1
+    if (nLeaves > 2) nLeaves = 2;
 
     float baseR, baseG, baseB;
     bioWpPickColor(angleDeg, baseR, baseG, baseB);
@@ -1110,7 +1118,12 @@ static void bioRenderWavePulse(float dt) {
     float t = bioWpTime;
 
     float boostDecay = expf(-dt / BIO_WP_BOOST_TC);
+    float dampDecay  = expf(-dt / BIO_WP_DAMPING_TC);
     float sigma_sq2  = 2.0f * BIO_WP_LEAF_SIGMA * BIO_WP_LEAF_SIGMA;
+    // Beyond ~5σ, the gaussian weight is < 4e-6 — invisible after gamma. Skip
+    // the expf in the per-LED inner loop for any leaf farther than this.
+    // Cuts 16-leaf full-pool render from ~3 ms to ~0.5 ms on C3.
+    const float gaussCutoff = 5.0f * BIO_WP_LEAF_SIGMA;
 
     // Step 1: advance every active leaf.
     for (uint8_t i = 0; i < BIO_WP_MAX_LEAVES; i++) {
@@ -1123,7 +1136,7 @@ static void bioRenderWavePulse(float dt) {
         float speedMult = fmaxf(1.0f + noiseVal * BIO_WP_TURBULENCE, 0.05f);
 
         float force = BIO_WP_WIND_SPEED * speedMult;
-        lf.vel = lf.vel * BIO_WP_DAMPING + force * (1.0f - BIO_WP_DAMPING);
+        lf.vel = lf.vel * dampDecay + force * (1.0f - dampDecay);
         lf.boost *= boostDecay;
         lf.pos  += (lf.vel + lf.boost) * dt;
         lf.age  += dt;
@@ -1160,6 +1173,7 @@ static void bioRenderWavePulse(float dt) {
             const BioWPLeaf &lf = bioWpLeaves[j];
             if (!lf.active) continue;
             float d = (float)li - lf.pos;
+            if (d > gaussCutoff || d < -gaussCutoff) continue;
             float w = expf(-(d * d) / sigma_sq2) * lf.brightness;
             glow += w;
             oR   += w * lf.colR;
@@ -1463,14 +1477,35 @@ void loop() {
     lastRenderMs = now;
 
     // === DUCK PIPELINE ===
+    uint32_t t0 = micros();
+#if !CONTROL_DISABLE_DUCK
     duckRenderFrame(dt, now);
+#endif
+    uint32_t t1 = micros();
 
     // === BIOLUM PIPELINE ===
     bioRenderFrame(dt, now);
+    uint32_t t2 = micros();
 
     // Queue both transmissions; RMT hardware overlaps them.
+#if !CONTROL_DISABLE_DUCK
     stripDuck.Show();
+#endif
+    uint32_t t3 = micros();
     stripBio.Show();
+    uint32_t t4 = micros();
+
+    // Stage timing accumulators (us, summed across telemetry window)
+    static uint32_t accDuckRender = 0, accBioRender = 0,
+                    accDuckShow   = 0, accBioShow   = 0;
+    static uint32_t accDuckMax = 0, accBioMax = 0, accBioShowMax = 0;
+    uint32_t dDuck = t1 - t0, dBio = t2 - t1,
+             dDShow = t3 - t2, dBShow = t4 - t3;
+    accDuckRender += dDuck; accBioRender  += dBio;
+    accDuckShow   += dDShow; accBioShow   += dBShow;
+    if (dDuck   > accDuckMax)   accDuckMax   = dDuck;
+    if (dBio    > accBioMax)    accBioMax    = dBio;
+    if (dBShow  > accBioShowMax) accBioShowMax = dBShow;
 
     // Periodic SSID rescan — heals if the AP moves channel.
     if (now - lastScanMs > CHANNEL_RESCAN_MS) {
@@ -1494,10 +1529,19 @@ void loop() {
 
         bool duckConn = (duckLastPktMs > 0) && (now - duckLastPktMs < TIMEOUT_MS);
         bool bioConn  = (bioLastPktMs  > 0) && (now - bioLastPktMs  < TIMEOUT_MS);
-        Serial.printf("[bench] %ufps duck=%s(%u) bio=%s(%u) ch=%u\n",
+        uint32_t denom = fps ? fps : 1;
+        Serial.printf(
+            "[bench] %ufps duck=%s(%u) bio=%s(%u) ch=%u | "
+            "us avg/max  duckR=%lu/%lu  bioR=%lu/%lu  duckShow=%lu  bioShow=%lu/%lu\n",
             fps,
             duckConn ? "ok" : "--", (unsigned)duckPktCount,
             bioConn  ? "ok" : "--", (unsigned)bioPktCount,
-            currentChannel);
+            currentChannel,
+            (unsigned long)(accDuckRender / denom), (unsigned long)accDuckMax,
+            (unsigned long)(accBioRender  / denom), (unsigned long)accBioMax,
+            (unsigned long)(accDuckShow   / denom),
+            (unsigned long)(accBioShow    / denom), (unsigned long)accBioShowMax);
+        accDuckRender = accBioRender = accDuckShow = accBioShow = 0;
+        accDuckMax = accBioMax = accBioShowMax = 0;
     }
 }

@@ -1,0 +1,13 @@
+{
+  "name": "webrtc_ns",
+  "version": "0.1.0",
+  "description": "WebRTC noise suppression module (legacy float port from cpuimage/WebRTC_NS). Pure C, no external deps. 16kHz, 10ms frames, 3 aggressiveness modes (0=Mild, 1=Medium, 2=Aggressive).",
+  "license": "BSD-3-Clause",
+  "build": {
+    "srcFilter": ["+<*.c>", "+<*.h>"],
+    "flags": [
+      "-O2",
+      "-ffast-math"
+    ]
+  }
+}

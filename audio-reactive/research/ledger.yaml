@@ -4244,3 +4244,194 @@ entries:
 
       Energy-equalized edges (eq3 at 113/266 Hz), Bark/mel pre-normalization aggregated to broad bands, overlapping/Hann-tapered soft edges, sqrt(f) whitening pre-split, or a per-band noise-floor gate.
 
+  - id: mic-profiling-sparkle-threshold
+    date: 2026-05-05
+    touched: 2026-05-05
+    title: "INMP441 mic profiling: two valid approaches for sparkle-triggering thresholds"
+    summary: >
+      Profiled INMP441 across 9 scenarios (direct voice, laptop distance, outdoor
+      close/medium/far, same room, next room, closed door, two speakers). Two valid
+      approaches emerged for sparkle triggering from raw RMS: (1) fixed dB threshold,
+      (2) adaptive EMA floor-tracking. Both are cheap on ESP32. The choice is a design
+      decision about which scenarios should trigger effects.
+    status: validated
+    warmth: high
+    confidence: high
+    source:
+      - festicorn/original-duck/tools/mic_capture.py
+      - festicorn/original-duck/tools/mic_echo.py
+      - festicorn/original-duck/tools/mic_compare.py
+    tags: [hardware, microphone, inmp441, sparkles, threshold, signal-processing, esp32]
+    relates_to: [inmp441-frequency-response, feelings-are-contextual, band-zone-pulse-effect]
+    notes: >
+      ## Approach 1: Fixed dB threshold (e.g., -50 dBFS raw)
+
+      Simple, zero-state, no adaptation delay. Works well for indoor scenarios where
+      the noise floor is consistently ~-75 dBFS. Sparkle trigger counts at -50 dBFS:
+
+        Scenario         Events   % active
+        direct_voice       28      16.1%
+        laptop_dist        21       6.5%
+        outdoor_close      14      26.3%   ← ambient leaks
+        outdoor_medium      7      10.4%
+        outdoor_far         2       2.0%
+        same_room          40       1.9%
+        next_room          42       1.4%
+        closed_door         0       0.0%
+        two_speakers       37      22.9%
+
+      Fails outdoors: ambient floor is -60 dBFS, only 10 dB below threshold, so wind
+      and traffic trigger false sparkles. Indoor floor is -75 dBFS → 25 dB margin → clean.
+
+      ## Approach 2: Adaptive EMA floor + relative offset (e.g., floor + 15 dB)
+
+      Tracks the current noise floor with a slow EMA (τ ≈ 2s), triggers when RMS
+      exceeds floor + offset. Self-adapts to environment. Sparkle counts at +15 dB:
+
+        Scenario         Events   % active
+        direct_voice       32      19.2%
+        laptop_dist        19       9.5%
+        outdoor_close       5       6.9%   ← cleaned up
+        outdoor_medium      1       0.8%
+        outdoor_far         0       0.0%
+        same_room          39       2.0%
+        next_room          59       2.0%
+        closed_door         0       0.0%
+        two_speakers        7       3.2%   ← suppresses background speaker
+
+      Outdoor false triggers drop from 26% to 7% (close) and 10% to 1% (medium).
+      Tradeoff: ~2s adaptation latency, slightly more complex, and two_speakers
+      goes from 23% to 3% (EMA learns the close speaker's level and suppresses both).
+
+      ## Key numbers (raw RMS, sender scale, dBFS)
+
+      Indoor floors: -75 to -77 dBFS. Outdoor floors: -58 to -62 dBFS. Gap: ~16 dB.
+      Direct voice peaks (P95): -42 dBFS. Same room peaks (P95): -58 dBFS.
+      The full spread across scenarios is ~36 dB.
+
+      ## Design decision
+
+      Fixed threshold = "only react to close/loud sounds." EMA = "react to whatever
+      is louder than the current background." Neither is wrong — it depends on
+      whether the installation should respond to distant conversation or not.
+
+      ## Remaining work
+
+      1. Test both on hardware with actual sparkle effect running
+      2. Determine if EMA adaptation latency is noticeable in practice
+      3. Each effect can independently choose which approach (or combination) it wants
+      4. WebRTC NS on ESP32-C3 is infeasible (235ms/loop, soft-float FFT bottleneck);
+         raw RMS is the practical input signal
+
+  - id: intent-detection-heuristic
+    date: 2026-05-05
+    touched: 2026-05-05
+    title: "Intent detection via energy envelope achieves ~20 dB background speaker suppression without NS"
+    summary: >
+      A single-mic intent detection heuristic using energy envelope tracking can
+      attenuate a background speaker by ~20 dB relative to a close speaker. Uses
+      multiplicative scoring of harmonic content, sustain, attack, and proximity
+      to learned energy envelope. Reasonable background filtering achieved, but
+      full speaker separation is infeasible on ESP32 without neural models or
+      multiple microphones.
+    status: validated
+    warmth: medium
+    confidence: high
+    source:
+      - festicorn/original-duck/tools/mic_echo.py
+    tags: [signal-processing, microphone, inmp441, intent-detection, esp32]
+    relates_to: [mic-profiling-sparkle-threshold, inmp441-frequency-response]
+    notes: >
+      ## Algorithm (implemented in mic_echo.py process_intent)
+
+      1. WebRTC NS (agg=3) cleans input (Python-side only, too slow for ESP32-C3)
+      2. Per-20ms frame: compute harmonic score (autocorrelation), attack penalty
+         (>30 dB spikes), sustain ramp (0→1 over 150ms), repetition count (5s window)
+      3. Energy envelope: slow EMA (τ=3s rise, τ=0.5s fall) tracks RMS of active frames
+      4. Level score: frames far below energy envelope (>20 dB gap) → score near 0
+      5. Multiplicative: core = harmonic × sustain × attack × level, squared output
+
+      ## Two-speaker test results
+
+      Tested with one close speaker and one background speaker:
+      - Close speaker (laptop/phone distance): level_score 0.8-1.0, confidence 0.3-0.5
+      - Background speaker (same room): level_score 0.0-0.17, confidence 0.09
+      - After close speaker calibrates the energy envelope, background is nearly zeroed
+      - Slow 3s decay means suppression persists for seconds after close speaker stops
+
+      ## Limitations
+
+      - Cannot fully remove a second voice — same frequency band, same harmonic structure
+      - Full speaker separation requires beamforming (multiple mics) or neural models
+        (Conv-TasNet, SepFormer) — both infeasible on ESP32
+      - Phones use multi-mic beamforming + neural models layered together
+      - The energy envelope approach is the best single-mic non-neural option
+
+      ## ESP32 feasibility
+
+      The harmonic/sustain/attack/repetition scoring is cheap (no FFT needed for
+      autocorrelation at this frame size). The energy envelope is one multiply + add
+      per frame. The expensive part is WebRTC NS — 235ms/loop on ESP32-C3 due to
+      soft-float FFT. Without NS, the intent heuristic runs on raw RMS and is
+      ESP32-viable. Whether it needs NS as a preprocessing step or works on raw
+      audio is an open question — the harmonic detector may be robust enough without it.
+
+  - id: voice-processing-exploration-paused
+    date: 2026-05-05
+    touched: 2026-05-05
+    title: "Voice processing R&D: noise filtering works, speaker separation doesn't — paused in favor of simple thresholds"
+    summary: >
+      Explored WebRTC NS, RNNoise, spectral gating, VAD, and custom intent detection
+      for INMP441 audio on ESP32. Noise suppression (WebRTC NS agg=3) effectively
+      isolates speech from ambient noise. Speaker separation (distinguishing two voices
+      at different distances) achieved ~20 dB attenuation but not full removal — would
+      require neural models or multi-mic beamforming. For LED effects, simple dB
+      thresholds or EMA floor-tracking are sufficient. Paused advanced voice processing.
+    status: dormant
+    warmth: medium
+    confidence: high
+    source:
+      - festicorn/original-duck/tools/mic_echo.py
+      - festicorn/original-duck/src/sender_ns.cpp
+    tags: [signal-processing, microphone, inmp441, voice, noise-suppression, esp32, future]
+    relates_to: [mic-profiling-sparkle-threshold, intent-detection-heuristic, inmp441-frequency-response]
+    notes: >
+      ## What worked
+
+      - WebRTC NS (Wiener filter, agg=3) effectively suppresses non-speech noise.
+        Validated across 9 scenarios: same room, next room, closed door, outdoor
+        close/medium/far, direct voice, laptop distance, two speakers.
+      - Spectral gating (noisereduce library) is ineffective for broadband noise — only
+        ~3 dB reduction on outdoor ambient. Not a real substitute for WebRTC NS.
+      - RNNoise (neural) didn't work well in our pipeline — output was loud and muffled
+        even after fixing int16 scaling issues.
+      - Intent detection heuristic (harmonic + sustain + energy envelope) achieved
+        reasonable foreground/background discrimination (~20 dB attenuation of
+        background speaker) using a single mic with no neural model.
+
+      ## What didn't work
+
+      - Full speaker separation with single mic: two voices in the same frequency band
+        with the same harmonic structure can't be fully separated without spatial
+        information (multiple mics for beamforming) or neural source separation
+        (Conv-TasNet, SepFormer — too heavy for ESP32).
+      - WebRTC NS on ESP32-C3: 235ms per loop iteration due to soft-float FFT on a
+        chip with no hardware FPU. 6x over budget. Would need fixed-point FFT port.
+
+      ## Why paused
+
+      For LED effects (sparkles, pulses, color modulation), we likely only need simple
+      noise gates — raw RMS with either a fixed dB threshold or an adaptive EMA floor.
+      The full voice processing pipeline (NS + intent detection + speaker separation) is
+      interesting research but over-engineered for the current art. The tooling
+      (mic_echo.py, mic_capture.py, mic_compare.py) is preserved for future exploration
+      if art requirements evolve to need voice-specific reactivity.
+
+      ## Interesting future directions (if art requires it)
+
+      - Fixed-point FFT port of WebRTC NS for ESP32-C3 (esp-dsp has fixed-point FFT)
+      - Streaming raw audio to ESP32-S3 receiver (has hardware FPU) for NS there
+      - Two INMP441 mics for delay-and-sum beamforming (spatial filtering)
+      - Apple Voice Isolation as a ground truth comparison for single-mic quality ceiling
+      - Asteroid/Conv-TasNet for offline speaker separation analysis
+

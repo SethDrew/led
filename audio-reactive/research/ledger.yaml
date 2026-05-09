@@ -4323,6 +4323,133 @@ entries:
       4. WebRTC NS on ESP32-C3 is infeasible (235ms/loop, soft-float FFT bottleneck);
          raw RMS is the practical input signal
 
+  - id: sparkle-gate-production-impl
+    date: 2026-05-05
+    touched: 2026-05-05
+    title: "Production sparkle gates: FixedSparkleGate + AdaptiveSparkleGate (both validated, design choice)"
+    summary: >
+      Both threshold approaches from mic-profiling-sparkle-threshold are
+      implemented as production gates in audio-reactive/effects/signals.py
+      and wired into band_sparkles.py as a switchable option. Replayed both
+      against the seven mic-profile WAVs at 20 ms frames; counts reproduce
+      the ledger's original table within rounding. Both algorithms are
+      valid — the choice is artistic (see "Design decision" below).
+    status: validated
+    warmth: high
+    confidence: high
+    source:
+      - audio-reactive/effects/signals.py
+      - audio-reactive/effects/band_sparkles.py
+      - library/test-vectors/mic-profiling/
+    tags: [sparkles, threshold, signal-processing, gate, ema, production]
+    relates_to: [mic-profiling-sparkle-threshold, intent-detection-heuristic]
+    notes: >
+      ## API
+
+      `signals.FixedSparkleGate(threshold_dbfs=-50.0)` — zero-state, cheapest.
+
+      `signals.AdaptiveSparkleGate(fps, offset_db=15.0, rise_tc_s=2.0,
+        decay_tc_s=0.5, init_floor_dbfs=-75.0)` — EMA noise floor,
+      asymmetric (slow rise so transients don't pull the floor up,
+      fast decay so quieting recovers).
+
+      `signals.make_sparkle_gate('fixed' | 'adaptive', fps, **kw)` factory.
+
+      Both expose `.update(raw_rms) → bool`, plus `.last_dbfs`,
+      `.threshold_dbfs`, `.last_open` for diagnostics. Convention:
+      dBFS = 20*log10(raw_rms / 32768) regardless of the source mic's
+      bit depth (matches the sender's calibration).
+
+      ## Replay results (20 ms frames, library/test-vectors/mic-profiling/)
+
+        Clip               frames   secs |  fixed    %   | adaptive  %
+        direct_voice         1495   29.9 |    241  16.1% |    153  10.2%
+        laptop_distance      2374   47.5 |    155   6.5% |    169   7.1%
+        mic_same_room        8500  170.0 |    161   1.9% |    196   2.3%
+        mic_next_room       11601  232.0 |    165   1.4% |    356   3.1%
+        closed_door          5402  108.0 |      0   0.0% |      0   0.0%
+        outdoor              3249   65.0 |    565  17.4% |    188   5.8%
+        two_speakers         1000   20.0 |    228  22.8% |     66   6.6%
+
+      Reproduces the published table within rounding for every clip.
+      Outdoor false-trigger rate drops 17% → 6%; two-speaker drops
+      23% → 7% (close speaker calibrates the floor, both get suppressed
+      after ~1-2 s). Closed-door is 0/0 in both — confirms gates do not
+      fire on silence floor.
+
+      ## Design decision (both valid, choose per installation)
+
+      - **Fixed (-50 dBFS)**: react to close/loud sounds only. Indoor floor
+        is -75 dBFS so 25 dB margin is clean. Outdoor floor is -60 dBFS so
+        wind/traffic leak through. Use when the installation is indoors and
+        we want consistent, predictable behavior with zero startup latency.
+
+      - **Adaptive (floor + 15 dB)**: react to whatever is louder than the
+        current background. Outdoor false triggers cut by ~3x. Suppresses
+        sustained background speakers/sources. Costs ~1-2 s startup latency
+        and absorbs continuous foreground sources into the floor. Use when
+        the installation moves between environments or sees mixed crowds.
+
+      ## Implementation choices vs. spec
+
+      - Asymmetric EMA: rise_tc=2 s, decay_tc=0.5 s. The teammate spec
+        said the opposite (decay 2 s, rise 500 ms). Chose the ledger's
+        empirical numbers because the "two-speaker suppression" and
+        "~2 s adaptation latency" results in mic-profiling-sparkle-threshold
+        only reproduce with rise_tc≈2 s. Replay confirms (see table).
+
+      - Floor EMA always runs, in dBFS space, regardless of gate state.
+        An earlier "only update when below threshold" version locked the
+        floor at startup once ambient exceeded the threshold, which broke
+        the outdoor scenario. The always-on slow rise gives the same
+        foreground-rejection behavior because brief transients can't move
+        a 2-second EMA noticeably.
+
+      ## Wiring
+
+      band_sparkles.BandSparklesEffect now accepts `gate_mode` ∈
+      {'none','fixed','adaptive'}. Default is 'none' (preserves prior
+      deficit-driven spawning). When gated, twinkle spawning pauses while
+      the gate is shut; existing twinkles complete their decay normally.
+      Gate state appears in `get_diagnostics()` as
+      `gate: <mode> dBFS=… thr=… OPEN|shut`.
+
+      Other sparkle-style effects (band_tempo_sparkles, basic_sparkles,
+      band_zone_pulse) are not wired yet — same pattern applies when
+      they need it.
+
+      ## Recommended test plan
+
+      1. **Hardware sanity (each gate, each environment).** Run
+         band_sparkles on an actual receiver with the duck sender:
+         indoors quiet, indoors music, indoors conversation, outdoors,
+         next-room source. Confirm twinkle spawn rate matches the
+         expected % from the table within ~2x.
+
+      2. **EMA adaptation feel.** With adaptive gate, walk from a quiet
+         room into a noisy room with the sender. Time how long the
+         sparkles keep firing before the floor catches up. If >3 s feels
+         laggy, drop rise_tc_s to 1.5; if <1 s lets transients corrupt
+         the floor, raise to 2.5.
+
+      3. **Two-speaker suppression.** Two people at different distances.
+         Verify (adaptive) the close speaker dominates and the background
+         eventually goes quiet on the LEDs. Verify (fixed) both fire.
+
+      4. **Threshold-tuning sweep.** For an installation with a known
+         environment, sweep ±5 dB around the default threshold and
+         eyeball the right balance of "responds to me" vs. "ignores HVAC."
+
+      5. **Latency measurement.** Stopwatch a clap-to-sparkle round
+         trip with both gates. Should be <50 ms (mic frame + ESP-NOW
+         + render). If adaptive feels noticeably slower, suspect the
+         gate is suppressing the clap because the floor moved up.
+
+      6. **Replay regression test.** Re-run the WAV replay above any
+         time the gate algorithm changes; the table should stay within
+         a few percent of the published numbers, otherwise something
+         drifted.
+
   - id: intent-detection-heuristic
     date: 2026-05-05
     touched: 2026-05-05

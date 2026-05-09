@@ -193,6 +193,7 @@ struct __attribute__((packed)) SensorPacket {
 // ── Algorithm enum ───────────────────────────────────────────────
 enum Algorithm {
     ALG_SPARKLE_BURST,
+    ALG_SPARKLE_SIMPLE,
     ALG_FIRE_MELD,
     ALG_FIRE_FLICKER,
     ALG_QUIET_BLOOM,
@@ -474,7 +475,7 @@ void setup() {
         initResult, cbResult, currentChannel, WiFi.macAddress().c_str());
 
     Serial.println("Waiting for sender... (will auto-calibrate from first 2s of data)");
-    Serial.println("Commands: 'c' recal, 's' sparkle, 'm' fire_meld, 'f' fire_flicker, 'b' bloom, '?' identify");
+    Serial.println("Commands: 'c' recal, 's' sparkle, 'S' sparkle_simple, 'm' fire_meld, 'f' fire_flicker, 'b' bloom, '?' identify");
     Serial.printf("[BOOT] role=bulbs MAC=%s fw=bulb_receiver\n", WiFi.macAddress().c_str());
 }
 
@@ -824,6 +825,116 @@ static void renderSparkleBurst(float dt, float angleDeg, float tiltBlend,
     }
 }
 
+// ── Simple sparkle — same render as burst, just a fixed dBFS gate ─
+#define SIMPLE_SPARKLE_FLOOR_RAW  47234.0f  // -45 dBFS in sender >>8 scale
+
+static void renderSparkleSimple(float dt, float angleDeg, float tiltBlend,
+                                 float tiltR, float tiltG, float tiltB) {
+    float rawRms = (float)latestPacket.rawRms;
+    bool gate = rawRms > SIMPLE_SPARKLE_FLOOR_RAW;
+    bool isSilent = !gate;
+
+    float attackAlpha = fminf(1.0f, dt / 0.030f);
+    float decayAlpha  = fminf(1.0f, dt / 0.400f);
+    float gateVal = gate ? 1.0f : 0.0f;
+    if (gateVal > envelope)
+        envelope += attackAlpha * (gateVal - envelope);
+    else
+        envelope += decayAlpha * (gateVal - envelope);
+
+    cooldownRemaining = fmaxf(0.0f, cooldownRemaining - dt);
+
+    if (gate && cooldownRemaining <= 0.0f) {
+        cooldownRemaining = 0.100f;
+
+        float db = 20.0f * log10f(rawRms / SIMPLE_SPARKLE_FLOOR_RAW);
+        float intensity = clampf(db / 12.0f, 0.0f, 1.0f);
+
+        int nIgnite = (int)(LED_COUNT * (0.3f + 0.2f * intensity));
+
+        static uint8_t indices[LED_COUNT];
+        for (uint8_t i = 0; i < LED_COUNT; i++) indices[i] = i;
+        for (int i = 0; i < nIgnite; i++) {
+            int j = i + (int)(xorshift32() % (LED_COUNT - i));
+            uint8_t tmp = indices[i];
+            indices[i] = indices[j];
+            indices[j] = tmp;
+        }
+
+        float sparkVal = 0.7f + 0.3f * intensity;
+        for (int i = 0; i < nIgnite; i++) {
+            sparkle[indices[i]] = sparkVal;
+            decayRates[indices[i]] = 0.92f + randFloat() * 0.05f;
+        }
+    }
+
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        sparkle[i] *= fastDecay(decayRates[i], dt * 30.0f);
+    }
+
+    if (!isSilent) {
+        for (uint16_t i = 0; i < LED_COUNT; i++) {
+            float jitter = (randFloat() - 0.5f) * 0.02f;
+            float newVal = sparkle[i] + jitter;
+            if (newVal < 0.0f) newVal = 0.0f;
+            if (newVal > sparkle[i] && jitter > 0) newVal = sparkle[i];
+            sparkle[i] = newVal;
+        }
+    }
+
+    float base = fminf(envelope, 0.2f);
+
+    sparkPeakR = sparkPeakG = sparkPeakB = sparkPeakW = 0;
+    sparkPeakBright = 0.0f;
+    sparkPeakLin = 0.0f;
+
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        float s = sparkle[i];
+        float bright = base + s * (1.0f - base);
+        if (bright < SPARKLE_DEADBAND) bright = 0.0f;
+
+        float colR = 255.0f;
+        float colG = 180.0f + (240.0f - 180.0f) * s;
+        float colB =  80.0f + (200.0f -  80.0f) * s;
+
+        if (tiltBlend > 0.0f) {
+            colR = colR * (1.0f - tiltBlend) + tiltR * tiltBlend;
+            colG = colG * (1.0f - tiltBlend) + tiltG * tiltBlend;
+            colB = colB * (1.0f - tiltBlend) + tiltB * tiltBlend;
+        }
+
+        float linBright = fastGamma24(bright) * SPARKLE_BRIGHTNESS_CAP;
+        float colW = 255.0f * (1.0f - tiltBlend);
+        float fR = colR * linBright;
+        float fG = colG * linBright;
+        float fB = colB * linBright;
+        float fW = colW * linBright;
+
+        uint16_t tR16 = (uint16_t)clampf(fR * 256.0f, 0, 65535);
+        uint16_t tG16 = (uint16_t)clampf(fG * 256.0f, 0, 65535);
+        uint16_t tB16 = (uint16_t)clampf(fB * 256.0f, 0, 65535);
+        uint16_t tW16 = (uint16_t)clampf(fW * 256.0f, 0, 65535);
+
+        if (tR16 < 256) tR16 = 0;
+        if (tG16 < 256) tG16 = 0;
+        if (tB16 < 256) tB16 = 0;
+        if (tW16 < 256) tW16 = 0;
+
+        uint8_t r = deltaSigma(dsR[i], tR16);
+        uint8_t g = deltaSigma(dsG[i], tG16);
+        uint8_t b = deltaSigma(dsB[i], tB16);
+        uint8_t w = deltaSigma(dsW[i], tW16);
+        strip.setPixelColor(i, r, g, b, w);
+
+        if (r > sparkPeakR) sparkPeakR = r;
+        if (g > sparkPeakG) sparkPeakG = g;
+        if (b > sparkPeakB) sparkPeakB = b;
+        if (w > sparkPeakW) sparkPeakW = w;
+        if (bright > sparkPeakBright) sparkPeakBright = bright;
+        if (linBright > sparkPeakLin) sparkPeakLin = linBright;
+    }
+}
+
 // ── Fire render (shared by fire_meld and fire_flicker) ───────────
 
 static void renderFire(float dt, bool withDropout, float tiltBlend) {
@@ -1023,10 +1134,14 @@ void loop() {
         char c = Serial.read();
         if (c == 'c' || c == 'C') {
             startCalibration();
-        } else if (c == 's' || c == 'S') {
+        } else if (c == 's') {
             currentAlg = ALG_SPARKLE_BURST;
             resetSparkleState();
             Serial.println("Algorithm: sparkle_burst");
+        } else if (c == 'S') {
+            currentAlg = ALG_SPARKLE_SIMPLE;
+            resetSparkleState();
+            Serial.println("Algorithm: sparkle_simple (-45dBFS gate)");
         } else if (c == 'm' || c == 'M') {
             currentAlg = ALG_FIRE_MELD;
             resetFireState();
@@ -1171,7 +1286,7 @@ void loop() {
         if (currentAlg == ALG_QUIET_BLOOM) {
             Serial.printf("[%s] rate=%.1f energy=%.3f flash0=%.3f\n",
                 algName, bloomMotionRate, bloomColonyEnergy, bloomFlashGlow[0]);
-        } else if (currentAlg == ALG_SPARKLE_BURST) {
+        } else if (currentAlg == ALG_SPARKLE_BURST || currentAlg == ALG_SPARKLE_SIMPLE) {
             Serial.printf("[%s] angle=%.1f rms=%d en=%.3f ons=%.3f peak b=%.2f lin=%.3f rgbw=%3u/%3u/%3u/%3u\n",
                 algName, angleDeg, rawRms, energy, onset,
                 sparkPeakBright, sparkPeakLin,
@@ -1256,6 +1371,9 @@ void loop() {
     switch (currentAlg) {
         case ALG_SPARKLE_BURST:
             renderSparkleBurst(dt, angleDeg, tiltBlend, tiltR, tiltG, tiltB);
+            break;
+        case ALG_SPARKLE_SIMPLE:
+            renderSparkleSimple(dt, angleDeg, tiltBlend, tiltR, tiltG, tiltB);
             break;
         case ALG_FIRE_MELD:
             renderFire(dt, false, tiltBlend);

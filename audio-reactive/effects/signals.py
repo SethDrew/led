@@ -31,6 +31,8 @@ See library/arch-impl/axis3-audio-features/PER_BAND_NORMALIZATION.md.
   AbsIntegral             — single-band |d/dt| with peak-decay normalization
   BeatPredictor           — autocorrelation tempo + predicted/confirmed beats
   OnsetTempoTracker       — onset-envelope autocorrelation for tempo estimation
+  BeatEventTracker        — OnsetTempoTracker + onset-threshold events with
+                            phase-locked catchup (multi-band onset → events)
   SpeedSignal             — spectral evolution rate (ambient-friendly 0-1 speed)
   StickyFloorRMS          — sticky-floor noise-gate normalization
   FixedRangeRMS           — fixed-range log RMS mapping (no adaptive floor)
@@ -789,6 +791,7 @@ class OnsetTempoTracker:
             hi_bin = max(hi_bin, lo_bin + 1)  # at least 1 bin
             self._band_slices.append(slice(lo_bin, hi_bin))
         self._prev_band_energy = np.zeros(n_bands, dtype=np.float64)
+        self._prev_band_energy_init = False
 
         # Ring buffer of onset values for autocorrelation
         self.ac_window_frames = int(ac_window_sec * self.rms_fps)
@@ -816,6 +819,7 @@ class OnsetTempoTracker:
         self.estimated_period = 0.0  # seconds
         self.confidence = 0.0
         self.time_acc = 0.0
+        self.last_onset = 0.0  # raw onset envelope value from latest feed_frame
 
     def feed_frame(self, frame: np.ndarray):
         """Feed one audio frame (2048 samples). Call once per frame from
@@ -831,12 +835,21 @@ class OnsetTempoTracker:
         band_energy = np.zeros(self.n_bands, dtype=np.float64)
         for b, sl in enumerate(self._band_slices):
             band_energy[b] = np.log1p(np.sum(spectrum[sl] ** 2))
-        flux = band_energy - self._prev_band_energy
-        self._prev_band_energy = band_energy
+        # Lazy-init prev_band_energy so first-frame flux is 0 instead of a
+        # spurious giant onset (which would otherwise pin downstream peak
+        # normalizers and suppress real beats for many seconds).
+        if not self._prev_band_energy_init:
+            self._prev_band_energy = band_energy
+            self._prev_band_energy_init = True
+            flux = np.zeros_like(band_energy)
+        else:
+            flux = band_energy - self._prev_band_energy
+            self._prev_band_energy = band_energy
         # Rectify + mean: onset strength this frame
         # Half-wave (default): only energy increases (onsets)
         # Full-wave: both increases and decreases (onsets + offsets)
         onset = np.mean(np.abs(flux)) if self.full_wave else np.mean(np.maximum(0, flux))
+        self.last_onset = float(onset)
 
         # Store in ring buffer
         self.onset_buf[self.buf_pos % self.ac_window_frames] = onset
@@ -931,6 +944,156 @@ class OnsetTempoTracker:
         return 60.0 / self.estimated_period if self.estimated_period > 0 else 0.0
 
 
+class BeatEventTracker:
+    """Beat events (confirmed + predicted) on top of OnsetTempoTracker.
+
+    Pairs OnsetTempoTracker's multi-band onset autocorrelation (robust on
+    dense percussion / rap / treble-rich music) with BeatPredictor-style
+    phase-locked prediction, so an effect that wants per-beat events still
+    gets them — and keeps firing on the predicted beat when an onset is
+    missed (catchup). Up to `max_missed` consecutive predictions before
+    the lock drops.
+
+    Per-frame output:
+      [{'type': 'confirmed', 'strength': 0.85}, ...]   onset crossed threshold
+      [{'type': 'predicted', 'strength': 0.80}, ...]   phase-locked, no onset
+      []                                                nothing this frame
+
+    Detection is a peak-decay normalized threshold on the same multi-band
+    onset envelope OnsetTempoTracker uses for autocorrelation, so tempo
+    estimation and event detection share one signal source.
+    """
+
+    def __init__(self, sample_rate: int = 44100, frame_len: int = 2048,
+                 threshold: float = 0.30, cooldown: float = 0.25,
+                 predicted_strength: float = 0.8, max_missed: int = 4,
+                 peak_decay: float = 0.998,
+                 tempo_kwargs: dict = None):
+        """
+        Args:
+            sample_rate, frame_len: forwarded to OnsetTempoTracker.
+            threshold:          normalized onset must cross this for confirmed.
+            cooldown:           min seconds between confirmed events.
+            predicted_strength: strength field on predicted events.
+            max_missed:         consecutive predictions before lock drops.
+            peak_decay:         per-frame decay on onset peak normalizer.
+            tempo_kwargs:       extra kwargs for OnsetTempoTracker (prior, etc.)
+        """
+        tk = dict(tempo_kwargs or {})
+        self.tempo = OnsetTempoTracker(
+            sample_rate=sample_rate, frame_len=frame_len, **tk)
+        self.rms_fps = self.tempo.rms_fps
+
+        self.threshold = float(threshold)
+        self.cooldown = float(cooldown)
+        self.predicted_strength = float(predicted_strength)
+        self.max_missed = int(max_missed)
+        self._peak_decay = float(peak_decay)
+
+        # Onset peak-decay normalization (same shape as BeatPredictor's input
+        # signal: a 0-1 normalized event envelope.)
+        self._onset_peak = 1e-10
+        self.onset_normalized = 0.0
+
+        # Detection state
+        self.last_beat_time = -1.0
+        self.last_detection_time = -1.0
+        self.beat_count = 0
+        self.predicted_beat_count = 0
+
+        # Phase-locked prediction state
+        self.next_predicted_beat = 0.0
+        self.prediction_active = False
+        self.missed_beats = 0
+
+    def feed_frame(self, frame: np.ndarray) -> list:
+        """Feed one audio frame. Return list of beat events (0, 1, or 2)."""
+        events = []
+
+        # Tempo path computes onset envelope + autocorrelation internally.
+        self.tempo.feed_frame(frame)
+        onset = self.tempo.last_onset
+
+        # Normalize onset against slow-decay peak for thresholding.
+        self._onset_peak = max(onset, self._onset_peak * self._peak_decay)
+        self.onset_normalized = (onset / self._onset_peak
+                                 if self._onset_peak > 1e-10 else 0.0)
+
+        time_acc = self.tempo.time_acc
+
+        # Confirmed event: threshold + cooldown.
+        time_since_beat = time_acc - self.last_beat_time
+        beat_detected = False
+        if (self.onset_normalized > self.threshold
+                and time_since_beat > self.cooldown):
+            beat_detected = True
+            self.last_beat_time = time_acc
+            self.last_detection_time = time_acc
+            self.beat_count += 1
+            self._update_prediction_phase()
+            events.append({
+                'type': 'confirmed',
+                'strength': float(min(1.0, self.onset_normalized)),
+            })
+
+        # Predicted event: phase-locked catchup when no onset arrived on time.
+        if not beat_detected:
+            pred = self._check_predicted_beat(time_acc)
+            if pred:
+                events.append(pred)
+
+        return events
+
+    def _update_prediction_phase(self):
+        """Re-anchor predicted beats to the most recent confirmed detection."""
+        period = self.tempo.estimated_period
+        if period <= 0:
+            self.prediction_active = False
+            return
+        self.next_predicted_beat = self.last_detection_time + period
+        self.prediction_active = True
+        self.missed_beats = 0
+
+    def _check_predicted_beat(self, time_acc: float):
+        if not self.prediction_active:
+            return None
+        period = self.tempo.estimated_period
+        if period <= 0:
+            return None
+
+        if time_acc >= self.next_predicted_beat:
+            time_since_detection = time_acc - self.last_detection_time
+            # Don't double-fire too close to a real detection.
+            if time_since_detection < period * 0.3:
+                self.next_predicted_beat += period
+                self.missed_beats = 0
+                return None
+
+            self.predicted_beat_count += 1
+            self.next_predicted_beat += period
+            self.missed_beats += 1
+
+            if self.missed_beats >= self.max_missed:
+                self.prediction_active = False
+                self.missed_beats = 0
+
+            return {
+                'type': 'predicted',
+                'strength': self.predicted_strength,
+            }
+        return None
+
+    @property
+    def bpm(self) -> float:
+        return self.tempo.bpm
+
+    @property
+    def confidence(self) -> float:
+        return self.tempo.confidence
+
+    @property
+    def estimated_period(self) -> float:
+        return self.tempo.estimated_period
 
 
 class SpeedSignal:
@@ -1234,3 +1397,122 @@ def detect_timbral_sections(mfcc_matrix, fps, l2_normalize=False,
             frames_since_switch = 0
 
     return transitions
+
+
+# ── Sparkle gates ────────────────────────────────────────────────────
+#
+# Two production gates for sparkle-style triggers driven by raw audio
+# RMS from the INMP441 sender. Validated by the mic-profiling work
+# (research ledger: mic-profiling-sparkle-threshold, 2026-05-05).
+#
+# Convention: rawRms is the sender's uint16 RMS value. Even though the
+# sender computes RMS of 24-bit samples internally and truncates to
+# uint16, the project treats the value as a 16-bit-scale RMS for dBFS
+# math: dBFS = 20*log10(rawRms / 32768). At this scale a -50 dBFS
+# threshold corresponds to rawRms ≈ 103.
+#
+# Both gates accept rawRms as either:
+#   - uint16 from the sender (preferred; matches ledger calibration), or
+#   - a float RMS in [0, 32768] derived from a host-side PCM buffer
+#     (peak-normalized * 32768).
+
+DBFS_FULL_SCALE = 32768.0
+
+
+def rawrms_to_dbfs(raw_rms: float) -> float:
+    """Convert sender uint16 rawRms to dBFS using the 16-bit convention."""
+    if raw_rms <= 0:
+        return -120.0
+    return 20.0 * np.log10(float(raw_rms) / DBFS_FULL_SCALE)
+
+
+class FixedSparkleGate:
+    """Fixed dBFS threshold gate.
+
+    Cheap, zero-state, no adaptation delay. Best indoors where the noise
+    floor is consistent (~-75 dBFS). At the default -50 dBFS, indoor
+    margin is ~25 dB — wind/traffic outdoors will false-trigger.
+
+    Usage:
+        gate = FixedSparkleGate(threshold_dbfs=-50.0)
+        if gate.update(raw_rms):
+            spawn_sparkle()
+    """
+
+    def __init__(self, threshold_dbfs: float = -50.0):
+        self.threshold_dbfs = float(threshold_dbfs)
+        self.last_dbfs = -120.0
+        self.last_open = False
+
+    def update(self, raw_rms: float) -> bool:
+        self.last_dbfs = rawrms_to_dbfs(raw_rms)
+        self.last_open = self.last_dbfs > self.threshold_dbfs
+        return self.last_open
+
+
+class AdaptiveSparkleGate:
+    """EMA noise-floor + relative-offset gate.
+
+    Tracks the current noise floor with a slow EMA in dBFS space and
+    fires when rawRms exceeds floor + offset_db. Self-adapts to indoor
+    vs. outdoor environments (~16 dB floor delta). Tradeoffs:
+      - ~2 s adaptation latency on startup or environment change
+      - Suppresses sustained background sources (e.g., a second speaker
+        in the room) once their level joins the floor estimate
+
+    The floor EMA always runs so the gate can climb to track a louder
+    ambient (outdoor → indoor → noisy room). Asymmetric time constants:
+    rise (~2 s) is slow enough that brief transients don't move the
+    floor noticeably but sustained sources eventually join it; decay
+    (~0.5 s default) is faster so the floor relaxes promptly when a
+    room quiets down.
+
+    Trade-off (per ledger): a continuous foreground source — wind, a
+    nearby speaker — will, after ~1-2 s, get absorbed into the floor
+    and stop firing. This is the desired behavior outdoors and the
+    reason the two-speaker test goes from 23% → 3% activity.
+    """
+
+    def __init__(self,
+                 fps: float,
+                 offset_db: float = 15.0,
+                 rise_tc_s: float = 2.0,
+                 decay_tc_s: float = 0.5,
+                 init_floor_dbfs: float = -75.0):
+        self.fps = float(fps)
+        self.offset_db = float(offset_db)
+        # Per-frame EMA alphas from time constants (1 - exp(-dt/τ))
+        dt = 1.0 / max(self.fps, 1e-6)
+        self.alpha_rise = 1.0 - np.exp(-dt / max(rise_tc_s, 1e-6))
+        self.alpha_decay = 1.0 - np.exp(-dt / max(decay_tc_s, 1e-6))
+        self.floor_dbfs = float(init_floor_dbfs)
+        self.last_dbfs = init_floor_dbfs
+        self.last_open = False
+
+    @property
+    def threshold_dbfs(self) -> float:
+        return self.floor_dbfs + self.offset_db
+
+    def update(self, raw_rms: float) -> bool:
+        dbfs = rawrms_to_dbfs(raw_rms)
+        self.last_dbfs = dbfs
+        threshold = self.floor_dbfs + self.offset_db
+        self.last_open = dbfs > threshold
+
+        # Always update the floor; asymmetric so sustained activity
+        # rises slowly (transients don't move it) and quieting decays
+        # promptly.
+        alpha = self.alpha_rise if dbfs > self.floor_dbfs else self.alpha_decay
+        self.floor_dbfs += alpha * (dbfs - self.floor_dbfs)
+        return self.last_open
+
+
+def make_sparkle_gate(mode: str, fps: float, **kwargs):
+    """Factory: 'fixed' or 'adaptive'. Extra kwargs forwarded to the gate."""
+    m = mode.lower()
+    if m == 'fixed':
+        kwargs.pop('fps', None)
+        return FixedSparkleGate(**kwargs)
+    if m == 'adaptive':
+        return AdaptiveSparkleGate(fps=fps, **kwargs)
+    raise ValueError(f"unknown sparkle gate mode: {mode!r} (use 'fixed' or 'adaptive')")

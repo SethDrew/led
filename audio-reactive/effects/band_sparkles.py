@@ -18,6 +18,7 @@ Individual LEDs twinkle on top in the same color family, averaging
 import numpy as np
 import threading
 from base import AudioReactiveEffect
+from signals import EMARatioNormalize, make_sparkle_gate
 
 
 # Band definitions matching viewer.py exactly
@@ -47,8 +48,19 @@ class BandSparklesEffect(AudioReactiveEffect):
     ref_scope = 'phrase'
     ref_input = '5-band FFT energy'
 
-    def __init__(self, num_leds: int, sample_rate: int = 44100):
+    def __init__(self, num_leds: int, sample_rate: int = 44100,
+                 gate_mode: str = 'none',
+                 gate_threshold_dbfs: float = -50.0,
+                 gate_offset_db: float = 15.0):
         super().__init__(num_leds, sample_rate)
+
+        # Sparkle gate: 'none' keeps the original deficit-driven spawn,
+        # 'fixed' uses a constant -50 dBFS threshold, 'adaptive' tracks
+        # the noise floor with an EMA (~2 s decay / 0.5 s rise).
+        # See research ledger: mic-profiling-sparkle-threshold.
+        self.gate_mode = gate_mode
+        self._gate = None
+        self._gate_open = True  # default to spawning when gating disabled
 
         # FFT setup
         self.n_fft = 2048
@@ -65,11 +77,20 @@ class BandSparklesEffect(AudioReactiveEffect):
         self.audio_buf = np.zeros(self.n_fft, dtype=np.float32)
         self.audio_buf_pos = 0
 
-        # Per-band normalization: slow-decay peak so each band is 0-1
-        # relative to its own history (bass has 100x more raw energy than
-        # treble, so without this bass always wins)
-        self.band_peaks = np.full(self.n_bands, 1e-10, dtype=np.float32)
-        self.band_peak_decay = 0.9995  # very slow decay (~30s half-life)
+        # Per-band normalization: section-relative EMA-ratio (current/EMA).
+        # Decouples bands from each other (bass raw energy ≫ treble) and
+        # rises above 1.0 when a band is louder than its recent mean.
+        fps = sample_rate / self.n_fft
+        self.band_ema = EMARatioNormalize(
+            num_bands=self.n_bands, fps=fps, ema_tc=30.0)
+
+        if gate_mode != 'none':
+            gate_kwargs = {}
+            if gate_mode == 'fixed':
+                gate_kwargs['threshold_dbfs'] = gate_threshold_dbfs
+            elif gate_mode == 'adaptive':
+                gate_kwargs['offset_db'] = gate_offset_db
+            self._gate = make_sparkle_gate(gate_mode, fps=fps, **gate_kwargs)
 
         # Rolling normalized energy integral: ~5 seconds at ~22 frames/sec
         self.window_len = int(5 * sample_rate / self.n_fft)
@@ -116,16 +137,20 @@ class BandSparklesEffect(AudioReactiveEffect):
         self.audio_buf_pos = pos
 
     def _process_frame(self, frame):
+        # Sparkle gate runs in the dBFS convention shared with the sender:
+        # frame is float [-1, 1], so frame*32768 maps to the 16-bit RMS
+        # scale used by INMP441 sender's rawRms field.
+        if self._gate is not None:
+            frame_rms = float(np.sqrt(np.mean(frame ** 2))) * 32768.0
+            self._gate_open = self._gate.update(frame_rms)
+
         spec = np.abs(np.fft.rfft(frame * self.window))
         # Energy per band (sum of squared magnitudes)
         energies = np.array([np.sum(spec[mask] ** 2) for mask in self.band_masks],
                             dtype=np.float32)
 
-        # Normalize each band by its own slow-decay peak so all bands
-        # compete on a 0-1 scale (raw bass energy is 100x treble)
-        for i in range(self.n_bands):
-            self.band_peaks[i] = max(energies[i], self.band_peaks[i] * self.band_peak_decay)
-        normalized = energies / self.band_peaks
+        # Section-relative EMA-ratio normalization (band-decoupled, ~mean=1.0).
+        normalized = self.band_ema.update(energies)
 
         # Store normalized values in rolling buffer
         idx = self.ring_pos % self.window_len
@@ -198,10 +223,10 @@ class BandSparklesEffect(AudioReactiveEffect):
             else:
                 self.twinkle_brightness[i] += move if diff > 0 else -move
 
-        # Spawn new twinkles
+        # Spawn new twinkles (gated when a sparkle gate is configured)
         active = np.sum(self.twinkle_brightness > 0)
         deficit = self.target_active - active
-        if deficit > 0:
+        if deficit > 0 and self._gate_open:
             spawns = min(int(deficit * 0.3) + 1, 3)
             inactive = np.where(self.twinkle_brightness == 0)[0]
             if len(inactive) > 0:
@@ -231,10 +256,18 @@ class BandSparklesEffect(AudioReactiveEffect):
         band_names = ['Sub', 'Bas', 'Mid', 'HiM', 'Tre']
         prop_str = ' '.join(f'{band_names[i]}={p[i]:.2f}' for i in range(self.n_bands))
         wt_str = ' '.join(f'{band_names[i]}={w[i]:.2f}' for i in range(self.n_bands))
-        return {
+        diag = {
             'band': BANDS[idx][0],
             'props': prop_str,
             'weights': wt_str,
             'rgb': f'{int(c[0])},{int(c[1])},{int(c[2])}',
             'twinkles': int(np.sum(self.twinkle_brightness > 0)),
         }
+        if self._gate is not None:
+            diag['gate'] = (
+                f"{self.gate_mode} "
+                f"dBFS={self._gate.last_dbfs:.1f} "
+                f"thr={self._gate.threshold_dbfs:.1f} "
+                f"{'OPEN' if self._gate_open else 'shut'}"
+            )
+        return diag

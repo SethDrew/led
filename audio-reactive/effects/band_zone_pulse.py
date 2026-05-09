@@ -17,7 +17,7 @@ Optional harmonic-dominant background glow (currently off for testing).
 import numpy as np
 import threading
 from base import AudioReactiveEffect
-from signals import OverlapFrameAccumulator
+from signals import OverlapFrameAccumulator, EMARatioNormalize
 
 
 BANDS = [
@@ -79,9 +79,11 @@ class BandZonePulseEffect(AudioReactiveEffect):
         self.spec_buf_idx = 0
         self.spec_buf_filled = 0
 
-        # ── Harmonic band energy (drives background color) ──
-        self.band_peaks = np.full(self.n_bands, 1e-10, dtype=np.float32)
-        self.band_peak_decay = 0.9995
+        # ── Full-spectrum band energy (drives background color) ──
+        # Section-relative EMA-ratio: ~mean=1.0 per band, rises on excursions.
+        band_fps = sample_rate / 512
+        self.band_ema = EMARatioNormalize(
+            num_bands=self.n_bands, fps=band_fps, ema_tc=30.0)
 
         # Vote ring: which group won each frame (0=low, 1=mid, 2=high)
         self.vote_window_len = int(5 * sample_rate / self.n_fft)
@@ -160,10 +162,7 @@ class BandZonePulseEffect(AudioReactiveEffect):
             [np.sum(spec[m] ** 2) for m in self.band_masks],
             dtype=np.float32)
 
-        for i in range(self.n_bands):
-            self.band_peaks[i] = max(
-                band_energies[i], self.band_peaks[i] * self.band_peak_decay)
-        normalized = band_energies / self.band_peaks
+        normalized = self.band_ema.update(band_energies)
 
         # This frame's winner (3 groups, averaged)
         group_energy = np.array([

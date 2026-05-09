@@ -14,16 +14,10 @@ Captured 2026-05-05 using `festicorn/original-duck/tools/mic_capture.py`.
 | `mic_same_room.wav` | 170s | Conversation in same room, ~3m |
 | `mic_next_room_open.wav` | 232s | Conversation in next room, door open |
 | `mic_profile_closed_door.wav` | 108s | Conversation in next room, door closed |
-| `outdoor.wav` | 65s | Outdoor speech at varying distances (see segments below) |
+| `outdoor_close.wav` | 7s | Outdoor speech ~30cm from mic, with pauses |
+| `outdoor_medium.wav` | 5s | Outdoor speech ~1-2m from mic |
+| `outdoor_far.wav` | 4s | Outdoor speech ~5m+ from mic |
 | `two_speakers_20s.wav` | 20s | Two speakers at different distances simultaneously |
-
-## Outdoor segments (timestamps into outdoor.wav)
-
-| Segment | Start | End | Description |
-|---------|-------|-----|-------------|
-| Close | 13s | 20s | Speaking ~30cm from mic, with pauses |
-| Medium | 25s | 30s | Speaking ~1-2m from mic |
-| Far | 34s | 38s | Speaking ~5m+ from mic |
 
 ## Two speakers scenario (two_speakers_20s.wav)
 

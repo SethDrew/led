@@ -54,6 +54,16 @@ firmware_by_role:
       Standalone sap-flow animation on a 3-strip 197-LED tree topology
       (pins 27/13/14 via build flags). No network. Sap-flow particle
       effect lives at festicorn/bench-tree/src/foregrounds/SapFlowForeground.h.
+  noodles:
+    deployment: dynamic
+    source: null
+    hardware:
+      chip: esp32-d0wd-v3 (DevKit V1, 30-pin clone, CH340)
+      strips: 2× WS2812 RGB (150 LEDs each, logically one 300-LED chain)
+      pins: GPIO 4 (strip A, idx 0–149) / GPIO 19 (strip B, idx 150–299)
+    notes: |
+      Audio-reactive installation. Two 150-LED strips.
+      Dynamic deployment — firmware changes with the experiment.
   take-root:
     deployment: dynamic
     source: null
@@ -261,12 +271,14 @@ boards:
 
 # ── classic-ESP32 fixtures ───────────────────────────────────────────
 - mac: F4:2D:C9:6D:B2:58
-  id: ''
-  chip: esp32
-  role: test-receiver
+  id: 'noodles'
+  chip: esp32-d0wd-v3
+  role: noodles
+  first_seen: '2026-04-28T18:00:00Z'
   notes: |
-    Classic ESP32 used as the bulb-sender RX-validation receiver
-    (see rx_check entries above). Runs `tx_test_recv` firmware.
+    Formerly test-receiver. Repurposed 2026-05-06 for noodles installation.
+    2× 150 LED strips (WS2812 GRB) on GPIO 4 (strip A) and GPIO 19 (strip B).
+    CH340 USB serial, port /dev/cu.usbserial-11430 (re-enumerates on replug).
 - mac: null
   id: 'unknown-classic-1110'
   chip: esp32

@@ -1,4 +1,5 @@
 [
   {"id": "sculpture", "name": "Sculpture COB", "vid": "1a86", "pid": "7523", "leds": 80, "device_id": 1, "port_hint": "1230"},
-  {"id": "strip_150", "name": "150 Strip Nano", "vid": "1a86", "pid": "7523", "leds": 150, "device_id": 2, "port_hint": "1240"}
+  {"id": "strip_150", "name": "150 Strip Nano", "vid": "1a86", "pid": "7523", "leds": 150, "device_id": 2, "port_hint": "1240"},
+  {"id": "noodles", "name": "Noodles ESP32", "vid": "1a86", "pid": "7523", "leds": 120, "port_hint": "11430", "baud": 460800, "mac": "f4:2d:c9:6d:b2:58"}
 ]

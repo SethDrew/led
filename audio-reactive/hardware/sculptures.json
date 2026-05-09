@@ -41,6 +41,16 @@
     "notes": "Strip starts at base (LED 0), wraps up left branch to apex (41-42 junction). Left tip at LED 26 dips below middle height. Right branch crosses middle twice: at apex (42/71, R-to-L) and at 46/66 (L-to-R). After crossing, right branch stays to the right of middle (~0.25 in x). Right branch self-loops at 52/57 (same physical position). LED 54 is peak of loop, ~6 LEDs from middle. Base convergence: 0/61/62. LEDs 4 and 63 are near-neighbors across left/middle branches. Middle branch runs roughly straight up center (x=0) with slight leftward lean at base. Total 72 active LEDs on 80-pixel strip."
   },
   {
+    "id": "noodles",
+    "name": "Noodles (2×150 mirrored)",
+    "controller": "noodles",
+    "physical_leds": 120,
+    "branches": [
+      {"start": 0, "count": 120, "reverse": false}
+    ],
+    "notes": "Two back-to-back 150-LED strips on ESP32 (D4 + D19). Both strips show identical output. Currently using last 120 LEDs of each strip (240 total, 120 per strip)."
+  },
+  {
     "id": "strip_150",
     "name": "150 LED Strip",
     "controller": "strip_150",

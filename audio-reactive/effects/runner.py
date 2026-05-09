@@ -54,7 +54,7 @@ CHUNK_SIZE = 1024          # ~23ms per chunk
 LED_FPS = 30
 NUM_LEDS = 197             # Tree default
 BAUD_RATE = 1000000
-BRIGHTNESS_CAP = 0.30      # 30%
+BRIGHTNESS_CAP = 1.00
 START_BYTE_1 = 0xFF
 START_BYTE_2 = 0xAA
 
@@ -335,11 +335,21 @@ class SerialLEDOutput:
     """Sends RGB frames to Arduino via serial."""
 
     CMD_POT = 0xFC
+    CMD_DUCK = 0xFB
+    CMD_V1 = 0xFA
+    DUCK_PAYLOAD_LEN = 15  # SensorPacket size
+    V1_PAYLOAD_LEN = 16    # TelemetryPacketV1 size
 
     def __init__(self, port, num_leds, baud_rate=BAUD_RATE):
         self.num_leds = num_leds
         self.ser = None
         self.pot_value = 512  # default mid-position (0-1023)
+        self.duck_data = {
+            'ax': 0, 'ay': 0, 'az': 0,
+            'gx': 0, 'gy': 0, 'gz': 0,
+            'rms': 0, 'mic_on': False,
+        }
+        self.v1_data = None
 
         if port:
             try:
@@ -357,17 +367,45 @@ class SerialLEDOutput:
                 self.ser = None
 
     def _drain_and_parse(self):
-        """Read incoming serial data, parsing pot messages (0xFC)."""
+        """Read incoming serial data, parsing pot (0xFC) and duck (0xFB) messages."""
         if not self.ser or not self.ser.in_waiting:
             return
         try:
+            import struct
             data = self.ser.read(self.ser.in_waiting)
-            # Scan for 0xFC pot messages (3 bytes: 0xFC, hi, lo)
             i = 0
-            while i < len(data) - 2:
-                if data[i] == self.CMD_POT:
+            n = len(data)
+            while i < n:
+                b = data[i]
+                if b == self.CMD_POT and i + 2 < n:
                     self.pot_value = (data[i + 1] << 8) | data[i + 2]
                     i += 3
+                elif b == self.CMD_DUCK and i + self.DUCK_PAYLOAD_LEN < n:
+                    payload = data[i + 1:i + 1 + self.DUCK_PAYLOAD_LEN]
+                    ax, ay, az, gx, gy, gz, rms, mic = struct.unpack('<hhhhhhHB', payload)
+                    self.duck_data = {
+                        'ax': ax, 'ay': ay, 'az': az,
+                        'gx': gx, 'gy': gy, 'gz': gz,
+                        'rms': rms, 'mic_on': bool(mic),
+                    }
+                    i += 1 + self.DUCK_PAYLOAD_LEN
+                elif b == self.CMD_V1 and i + self.V1_PAYLOAD_LEN < n:
+                    payload = data[i + 1:i + 1 + self.V1_PAYLOAD_LEN]
+                    (seq, ax_max, ay_max, az_max,
+                     ax_min, ay_min, az_min,
+                     ax_mean, ay_mean, az_mean,
+                     amag_max, amag_mean,
+                     gmag_max, gmag_mean, flags) = struct.unpack('<HbbbbbbbbbBBBBB', payload)
+                    self.v1_data = {
+                        'seq': seq,
+                        'ax_max': ax_max, 'ay_max': ay_max, 'az_max': az_max,
+                        'ax_min': ax_min, 'ay_min': ay_min, 'az_min': az_min,
+                        'ax_mean': ax_mean, 'ay_mean': ay_mean, 'az_mean': az_mean,
+                        'amag_max': amag_max, 'amag_mean': amag_mean,
+                        'gmag_max': gmag_max, 'gmag_mean': gmag_mean,
+                        'flags': flags,
+                    }
+                    i += 1 + self.V1_PAYLOAD_LEN
                 else:
                     i += 1
         except Exception:
@@ -425,6 +463,30 @@ def print_diagnostics(effect, frame_num):
     sys.stdout.flush()
 
 
+_active_keys = set()
+
+
+def _start_stdin_reader():
+    """Read JSON lines from stdin for keyboard input."""
+    global _active_keys
+
+    def reader():
+        global _active_keys
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+                if msg.get('type') == 'keys':
+                    _active_keys = set(msg.get('keys', []))
+            except (json.JSONDecodeError, Exception):
+                pass
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+    return t
+
+
 def run_live(effect, led_output, device_id, brightness_cap=BRIGHTNESS_CAP,
              sculpture_def=None, stream_features=False):
     """Run effect on live BlackHole audio.
@@ -475,6 +537,8 @@ def run_live(effect, led_output, device_id, brightness_cap=BRIGHTNESS_CAP,
 
     print("  Listening... Play music through BlackHole. Ctrl+C to stop.\n")
 
+    _start_stdin_reader()
+
     try:
         stream.start()
         frame_interval = 1.0 / LED_FPS
@@ -498,6 +562,12 @@ def run_live(effect, led_output, device_id, brightness_cap=BRIGHTNESS_CAP,
             # Pass pot value to effect if it supports it
             if hasattr(effect, 'set_pot_value'):
                 effect.set_pot_value(led_output.pot_value)
+            if hasattr(effect, 'set_duck_data'):
+                effect.set_duck_data(led_output.duck_data)
+            if hasattr(effect, 'set_v1_data') and led_output.v1_data is not None:
+                effect.set_v1_data(led_output.v1_data)
+            if hasattr(effect, 'set_keys'):
+                effect.set_keys(_active_keys)
 
             # Terminal display
             print_diagnostics(effect, frame_num)
@@ -881,6 +951,7 @@ def main():
 
     # Resolve sculpture topology (if specified)
     sculpture_def = None
+    controller = None
     if args.sculpture:
         try:
             sculpture_def, controller = load_sculpture(args.sculpture)
@@ -929,7 +1000,8 @@ def main():
         if serial_port is None:
             print("  No serial port found — terminal-only mode")
 
-    led_output = SerialLEDOutput(serial_port, physical_leds)
+    baud_rate = controller.get('baud', BAUD_RATE) if controller else BAUD_RATE
+    led_output = SerialLEDOutput(serial_port, physical_leds, baud_rate=baud_rate)
 
     # Run
     try:

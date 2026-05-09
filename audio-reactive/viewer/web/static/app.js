@@ -1692,6 +1692,38 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
+// ── LED Keyboard Input ───────────────────────────────────────────
+
+const _ledKeys = new Set();
+
+function _sendLedKeys() {
+    fetch('/api/effects/keys', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({keys: [..._ledKeys]})
+    }).catch(() => {});
+}
+
+document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.repeat) return;
+    if (_ledKeys.has(e.code)) return;
+    _ledKeys.add(e.code);
+    _sendLedKeys();
+});
+
+document.addEventListener('keyup', (e) => {
+    _ledKeys.delete(e.code);
+    _sendLedKeys();
+});
+
+window.addEventListener('blur', () => {
+    if (_ledKeys.size > 0) {
+        _ledKeys.clear();
+        _sendLedKeys();
+    }
+});
+
 // ── Helpers ──────────────────────────────────────────────────────
 
 function formatTime(s) {

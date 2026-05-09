@@ -228,6 +228,7 @@ static void applyChannel(uint8_t ch) {
 // ── Algorithm enum ───────────────────────────────────────────────
 enum DuckAlgorithm {
     DUCK_ALG_SPARKLE_BURST,
+    DUCK_ALG_SPARKLE_SIMPLE,
     DUCK_ALG_FIRE_MELD,
     DUCK_ALG_FIRE_FLICKER,
     DUCK_ALG_QUIET_BLOOM,
@@ -600,6 +601,123 @@ static void duckRenderSparkleBurst(float dt, float angleDeg, float tiltBlend,
     }
 }
 
+// ── Simple sparkle — same render as burst, just a fixed dBFS gate ─
+// Instead of onset detection + adaptive envelope + adaptive threshold,
+// the gate is: rawRms (sender >>8 scale) > -45 dBFS? That's it.
+// Everything else (cooldown, ignition count, decay, jitter, rendering)
+// is identical to sparkle_burst.
+#define DUCK_SIMPLE_FLOOR_RAW  47234.0f  // -45 dBFS in sender >>8 scale
+
+static void duckRenderSparkleSimple(float dt, float angleDeg, float tiltBlend,
+                                     float tiltR, float tiltG, float tiltB) {
+    float rawRms = (float)latestDuckPacket.rawRms;
+    bool gate = rawRms > DUCK_SIMPLE_FLOOR_RAW;
+    bool isSilent = !gate;
+
+    // Reuse burst's envelope for base glow (tracks gate state, not energy)
+    float attackAlpha = fminf(1.0f, dt / 0.030f);
+    float decayAlpha  = fminf(1.0f, dt / 0.400f);
+    float gateVal = gate ? 1.0f : 0.0f;
+    if (gateVal > duckEnvelope)
+        duckEnvelope += attackAlpha * (gateVal - duckEnvelope);
+    else
+        duckEnvelope += decayAlpha * (gateVal - duckEnvelope);
+
+    duckCooldownRemaining = fmaxf(0.0f, duckCooldownRemaining - dt);
+
+    // Fire when gate is open and cooldown expired
+    if (gate && duckCooldownRemaining <= 0.0f) {
+        duckCooldownRemaining = 0.100f;
+
+        // Intensity from how far above the gate
+        float db = 20.0f * log10f(rawRms / DUCK_SIMPLE_FLOOR_RAW);
+        float intensity = clampf(db / 12.0f, 0.0f, 1.0f);
+
+        int nIgnite = (int)(DUCK_LED_COUNT * (0.3f + 0.2f * intensity));
+
+        static uint8_t indices[DUCK_LED_COUNT];
+        for (uint8_t i = 0; i < DUCK_LED_COUNT; i++) indices[i] = i;
+        for (int i = 0; i < nIgnite; i++) {
+            int j = i + (int)(xorshift32() % (DUCK_LED_COUNT - i));
+            uint8_t tmp = indices[i];
+            indices[i] = indices[j];
+            indices[j] = tmp;
+        }
+
+        float sparkVal = 0.7f + 0.3f * intensity;
+        for (int i = 0; i < nIgnite; i++) {
+            duckSparkle[indices[i]] = sparkVal;
+            duckDecayRates[indices[i]] = 0.92f + randFloat() * 0.05f;
+        }
+    }
+
+    for (uint16_t i = 0; i < DUCK_LED_COUNT; i++) {
+        duckSparkle[i] *= fastDecay(duckDecayRates[i], dt * 30.0f);
+    }
+
+    if (!isSilent) {
+        for (uint16_t i = 0; i < DUCK_LED_COUNT; i++) {
+            float jitter = (randFloat() - 0.5f) * 0.02f;
+            float newVal = duckSparkle[i] + jitter;
+            if (newVal < 0.0f) newVal = 0.0f;
+            if (newVal > duckSparkle[i] && jitter > 0) newVal = duckSparkle[i];
+            duckSparkle[i] = newVal;
+        }
+    }
+
+    float base = fminf(duckEnvelope, 0.2f);
+
+    duckSparkPeakR = duckSparkPeakG = duckSparkPeakB = duckSparkPeakW = 0;
+    duckSparkPeakBright = 0.0f;
+    duckSparkPeakLin = 0.0f;
+
+    for (uint16_t i = 0; i < DUCK_LED_COUNT; i++) {
+        float s = duckSparkle[i];
+        float bright = base + s * (1.0f - base);
+        if (bright < DUCK_SPARKLE_DEADBAND) bright = 0.0f;
+
+        float colR = 255.0f;
+        float colG = 180.0f + (240.0f - 180.0f) * s;
+        float colB =  80.0f + (200.0f -  80.0f) * s;
+
+        if (tiltBlend > 0.0f) {
+            colR = colR * (1.0f - tiltBlend) + tiltR * tiltBlend;
+            colG = colG * (1.0f - tiltBlend) + tiltG * tiltBlend;
+            colB = colB * (1.0f - tiltBlend) + tiltB * tiltBlend;
+        }
+
+        float linBright = fastGamma24(bright) * DUCK_BRIGHTNESS_CAP;
+        float colW = 255.0f * (1.0f - tiltBlend);
+        float fR = colR * linBright;
+        float fG = colG * linBright;
+        float fB = colB * linBright;
+        float fW = colW * linBright;
+
+        uint16_t tR16 = (uint16_t)clampf(fR * 256.0f, 0, 65535);
+        uint16_t tG16 = (uint16_t)clampf(fG * 256.0f, 0, 65535);
+        uint16_t tB16 = (uint16_t)clampf(fB * 256.0f, 0, 65535);
+        uint16_t tW16 = (uint16_t)clampf(fW * 256.0f, 0, 65535);
+
+        if (tR16 < 256) tR16 = 0;
+        if (tG16 < 256) tG16 = 0;
+        if (tB16 < 256) tB16 = 0;
+        if (tW16 < 256) tW16 = 0;
+
+        uint8_t r = deltaSigma(duckDsR[i], tR16);
+        uint8_t g = deltaSigma(duckDsG[i], tG16);
+        uint8_t b = deltaSigma(duckDsB[i], tB16);
+        uint8_t w = deltaSigma(duckDsW[i], tW16);
+        stripDuck.SetPixelColor(i, RgbwColor(r, g, b, w));
+
+        if (r > duckSparkPeakR) duckSparkPeakR = r;
+        if (g > duckSparkPeakG) duckSparkPeakG = g;
+        if (b > duckSparkPeakB) duckSparkPeakB = b;
+        if (w > duckSparkPeakW) duckSparkPeakW = w;
+        if (bright > duckSparkPeakBright) duckSparkPeakBright = bright;
+        if (linBright > duckSparkPeakLin) duckSparkPeakLin = linBright;
+    }
+}
+
 // ── Fire render (shared by fire_meld and fire_flicker) ───────────
 static void duckRenderFire(float dt, bool withDropout, float tiltBlend) {
     duckFireTime += dt;
@@ -819,6 +937,9 @@ static void duckRenderFrame(float dt, uint32_t now) {
     switch (duckCurrentAlg) {
         case DUCK_ALG_SPARKLE_BURST:
             duckRenderSparkleBurst(dt, angleDeg, tiltBlend, tiltR, tiltG, tiltB);
+            break;
+        case DUCK_ALG_SPARKLE_SIMPLE:
+            duckRenderSparkleSimple(dt, angleDeg, tiltBlend, tiltR, tiltG, tiltB);
             break;
         case DUCK_ALG_FIRE_MELD:
             duckRenderFire(dt, false, tiltBlend);
@@ -1475,6 +1596,32 @@ void loop() {
                                   : (1.0f / DUCK_SENSOR_HZ);
     if (dt > 0.1f) dt = 0.1f;
     lastRenderMs = now;
+
+    // ── Serial commands ─────────────────────────────────────────
+    while (Serial.available()) {
+        char c = Serial.read();
+        if (c == 's') {
+            duckCurrentAlg = DUCK_ALG_SPARKLE_BURST;
+            duckResetSparkleState();
+            Serial.println("Algorithm: sparkle_burst");
+        } else if (c == 'S') {
+            duckCurrentAlg = DUCK_ALG_SPARKLE_SIMPLE;
+            duckResetSparkleState();
+            Serial.println("Algorithm: sparkle_simple (-45dBFS gate)");
+        } else if (c == 'm') {
+            duckCurrentAlg = DUCK_ALG_FIRE_MELD;
+            duckResetFireState();
+            Serial.println("Algorithm: fire_meld");
+        } else if (c == 'f') {
+            duckCurrentAlg = DUCK_ALG_FIRE_FLICKER;
+            duckResetFireState();
+            Serial.println("Algorithm: fire_flicker");
+        } else if (c == 'b') {
+            duckCurrentAlg = DUCK_ALG_QUIET_BLOOM;
+            duckResetBloomState();
+            Serial.println("Algorithm: quiet_bloom");
+        }
+    }
 
     // === DUCK PIPELINE ===
     uint32_t t0 = micros();

@@ -93,9 +93,7 @@ def _load_controllers():
 CMD_IDENTIFY = 0xFE
 
 def _query_device_id(port, baud=1000000, timeout=0.5):
-    """Query a serial port for its EEPROM device_id. Returns id (int) or None.
-    Opening triggers Arduino reset (DTR), so we wait for bootloader (~2s).
-    """
+    """Query a serial port for its EEPROM device_id (Nano). Returns id (int) or None."""
     import serial
     import time
     try:
@@ -107,6 +105,23 @@ def _query_device_id(port, baud=1000000, timeout=0.5):
         ser.close()
         if len(resp) == 2 and resp[0] == CMD_IDENTIFY:
             return resp[1]
+    except Exception:
+        pass
+    return None
+
+def _query_mac(port, baud=460800, timeout=0.5):
+    """Query a serial port for its MAC (ESP32). Returns 'aa:bb:..' string or None."""
+    import serial
+    import time
+    try:
+        ser = serial.Serial(port, baud, timeout=timeout)
+        time.sleep(2.0)  # ESP32 boot
+        ser.reset_input_buffer()
+        ser.write(bytes([CMD_IDENTIFY]))
+        resp = ser.read(7)
+        ser.close()
+        if len(resp) == 7 and resp[0] == CMD_IDENTIFY:
+            return ":".join(f"{b:02x}" for b in resp[1:])
     except Exception:
         pass
     return None
@@ -133,17 +148,22 @@ def _resolve_controller_ports(controllers):
             key = (f"{p.vid:04x}", f"{p.pid:04x}")
             by_vidpid.setdefault(key, []).append(p.device)
 
-    # Query EEPROM device_id for all CH340 ports (vid=1a86, pid=7523)
+    # Probe each CH340 port: try Nano EEPROM id (1Mbps), then ESP32 MAC (460800).
     ch340_ports = by_vidpid.get(("1a86", "7523"), [])
-    port_ids = {}  # port -> device_id
-    if ch340_ports:
-        for port in ch340_ports:
-            dev_id = _query_device_id(port)
-            if dev_id is not None:
-                port_ids[port] = dev_id
-                print(f"[controllers] {port}: EEPROM device_id={dev_id}")
-            else:
-                print(f"[controllers] {port}: no EEPROM response (unprovisioned?)")
+    port_ids = {}   # port -> device_id (Nano)
+    port_macs = {}  # port -> mac string (ESP32)
+    for port in ch340_ports:
+        dev_id = _query_device_id(port)
+        if dev_id is not None:
+            port_ids[port] = dev_id
+            print(f"[controllers] {port}: EEPROM device_id={dev_id}")
+            continue
+        mac = _query_mac(port)
+        if mac is not None:
+            port_macs[port] = mac
+            print(f"[controllers] {port}: MAC={mac}")
+        else:
+            print(f"[controllers] {port}: no identify response (unprovisioned?)")
 
     for c in controllers:
         vid = c.get('vid')
@@ -153,7 +173,7 @@ def _resolve_controller_ports(controllers):
         key = (vid.lower(), pid.lower())
         ports = by_vidpid.get(key, [])
 
-        # Try EEPROM device_id first (definitive match)
+        # Try EEPROM device_id first (definitive match for Nanos)
         target_id = c.get('device_id')
         if target_id is not None:
             match = [p for p, did in port_ids.items() if did == target_id]
@@ -162,12 +182,22 @@ def _resolve_controller_ports(controllers):
                 print(f"[controllers] {c['name']}: {c['port']} (device_id={target_id})")
                 continue
 
-        # Fallback: port_hint
+        # Try MAC match (definitive for ESP32)
+        target_mac = c.get('mac')
+        if target_mac is not None:
+            tm = target_mac.lower()
+            match = [p for p, m in port_macs.items() if m == tm]
+            if match:
+                c['port'] = match[0]
+                print(f"[controllers] {c['name']}: {c['port']} (mac={tm})")
+                continue
+
+        # Fallback: port_hint (strict — no match means not connected)
         hint = c.get('port_hint')
         if hint and ports:
             match = [p for p in ports if hint in p]
-            c['port'] = match[0] if match else ports[0]
-        elif ports:
+            c['port'] = match[0] if match else None
+        elif not hint and ports:
             c['port'] = ports[0]
         else:
             c['port'] = None
@@ -650,6 +680,7 @@ def _start_effect(name, controller_id=None, sculpture_id=None, palette_name=None
             proc = subprocess.Popen(
                 cmd,
                 cwd=EFFECTS_DIR,
+                stdin=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
             reader_thread = _start_feature_reader(proc, target_id)
@@ -4179,6 +4210,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._handle_effect_start(name)
         elif path == '/api/effects/stop':
             self._handle_effect_stop()
+        elif path == '/api/effects/keys':
+            self._handle_effect_keys()
         elif path == '/api/effects/rate':
             self._handle_effect_rate()
         elif path == '/api/effects/reorder':
@@ -4232,6 +4265,22 @@ class ViewerHandler(BaseHTTPRequestHandler):
         body = self._read_json_body()
         target_id = body.get('target_id') if body else None
         _stop_effect(target_id)  # None → stop all
+        self._json_response({'ok': True})
+
+    def _handle_effect_keys(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        keys = body.get('keys', [])
+        msg = json.dumps({'type': 'keys', 'keys': keys}) + '\n'
+        for slot in _effect_slots.values():
+            proc = slot.get('process')
+            if proc and proc.stdin and proc.poll() is None:
+                try:
+                    proc.stdin.write(msg.encode())
+                    proc.stdin.flush()
+                except Exception:
+                    pass
         self._json_response({'ok': True})
 
     def _handle_effect_rate(self):

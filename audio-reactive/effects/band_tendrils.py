@@ -27,12 +27,12 @@ import threading
 import numpy as np
 from base import AudioReactiveEffect
 from topology import SculptureTopology
-from signals import OverlapFrameAccumulator
+from signals import OverlapFrameAccumulator, AbsIntegralMetric, EMARatioNormalize
 
 
 # ── Tendril constants ──
 MAX_TENDRILS = 2
-TENDRIL_MIN_LENGTH = 3       # LEDs for weakest hit
+TENDRIL_MIN_LENGTH = 5       # LEDs for weakest hit
 TENDRIL_MAX_LENGTH = 20      # LEDs for strongest hit
 TENDRIL_EXPAND_SPEED = 40.0  # LEDs per second expansion rate
 TENDRIL_TRAIL_FALLOFF = 0.80 # brightness multiplier per LED behind head
@@ -66,9 +66,9 @@ ORIGIN_DRIFT_INTERVAL = 8.0  # seconds between origin changes
 #   window=0.15s, AbsInt EMA tau=2.0s, single-best-per-frame with 0.45s cooldown.
 #   Floors picked between ambient p100 and percussive p95; ratio chosen so
 #   sustained loud signals (steady drone, sustained drop) don't keep retriggering.
-ABSINT_FLOOR_PER_BAND = [20.0, 7.0, 1.4]    # LOW, MID, HIGH absolute thresholds
+ABSINT_FLOOR_PER_BAND = [16.0, 5.5, 1.1]    # LOW, MID, HIGH absolute thresholds
 ABSINT_RATIO_THRESHOLD = 2.0   # AbsInt must be 2x its own recent baseline
-ONSET_COOLDOWN_S = 0.45        # per-band cooldown in seconds
+ONSET_COOLDOWN_S = 0.1125      # per-band cooldown in seconds
 
 # ── Frequency bands for per-band onset detection ──
 BAND_EDGES_HZ = [0, 250, 2000]  # low: 0-250, mid: 250-2000, high: 2000+
@@ -81,7 +81,7 @@ ABSINT_EMA_TIME_CONSTANT = 2.0 # tracks per-band energy envelope (for ratio + de
 # ── AbsInt-to-length mapping ──
 # Length scales by how much the AbsInt exceeds the trigger floor.
 # At floor → MIN length, at LENGTH_CEIL × floor → MAX length.
-ABSINT_LENGTH_CEIL_MULT = 2.0  # raw AbsInt at this multiple of floor → max length
+ABSINT_LENGTH_CEIL_MULT = 1.4  # raw AbsInt at this multiple of floor → max length
 
 
 def hsv_to_rgb(h, s, v):
@@ -151,21 +151,15 @@ class BandTendrilsEffect(AudioReactiveEffect):
         self.band_cooldown = np.zeros(self.n_bands, dtype=np.int32)
 
         # ── Per-band AbsInt: trigger metric, length input, decay modulator ──
-        # AbsInt = integral of |d(band_rms)/dt| over ABSINT_WINDOW_SEC.
-        # Sustained signals have small derivatives → low AbsInt; transients spike.
-        absint_window_frames = max(1, int(ABSINT_WINDOW_SEC * frames_per_sec))
-        self._absint_window_frames = absint_window_frames
-        self._absint_deriv_buf = np.zeros((self.n_bands, absint_window_frames),
-                                          dtype=np.float32)
-        self._absint_buf_pos = 0
-        self._absint_prev_band_rms = np.zeros(self.n_bands, dtype=np.float32)
+        # Abs-int path = AbsIntegralMetric (raw |d(band_rms)/dt| integral) →
+        # EMARatioNormalize (events relative to typical change rate).
+        self._absint_metric = AbsIntegralMetric(
+            num_bands=self.n_bands, fps=frames_per_sec,
+            window_sec=ABSINT_WINDOW_SEC)
+        self._absint_ema = EMARatioNormalize(
+            num_bands=self.n_bands, fps=frames_per_sec,
+            ema_tc=ABSINT_EMA_TIME_CONSTANT)
         self._absint_raw = np.zeros(self.n_bands, dtype=np.float32)
-        self._absint_dt = 1.0 / frames_per_sec  # seconds per frame
-
-        # Per-band AbsInt EMA — used for both the trigger ratio gate and decay.
-        self._absint_ema_alpha = 1.0 / (ABSINT_EMA_TIME_CONSTANT * frames_per_sec)
-        self._absint_ema = np.zeros(self.n_bands, dtype=np.float32)
-        self._absint_ema_initialized = np.zeros(self.n_bands, dtype=bool)
         # Normalized per-band absint (ratio/(ratio+1), in [0,1)) — drives decay.
         self._absint_normalized = np.zeros(self.n_bands, dtype=np.float32)
 
@@ -306,35 +300,19 @@ class BandTendrilsEffect(AudioReactiveEffect):
             band_spec = spec[self.band_slices[b]]
             band_rms[b] = float(np.sqrt(np.mean(band_spec ** 2))) if len(band_spec) > 0 else 0.0
 
-        # ── Per-band AbsInt update + EMA ──
-        buf_idx = self._absint_buf_pos % self._absint_window_frames
-        for b in range(self.n_bands):
-            deriv = (band_rms[b] - self._absint_prev_band_rms[b]) / self._absint_dt
-            self._absint_deriv_buf[b, buf_idx] = abs(deriv)
-            raw = float(np.sum(self._absint_deriv_buf[b])) * self._absint_dt
-            self._absint_raw[b] = raw
-
-            if not self._absint_ema_initialized[b]:
-                self._absint_ema[b] = raw
-                self._absint_ema_initialized[b] = True
-            else:
-                self._absint_ema[b] += self._absint_ema_alpha * (raw - self._absint_ema[b])
-
-            ema_val = self._absint_ema[b]
-            ratio = raw / ema_val if ema_val > 1e-10 else 0.0
-            # Normalized form for decay (saturates smoothly into [0, 1))
-            self._absint_normalized[b] = ratio / (ratio + 1.0)
-
-        self._absint_prev_band_rms = band_rms.copy()
-        self._absint_buf_pos += 1
+        # ── Per-band AbsInt update + EMA-ratio ──
+        absint_raw = self._absint_metric.update(band_rms)
+        ratios = self._absint_ema.update(absint_raw)
+        self._absint_raw = absint_raw
+        # Saturating decay modulator in [0, 1): centers ~0.5 at mean activity.
+        self._absint_normalized = ratios / (ratios + 1.0)
 
         # ── Trigger gate: absolute floor AND ratio>k, per band ──
         self.band_cooldown = np.maximum(self.band_cooldown - 1, 0)
         hits_this_frame = []
         for b in range(self.n_bands):
-            raw = self._absint_raw[b]
-            ema_val = self._absint_ema[b]
-            ratio = raw / ema_val if ema_val > 1e-10 else 0.0
+            raw = float(absint_raw[b])
+            ratio = float(ratios[b])
             floor_ok = raw > ABSINT_FLOOR_PER_BAND[b]
             ratio_ok = ratio > ABSINT_RATIO_THRESHOLD
             cooldown_ok = self.band_cooldown[b] == 0

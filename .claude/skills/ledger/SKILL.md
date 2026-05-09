@@ -111,12 +111,23 @@ The user has repeatedly flagged a specific failure mode in recent entries: **imp
 
 These are real entries already in the research ledger that exhibit the failure modes you are screening for. Use them to calibrate.
 
-**Example A — `inmp441-validation-2026-04-26` (narrow flag: firmware-variant naming only)**
-This entry is mostly OK. Its notes field has a `## Methodology` block citing 16 kHz int16 PCM, USB CDC, BlackHole loopback, host scripts (`dual_capture.py`, `compare_inmp441_vs_system.py`), 60 s per condition. **Most of that is legitimate reproducibility detail** — public tools (BlackHole), chip names (INMP441), conditions, sample rates, and durations all help a future reader reproduce the result, and host-side scripts checked into the repo are stable reproducibility primitives. Do NOT flag those.
+**Example A — `bulb-tap-quiet-floor-gate` (the agent over-reached on detail)**
+The user explicitly asked for this entry, knowing the topic skirts implementation territory: "this may appear to be an implementation detail at first glance, I think coming up with a simple solution that basically captures everything we need is an architecturally relevant point." That framing is exactly right — the *architectural insight* (a single quiet-floor shape feature cleanly separates strikes from sustained motion) belongs in the research ledger.
 
-The narrow problem: it names internal **firmware variants** — "Wrote a new firmware variant `raw_audio_sender`... vs the production `stream_sender`". Firmware variants live only inside this project, change often, and naming them does not help anyone reproduce the finding. Flag only the firmware-variant naming and suggest replacing with a behavioural description ("a raw-PCM streaming firmware variant" rather than the variant's identifier). Leave the rest of the methodology alone.
+What got published, however, drifts well past that mandate. From the notes field:
 
-Lesson: not every code/file name is leakage. Public tools, chips, host scripts that exist as stable reproducibility primitives = OK. Internal firmware variants, deploy targets, code-internal class/function names = leakage.
+> "Implementation cost is trivial: one 5-element ring buffer of recent peaks (~20 bytes RAM), scan-for-min on each packet (~5 comparisons). No new wire fields; the per-axis max/min the v1 schema already ships is sufficient. Plot at /tmp/duck_quietfloor.png in the analysis session that derived this; analysis script /tmp/plot_duck_quietfloor.py."
+
+Every clause of that paragraph is misplaced for a research-ledger entry:
+- **/tmp paths**: ephemeral, will be wrong by morning, point to nothing reproducible.
+- **RAM byte count + comparison count**: firmware-engineering content. Belongs in an engineering-ledger entry or a firmware doc, not in the research ledger.
+- **"v1 schema already ships is sufficient"**: an observation about the engineering wire schema. Belongs in the engineering ledger.
+
+The validation table further down (per-episode survival counts: "ep1 pick it up movement 0/0 fires, ep2 hold it 0/0, ep3 shake it 28→8 (71% suppressed)...") is borderline — the headline numbers (95-96% kept, 71% suppressed) belong in the entry as the finding, but the per-episode breakdown is a validation log that should live in `library/test-vectors/duck-gestures/` and be linked via `source:`.
+
+Suggested rewrite: keep the title, summary, and the "why this works mechanically" paragraph. Drop the implementation-cost paragraph entirely (move RAM/comparison cost to a separate engineering-ledger entry if it's worth recording at all). Replace the per-episode table with a one-line summary of the headline numbers plus a `source:` pointer.
+
+Lesson: even when the user authorises an entry that touches implementation territory, publish only the *architectural / perceptual finding*. Engineering-cost detail, /tmp paths, and validation logs do not earn their place in the research ledger just because they're related to the same investigation. Be precise about what each ledger is for.
 
 **Example B — `bulb-movement-hard-gate-sufficient` (engineering decision dressed up as research finding)**
 This is a clean anti-pattern. The "finding" was really a build-time engineering decision — "we picked 0.5 g as the AC threshold and it works on our current bulbs" — closer to a bug/tuning fix than a research insight about audio/LEDs/feeling. It got published into the *research* ledger but reads like an engineering changelog: cites build targets ("festicorn/biolum, festicorn/bench-bulbs"), the v1 wire schema field layout ("ax_max, ay_max, az_max, then mins, then means"), and a config-style threshold rule.

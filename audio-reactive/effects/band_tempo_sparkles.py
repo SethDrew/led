@@ -16,7 +16,8 @@ flash on beats in the same color family.
 import numpy as np
 import threading
 from base import AudioReactiveEffect
-from signals import OverlapFrameAccumulator, AbsIntegral, BeatPredictor
+from signals import (
+    OverlapFrameAccumulator, BeatEventTracker, EMARatioNormalize)
 
 
 # Band definitions matching viewer.py exactly
@@ -61,8 +62,11 @@ class BandTempoSparklesEffect(AudioReactiveEffect):
             self.band_masks.append(
                 (self.band_freq_bins >= lo) & (self.band_freq_bins < hi))
 
-        self.band_peaks = np.full(self.n_bands, 1e-10, dtype=np.float32)
-        self.band_peak_decay = 0.9995
+        # Section-relative EMA-ratio: ~mean=1.0 per band, rises on excursions.
+        # FPS reflects OverlapFrameAccumulator (frame=2048, hop=512).
+        band_fps = sample_rate / 512
+        self.band_ema = EMARatioNormalize(
+            num_bands=self.n_bands, fps=band_fps, ema_tc=30.0)
 
         self.band_window_len = int(5 * sample_rate / self.n_fft_band)
         self.band_ring = np.zeros(
@@ -74,10 +78,12 @@ class BandTempoSparklesEffect(AudioReactiveEffect):
         self.dominant_color_target = self.dominant_color.copy()
         self.dominant_idx = 0
 
-        # Beat detection (using signal primitives)
+        # Beat detection: multi-band onset envelope autocorrelation for tempo,
+        # onset-threshold for confirmed events, phase-locked catchup for
+        # predicted events when an onset is missed. Better on dense
+        # percussion than the broadband AbsIntegral+BeatPredictor path.
         self.accum = OverlapFrameAccumulator()
-        self.absint = AbsIntegral(sample_rate=sample_rate)
-        self.predictor = BeatPredictor(rms_fps=self.absint.rms_fps)
+        self.beat_tracker = BeatEventTracker(sample_rate=sample_rate)
 
         # Sparkle state
         self.sparkle_pos = np.zeros(MAX_SPARKLES, dtype=np.float32)
@@ -107,9 +113,8 @@ class BandTempoSparklesEffect(AudioReactiveEffect):
             # Process band energy
             self._process_bands(frame)
 
-            # Process beat detection
-            normalized = self.absint.update(frame)
-            beats = self.predictor.feed(self.absint.raw, normalized, self.absint.time_acc)
+            # Process beat detection (multi-band onset → events + catchup)
+            beats = self.beat_tracker.feed_frame(frame)
 
             for beat in beats:
                 with self._lock:
@@ -121,10 +126,7 @@ class BandTempoSparklesEffect(AudioReactiveEffect):
         energies = np.array(
             [np.sum(spec[m] ** 2) for m in self.band_masks], dtype=np.float32)
 
-        for i in range(self.n_bands):
-            self.band_peaks[i] = max(
-                energies[i], self.band_peaks[i] * self.band_peak_decay)
-        normalized = energies / self.band_peaks
+        normalized = self.band_ema.update(energies)
 
         idx = self.band_ring_pos % self.band_window_len
         self.band_ring[idx] = normalized
@@ -236,9 +238,9 @@ class BandTempoSparklesEffect(AudioReactiveEffect):
             idx = self.dominant_idx
         return {
             'band': BANDS[idx][0],
-            'bpm': f'{self.predictor.bpm:.1f}',
-            'ac_conf': f'{self.predictor.confidence:.2f}',
-            'beats': self.predictor.beat_count,
-            'predicted': self.predictor.predicted_beat_count,
+            'bpm': f'{self.beat_tracker.bpm:.1f}',
+            'ac_conf': f'{self.beat_tracker.confidence:.2f}',
+            'beats': self.beat_tracker.beat_count,
+            'predicted': self.beat_tracker.predicted_beat_count,
             'sparkles': int(np.sum(self.sparkle_active)),
         }

@@ -19,6 +19,7 @@ class TiltGravityEffect(AudioReactiveEffect):
     ref_pattern = 'ambient'
     ref_scope = 'beat'
     ref_input = 'accel (tilt) + pot (spawn/erase)'
+    ref_interactivity = 'sensor'
 
     MAX_PARTICLES = 20
 
@@ -47,7 +48,7 @@ class TiltGravityEffect(AudioReactiveEffect):
         self.prev_pot = self.pot_raw
         self.pot_raw = float(raw)
 
-    def set_duck_data(self, data):
+    def set_imu_data(self, data):
         raw_ax = data.get('ax', 0) / 16384.0
         if not self.baseline_ready:
             self.ax_baseline = raw_ax

@@ -30,6 +30,7 @@ class AudioReactiveEffect(ABC):
     ref_pattern = ''   # accent | groove | section | ambient | proportional | composite
     ref_scope = ''     # beat | phrase | song
     ref_input = ''     # human-readable audio input description
+    ref_interactivity = 'audio'  # audio | sensor | hybrid | visual
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         self.num_leds = num_leds

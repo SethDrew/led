@@ -43,6 +43,7 @@ static volatile bool duckPacketReady = false;
 static SensorPacket duckLatest;
 static volatile bool v1PacketReady = false;
 static TelemetryPacketV1 v1Latest;
+static uint8_t v1Mac[6];
 
 #define DUCK_CHANNEL_FALLBACK   1
 #define DUCK_CHANNEL_RESCAN_MS  (5UL * 60UL * 1000UL)
@@ -78,6 +79,7 @@ void onDuckRecv(const uint8_t *mac, const uint8_t *data, int len) {
         duckPacketReady = true;
     } else if (len == sizeof(TelemetryPacketV1)) {
         memcpy((void*)&v1Latest, data, sizeof(TelemetryPacketV1));
+        memcpy(v1Mac, mac, 6);
         v1PacketReady = true;
     }
 }
@@ -190,13 +192,17 @@ void loop() {
         Serial.write((const uint8_t*)&pkt, sizeof(pkt));
     }
 
-    // Forward latest v1 telemetry packet.
+    // Forward latest v1 telemetry packet with sender MAC.
+    // Wire: [0xFA][mac 6B][packet 16B] = 23 bytes total.
     if (v1PacketReady) {
         noInterrupts();
         TelemetryPacketV1 pkt = v1Latest;
+        uint8_t mac[6];
+        memcpy(mac, v1Mac, 6);
         v1PacketReady = false;
         interrupts();
         Serial.write(CMD_V1);
+        Serial.write(mac, 6);
         Serial.write((const uint8_t*)&pkt, sizeof(pkt));
     }
 

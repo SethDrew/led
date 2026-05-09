@@ -16,6 +16,7 @@ class NebulaEffect(AudioReactiveEffect):
     ref_pattern = 'ambient'
     ref_scope = 'global'
     ref_input = 'none (visual only)'
+    ref_interactivity = 'visual'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

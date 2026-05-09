@@ -335,16 +335,16 @@ class SerialLEDOutput:
     """Sends RGB frames to Arduino via serial."""
 
     CMD_POT = 0xFC
-    CMD_DUCK = 0xFB
+    CMD_IMU = 0xFB
     CMD_V1 = 0xFA
-    DUCK_PAYLOAD_LEN = 15  # SensorPacket size
-    V1_PAYLOAD_LEN = 16    # TelemetryPacketV1 size
+    IMU_PAYLOAD_LEN = 15  # SensorPacket size
+    V1_PAYLOAD_LEN = 22    # 6B MAC + 16B TelemetryPacketV1
 
     def __init__(self, port, num_leds, baud_rate=BAUD_RATE):
         self.num_leds = num_leds
         self.ser = None
         self.pot_value = 512  # default mid-position (0-1023)
-        self.duck_data = {
+        self.imu_data = {
             'ax': 0, 'ay': 0, 'az': 0,
             'gx': 0, 'gy': 0, 'gz': 0,
             'rms': 0, 'mic_on': False,
@@ -367,7 +367,7 @@ class SerialLEDOutput:
                 self.ser = None
 
     def _drain_and_parse(self):
-        """Read incoming serial data, parsing pot (0xFC) and duck (0xFB) messages."""
+        """Read incoming serial data, parsing pot (0xFC) and IMU (0xFB) messages."""
         if not self.ser or not self.ser.in_waiting:
             return
         try:
@@ -380,23 +380,26 @@ class SerialLEDOutput:
                 if b == self.CMD_POT and i + 2 < n:
                     self.pot_value = (data[i + 1] << 8) | data[i + 2]
                     i += 3
-                elif b == self.CMD_DUCK and i + self.DUCK_PAYLOAD_LEN < n:
-                    payload = data[i + 1:i + 1 + self.DUCK_PAYLOAD_LEN]
+                elif b == self.CMD_IMU and i + self.IMU_PAYLOAD_LEN < n:
+                    payload = data[i + 1:i + 1 + self.IMU_PAYLOAD_LEN]
                     ax, ay, az, gx, gy, gz, rms, mic = struct.unpack('<hhhhhhHB', payload)
-                    self.duck_data = {
+                    self.imu_data = {
                         'ax': ax, 'ay': ay, 'az': az,
                         'gx': gx, 'gy': gy, 'gz': gz,
                         'rms': rms, 'mic_on': bool(mic),
                     }
-                    i += 1 + self.DUCK_PAYLOAD_LEN
+                    i += 1 + self.IMU_PAYLOAD_LEN
                 elif b == self.CMD_V1 and i + self.V1_PAYLOAD_LEN < n:
-                    payload = data[i + 1:i + 1 + self.V1_PAYLOAD_LEN]
+                    mac_bytes = data[i + 1:i + 7]
+                    payload = data[i + 7:i + 7 + 16]
                     (seq, ax_max, ay_max, az_max,
                      ax_min, ay_min, az_min,
                      ax_mean, ay_mean, az_mean,
                      amag_max, amag_mean,
                      gmag_max, gmag_mean, flags) = struct.unpack('<HbbbbbbbbbBBBBB', payload)
+                    sender_mac = ':'.join(f'{b:02x}' for b in mac_bytes)
                     self.v1_data = {
+                        'mac': sender_mac,
                         'seq': seq,
                         'ax_max': ax_max, 'ay_max': ay_max, 'az_max': az_max,
                         'ax_min': ax_min, 'ay_min': ay_min, 'az_min': az_min,
@@ -562,8 +565,8 @@ def run_live(effect, led_output, device_id, brightness_cap=BRIGHTNESS_CAP,
             # Pass pot value to effect if it supports it
             if hasattr(effect, 'set_pot_value'):
                 effect.set_pot_value(led_output.pot_value)
-            if hasattr(effect, 'set_duck_data'):
-                effect.set_duck_data(led_output.duck_data)
+            if hasattr(effect, 'set_imu_data'):
+                effect.set_imu_data(led_output.imu_data)
             if hasattr(effect, 'set_v1_data') and led_output.v1_data is not None:
                 effect.set_v1_data(led_output.v1_data)
             if hasattr(effect, 'set_keys'):
@@ -828,6 +831,7 @@ def list_json():
                 'ref_pattern': getattr(cls, 'ref_pattern', ''),
                 'ref_scope': getattr(cls, 'ref_scope', ''),
                 'ref_input': getattr(cls, 'ref_input', ''),
+                'ref_interactivity': getattr(cls, 'ref_interactivity', 'audio'),
                 'handles_topology': getattr(cls, 'handles_topology', False),
             })
         except Exception:
@@ -845,6 +849,7 @@ def list_json():
                 'ref_pattern': getattr(cls, 'ref_pattern', ''),
                 'ref_scope': getattr(cls, 'ref_scope', ''),
                 'ref_input': getattr(cls, 'ref_input', ''),
+                'ref_interactivity': getattr(cls, 'ref_interactivity', 'audio'),
                 'handles_topology': getattr(cls, 'handles_topology', False),
             })
         except Exception:

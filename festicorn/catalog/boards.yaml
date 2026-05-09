@@ -54,6 +54,16 @@ firmware_by_role:
       Standalone sap-flow animation on a 3-strip 197-LED tree topology
       (pins 27/13/14 via build flags). No network. Sap-flow particle
       effect lives at festicorn/bench-tree/src/foregrounds/SapFlowForeground.h.
+  bench-bulbs:
+    deployment: static
+    source: festicorn/bench-bulbs/src/bench.cpp
+    packet_format: dual (v0.1 SensorPacket 15B + v1 TelemetryPacketV1 16B)
+    notes: |
+      Dual-pipeline A/B receiver. Strip A: 50× SK6812 RGBW (GRBW order,
+      bullet nodes) on GPIO 4 — driven by duck-sender. Strip B: 50× WS2812
+      RGB on GPIO 18 — driven by gyro-sense v1 sender. Migrated from C3
+      (GPIO 10/21) to classic ESP32 to fix single-core WiFi/RMT stutter.
+      Dithering disabled, render target 60 FPS.
   noodles:
     deployment: dynamic
     source: null
@@ -268,6 +278,21 @@ boards:
     See firmware_by_role.take-root for hardware spec. Currently on
     /dev/cu.usbserial-8 (CH340 enumerates differently each plug — verify
     with esptool chip_id if uncertain).
+
+# ── bench-bulbs (classic-ESP32 port of C3 receiver) ──────────────────
+- mac: A4:F0:0F:61:92:2C
+  id: 'bench-bulbs'
+  chip: esp32-d0wd-v3
+  role: bench-bulbs
+  first_seen: '2026-05-08T00:00:00Z'
+  last_validated:
+    utc: '2026-05-08T00:00:00Z'
+    port: /dev/cu.usbserial-0001
+    notes: MAC confirmed via esptool read_mac.
+  notes: |
+    Replaces C3 board 10:00:3B:B0:6E:04 to eliminate single-core
+    WiFi/RMT stutter. Strip A SK6812 RGBW on GPIO 4 (was GPIO 10),
+    Strip B WS2812 RGB on GPIO 18 (was GPIO 21).
 
 # ── classic-ESP32 fixtures ───────────────────────────────────────────
 - mac: F4:2D:C9:6D:B2:58

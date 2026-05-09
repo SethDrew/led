@@ -21,6 +21,7 @@ class PotParticleEffect(AudioReactiveEffect):
     ref_pattern = 'ambient'
     ref_scope = 'beat'
     ref_input = 'pot (position) + gyro (rotation speed) + keyboard (explosion)'
+    ref_interactivity = 'sensor'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
@@ -39,10 +40,10 @@ class PotParticleEffect(AudioReactiveEffect):
     def set_pot_value(self, raw):
         self.pot_raw = float(raw)
 
-    def set_duck_data(self, duck_data):
-        gx = duck_data.get('gx', 0)
-        gy = duck_data.get('gy', 0)
-        gz = duck_data.get('gz', 0)
+    def set_imu_data(self, imu_data):
+        gx = imu_data.get('gx', 0)
+        gy = imu_data.get('gy', 0)
+        gz = imu_data.get('gz', 0)
         mag_raw = math.sqrt(gx * gx + gy * gy + gz * gz)
         self.gyro_dps = mag_raw / 131.0
 

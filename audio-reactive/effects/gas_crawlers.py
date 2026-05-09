@@ -19,7 +19,8 @@ class GasCrawlersEffect(AudioReactiveEffect):
     registry_name = 'gas_crawlers'
     ref_pattern = 'ambient'
     ref_scope = 'phrase'
-    ref_input = 'pot rotation (agitation) + accel (gravity) + RMS (brightness)'
+    ref_input = 'pot rotation (agitation) + accel (gravity)'
+    ref_interactivity = 'sensor'
 
     NUM_CRAWLERS = 15
 
@@ -54,7 +55,7 @@ class GasCrawlersEffect(AudioReactiveEffect):
                 c['vel'] += random.gauss(0, kick * 8.0)
                 c['jitter_timer'] = min(c['jitter_timer'], 0.1)
 
-    def set_duck_data(self, data):
+    def set_imu_data(self, data):
         raw_ax = data.get('ax', 0) / 16384.0
         if not self.baseline_ready:
             self.ax_baseline = raw_ax

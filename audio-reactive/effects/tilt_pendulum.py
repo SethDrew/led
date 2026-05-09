@@ -17,6 +17,7 @@ class TiltPendulumEffect(AudioReactiveEffect):
     ref_pattern = 'ambient'
     ref_scope = 'phrase'
     ref_input = 'pot (oscillation) + accel (gravity) + RMS (particle width)'
+    ref_interactivity = 'hybrid'
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
@@ -35,7 +36,7 @@ class TiltPendulumEffect(AudioReactiveEffect):
     def set_pot_value(self, raw):
         self.pot_raw = float(raw)
 
-    def set_duck_data(self, data):
+    def set_imu_data(self, data):
         raw_ax = data.get('ax', 0) / 16384.0
         if not self.baseline_ready:
             self.ax_baseline = raw_ax

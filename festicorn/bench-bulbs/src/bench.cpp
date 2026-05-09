@@ -32,21 +32,40 @@
 #include <delta_sigma.h>
 #include <fast_math.h>
 
+// Dithering disabled on bench-bulbs: glitchy at 200 FPS on single-core C3
+// with two ESP-NOW senders + two RMT strips. Truncate instead.
+#undef deltaSigma
+#define deltaSigma(accum, target16) ((uint8_t)((uint16_t)(target16) >> 8))
+
 // ════════════════════════════════════════════════════════════════════
 //   SHARED HARDWARE / WIFI / HELPERS
 // ════════════════════════════════════════════════════════════════════
 
 // ── Strip A: SK6812 RGBW (duck) ─────────────────────────────────
-#define DUCK_LED_PIN    10
+#define DUCK_LED_PIN    4
 #define DUCK_LED_COUNT  50
 
 // ── Strip B: WS2812B RGB (biolum) ───────────────────────────────
-#define BIO_LED_PIN     21
+#define BIO_LED_PIN     18
 #define BIO_LED_COUNT   50
 
-// NeoPixelBus drivers — RMT0 → SK6812 RGBW, RMT1 → WS2812B RGB.
-static NeoPixelBus<NeoGrbwFeature, NeoEsp32Rmt0Sk6812Method>  stripDuck(DUCK_LED_COUNT, DUCK_LED_PIN);
-static NeoPixelBus<NeoGrbFeature,  NeoEsp32Rmt1Ws2812xMethod> stripBio (BIO_LED_COUNT,  BIO_LED_PIN);
+// ── Strip C/D: stick green-breathe (WS2812 RGB) ─────────────────
+// Two small diffuser strips — standalone breathing animation, no input.
+// Same pins as the original `festicorn/stick/` project.
+#define STICK_A_PIN    32
+#define STICK_A_COUNT  12
+#define STICK_B_PIN    12
+#define STICK_B_COUNT  11
+
+// NeoPixelBus drivers — classic ESP32 has 8 RMT channels, plenty for 4 strips.
+//   RMT0 → SK6812 RGBW (duck)
+//   RMT1 → WS2812B RGB (biolum)
+//   RMT2 → WS2812 RGB (stick A)
+//   RMT3 → WS2812 RGB (stick B)
+static NeoPixelBus<NeoGrbwFeature, NeoEsp32Rmt0Sk6812Method>  stripDuck (DUCK_LED_COUNT,  DUCK_LED_PIN);
+static NeoPixelBus<NeoGrbFeature,  NeoEsp32Rmt1Ws2812xMethod> stripBio  (BIO_LED_COUNT,   BIO_LED_PIN);
+static NeoPixelBus<NeoGrbFeature,  NeoEsp32Rmt2Ws2812xMethod> stripStkA (STICK_A_COUNT,   STICK_A_PIN);
+static NeoPixelBus<NeoGrbFeature,  NeoEsp32Rmt3Ws2812xMethod> stripStkB (STICK_B_COUNT,   STICK_B_PIN);
 
 // ── ESP-NOW timeouts / Wi-Fi channel discovery ─────────────────
 #define TIMEOUT_MS         500
@@ -1482,10 +1501,16 @@ void setup() {
     // ── Strip init ───────────────────────────────────────────────
     stripDuck.Begin();
     stripBio.Begin();
+    stripStkA.Begin();
+    stripStkB.Begin();
     stripDuck.ClearTo(RgbwColor(0, 0, 0, 0));
     stripBio.ClearTo(RgbColor(0, 0, 0));
+    stripStkA.ClearTo(RgbColor(0, 0, 0));
+    stripStkB.ClearTo(RgbColor(0, 0, 0));
     stripDuck.Show();
     stripBio.Show();
+    stripStkA.Show();
+    stripStkB.Show();
 
     // Seed delta-sigma accumulators (duck side, RGBW).
     for (uint16_t i = 0; i < DUCK_LED_COUNT; i++) {
@@ -1578,7 +1603,7 @@ void setup() {
 //
 // We don't busy-wait — the loop falls through and FreeRTOS gets the slack
 // (critical on single-core C3 to keep WiFi healthy).
-static const uint32_t FRAME_INTERVAL_US = 5000;  // 200 FPS target
+static const uint32_t FRAME_INTERVAL_US = 16667;  // 60 FPS — dithering disabled, no need for 200
 
 void loop() {
     static uint32_t lastFrameUs = 0;
@@ -1634,12 +1659,27 @@ void loop() {
     bioRenderFrame(dt, now);
     uint32_t t2 = micros();
 
-    // Queue both transmissions; RMT hardware overlaps them.
+    // === STICK PIPELINE (green breathe) ===
+    // Standalone slow-sine green, max 50% brightness — no input needed.
+    // Cycle ~4 s at 60 fps via 0.025 rad/frame phase advance (matches the
+    // original `festicorn/stick/src/green_breathe.cpp`).
+    static float stickPhase = 0.0f;
+    float stickBr = (sinf(stickPhase) + 1.0f) * 0.5f;
+    uint8_t stickG = (uint8_t)(stickBr * 127.0f);
+    RgbColor stickColor(0, stickG, 0);
+    stripStkA.ClearTo(stickColor);
+    stripStkB.ClearTo(stickColor);
+    stickPhase += 0.025f;
+    if (stickPhase > 6.2832f) stickPhase -= 6.2832f;
+
+    // Queue all transmissions; RMT hardware overlaps them.
 #if !CONTROL_DISABLE_DUCK
     stripDuck.Show();
 #endif
     uint32_t t3 = micros();
     stripBio.Show();
+    stripStkA.Show();
+    stripStkB.Show();
     uint32_t t4 = micros();
 
     // Stage timing accumulators (us, summed across telemetry window)

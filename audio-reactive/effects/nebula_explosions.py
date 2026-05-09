@@ -2,7 +2,7 @@
 Nebula Explosions — nebula background + tap-triggered particle bursts.
 
 Breathing blue-magenta waves with drifting warm-white orbs (from nebula).
-When the duck sender detects a hard tap (peak AC accel > threshold),
+When the v1 telemetry sender detects a hard tap (amag_max above threshold),
 a random orb explodes into pot_particle-style shrapnel.
 """
 
@@ -12,16 +12,18 @@ import numpy as np
 import colorsys
 from base import AudioReactiveEffect
 
+AMAG_TAP_THRESH = 130
+
 
 class NebulaExplosionsEffect(AudioReactiveEffect):
 
     registry_name = 'nebula_explosions'
     ref_pattern = 'ambient'
     ref_scope = 'global'
-    ref_input = 'accel (tap → explosion)'
+    ref_input = 'v1 telemetry IMU (tap → explosion)'
+    ref_interactivity = 'sensor'
 
-    TAP_THRESH_G = 0.50
-    TAP_COOLDOWN_S = 0.3
+    TAP_COOLDOWN_S = 0.15  # fast cooldown — users may tap many times/sec
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
@@ -46,14 +48,10 @@ class NebulaExplosionsEffect(AudioReactiveEffect):
         self.orbs = []
         self.orb_brightness = np.zeros(num_leds, dtype=np.float32)
 
-        # --- Tap detection ---
-        self.ax_baseline = 0.0
-        self.ay_baseline = 0.0
-        self.az_baseline = 0.0
-        self.baseline_ready = False
-        self.peak_ac_g = 0.0
+        # --- Tap detection (v1 telemetry) ---
+        self.amag_max = 0
         self.last_tap_time = -1.0
-        self._duck_call_count = 0
+        self._v1_count = 0
 
         # --- Shrapnel ---
         self.shrapnel = []
@@ -66,31 +64,13 @@ class NebulaExplosionsEffect(AudioReactiveEffect):
     def description(self):
         return "Nebula with orbs that explode into shrapnel on tap."
 
-    def set_duck_data(self, data):
-        raw_ax = data.get('ax', 0) / 16384.0
-        raw_ay = data.get('ay', 0) / 16384.0
-        raw_az = data.get('az', 0) / 16384.0
-
-        if not self.baseline_ready:
-            self.ax_baseline = raw_ax
-            self.ay_baseline = raw_ay
-            self.az_baseline = raw_az
-            self.baseline_ready = True
-
-        alpha = 0.008
-        self.ax_baseline += (raw_ax - self.ax_baseline) * alpha
-        self.ay_baseline += (raw_ay - self.ay_baseline) * alpha
-        self.az_baseline += (raw_az - self.az_baseline) * alpha
-
-        ac_x = abs(raw_ax - self.ax_baseline)
-        ac_y = abs(raw_ay - self.ay_baseline)
-        ac_z = abs(raw_az - self.az_baseline)
-        self.peak_ac_g = max(ac_x, ac_y, ac_z)
-        self._duck_call_count += 1
-        if self._duck_call_count % 25 == 0:
-            print(f"[nebula_explosions] duck #{self._duck_call_count}: "
-                  f"raw=({raw_ax:.2f}, {raw_ay:.2f}, {raw_az:.2f})g  "
-                  f"peak_ac={self.peak_ac_g:.3f}g  orbs={len(self.orbs)}")
+    def set_v1_data(self, data):
+        self.amag_max = data['amag_max']
+        self._v1_count += 1
+        if self._v1_count % 25 == 0:
+            print(f"[nebula_explosions] v1 #{self._v1_count}: "
+                  f"amag={self.amag_max} (thresh={AMAG_TAP_THRESH})  "
+                  f"orbs={len(self.orbs)}")
 
     def process_audio(self, mono_chunk: np.ndarray):
         pass
@@ -106,7 +86,7 @@ class NebulaExplosionsEffect(AudioReactiveEffect):
                 'vel': speed * direction,
                 'life': 1.0,
                 'decay': random.uniform(1.5, 3.5),
-                'hue': random.uniform(0.7, 1.1) % 1.0,  # blue-magenta range
+                'hue': random.uniform(0.7, 1.1) % 1.0,
             })
 
     def render(self, dt: float) -> np.ndarray:
@@ -136,8 +116,9 @@ class NebulaExplosionsEffect(AudioReactiveEffect):
         self.orb_brightness *= decay_per_sec ** dt
         self.orb_brightness[self.orb_brightness < 0.01] = 0.0
 
-        # Spawn orbs
-        if len(self.orbs) < self.max_orbs and np.random.rand() < 0.03:
+        # Spawn orbs (2x rate for 5s after an explosion)
+        respawn_boost = 2.0 if (self.elapsed - self.last_tap_time < 5.0) else 1.0
+        if len(self.orbs) < self.max_orbs and np.random.rand() < 0.03 * respawn_boost:
             self.orbs.append({
                 'pos': float(np.random.randint(0, self.num_leds)),
                 'vel': np.random.choice([-1, 1]) * self.orb_base_speed * self.speed * np.random.uniform(0.7, 1.3),
@@ -146,15 +127,16 @@ class NebulaExplosionsEffect(AudioReactiveEffect):
             })
 
         # === Tap detection → explode random orb ===
-        if (self.peak_ac_g >= self.TAP_THRESH_G
+        if (self.amag_max >= AMAG_TAP_THRESH
                 and self.elapsed - self.last_tap_time > self.TAP_COOLDOWN_S
                 and len(self.orbs) > 0):
             victim = random.choice(self.orbs)
             self._explode_orb(victim)
             self.orbs.remove(victim)
             self.last_tap_time = self.elapsed
+            print(f"[nebula_explosions] TAP! amag={self.amag_max} → exploded orb at {victim['pos']:.0f}")
 
-        self.peak_ac_g = 0.0
+        self.amag_max = 0
 
         # Update orbs
         dead = []
@@ -225,5 +207,5 @@ class NebulaExplosionsEffect(AudioReactiveEffect):
         return {
             'orbs': len(self.orbs),
             'shrapnel': len(self.shrapnel),
-            'peak_g': round(self.peak_ac_g, 2),
+            'amag': self.amag_max,
         }

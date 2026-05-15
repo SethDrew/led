@@ -67,6 +67,9 @@ audio-reactive/research/*.wav
 # Audio: dual-capture test vectors (large; reproducible from dual_capture_continuous.py)
 library/test-vectors/**/*.wav
 
+# Festicorn recordings (runtime WAVs + .rmslog/.ducklog)
+festicorn/recordings/
+
 # Gyro-sense: derivatives of .bin captures (regenerable via harvest.py / analysis tools)
 festicorn/gyro-sense/data/recordings/**/*.csv
 festicorn/gyro-sense/data/recordings/**/*.png

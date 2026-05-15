@@ -9,11 +9,6 @@ Usage (via explore.py):
     python explore.py                  # Opens browser, explore all files
     python explore.py --port 8080      # Fixed port
 
-To record from the Recorder tab: start the viewer, open the Recorder tab.
-The mic is always recorded; if a bridge ESP32 is plugged in via USB the
-viewer also forwards live frames and can replay LED-only playback to it.
-Lazy init runs on first /api/recorder/* hit (see festicorn/tools/mic_bridge.py).
-
 Architecture:
     Python server pre-renders analysis panels as PNGs using matplotlib Agg backend.
     Browser uses <audio> element for playback and requestAnimationFrame for cursor sync.
@@ -52,12 +47,6 @@ matplotlib.use('Agg')
 _viewer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 if _viewer_dir not in sys.path:
     sys.path.insert(0, _viewer_dir)
-
-# festicorn/tools for the Recorder tab (mic_bridge.py)
-_festicorn_tools = os.path.normpath(os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'festicorn', 'tools'))
-if _festicorn_tools not in sys.path:
-    sys.path.insert(0, _festicorn_tools)
 
 SEGMENTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'research', 'audio-segments')
 DPI = 100
@@ -4198,13 +4187,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
 
         # Block record/effects/annotation-save in public mode
         if PUBLIC_MODE and (path.startswith('/api/record') or path.startswith('/api/effects')
-                           or path.startswith('/api/annotations/') or path.startswith('/api/palettes/')
-                           or path.startswith('/api/recorder')):
+                           or path.startswith('/api/annotations/') or path.startswith('/api/palettes/')):
             self._json_response({'error': 'Not available'}, status=403)
-            return
-
-        if path.startswith('/api/recorder/'):
-            self._handle_recorder_post(path)
             return
 
         if path == '/api/upload':
@@ -4691,93 +4675,6 @@ class ViewerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def _get_recorder(self):
-        try:
-            import mic_bridge
-            return mic_bridge.get_or_create_recorder()
-        except Exception as e:
-            self._json_response({'error': f'recorder unavailable: {e}'}, status=503)
-            return None
-
-    def _handle_recorder_post(self, path):
-        rec = self._get_recorder()
-        if rec is None:
-            return
-        if path == '/api/recorder/record':
-            self._json_response({'msg': rec.start()})
-        elif path == '/api/recorder/stop':
-            self._json_response({'msg': rec.stop()})
-        elif path == '/api/recorder/play':
-            if not rec.has_bridge:
-                self._json_response({'error': 'no bridge attached'}, status=503)
-                return
-            self._json_response({'msg': rec.play_leds()})
-        elif path == '/api/recorder/play/stop':
-            rec.stop_playback()
-            self._json_response({'msg': 'stopped'})
-        else:
-            self._json_response({'error': 'not found'}, status=404)
-
-    def _handle_recorder_get(self, path):
-        rec = self._get_recorder()
-        if rec is None:
-            return
-        import mic_bridge
-        if path == '/api/recorder/status':
-            import soundfile as sf
-            dur = (time.time() - rec.start_t) if rec.recording else 0.0
-            lp = rec.latest_recording()
-            rec_dur = None
-            if lp:
-                wav = mic_bridge._strip_log_ext(lp) + ".wav"
-                if os.path.exists(wav):
-                    try:
-                        rec_dur = sf.info(wav).duration
-                    except Exception:
-                        pass
-            self._json_response({
-                'state': 'recording' if rec.recording else ('playing' if rec.playing else 'idle'),
-                'timer': round(dur, 1),
-                'rms': rec.last_rms_u16,
-                'has_recording': lp is not None,
-                'recording_duration': rec_dur,
-                'frame_count': rec.frame_count,
-                'has_bridge': rec.has_bridge,
-            })
-        elif path == '/api/recorder/recording/wav':
-            lp = rec.latest_recording()
-            if not lp:
-                self._json_response({'error': 'no recording'}, status=404)
-                return
-            wav = mic_bridge._strip_log_ext(lp) + ".wav"
-            if not os.path.exists(wav):
-                self._json_response({'error': 'wav not found'}, status=404)
-                return
-            with open(wav, 'rb') as f:
-                data = f.read()
-            self.send_response(200)
-            self.send_header('Content-Type', 'audio/wav')
-            self.send_header('Content-Length', str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-        else:
-            self._json_response({'error': 'not found'}, status=404)
-
-    def _handle_recorder_delete_recording(self):
-        rec = self._get_recorder()
-        if rec is None:
-            return
-        import mic_bridge
-        lp = rec.latest_recording()
-        if not lp:
-            self._json_response({'error': 'no recording'}, status=404)
-            return
-        wav = mic_bridge._strip_log_ext(lp) + ".wav"
-        for p in (lp, wav):
-            try: os.remove(p)
-            except OSError: pass
-        self._json_response({'msg': 'deleted'})
-
     def _handle_record_start(self):
         result = start_recording()
         data = json.dumps(result).encode('utf-8')
@@ -4954,8 +4851,6 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 self.send_error(400, 'Missing layer parameter')
                 return
             self._delete_annotation_layer(rel_path, layer)
-        elif path == '/api/recorder/recording':
-            self._handle_recorder_delete_recording()
         else:
             self.send_error(404)
 
@@ -4973,10 +4868,6 @@ class ViewerHandler(BaseHTTPRequestHandler):
         # Auth gate for protected endpoints
         if _is_protected(path) and not _is_authenticated(self):
             self._json_response({'error': 'Sign in to access this feature'}, status=401)
-            return
-
-        if path.startswith('/api/recorder/'):
-            self._handle_recorder_get(path)
             return
 
         if path == '/':

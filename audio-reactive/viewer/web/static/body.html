@@ -54,7 +54,6 @@
         </div>
     </div>
     <div class="tab" data-tab="effects">Effects</div>
-    <div class="tab" data-tab="recorder">Recorder</div>
     <div class="tab" data-tab="reference">Reference</div>
 </div>
 
@@ -294,71 +293,6 @@
         </div>
     </div>
     <div class="effects-panel" id="effectsPanel"></div>
-    <div class="recorder-panel" id="recorderPanel" style="display:none;">
-        <div class="recorder-layout">
-            <h2 style="color:#ccc; font-size:16px; margin-bottom:16px;">Synchronized Audio + LED Recorder</h2>
-            <p style="color:#888; font-size:13px; margin-bottom:24px;">
-                Record mic input and LED visuals together. Play back both in sync.
-                Only the last recording is kept.
-            </p>
-
-            <div class="recorder-controls">
-                <div class="recorder-status-row">
-                    <div class="recorder-state" id="recorderState">IDLE</div>
-                    <div class="recorder-timer" id="recorderTimer">0:00.0</div>
-                </div>
-
-                <div class="recorder-level-row">
-                    <span style="color:#888; font-size:12px;">Mic</span>
-                    <div class="recorder-level-bar">
-                        <div class="recorder-level-fill" id="recorderLevelFill"></div>
-                    </div>
-                    <span style="color:#888; font-family:monospace; font-size:12px; min-width:48px;" id="recorderLevelDb">&minus;&infin; dB</span>
-                </div>
-
-                <div class="recorder-btn-row">
-                    <button class="recorder-rec-btn" id="recorderRecBtn" title="Record">
-                        <span class="recorder-rec-dot"></span>
-                    </button>
-                    <button class="recorder-stop-btn" id="recorderStopBtn" title="Stop" disabled>
-                        &#9632;
-                    </button>
-                </div>
-            </div>
-
-            <hr style="border-color:#333; margin:24px 0;">
-
-            <div class="recorder-playback" id="recorderPlayback" style="display:none;">
-                <h3 style="color:#ccc; font-size:14px; margin-bottom:12px;">Last Recording</h3>
-                <div class="recorder-playback-info">
-                    <span style="color:#888; font-size:12px;" id="recorderRecInfo">No recording</span>
-                </div>
-
-                <div class="recorder-waveform-container">
-                    <canvas class="recorder-waveform" id="recorderWaveform" height="60"></canvas>
-                    <div class="recorder-playhead" id="recorderPlayhead"></div>
-                </div>
-
-                <div class="recorder-transport">
-                    <button class="recorder-play-btn" id="recorderPlayBtn" title="Play">&#9654;</button>
-                    <span class="recorder-play-time" id="recorderPlayTime">0:00.0 / 0:00.0</span>
-                </div>
-
-                <div class="recorder-led-preview" id="recorderLedPreview">
-                    <div class="recorder-led-strip" id="recorderLedStrip"></div>
-                    <div style="color:#555; font-size:11px; text-align:center; margin-top:4px;">LED preview (wired later)</div>
-                </div>
-
-                <div class="recorder-playback-actions">
-                    <button class="recorder-delete-btn" id="recorderDeleteBtn" title="Delete recording">Delete Recording</button>
-                </div>
-            </div>
-
-            <div class="recorder-empty" id="recorderEmpty">
-                <p style="color:#555; font-style:italic;">No recording yet. Hit the red button to start.</p>
-            </div>
-        </div>
-    </div>
     <div class="welcome-panel" id="welcomePanel" style="display:none;">
         <div class="welcome-card">
             <h1>Audio Explorer</h1>

@@ -1,0 +1,114 @@
+html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #0a0a0a; color: #ccc;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.recorder-panel {
+    min-height: 100vh; overflow-y: auto; padding: 32px;
+    display: flex; justify-content: center;
+}
+.recorder-layout {
+    max-width: 560px; width: 100%;
+}
+.recorder-controls {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px; padding: 20px;
+}
+.recorder-status-row {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px;
+}
+.recorder-state {
+    font-size: 12px; font-weight: 600; letter-spacing: 1.5px;
+    color: #555; text-transform: uppercase;
+}
+.recorder-state.recording { color: #e94560; }
+.recorder-timer {
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: 20px; color: #ccc;
+}
+.recorder-level-row {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 16px;
+}
+.recorder-level-bar {
+    flex: 1; height: 6px; background: #222; border-radius: 3px; overflow: hidden;
+}
+.recorder-level-fill {
+    height: 100%; width: 0%; background: #4caf50; border-radius: 3px;
+    transition: width 0.05s;
+}
+.recorder-btn-row {
+    display: flex; gap: 16px; justify-content: center;
+}
+.recorder-rec-btn {
+    width: 56px; height: 56px; border-radius: 50%;
+    background: #2a1520; border: 3px solid #e94560;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s;
+}
+.recorder-rec-btn:hover { background: #3a1a28; }
+.recorder-rec-btn.active { background: #e94560; }
+.recorder-rec-dot {
+    width: 20px; height: 20px; background: #e94560; border-radius: 50%;
+    transition: border-radius 0.15s, width 0.15s, height 0.15s;
+}
+.recorder-rec-btn.active .recorder-rec-dot {
+    width: 16px; height: 16px; border-radius: 3px; background: #fff;
+}
+.recorder-stop-btn {
+    width: 56px; height: 56px; border-radius: 50%;
+    background: #222; border: 2px solid #555; color: #888;
+    font-size: 20px; cursor: pointer; transition: all 0.15s;
+}
+.recorder-stop-btn:hover:not(:disabled) { border-color: #aaa; color: #ccc; }
+.recorder-stop-btn:disabled { opacity: 0.3; cursor: default; }
+
+.recorder-playback {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px; padding: 20px;
+}
+.recorder-playback-info { margin-bottom: 12px; }
+.recorder-waveform-container {
+    position: relative; margin-bottom: 12px;
+}
+.recorder-waveform {
+    width: 100%; height: 60px; background: #111; border-radius: 6px;
+    display: block;
+}
+.recorder-playhead {
+    position: absolute; top: 0; left: 0; width: 2px; height: 100%;
+    background: #e94560; pointer-events: none; display: none;
+}
+.recorder-transport {
+    display: flex; align-items: center; gap: 12px; margin-bottom: 16px;
+}
+.recorder-play-btn {
+    width: 40px; height: 40px; border-radius: 50%;
+    background: #0f3460; border: 2px solid #e94560; color: #e94560;
+    font-size: 16px; cursor: pointer; transition: background 0.15s;
+    display: flex; align-items: center; justify-content: center;
+}
+.recorder-play-btn:hover { background: #1a4a7a; }
+.recorder-play-time {
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: 13px; color: #888;
+}
+.recorder-led-preview {
+    margin-bottom: 16px;
+}
+.recorder-led-strip {
+    height: 12px; background: #111; border-radius: 6px;
+    display: flex; gap: 1px; overflow: hidden;
+}
+.recorder-playback-actions {
+    display: flex; justify-content: flex-end;
+}
+.recorder-delete-btn {
+    background: none; border: 1px solid #555; color: #888;
+    padding: 6px 14px; border-radius: 4px; font-size: 12px;
+    cursor: pointer; transition: all 0.15s;
+}
+.recorder-delete-btn:hover { border-color: #e94560; color: #e94560; }

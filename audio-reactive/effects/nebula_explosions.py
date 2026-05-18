@@ -11,8 +11,7 @@ import random
 import numpy as np
 import colorsys
 from base import AudioReactiveEffect
-
-AMAG_TAP_THRESH = 130
+from inputs import tap_event, AMAG_TAP_THRESH
 
 
 class NebulaExplosionsEffect(AudioReactiveEffect):
@@ -22,6 +21,10 @@ class NebulaExplosionsEffect(AudioReactiveEffect):
     ref_scope = 'global'
     ref_input = 'v1 telemetry IMU (tap → explosion)'
     ref_interactivity = 'sensor'
+    ref_inputs_required = ['tap_event']
+    input_roles = {
+        'tap_event': 'each tap on the v1 sender explodes a random orb into shrapnel',
+    }
 
     TAP_COOLDOWN_S = 0.15  # fast cooldown — users may tap many times/sec
 
@@ -51,6 +54,7 @@ class NebulaExplosionsEffect(AudioReactiveEffect):
         # --- Tap detection (v1 telemetry) ---
         self.amag_max = 0
         self.last_tap_time = -1.0
+        self._tap_state = {}
         self._v1_count = 0
 
         # --- Shrapnel ---
@@ -127,9 +131,8 @@ class NebulaExplosionsEffect(AudioReactiveEffect):
             })
 
         # === Tap detection → explode random orb ===
-        if (self.amag_max >= AMAG_TAP_THRESH
-                and self.elapsed - self.last_tap_time > self.TAP_COOLDOWN_S
-                and len(self.orbs) > 0):
+        if tap_event(self.amag_max, self._tap_state,
+                     cooldown_s=self.TAP_COOLDOWN_S, now=self.elapsed) and len(self.orbs) > 0:
             victim = random.choice(self.orbs)
             self._explode_orb(victim)
             self.orbs.remove(victim)

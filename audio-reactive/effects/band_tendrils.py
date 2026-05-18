@@ -28,6 +28,7 @@ import numpy as np
 from base import AudioReactiveEffect
 from topology import SculptureTopology
 from signals import OverlapFrameAccumulator, AbsIntegralMetric, EMARatioNormalize
+from inputs import pot_position
 
 
 # ── Tendril constants ──
@@ -119,6 +120,12 @@ class BandTendrilsEffect(AudioReactiveEffect):
 
     registry_name = 'band_tendrils'
     handles_topology = True
+    ref_input = 'mic (band onsets) + pot (tendril length scale)'
+    ref_inputs_required = ['audio', 'pot_position']
+    input_roles = {
+        'audio': 'per-band AbsInt onsets trigger tendrils with band-tinted color',
+        'pot_position': 'scales tendril length from 0.5x (CCW) to 8.0x (CW)',
+    }
 
     def __init__(self, num_leds: int, sample_rate: int = 44100,
                  sculpture_id: str = 'cob_diamond'):
@@ -184,6 +191,7 @@ class BandTendrilsEffect(AudioReactiveEffect):
 
         # ── Pot control ──
         self._pot_scale = 1.0
+        self._pot_state = {'smoothed': 512.0}
 
         # Per-LED buffers (render thread)
         self._led_brightness = np.zeros(self.num_leds, dtype=np.float32)

@@ -1753,6 +1753,7 @@ function readHashState() {
 // ── Effects ──────────────────────────────────────────────────────
 
 let effectsList = [];
+let inputCatalog = {};
 let deprecatedEffects = [];  // effects marked as deprecated
 let palettesList = [];  // available palettes
 let selectedPalette = JSON.parse(localStorage.getItem('selectedPalette') || '{}');
@@ -1771,9 +1772,33 @@ const CLASS_LABELS = {
 };
 
 function isEffectAudioReactive(eff) {
-    // An effect is non-audio-reactive if ref_input starts with "none" (case-insensitive)
+    // Use ref_inputs_required when available; fall back to ref_input for legacy effects.
+    const inputs = eff.ref_inputs_required;
+    if (inputs && inputs.length !== undefined) {
+        // Audio-reactive if it requires 'audio' (alone or with sensors).
+        // Non-audio-reactive if empty or contains only non-audio sensors.
+        return inputs.includes('audio');
+    }
+    // Legacy fallback: ref_input starts with "none" → not audio-reactive
     const input = (eff.ref_input || '').trim().toLowerCase();
     return !input.startsWith('none');
+}
+
+function renderInputBadges(eff) {
+    const inputs = eff.ref_inputs_required || [];
+    if (!inputs.length) return null;
+    const wrap = document.createElement('span');
+    wrap.className = 'input-badges';
+    inputs.forEach(id => {
+        const meta = inputCatalog[id];
+        if (!meta) return;
+        const pill = document.createElement('span');
+        pill.className = 'input-badge';
+        pill.textContent = meta.label;
+        pill.title = meta.wiring || '';
+        wrap.appendChild(pill);
+    });
+    return wrap;
 }
 
 function paletteGradientCSS(pal) {
@@ -2169,6 +2194,7 @@ async function loadEffects() {
         deprecatedEffects = data.deprecated || [];
         palettesList = data.palettes || [];
         effectsRunning = data.running || {};
+        inputCatalog = data.input_catalog || {};
         initClassFilters();
         renderEffectsCards();
         startEffectsPoll();
@@ -2457,6 +2483,9 @@ function renderEffectsCards() {
         }
         nameEl.addEventListener('click', (e) => { e.stopPropagation(); showEffectDetail(eff.name); });
         nameWrap.appendChild(nameEl);
+
+        const badges = renderInputBadges(eff);
+        if (badges) nameWrap.appendChild(badges);
 
         const pencil = document.createElement('button');
         pencil.className = 'effect-rename-btn';
@@ -2921,6 +2950,43 @@ function showEffectDetail(name, focusNotes) {
         desc.style.cssText = 'color: #888; font-size: 13px; margin-top: -4px;';
         desc.textContent = effEntry.description;
         panel.appendChild(desc);
+    }
+
+    // Inputs section
+    if (effEntry) {
+        const inputs = effEntry.ref_inputs_required || [];
+        const roles = effEntry.input_roles || {};
+        if (inputs.length > 0) {
+            const inputsWrap = document.createElement('div');
+            inputsWrap.className = 'effect-inputs-section';
+            const inputsLabel = document.createElement('div');
+            inputsLabel.className = 'effect-inputs-label';
+            inputsLabel.textContent = 'Inputs';
+            inputsWrap.appendChild(inputsLabel);
+            inputs.forEach(id => {
+                const meta = inputCatalog[id] || {};
+                const row = document.createElement('div');
+                row.className = 'effect-input-row';
+                const title = document.createElement('span');
+                title.className = 'effect-input-title';
+                title.textContent = (meta.label || id) + (roles[id] ? ': ' + roles[id] : '');
+                row.appendChild(title);
+                if (meta.wiring) {
+                    const wiring = document.createElement('div');
+                    wiring.className = 'effect-input-wiring';
+                    wiring.textContent = meta.wiring;
+                    row.appendChild(wiring);
+                }
+                inputsWrap.appendChild(row);
+            });
+            panel.appendChild(inputsWrap);
+        } else if (effEntry.ref_input && !effEntry.ref_input.toLowerCase().startsWith('none')) {
+            // Legacy fallback: show ref_input as plain text
+            const legacyWrap = document.createElement('div');
+            legacyWrap.style.cssText = 'color: #888; font-size: 12px; margin: 4px 0 8px;';
+            legacyWrap.textContent = 'Input: ' + effEntry.ref_input;
+            panel.appendChild(legacyWrap);
+        }
     }
 
     // Notes section (editable textarea)

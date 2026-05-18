@@ -26,6 +26,8 @@ class RapPulseEffect(AudioReactiveEffect):
     ref_pattern = 'groove'
     ref_scope = 'phrase'
     ref_input = 'onset envelope autocorrelation'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': 'Onset envelope autocorrelation locks slow background pulse to 1/6 tempo'}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

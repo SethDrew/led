@@ -110,6 +110,10 @@ class TwoSnakesEffect(AudioReactiveEffect):
     """Yellow and orange snakes on purple — grow on each bounce."""
 
     registry_name = 'two_snakes'
+    ref_input = 'none (visual only)'
+    ref_interactivity = 'visual'
+    ref_inputs_required = []
+    input_roles = {}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

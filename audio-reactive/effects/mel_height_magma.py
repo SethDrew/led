@@ -22,6 +22,8 @@ class CombinedSpectroFallEffect(AudioReactiveEffect):
     ref_pattern = 'proportional'
     ref_scope = 'beat'
     ref_input = '64-bin mel spectrogram'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': '64-bin mel spectrogram split into spectro chroma + energy waterfall halves'}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

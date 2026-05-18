@@ -30,6 +30,8 @@ class HeatDiffusionEffect(AudioReactiveEffect):
     ref_pattern = 'proportional'
     ref_scope = 'beat'
     ref_input = 'RMS amplitude (sticky floor)'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': 'Sticky-floor RMS injects heat at rotating source point'}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100,
                  # --- Thermal physics ---

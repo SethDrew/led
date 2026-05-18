@@ -59,6 +59,8 @@ class LeafGustEffect(AudioReactiveEffect):
     ref_pattern = 'proportional'
     ref_scope = 'beat'
     ref_input = 'RMS energy (EMA-normalized, continuous)'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': 'EMA-normalized RMS drives leaf drift speed and brightness'}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100,
                  sculpture_id: str = None,

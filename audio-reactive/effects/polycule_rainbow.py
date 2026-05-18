@@ -46,6 +46,8 @@ class PolyculeRainbowEffect(AudioReactiveEffect):
     ref_pattern = 'ambient'
     ref_scope = 'phrase'
     ref_input = 'RMS energy (brightness pulse)'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': 'RMS energy pulses rainbow particle brightness'}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

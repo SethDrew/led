@@ -12,6 +12,7 @@ import random
 import numpy as np
 import colorsys
 from base import AudioReactiveEffect
+from inputs import accel_shake
 
 
 class GasCrawlersEffect(AudioReactiveEffect):
@@ -21,6 +22,12 @@ class GasCrawlersEffect(AudioReactiveEffect):
     ref_scope = 'phrase'
     ref_input = 'pot rotation (agitation) + accel (gravity)'
     ref_interactivity = 'sensor'
+    ref_inputs_required = ['pot_position', 'accel_shake', 'audio']
+    input_roles = {
+        'pot_position': 'turning the knob agitates the crawlers (kick + decay)',
+        'accel_shake': 'x-axis motion adds gravity drift',
+        'audio': 'RMS contributes a gentle brightness pulse',
+    }
 
     NUM_CRAWLERS = 15
 
@@ -33,8 +40,7 @@ class GasCrawlersEffect(AudioReactiveEffect):
         self.agitation = 0.0
         self.color_agitation = 0.0
         self.accel_x = 0.0
-        self.ax_baseline = 0.0
-        self.baseline_ready = False
+        self._ax_state = {}
         self.crawlers = []
         for _ in range(self.NUM_CRAWLERS):
             self.crawlers.append({
@@ -56,12 +62,11 @@ class GasCrawlersEffect(AudioReactiveEffect):
                 c['jitter_timer'] = min(c['jitter_timer'], 0.1)
 
     def set_imu_data(self, data):
-        raw_ax = data.get('ax', 0) / 16384.0
-        if not self.baseline_ready:
-            self.ax_baseline = raw_ax
-            self.baseline_ready = True
-        self.ax_baseline += (raw_ax - self.ax_baseline) * 0.008
-        self.accel_x = raw_ax - self.ax_baseline
+        shake = accel_shake((data.get('ax', 0) / 16384.0,
+                             data.get('ay', 0) / 16384.0,
+                             data.get('az', 0) / 16384.0),
+                            self._ax_state)
+        self.accel_x = shake[0]
 
     def process_audio(self, mono_chunk: np.ndarray):
         self.rms = float(np.sqrt(np.mean(mono_chunk ** 2)))

@@ -31,6 +31,8 @@ class BandProportionalEffect(AudioReactiveEffect):
     ref_pattern = 'proportional'
     ref_scope = 'beat'
     ref_input = '3-band abs-integral'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': '3-band abs-integral mapped to RGB color channels'}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

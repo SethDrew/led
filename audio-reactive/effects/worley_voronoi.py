@@ -26,6 +26,8 @@ class WorleyCollisionEffect(AudioReactiveEffect):
     ref_pattern = 'accent'
     ref_scope = 'beat'
     ref_input = 'bass flux 20-250Hz'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': 'Bass spectral flux drives Voronoi seed collision spring forces'}
 
     source_features = [
         {'id': 'bass_flux', 'label': 'Bass Flux', 'color': '#FF4400'},

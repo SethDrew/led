@@ -11,6 +11,7 @@ import random
 import numpy as np
 import colorsys
 from base import AudioReactiveEffect
+from inputs import accel_shake
 
 
 class TiltGravityEffect(AudioReactiveEffect):
@@ -20,6 +21,11 @@ class TiltGravityEffect(AudioReactiveEffect):
     ref_scope = 'beat'
     ref_input = 'accel (tilt) + pot (spawn/erase)'
     ref_interactivity = 'sensor'
+    ref_inputs_required = ['accel_shake', 'pot_position']
+    input_roles = {
+        'accel_shake': 'x-axis motion drives gravity force on particles',
+        'pot_position': 'turning the knob spawns (+) or pops (-) particles by delta',
+    }
 
     MAX_PARTICLES = 20
 
@@ -30,8 +36,7 @@ class TiltGravityEffect(AudioReactiveEffect):
         self.prev_pot = 512.0
         self.glow_width = 1.5
         self.particles = []
-        self.ax_baseline = 0.0
-        self.baseline_ready = False
+        self._ax_state = {}
         self._spawn_particle()
 
     def _spawn_particle(self):
@@ -49,12 +54,11 @@ class TiltGravityEffect(AudioReactiveEffect):
         self.pot_raw = float(raw)
 
     def set_imu_data(self, data):
-        raw_ax = data.get('ax', 0) / 16384.0
-        if not self.baseline_ready:
-            self.ax_baseline = raw_ax
-            self.baseline_ready = True
-        self.ax_baseline += (raw_ax - self.ax_baseline) * 0.008
-        self.accel_x = raw_ax - self.ax_baseline
+        shake = accel_shake((data.get('ax', 0) / 16384.0,
+                             data.get('ay', 0) / 16384.0,
+                             data.get('az', 0) / 16384.0),
+                            self._ax_state)
+        self.accel_x = shake[0]
 
     def process_audio(self, mono_chunk: np.ndarray):
         pass

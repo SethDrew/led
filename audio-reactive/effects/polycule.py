@@ -104,6 +104,8 @@ class PolyculeEffect(AudioReactiveEffect):
     ref_pattern = 'ambient'
     ref_scope = 'phrase'
     ref_input = 'RMS energy (EMA-normalized, snake brightness pulse)'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': 'EMA-normalized RMS pulses snake brightness on audio energy'}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

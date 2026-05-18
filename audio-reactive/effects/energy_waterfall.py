@@ -25,6 +25,8 @@ class EnergyWaterfallEffect(AudioReactiveEffect):
     ref_pattern = 'proportional'
     ref_scope = 'beat'
     ref_input = 'RMS amplitude'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': 'RMS amplitude scrolls brightness pulses down the strip'}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100,
                  # How much brightness each pulse deposits per pixel per frame.

@@ -44,6 +44,8 @@ class MfccChromaRainbowEffect(AudioReactiveEffect):
     ref_pattern = 'proportional'
     ref_scope = 'phrase'
     ref_input = 'MFCCs 1-12 + RMS'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': 'MFCCs 1-12 map timbral shape to rainbow hue; RMS drives brightness'}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

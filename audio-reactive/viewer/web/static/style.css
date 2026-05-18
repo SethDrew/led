@@ -770,3 +770,45 @@ td.ref-notes { text-align: left; max-width: 200px; overflow: hidden; text-overfl
     margin-left: 1px;
 }
 
+/* Input badges (effect cards + detail panel) */
+.input-badges {
+    display: inline-flex;
+    gap: 3px;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+.input-badge {
+    display: inline-block;
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 8px;
+    background: #2a2a3a;
+    color: #aab;
+    border: 1px solid #3a3a4a;
+    white-space: nowrap;
+    line-height: 1.4;
+}
+.effect-inputs-section {
+    margin: 6px 0 10px;
+}
+.effect-inputs-label {
+    font-size: 11px;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+.effect-input-row {
+    margin-bottom: 4px;
+}
+.effect-input-title {
+    font-size: 13px;
+    color: #ccc;
+}
+.effect-input-wiring {
+    font-size: 11px;
+    color: #777;
+    margin-top: 1px;
+    margin-left: 8px;
+}
+

@@ -33,6 +33,8 @@ class DiamondVoicesEffect(AudioReactiveEffect):
     ref_pattern = 'composite'
     ref_scope = 'beat'
     ref_input = 'streaming HPSS 3-voice (topology-mapped)'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': 'Streaming HPSS splits audio into bass/harmonic/percussive voices mapped to topology'}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100,
                  sculpture_id: str = 'cob_diamond'):

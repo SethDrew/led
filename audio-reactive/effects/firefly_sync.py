@@ -29,6 +29,8 @@ class FireflySyncEffect(AudioReactiveEffect):
     ref_pattern = 'groove'
     ref_scope = 'phrase'
     ref_input = 'absint'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': 'Abs-integral percussive signal recruits firefly flashes'}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100,
                  n_fireflies: int = 28):

@@ -13,6 +13,7 @@ import random
 import numpy as np
 import colorsys
 from base import AudioReactiveEffect
+from inputs import pot_position, gyro_rate, key_event
 
 
 class PotParticleEffect(AudioReactiveEffect):
@@ -22,30 +23,32 @@ class PotParticleEffect(AudioReactiveEffect):
     ref_scope = 'beat'
     ref_input = 'pot (position) + gyro (rotation speed) + keyboard (explosion)'
     ref_interactivity = 'sensor'
+    ref_inputs_required = ['pot_position', 'gyro_rate', 'key_event']
+    input_roles = {
+        'pot_position': 'sets particle position along the strip',
+        'gyro_rate': 'rotation speed drives hue (still=warm, spin=cool)',
+        'key_event': 'Digit1 triggers an explosion at the particle',
+    }
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
-        self.pot_raw = 512.0
-        self.pot_smoothed = 512.0
+        self._pot_state = {'smoothed': 512.0}
+        self.pot_norm = 0.5
         self.gyro_dps = 0.0
         self.hue = 0.0
         self.glow_width = 3.0
-        self.pot_alpha = 0.2
         self.hue_alpha = 0.05
-        self.pot_deadzone = 6.0
         self.keys = set()
         self.prev_keys = set()
         self.shrapnel = []
 
     def set_pot_value(self, raw):
-        self.pot_raw = float(raw)
+        self.pot_norm = pot_position(raw, self._pot_state, alpha=0.2, deadzone_raw=6.0)
 
     def set_imu_data(self, imu_data):
-        gx = imu_data.get('gx', 0)
-        gy = imu_data.get('gy', 0)
-        gz = imu_data.get('gz', 0)
-        mag_raw = math.sqrt(gx * gx + gy * gy + gz * gz)
-        self.gyro_dps = mag_raw / 131.0
+        self.gyro_dps = gyro_rate((imu_data.get('gx', 0),
+                                   imu_data.get('gy', 0),
+                                   imu_data.get('gz', 0)))
 
     def set_keys(self, keys):
         self.prev_keys = self.keys
@@ -70,19 +73,14 @@ class PotParticleEffect(AudioReactiveEffect):
     def render(self, dt: float) -> np.ndarray:
         frame = np.zeros((self.num_leds, 3), dtype=np.float32)
 
-        # Pot smoothing
-        if abs(self.pot_raw - self.pot_smoothed) > self.pot_deadzone:
-            self.pot_smoothed += (self.pot_raw - self.pot_smoothed) * self.pot_alpha
-
-        position = (self.pot_smoothed / 1023.0) * (self.num_leds - 1)
+        position = self.pot_norm * (self.num_leds - 1)
 
         # Gyro → hue
         rotation_speed = min(self.gyro_dps / 300.0, 1.0)
         target_hue = rotation_speed * 0.65
         self.hue += (target_hue - self.hue) * self.hue_alpha
 
-        # Trigger explosion on key press (not hold)
-        if 'Digit1' in self.keys and 'Digit1' not in self.prev_keys:
+        if key_event('Digit1', self.keys, self.prev_keys):
             self._explode(position)
 
         # Draw main particle

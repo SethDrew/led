@@ -25,6 +25,8 @@ class HeatBurstEffect(AudioReactiveEffect):
     ref_pattern = ''
     ref_scope = ''
     ref_input = 'none (static snapshot)'
+    ref_inputs_required = []
+    input_roles = {}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100,
                  # --- Thermal physics ---

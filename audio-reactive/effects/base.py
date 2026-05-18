@@ -29,8 +29,14 @@ class AudioReactiveEffect(ABC):
 
     ref_pattern = ''   # accent | groove | section | ambient | proportional | composite
     ref_scope = ''     # beat | phrase | song
-    ref_input = ''     # human-readable audio input description
+    ref_input = ''     # human-readable audio input description (legacy / freeform)
     ref_interactivity = 'audio'  # audio | sensor | hybrid | visual
+
+    # Structured inputs declaration — keys from inputs.INPUT_CATALOG.
+    # ref_inputs_required: ids this effect consumes; UI renders badges from these.
+    # input_roles: per-effect prose describing how each input is used.
+    ref_inputs_required: list = []
+    input_roles: dict = {}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         self.num_leds = num_leds

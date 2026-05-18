@@ -4562,3 +4562,60 @@ entries:
       - Apple Voice Isolation as a ground truth comparison for single-mic quality ceiling
       - Asteroid/Conv-TasNet for offline speaker separation analysis
 
+  - id: physical-user-input-exploration
+    date: 2026-05-15
+    touched: 2026-05-15
+    title: Multiple physical user-input methods in flight; canonical set undecided
+    summary: >
+      Actively experimenting with several physical inputs beyond mic audio to
+      drive effects. Each has distinct latency/jitter/false-positive profiles
+      and different semantics. Jury still out on which methods feel best for
+      which effect types — explicitly not locking in a canonical input set yet.
+    status: exploring
+    warmth: high
+    confidence: medium
+    source:
+      - audio-reactive/effects/INPUT_PATTERNS.md
+      - audio-reactive/effects/runner.py
+      - festicorn/original-duck/src/sender.cpp
+      - festicorn/gyro-sense/src/sender.cpp
+    tags: [interactivity, sensors, user-input, effects, art, taste, future]
+    relates_to: []
+    notes: >
+      ## Inputs currently in flight
+
+      - **Potentiometer** (knob position, knob delta, knob-as-event). Wired via
+        CMD 0xFC from noodles/strip controllers. Used as continuous position,
+        signed velocity gate, and parameter knob across ~6 effects.
+      - **Keyboard key edges** — debug trigger with hold state. stdin JSON via
+        the viewer. One effect (`pot_particle`) uses it today.
+      - **IMU accelerometer** — gravity vector, tilt angle, shake magnitude.
+        Sourced from duck (raw stream, CMD 0xFB) or v1 sender (aggregated stats,
+        CMD 0xFA).
+      - **IMU gyroscope** — rotation rate magnitude. Duck raw or v1 `gmag_mean`.
+      - **v1 telemetry `amag_max`** — physical tap via thresholded accel
+        magnitude. 200 Hz inner sampling, 25 Hz emission. Rate-limited Schmitt
+        trigger receiver-side.
+      - **Mic on duck** — RMS on-device, currently part of the audio path
+        rather than a discrete user-input.
+
+      ## Honest finding: "button" is three different events, not one
+
+      - Keyboard = named channel, has hold state, zero false positives.
+      - v1 amag tap = thresholded continuous magnitude with cooldown, includes
+        gravity (rotation hard enough to clear 130 fires it), no hold state.
+      - Pot delta = signed velocity gate, naturally rate-limited by user.
+
+      Unifying these under a single `button.pressed()` abstraction would
+      mislead — a future agent expecting keyboard semantics would be surprised
+      by v1 tap firing repeatedly during sustained motion, or by pot delta
+      carrying sign information thrown away.
+
+      ## Open question
+
+      Which input modalities feel best for which effect types? Pot for
+      continuous parameters seems to land. Tap-as-explosion is fun but
+      false-positive-prone. Tilt-as-position is intuitive but tedious. Need
+      more time with each before declaring winners. Companion technical doc:
+      `audio-reactive/effects/INPUT_PATTERNS.md`.
+

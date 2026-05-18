@@ -29,6 +29,8 @@ class TempoPulseEffect(ScalarSignalEffect):
     ref_pattern = 'groove'
     ref_scope = 'phrase'
     ref_input = 'RMS + onset autocorr'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': 'RMS scales brightness; onset autocorrelation locks pulse to tempo'}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

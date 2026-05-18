@@ -54,6 +54,8 @@ class HeartbeatTempoEffect(AudioReactiveEffect):
     ref_pattern = 'groove'
     ref_scope = 'phrase'
     ref_input = 'tempo-locked heartbeat'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': 'Onset tempo tracker locks pulse wavefront to musical beat'}
 
     COLOR = np.array([140, 0, 0], dtype=np.float64)
 

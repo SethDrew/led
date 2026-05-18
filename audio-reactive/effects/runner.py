@@ -832,6 +832,8 @@ def list_json():
                 'ref_scope': getattr(cls, 'ref_scope', ''),
                 'ref_input': getattr(cls, 'ref_input', ''),
                 'ref_interactivity': getattr(cls, 'ref_interactivity', 'audio'),
+                'ref_inputs_required': getattr(cls, 'ref_inputs_required', []),
+                'input_roles': getattr(cls, 'input_roles', {}),
                 'handles_topology': getattr(cls, 'handles_topology', False),
             })
         except Exception:
@@ -850,6 +852,8 @@ def list_json():
                 'ref_scope': getattr(cls, 'ref_scope', ''),
                 'ref_input': getattr(cls, 'ref_input', ''),
                 'ref_interactivity': getattr(cls, 'ref_interactivity', 'audio'),
+                'ref_inputs_required': getattr(cls, 'ref_inputs_required', []),
+                'input_roles': getattr(cls, 'input_roles', {}),
                 'handles_topology': getattr(cls, 'handles_topology', False),
             })
         except Exception:

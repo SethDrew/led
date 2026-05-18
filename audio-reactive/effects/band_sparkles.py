@@ -47,6 +47,8 @@ class BandSparklesEffect(AudioReactiveEffect):
     ref_pattern = 'ambient'
     ref_scope = 'phrase'
     ref_input = '5-band FFT energy'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': '5-band FFT energy selects dominant band color for base + sparkles'}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100,
                  gate_mode: str = 'none',

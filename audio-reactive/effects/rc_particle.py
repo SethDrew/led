@@ -15,8 +15,7 @@ import random
 import numpy as np
 import colorsys
 from base import AudioReactiveEffect
-
-AMAG_TAP_THRESH = 130
+from inputs import tap_event, AMAG_TAP_THRESH
 
 
 class RcParticleEffect(AudioReactiveEffect):
@@ -26,6 +25,11 @@ class RcParticleEffect(AudioReactiveEffect):
     ref_scope = 'beat'
     ref_input = 'v1 accel (tilt → position) + v1 tap (explosion)'
     ref_interactivity = 'sensor'
+    ref_inputs_required = ['accel_gravity', 'tap_event']
+    input_roles = {
+        'accel_gravity': 'tilt angle (atan2 of x/z) steers the particle position',
+        'tap_event': 'tap on the trigger sender explodes the particle',
+    }
 
     TAP_COOLDOWN_S = 0.15
 
@@ -52,6 +56,7 @@ class RcParticleEffect(AudioReactiveEffect):
         # --- Tap / explosion ---
         self.tap_amag = 0
         self.last_tap_time = -1.0
+        self._tap_state = {}
         self.shrapnel = []
 
     def set_v1_data(self, data):
@@ -115,8 +120,8 @@ class RcParticleEffect(AudioReactiveEffect):
         self.hue += (target_hue - self.hue) * self.hue_alpha
 
         # Tap → explode
-        if (self.tap_amag >= AMAG_TAP_THRESH
-                and self.elapsed - self.last_tap_time > self.TAP_COOLDOWN_S):
+        if tap_event(self.tap_amag, self._tap_state,
+                     cooldown_s=self.TAP_COOLDOWN_S, now=self.elapsed):
             self._explode(self.position)
             self.last_tap_time = self.elapsed
             print(f"[rc_particle] TAP! amag={self.tap_amag} → explode at {self.position:.0f}")

@@ -27,6 +27,8 @@ class EnergyWaterfallRapEffect(AudioReactiveEffect):
     ref_pattern = 'proportional'
     ref_scope = 'beat'
     ref_input = 'bass + vocal band energy'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': 'Bass and vocal bands independently normalized for balanced waterfall'}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100,
                  pulse_deposit: float = 0.008,

@@ -59,6 +59,8 @@ class LeafWindEffect(AudioReactiveEffect):
     ref_pattern = 'accent'
     ref_scope = 'beat'
     ref_input = 'RMS delta onsets (EMA-normalized, reluctant eagerness)'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': 'RMS delta onsets trigger leaf spawning with reluctant eagerness curve'}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100,
                  sculpture_id: str = None,

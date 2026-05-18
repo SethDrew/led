@@ -9,6 +9,7 @@ import math
 import numpy as np
 import colorsys
 from base import AudioReactiveEffect
+from inputs import pot_position, accel_shake
 
 
 class TiltPendulumEffect(AudioReactiveEffect):
@@ -18,6 +19,12 @@ class TiltPendulumEffect(AudioReactiveEffect):
     ref_scope = 'phrase'
     ref_input = 'pot (oscillation) + accel (gravity) + RMS (particle width)'
     ref_interactivity = 'hybrid'
+    ref_inputs_required = ['pot_position', 'accel_shake', 'audio']
+    input_roles = {
+        'pot_position': 'sweeps the spring rest position across the strip',
+        'accel_shake': 'x-axis motion adds gravity force to the particle',
+        'audio': 'RMS modulates the particle glow width',
+    }
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)
@@ -26,24 +33,21 @@ class TiltPendulumEffect(AudioReactiveEffect):
         self.accel_x = 0.0
         self.rms = 0.0
         self.rms_smooth = 0.0
-        self.pot_raw = 512.0
+        self.pot_norm = 0.5
         self.base_glow = 1.5
-        # Live high-pass: slow EMA tracks "resting" value, subtract it.
-        # Adapts continuously instead of one-shot calibration.
-        self.ax_baseline = 0.0
-        self.baseline_ready = False
+        self._pot_state = {'smoothed': 512.0}
+        self._ax_state = {}
 
     def set_pot_value(self, raw):
-        self.pot_raw = float(raw)
+        # No smoothing — spring physics absorbs jitter downstream.
+        self.pot_norm = pot_position(raw, self._pot_state, alpha=1.0, deadzone_raw=0.0)
 
     def set_imu_data(self, data):
-        raw_ax = data.get('ax', 0) / 16384.0
-        if not self.baseline_ready:
-            self.ax_baseline = raw_ax
-            self.baseline_ready = True
-        # Slow EMA baseline (~5s time constant at 25Hz)
-        self.ax_baseline += (raw_ax - self.ax_baseline) * 0.008
-        self.accel_x = raw_ax - self.ax_baseline
+        shake = accel_shake((data.get('ax', 0) / 16384.0,
+                             data.get('ay', 0) / 16384.0,
+                             data.get('az', 0) / 16384.0),
+                            self._ax_state)
+        self.accel_x = shake[0]
 
     def process_audio(self, mono_chunk: np.ndarray):
         self.rms = float(np.sqrt(np.mean(mono_chunk ** 2)))
@@ -52,7 +56,7 @@ class TiltPendulumEffect(AudioReactiveEffect):
         frame = np.zeros((self.num_leds, 3), dtype=np.float32)
 
         # Pot -> rest position across strip
-        rest = (self.pot_raw / 1023.0) * (self.num_leds - 1)
+        rest = self.pot_norm * (self.num_leds - 1)
 
         # Spring toward pot rest position
         stiffness = 80.0

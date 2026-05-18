@@ -22,6 +22,7 @@ import math
 import threading
 import numpy as np
 from base import AudioReactiveEffect
+from inputs import pot_position
 from topology import SculptureTopology
 from signals import OverlapFrameAccumulator, OnsetTempoTracker
 
@@ -158,7 +159,12 @@ class JellyfishEffect(AudioReactiveEffect):
     handles_topology = True
     ref_pattern = 'groove'
     ref_scope = 'beat'
-    ref_input = 'tempo tracker'
+    ref_input = 'tempo tracker + pot (hue)'
+    ref_inputs_required = ['audio', 'pot_position']
+    input_roles = {
+        'audio': 'Tempo tracker drives bell contraction rhythm',
+        'pot_position': 'Maps pot rotation to hue; paints rainbow top-to-bottom',
+    }
 
     def __init__(self, num_leds: int, sample_rate: int = 44100,
                  sculpture_id: str = 'cob_diamond'):
@@ -190,6 +196,7 @@ class JellyfishEffect(AudioReactiveEffect):
         self._trail_head = 0  # index of newest entry
 
         # Pot state: hue 0-1 mapped from pot 0-1023
+        self._pot_state = {}  # for inputs.pot_position EMA
         self._pot_hue = 0.75  # default: start in the blue-magenta range
         self._pot_active = False  # True when pot has been turned at least once
         self._auto_hue_phase = 0.75  # autonomous drift starting hue
@@ -205,7 +212,7 @@ class JellyfishEffect(AudioReactiveEffect):
 
     def set_pot_value(self, raw):
         """Map pot 0-1023 to hue 0-1 (full color wheel)."""
-        self._pot_hue = raw / 1023.0
+        self._pot_hue = pot_position(raw, self._pot_state)
         self._pot_active = True
 
     # ------------------------------------------------------------------

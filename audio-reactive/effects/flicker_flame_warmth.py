@@ -30,6 +30,8 @@ class FlickerFlameWarmthEffect(AudioReactiveEffect):
     ref_pattern = 'ambient'
     ref_scope = 'phrase'
     ref_input = 'RMS energy + energy delta'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': 'RMS energy and delta drive flame color shift and sustain detection'}
 
     source_features = [
         {'id': 'energy', 'label': 'Energy', 'color': '#ff4400'},

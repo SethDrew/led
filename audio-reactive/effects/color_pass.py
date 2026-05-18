@@ -114,6 +114,8 @@ class ColorPassEffect(AudioReactiveEffect):
     ref_pattern = 'ambient'
     ref_scope = 'phrase'
     ref_input = 'RMS energy (EMA-normalized, blob brightness pulse)'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': 'RMS energy pulses blob brightness as they pass through each other'}
 
     def __init__(self, num_leds: int, sample_rate: int = 44100):
         super().__init__(num_leds, sample_rate)

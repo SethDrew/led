@@ -32,6 +32,8 @@ class EnergyColorEffect(ScalarSignalEffect):
     ref_pattern = 'ambient'
     ref_scope = 'phrase'
     ref_input = 'rolling RMS integral 10s'
+    ref_inputs_required = ['audio']
+    input_roles = {'audio': '10s rolling RMS integral drives color vibrancy and brightness'}
 
     source_features = [
         {'id': 'rms_integral', 'label': 'RMS Integral (10s)', 'color': '#e94560'},

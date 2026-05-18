@@ -418,6 +418,8 @@ def _discover_effects():
                 'ref_pattern': sig.get('ref_pattern', ''),
                 'ref_scope': sig.get('ref_scope', ''),
                 'ref_input': sig.get('ref_input', ''),
+                'ref_inputs_required': sig.get('ref_inputs_required', []),
+                'input_roles': sig.get('input_roles', {}),
                 'handles_topology': sig.get('handles_topology', False),
             })
         for eff in data.get('effects', []):
@@ -428,6 +430,8 @@ def _discover_effects():
                 'ref_pattern': eff.get('ref_pattern', ''),
                 'ref_scope': eff.get('ref_scope', ''),
                 'ref_input': eff.get('ref_input', ''),
+                'ref_inputs_required': eff.get('ref_inputs_required', []),
+                'input_roles': eff.get('input_roles', {}),
                 'handles_topology': eff.get('handles_topology', False),
             })
         return entries, data.get('palettes', [])
@@ -559,6 +563,8 @@ def _get_effects_list():
             'ref_scope': entry.get('ref_scope', '') if isinstance(entry, dict) else '',
             'ref_input': entry.get('ref_input', '') if isinstance(entry, dict) else '',
             'handles_topology': entry.get('handles_topology', False) if isinstance(entry, dict) else False,
+            'ref_inputs_required': entry.get('ref_inputs_required', []) if isinstance(entry, dict) else [],
+            'input_roles': entry.get('input_roles', {}) if isinstance(entry, dict) else {},
         }
         if p.get('display_name'):
             e['display_name'] = p['display_name']
@@ -4940,11 +4946,23 @@ class ViewerHandler(BaseHTTPRequestHandler):
         elif path == '/api/effects':
             effects, deprecated, palettes = _get_effects_list()
             running = _get_running_effects()
+            # Load INPUT_CATALOG from effects module
+            input_catalog = {}
+            try:
+                _ic_path = os.path.join(EFFECTS_DIR, 'inputs.py')
+                import importlib.util
+                _spec = importlib.util.spec_from_file_location('inputs', _ic_path)
+                _mod = importlib.util.module_from_spec(_spec)
+                _spec.loader.exec_module(_mod)
+                input_catalog = _mod.INPUT_CATALOG
+            except Exception:
+                pass
             self._json_response({
                 'effects': effects,
                 'deprecated': deprecated,
                 'palettes': palettes,
                 'running': running,
+                'input_catalog': input_catalog,
             })
         elif path == '/api/effects/features':
             since = int(query.get('since', [0])[0])

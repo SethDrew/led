@@ -1,16 +1,19 @@
 /*
- * BENCH-BULBS — phone WiFi UDP architecture (adapted from road-bulbs).
+ * ROAD BULBS — classic ESP32 LED controller (portable rig)
  *
- * Phone (Sensor Logger app) → WiFi UDP → ESP32 listener. No ESP-NOW.
- * Connects to phone hotspot SSID "cuteplant".
+ * Phone (Sensor Logger app) → WiFi HTTP POST → ESP32 web server.
+ * No laptop needed. ESP32 connects to phone hotspot and listens for
+ * Sensor Logger JSON pushes on port 80.
  *
- * Strip A: 50× SK6812 RGBW on GPIO 4   (main output, NeoPixelBus, RMT0)
- * Strip B: 50× WS2812  RGB  on GPIO 18 (mirror of A, W dropped, RMT1)
- * Stick A: 12× WS2812  RGB  on GPIO 32 (green breathe, RMT2)
- * Stick B: 11× WS2812  RGB  on GPIO 12 (green breathe, RMT3)
+ * Algorithms: sparkle_burst, fire_meld, fire_flicker,
+ *   quiet_bloom, gravity_particle, sparkle_syllable
  *
- * UDP ports: 4210 sensor, 4211 cmd, 4212 discovery, 4213 onset.
- * Effects ported verbatim from road-bulbs/src/receiver.cpp.
+ * Serial commands (over USB for debug):
+ *   's' sparkle_burst, 'm' fire_meld, 'f' fire_flicker,
+ *   'b' quiet_bloom, 'g' gravity_particle, 'y' sparkle_syllable,
+ *   'c' recalibrate, 'e' toggle force-engage, '?' identify
+ *
+ * Wiring: GPIO 13 → SK6812 RGBW bulbs (50 LEDs).
  */
 
 #include <Arduino.h>
@@ -21,7 +24,7 @@
 #include <freertos/semphr.h>
 #include <esp_random.h>
 #include <esp_system.h>
-#include <NeoPixelBus.h>
+#include <Adafruit_NeoPixel.h>
 #include <math.h>
 #include <oklch_lut.h>
 #include <delta_sigma.h>
@@ -46,29 +49,16 @@ static AsyncUDP onsetUdp;
 static portMUX_TYPE pktMux = portMUX_INITIALIZER_UNLOCKED;
 
 // ── LED config ───────────────────────────────────────────────────
+#ifndef LED_PIN_OVERRIDE
+#define LED_PIN    13
+#else
+#define LED_PIN    LED_PIN_OVERRIDE
+#endif
 #define LED_COUNT  50
-
-#define DUCK_LED_PIN   4
-#define BIO_LED_PIN    18
-#define STICK_A_PIN    32
-#define STICK_A_COUNT  12
-#define STICK_B_PIN    12
-#define STICK_B_COUNT  11
-
-static NeoPixelBus<NeoGrbwFeature, NeoEsp32Rmt0Sk6812Method>  stripA (LED_COUNT,      DUCK_LED_PIN);
-static NeoPixelBus<NeoGrbFeature,  NeoEsp32Rmt1Ws2812xMethod> stripB (LED_COUNT,      BIO_LED_PIN);
-static NeoPixelBus<NeoGrbFeature,  NeoEsp32Rmt2Ws2812xMethod> stripStkA (STICK_A_COUNT, STICK_A_PIN);
-static NeoPixelBus<NeoGrbFeature,  NeoEsp32Rmt3Ws2812xMethod> stripStkB (STICK_B_COUNT, STICK_B_PIN);
-
-// Set a pixel on both Strip A (RGBW) and Strip B (RGB, no W).
-static inline void setBothPixel(uint16_t i, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
-    stripA.SetPixelColor(i, RgbwColor(r, g, b, w));
-    stripB.SetPixelColor(i, RgbColor(r, g, b));
-}
 
 // ── Rendering ────────────────────────────────────────────────────
 #define GAMMA 2.4f
-#define BRIGHTNESS_CAP 0.25f
+#define BRIGHTNESS_CAP 0.10f
 #define SPARKLE_BRIGHTNESS_CAP 0.05f
 #define PURE_W_CEIL    0.10f
 #define PURE_W_BLEND   0.15f
@@ -83,14 +73,14 @@ static inline void setBothPixel(uint16_t i, uint8_t r, uint8_t g, uint8_t b, uin
 #define RMS_CEILING     5000.0f
 
 // ── Adaptive floor (P4-guarded) ──────────────────────────────────
-#define MIC_NOISE_FLOOR_MIN    50.0f
-#define FLOOR_LEAK_RATE        0.005f
-#define FLOOR_SNAP_EPSILON     0.05f
-#define FLOOR_SNAP_CONSECUTIVE 3
-#define FLOOR_SNAP_MIN_RATIO   0.4f
-#define FLOOR_SOFT_SIGMA       0.6f
-#define FLOOR_LONG_DRIFT       0.001f
-#define FLOOR_HEADROOM         1.4f
+#define MIC_NOISE_FLOOR_MIN    50.0f    // physical mic floor (Galaxy S24 quiet room ~60)
+#define FLOOR_LEAK_RATE        0.005f   // multiplicative upward leak per second
+#define FLOOR_SNAP_EPSILON     0.05f    // ratio within which rms counts as "at floor"
+#define FLOOR_SNAP_CONSECUTIVE 3        // require N consecutive below-floor before snapping
+#define FLOOR_SNAP_MIN_RATIO   0.4f     // don't collapse below this × long_min (breath-pause guard)
+#define FLOOR_SOFT_SIGMA       0.6f     // soft-weight gate width for upward leak
+#define FLOOR_LONG_DRIFT       0.001f   // long-min upward drift per second
+#define FLOOR_HEADROOM         1.4f     // signal must exceed floor × this to register as energy
 
 // ── Sparkle ──────────────────────────────────────────────────────
 #define SPARKLE_DEADBAND 0.08f
@@ -154,23 +144,26 @@ enum Algorithm {
 static Algorithm currentAlg = ALG_GRAVITY_PARTICLE;
 
 // ── Gravity sparkle ──────────────────────────────────────────────
+// Rainbow particles drift along the strip pulled by phone tilt. Flat
+// phone → no motion; tilted → all particles slide toward the low end.
 #define GS_PARTICLE_COUNT     7
-#define GS_GRAVITY_SCALE      40.0f
-#define GS_VELOCITY_DAMP      0.92f
-#define GS_BOUNCE_REBOUND     0.5f
-#define GS_SPLAT_RADIUS       2.5f
+#define GS_GRAVITY_SCALE      40.0f   // LEDs/s² per g of tilt
+#define GS_VELOCITY_DAMP      0.92f   // applied as ^(dt*30) per frame
+#define GS_BOUNCE_REBOUND     0.5f    // |v| × this on bounce
+#define GS_SPLAT_RADIUS       2.5f    // LEDs; gaussian-ish σ
 #define GS_BRIGHTNESS_CAP     0.45f
 
 struct GsParticle {
-    float pos;
-    float vel;
-    float bright;
-    float hue;
+    float pos;        // 0..LED_COUNT-1
+    float vel;        // LEDs/s
+    float bright;     // 0..1
+    float hue;        // 0..256, fixed per particle
 };
 static GsParticle gsParticles[GS_PARTICLE_COUNT];
 
 // ── Global state ─────────────────────────────────────────────────
 
+Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRBW + NEO_KHZ800);
 static uint16_t dsR[LED_COUNT], dsG[LED_COUNT], dsB[LED_COUNT], dsW[LED_COUNT];
 
 static volatile uint32_t lastPacketMs = 0;
@@ -190,7 +183,7 @@ static float frrCeiling = RMS_CEILING;
 static float energy = 0.0f;
 
 // Adaptive floor state
-static float adaptiveFloor = 0.0f;
+static float adaptiveFloor = 0.0f;     // 0 = uninitialized, first packet sets it
 static float longMin = 0.0f;
 static int belowFloorCount = 0;
 
@@ -202,7 +195,11 @@ static float onset = 0.0f;
 static volatile uint8_t syllOnsetStrength = 0;
 static volatile uint32_t syllOnsetMs = 0;
 
-// Sparkle (burst state removed — syllable has its own arrays)
+// Sparkle
+static float sparkle[LED_COUNT];
+static float decayRates[LED_COUNT];
+static float envelope = 0.0f;
+static float cooldownRemaining = 0.0f;
 
 // Fire
 static float fireTime = 0.0f;
@@ -239,6 +236,23 @@ static void initMacStr() {
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+// ── Helpers (forward decl for HTTP handler) ─────────────────────
+static inline float clampf(float v, float lo, float hi);
+
+// ── UDP sensor receiver ──────────────────────────────────────────
+// 15-byte binary SensorPacket arrives on UDP port 4210 at ~25 Hz.
+// Handler runs on the AsyncUDP task (separate from the LED render loop).
+
+static void parseSerialCommands() {
+    while (Serial.available()) {
+        char c = (char)Serial.read();
+        if (c >= 32 && c < 127) {
+            extern void handleSerialCommand(char c);
+            handleSerialCommand(c);
+        }
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -337,7 +351,7 @@ static float computeOnset(uint16_t rawRms, float dt) {
     return (deltaPeak > 1e-6f) ? (delta / deltaPeak) : 0.0f;
 }
 
-// Motion-derived energy/onset
+// Motion-derived energy/onset (substitute for mic when mic is off)
 static float motionRms = 0.0f;
 static float motionRmsEma = 0.0f;
 static float prevMotionRms = 0.0f;
@@ -363,9 +377,9 @@ static void computeMotionEnergy(int16_t ax, int16_t ay, int16_t az,
 }
 
 static void resetBloomState();
+static void resetSparkleState();
 static void resetFireState();
 static void resetGravitySparkle();
-static void resetSyllableState();
 void startCalibration();
 void handleSerialCommand(char c);
 
@@ -377,10 +391,8 @@ void setup() {
 
     initMacStr();
 
-    stripA.Begin();
-    stripB.Begin();
-    stripStkA.Begin();
-    stripStkB.Begin();
+    strip.begin();
+    strip.setBrightness(255);
 
     for (uint16_t i = 0; i < LED_COUNT; i++) {
         uint16_t seed = (uint16_t)((uint32_t)i * 256 / LED_COUNT);
@@ -389,21 +401,31 @@ void setup() {
         dsB[i] = (seed + 128) & 0xFF;
         dsW[i] = (seed + 192) & 0xFF;
     }
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        sparkle[i] = 0.0f;
+        decayRates[i] = 0.94f;
+    }
     prngState = esp_random();
     if (prngState == 0) prngState = 1;
 
-    resetSyllableState();
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        decayRates[i] = 0.92f + randFloat() * 0.05f;
+    }
+
+
     resetBloomState();
     resetGravitySparkle();
 
     // Show green while connecting WiFi
-    for (uint16_t i = 0; i < LED_COUNT; i++) setBothPixel(i, 0, 40, 0, 0);
-    stripA.Show();
-    stripB.Show();
+    for (uint16_t i = 0; i < LED_COUNT; i++)
+        strip.setPixelColor(i, 0, 40, 0, 0);
+    strip.show();
 
+    // Connect to phone hotspot
     Serial.printf("[BOOT] Connecting to WiFi: %s\n", WIFI_SSID);
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
+
     WiFi.setAutoReconnect(true);
     uint32_t wifiStart = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 30000) {
@@ -413,18 +435,21 @@ void setup() {
 
     if (WiFi.status() == WL_CONNECTED) {
         Serial.printf("\n[WIFI] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
-        for (uint16_t i = 0; i < LED_COUNT; i++) setBothPixel(i, 0, 0, 40, 0);
-        stripA.Show();
-        stripB.Show();
+        // Flash blue to confirm connection
+        for (uint16_t i = 0; i < LED_COUNT; i++)
+            strip.setPixelColor(i, 0, 0, 40, 0);
+        strip.show();
         delay(300);
     } else {
         Serial.println("\n[WIFI] FAILED — running in idle-only mode");
-        for (uint16_t i = 0; i < LED_COUNT; i++) setBothPixel(i, 40, 0, 0, 0);
-        stripA.Show();
-        stripB.Show();
+        // Flash red to indicate failure
+        for (uint16_t i = 0; i < LED_COUNT; i++)
+            strip.setPixelColor(i, 40, 0, 0, 0);
+        strip.show();
         delay(500);
     }
 
+    // Start AsyncUDP listener (runs on its own task — off the LED render loop).
     if (udp.listen(UDP_PORT)) {
         udp.onPacket([](AsyncUDPPacket packet) {
             if (packet.length() != sizeof(SensorPacket)) return;
@@ -440,6 +465,7 @@ void setup() {
         Serial.println("[UDP] FAILED to bind port");
     }
 
+    // Command UDP on port 4211 — single byte selects effect, replies with name
     if (cmdUdp.listen(CMD_PORT)) {
         cmdUdp.onPacket([](AsyncUDPPacket packet) {
             if (packet.length() < 1) return;
@@ -459,6 +485,7 @@ void setup() {
         Serial.printf("[CMD] Listening on port %d\n", CMD_PORT);
     }
 
+    // Discovery: phone broadcasts "ROAD?" on 4212, we reply "ROAD!" + MAC
     if (discoverUdp.listen(DISCOVER_PORT)) {
         discoverUdp.onPacket([](AsyncUDPPacket packet) {
             if (packet.length() >= 5 && memcmp(packet.data(), "ROAD?", 5) == 0) {
@@ -470,6 +497,7 @@ void setup() {
         Serial.printf("[DISC] Discovery on port %d\n", DISCOVER_PORT);
     }
 
+    // Onset packets from phone: [0xAA, strength, band, 0x55]
     if (onsetUdp.listen(ONSET_PORT)) {
         onsetUdp.onPacket([](AsyncUDPPacket packet) {
             if (packet.length() == 4 &&
@@ -482,18 +510,17 @@ void setup() {
         Serial.printf("[ONSET] Listening on port %d\n", ONSET_PORT);
     }
 
-    if (MDNS.begin("bench-bulbs")) {
-        MDNS.addService("bench-bulbs", "udp", UDP_PORT);
-        Serial.println("[MDNS] bench-bulbs.local");
+    // mDNS
+    if (MDNS.begin("road-bulbs")) {
+        MDNS.addService("road-bulbs", "udp", UDP_PORT);
+        Serial.println("[MDNS] road-bulbs.local");
     }
 
-    stripA.ClearTo(RgbwColor(0, 0, 0, 0));
-    stripB.ClearTo(RgbColor(0, 0, 0));
-    stripA.Show();
-    stripB.Show();
+    strip.clear();
+    strip.show();
 
-    Serial.println("Commands: 'c' recal, 's' sparkle, 'm' fire_meld, 'f' fire_flicker, 'b' bloom, 'g' gravity_particle, 'y' syllable, '?' identify");
-    Serial.printf("[BOOT] role=bench-bulbs MAC=%s fw=bench_bulbs_wifi\n", macStr);
+    Serial.println("Commands: 'c' recal, 's' sparkle, 'm' fire_meld, 'f' fire_flicker, 'b' bloom, 'g' gravity_particle, 'e' force-engage, '?' identify");
+    Serial.printf("[BOOT] role=bulbs MAC=%s fw=road_bulbs_wifi\n", macStr);
 }
 
 // ── Calibration ──────────────────────────────────────────────────
@@ -539,6 +566,19 @@ static void resetFireState() {
     fireDropoutAmount = 0.0f;
 }
 
+static uint8_t sparkPeakR = 0, sparkPeakG = 0, sparkPeakB = 0, sparkPeakW = 0;
+static float sparkPeakBright = 0.0f;
+static float sparkPeakLin = 0.0f;
+
+static void resetSparkleState() {
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        sparkle[i] = 0.0f;
+        decayRates[i] = 0.92f + randFloat() * 0.05f;
+    }
+    envelope = 0.0f;
+    cooldownRemaining = 0.0f;
+}
+
 static void resetBloomState() {
     bloomColonyEnergy = 1.0f;
     bloomLastMotionMs = 0;
@@ -559,6 +599,8 @@ static void resetBloomState() {
             + randFloat() * (BLOOM_FLASH_DECAY_HI - BLOOM_FLASH_DECAY_LO);
     }
 }
+
+// ── Gravity sparkle reset / spawn ────────────────────────────────
 
 static void resetGravitySparkle() {
     for (uint16_t i = 0; i < GS_PARTICLE_COUNT; i++) {
@@ -626,30 +668,19 @@ static void renderGravitySparkle(float dt) {
         uint8_t rr = (uint8_t)clampf(r * norm + 0.5f, 0, 255);
         uint8_t gg = (uint8_t)clampf(g * norm + 0.5f, 0, 255);
         uint8_t bb = (uint8_t)clampf(b * norm + 0.5f, 0, 255);
-        setBothPixel(i, rr, gg, bb, 0);
+        strip.setPixelColor(i, rr, gg, bb, 0);
     }
 }
 
-// ── Serial dispatch ──────────────────────────────────────────────
-
-static float syllSparkle[LED_COUNT];
-static float syllDecay[LED_COUNT];
-static float syllEnvelope = 0.0f;
-static float syllCooldown = 0.0f;
-
-static void resetSyllableState() {
-    memset(syllSparkle, 0, sizeof(syllSparkle));
-    syllEnvelope = 0.0f;
-    syllCooldown = 0.0f;
-}
+// ── Serial command dispatch (called from frame parser idle state) ─
 
 void handleSerialCommand(char c) {
     if (c == 'c' || c == 'C') {
         startCalibration();
     } else if (c == 's') {
-        currentAlg = ALG_SPARKLE_SYLLABLE;
-        resetSyllableState();
-        Serial.println("Algorithm: sparkle_syllable");
+        currentAlg = ALG_SPARKLE_BURST;
+        resetSparkleState();
+        Serial.println("Algorithm: sparkle_burst");
     } else if (c == 'm' || c == 'M') {
         currentAlg = ALG_FIRE_MELD;
         resetFireState();
@@ -669,18 +700,9 @@ void handleSerialCommand(char c) {
     } else if (c == 'y' || c == 'Y') {
         currentAlg = ALG_SPARKLE_SYLLABLE;
         resetSyllableState();
-        Serial.println("Algorithm: sparkle_syllable (alias)");
+        Serial.println("Algorithm: sparkle_syllable");
     } else if (c == '?') {
-        Serial.printf("[BOOT] role=bench-bulbs MAC=%s fw=bench_bulbs_wifi\n", macStr);
-    }
-}
-
-static void parseSerialCommands() {
-    while (Serial.available()) {
-        char c = (char)Serial.read();
-        if (c >= 32 && c < 127) {
-            handleSerialCommand(c);
-        }
+        Serial.printf("[BOOT] role=bulbs MAC=%s fw=road_bulbs\n", macStr);
     }
 }
 
@@ -781,7 +803,7 @@ static void renderQuietBloom(float dt, uint32_t now) {
         uint8_t gc = deltaSigma(dsG[i], tG16);
         uint8_t b  = deltaSigma(dsB[i], tB16);
         uint8_t w  = deltaSigma(dsW[i], tW16);
-        setBothPixel(i, 0, gc, b, w);
+        strip.setPixelColor(i, 0, gc, b, w);
     }
 
     if (draining) {
@@ -793,7 +815,126 @@ static void renderQuietBloom(float dt, uint32_t now) {
     }
 }
 
+// ── Sparkle burst ────────────────────────────────────────────────
+
+static void renderSparkleBurst(float dt, float angleDeg, float tiltBlend,
+                                float tiltR, float tiltG, float tiltB) {
+    bool isSilent = energy < 0.001f;
+
+    float attackAlpha = fminf(1.0f, dt / 0.030f);
+    float decayAlpha  = fminf(1.0f, dt / 0.400f);
+    if (energy > envelope)
+        envelope += attackAlpha * (energy - envelope);
+    else
+        envelope += decayAlpha * (energy - envelope);
+
+    cooldownRemaining = fmaxf(0.0f, cooldownRemaining - dt);
+
+    float onsetThreshold = fmaxf(0.15f, 0.4f - envelope * 0.3f);
+
+    if (onset > onsetThreshold && cooldownRemaining <= 0.0f && !isSilent) {
+        cooldownRemaining = fmaxf(0.050f, 0.150f - envelope * 0.10f);
+
+        float onsetStrength = clampf(onset, 0.0f, 1.0f);
+        int nIgnite = (int)(LED_COUNT * (0.3f + 0.2f * onsetStrength));
+
+        static uint8_t indices[LED_COUNT];
+        for (uint8_t i = 0; i < LED_COUNT; i++) indices[i] = i;
+        for (int i = 0; i < nIgnite; i++) {
+            int j = i + (int)(xorshift32() % (LED_COUNT - i));
+            uint8_t tmp = indices[i];
+            indices[i] = indices[j];
+            indices[j] = tmp;
+        }
+
+        float sparkVal = 0.7f + 0.3f * onsetStrength;
+        for (int i = 0; i < nIgnite; i++) {
+            sparkle[indices[i]] = sparkVal;
+            decayRates[indices[i]] = 0.92f + randFloat() * 0.05f;
+        }
+    }
+
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        sparkle[i] *= fastDecay(decayRates[i], dt * 30.0f);
+    }
+
+    if (!isSilent) {
+        for (uint16_t i = 0; i < LED_COUNT; i++) {
+            float jitter = (randFloat() - 0.5f) * 0.02f;
+            float newVal = sparkle[i] + jitter;
+            if (newVal < 0.0f) newVal = 0.0f;
+            if (newVal > sparkle[i] && jitter > 0) newVal = sparkle[i];
+            sparkle[i] = newVal;
+        }
+    }
+
+    float base = fminf(envelope, 0.2f);
+
+    sparkPeakR = sparkPeakG = sparkPeakB = sparkPeakW = 0;
+    sparkPeakBright = 0.0f;
+    sparkPeakLin = 0.0f;
+
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        float s = sparkle[i];
+        float bright = base + s * (1.0f - base);
+        if (bright < SPARKLE_DEADBAND) bright = 0.0f;
+
+        float colR = 255.0f;
+        float colG = 180.0f + (240.0f - 180.0f) * s;
+        float colB =  80.0f + (200.0f -  80.0f) * s;
+
+        if (tiltBlend > 0.0f) {
+            colR = colR * (1.0f - tiltBlend) + tiltR * tiltBlend;
+            colG = colG * (1.0f - tiltBlend) + tiltG * tiltBlend;
+            colB = colB * (1.0f - tiltBlend) + tiltB * tiltBlend;
+        }
+
+        float linBright = fastGamma24(bright) * SPARKLE_BRIGHTNESS_CAP;
+        float colW = 255.0f * (1.0f - tiltBlend);
+        float fR = colR * linBright;
+        float fG = colG * linBright;
+        float fB = colB * linBright;
+        float fW = colW * linBright;
+
+        uint16_t tR16 = (uint16_t)clampf(fR * 256.0f, 0, 65535);
+        uint16_t tG16 = (uint16_t)clampf(fG * 256.0f, 0, 65535);
+        uint16_t tB16 = (uint16_t)clampf(fB * 256.0f, 0, 65535);
+        uint16_t tW16 = (uint16_t)clampf(fW * 256.0f, 0, 65535);
+
+        if (tR16 < 256) tR16 = 0;
+        if (tG16 < 256) tG16 = 0;
+        if (tB16 < 256) tB16 = 0;
+        if (tW16 < 256) tW16 = 0;
+
+        uint8_t r = deltaSigma(dsR[i], tR16);
+        uint8_t g = deltaSigma(dsG[i], tG16);
+        uint8_t b = deltaSigma(dsB[i], tB16);
+        uint8_t w = deltaSigma(dsW[i], tW16);
+        strip.setPixelColor(i, r, g, b, w);
+
+        if (r > sparkPeakR) sparkPeakR = r;
+        if (g > sparkPeakG) sparkPeakG = g;
+        if (b > sparkPeakB) sparkPeakB = b;
+        if (w > sparkPeakW) sparkPeakW = w;
+        if (bright > sparkPeakBright) sparkPeakBright = bright;
+        if (linBright > sparkPeakLin) sparkPeakLin = linBright;
+    }
+}
+
 // ── Sparkle syllable ─────────────────────────────────────────────
+// Onset detection runs on phone (44kHz waveform), arrives as 4-byte
+// async UDP packets on port 4213. ESP32 only renders.
+
+static float syllSparkle[LED_COUNT];
+static float syllDecay[LED_COUNT];
+static float syllEnvelope = 0.0f;
+static float syllCooldown = 0.0f;
+
+static void resetSyllableState() {
+    memset(syllSparkle, 0, sizeof(syllSparkle));
+    syllEnvelope = 0.0f;
+    syllCooldown = 0.0f;
+}
 
 static void renderSparkleSyllable(float dt, float angleDeg, float tiltBlend,
                                    float tiltR, float tiltG, float tiltB) {
@@ -801,9 +942,11 @@ static void renderSparkleSyllable(float dt, float angleDeg, float tiltBlend,
     uint32_t onsetAge = now - syllOnsetMs;
     uint8_t strength = syllOnsetStrength;
 
+    // Consume onset if fresh (< 100ms old)
     bool gotOnset = (syllOnsetMs > 0 && onsetAge < 100);
     float onsetNorm = gotOnset ? (strength / 255.0f) : 0.0f;
 
+    // Envelope tracks energy from status packets (same as sparkle_burst)
     float attackAlpha = fminf(1.0f, dt / 0.030f);
     float decayAlpha  = fminf(1.0f, dt / 0.400f);
     if (energy > syllEnvelope)
@@ -814,7 +957,7 @@ static void renderSparkleSyllable(float dt, float angleDeg, float tiltBlend,
     syllCooldown = fmaxf(0.0f, syllCooldown - dt);
 
     if (gotOnset && onsetNorm > 0.1f && syllCooldown <= 0.0f) {
-        syllOnsetMs = 0;
+        syllOnsetMs = 0;  // mark consumed
         syllCooldown = 0.060f;
 
         int nIgnite = (int)(LED_COUNT * (0.25f + 0.25f * onsetNorm));
@@ -875,7 +1018,7 @@ static void renderSparkleSyllable(float dt, float angleDeg, float tiltBlend,
         uint8_t g = deltaSigma(dsG[i], tG16);
         uint8_t b = deltaSigma(dsB[i], tB16);
         uint8_t w = deltaSigma(dsW[i], tW16);
-        setBothPixel(i, r, g, b, w);
+        strip.setPixelColor(i, r, g, b, w);
     }
 }
 
@@ -1023,7 +1166,7 @@ static void renderFire(float dt, bool withDropout, float tiltBlend) {
         uint8_t g = deltaSigma(dsG[i], tG16);
         uint8_t b = deltaSigma(dsB[i], tB16);
         uint8_t w = deltaSigma(dsW[i], tW16);
-        setBothPixel(i, r, g, b, w);
+        strip.setPixelColor(i, r, g, b, w);
     }
 }
 
@@ -1036,8 +1179,10 @@ void loop() {
     if (dt > 0.1f) dt = 0.1f;
     lastRenderMs = now;
 
+    // HTTP runs on AsyncTCP task automatically. Just handle serial here.
     parseSerialCommands();
 
+    // Snapshot shared sensor state under mutex (AsyncTCP task writes it).
     SensorPacket snap;
     uint32_t lastMs;
     portENTER_CRITICAL(&pktMux);
@@ -1052,6 +1197,10 @@ void loop() {
     uint16_t rawRms = snap.rawRms;
     bool micOn = snap.micEnabled != 0;
     bool connected = (lastMs > 0) && (now - lastMs < TIMEOUT_MS);
+    // Effects that read latestPacket directly (e.g. gravity sparkle) keep
+    // working — single 16-bit reads are atomic on ESP32 anyway. Snapshot
+    // is used here for self-consistent multi-field math below.
+    (void)snap;
 
     if (connected) {
         updateCalibration(ax, ay, az);
@@ -1103,12 +1252,18 @@ void loop() {
             Serial.printf("[%s] rate=%.1f energy=%.3f flash0=%.3f pkts=%lu\n",
                 algName, bloomMotionRate, bloomColonyEnergy, bloomFlashGlow[0],
                 pkts);
+        } else if (currentAlg == ALG_SPARKLE_BURST) {
+            Serial.printf("[%s] angle=%.1f rms=%d en=%.3f ons=%.3f peak b=%.2f lin=%.3f rgbw=%3u/%3u/%3u/%3u pkts=%lu\n",
+                algName, angleDeg, rawRms, energy, onset,
+                sparkPeakBright, sparkPeakLin,
+                sparkPeakR, sparkPeakG, sparkPeakB, sparkPeakW, pkts);
         } else {
             Serial.printf("[%s] angle=%.1f rms=%d energy=%.3f onset=%.3f mic=%s pkts=%lu\n",
                 algName, angleDeg, rawRms, energy, onset, micOn ? "on" : "off",
                 pkts);
         }
     }
+
 
     float tiltR = 0, tiltG = 0, tiltB = 0;
     float tiltBlend = 0.0f;
@@ -1125,7 +1280,7 @@ void loop() {
 
     switch (currentAlg) {
         case ALG_SPARKLE_BURST:
-            renderSparkleSyllable(dt, angleDeg, tiltBlend, tiltR, tiltG, tiltB);
+            renderSparkleBurst(dt, angleDeg, tiltBlend, tiltR, tiltG, tiltB);
             break;
         case ALG_FIRE_MELD:
             renderFire(dt, false, tiltBlend);
@@ -1144,20 +1299,8 @@ void loop() {
             break;
     }
 
-    // === STICK PIPELINE (green breathe) ===
-    // 4-second breathing cycle, frame-rate independent.
-    static float stickPhase = 0.0f;
-    float stickBr = (sinf(stickPhase) + 1.0f) * 0.5f;
-    uint8_t stickG = (uint8_t)(stickBr * 127.0f);
-    RgbColor stickColor(0, stickG, 0);
-    stripStkA.ClearTo(stickColor);
-    stripStkB.ClearTo(stickColor);
-    stickPhase += (2.0f * (float)M_PI / 4.0f) * dt;
-    if (stickPhase > 6.2832f) stickPhase -= 6.2832f;
 
-    stripA.Show();
-    stripB.Show();
-    stripStkA.Show();
-    stripStkB.Show();
+
+    strip.show();
     delay(1);
 }

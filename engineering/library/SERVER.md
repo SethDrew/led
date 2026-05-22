@@ -1,4 +1,6 @@
-# Server (Hetzner)
+# Server (Hetzner) — DEPRECATED
+
+> **Status:** Server deleted May 2026 to stop recurring charges. Workflow and docs kept for reference if we spin it back up.
 
 Remote server for the LED web viewer.
 

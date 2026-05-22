@@ -2,6 +2,17 @@ build/
 .DS_Store
 
 .pio/
+*.o
+
+# Sim build output + working recordings
+festicorn/road-bulbs/tools/sim/sim
+festicorn/road-bulbs/tools/sim/*.bin
+festicorn/road-bulbs/tools/sim/*.bin.times
+
+# Android / Gradle
+.gradle/
+**/app/build/
+local.properties
 
 # Python
 venv/

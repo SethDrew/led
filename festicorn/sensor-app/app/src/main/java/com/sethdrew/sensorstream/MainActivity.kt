@@ -8,7 +8,11 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import android.view.WindowManager
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
+import android.widget.SeekBar
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -18,11 +22,23 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import kotlin.concurrent.thread
 
+data class Installation(val name: String, val ip: String, val mac: String) {
+    override fun toString(): String = "$name ($ip)"
+}
+
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var prefs: SharedPreferences
     private val handler = Handler(Looper.getMainLooper())
+
+    private var lastEffect: Char = 'g'
+    private var lastSliderSendMs = 0L
+    private val SLIDER_THROTTLE_MS = 500L
+
+    private val installations = mutableListOf<Installation>()
+    private lateinit var spinnerAdapter: ArrayAdapter<Installation>
+    private var selectedInstallation: Installation? = null
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -37,20 +53,46 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         prefs = getSharedPreferences("sensorstream", MODE_PRIVATE)
-        binding.hostInput.setText(prefs.getString("host", "192.168.86.127"))
-        binding.portInput.setText(prefs.getInt("port", 4210).toString())
         binding.intervalInput.setText(prefs.getInt("interval_ms", 40).toString())
 
-        binding.startBtn.setOnClickListener { startService() }
-        binding.stopBtn.setOnClickListener { stopService() }
-        binding.discoverBtn.setOnClickListener { discoverEsp() }
+        spinnerAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, installations)
+        spinnerAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        binding.installationSpinner.adapter = spinnerAdapter
+        binding.installationSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
+                selectedInstallation = installations[pos]
+                prefs.edit().putString("last_ip", selectedInstallation?.ip).apply()
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {
+                selectedInstallation = null
+            }
+        }
+
+        val savedIp = prefs.getString("last_ip", null)
+        if (savedIp != null) {
+            installations.add(Installation("last session", savedIp, ""))
+            spinnerAdapter.notifyDataSetChanged()
+            selectedInstallation = installations[0]
+        }
+
+        binding.scanBtn.setOnClickListener { scanForInstallations() }
+
+        binding.startBtn.setOnClickListener {
+            sendCommand(lastEffect)
+            startService()
+        }
+        binding.stopBtn.setOnClickListener {
+            sendCommand('x')
+            stopService()
+        }
 
         binding.fxGravity.setOnClickListener { sendCommand('g') }
         binding.fxSparkle.setOnClickListener { sendCommand('s') }
         binding.fxFireMeld.setOnClickListener { sendCommand('m') }
         binding.fxFlicker.setOnClickListener { sendCommand('f') }
         binding.fxBloom.setOnClickListener { sendCommand('b') }
-        binding.fxSparkleSimple.setOnClickListener { sendCommand('y') }
+        binding.fxIdle.setOnClickListener { sendCommand('i') }
+        binding.fxNebula.setOnClickListener { sendCommand('n') }
 
         binding.micToggle.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked) {
@@ -60,6 +102,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
         binding.gyroToggle.setOnCheckedChangeListener { _, _ -> sendToggleUpdate() }
+
+        binding.brightnessSlider.setOnSeekBarChangeListener(throttledSlider('B'))
+        binding.sensitivitySlider.setOnSeekBarChangeListener(throttledSlider('S'))
+        binding.speedSlider.setOnSeekBarChangeListener(throttledSlider('V'))
 
         if (Build.VERSION.SDK_INT >= 33) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
@@ -110,20 +156,20 @@ class MainActivity : AppCompatActivity() {
         handler.removeCallbacks(ticker)
     }
 
+    private fun getSelectedHost(): String? = selectedInstallation?.ip
+
     private fun startService() {
-        val host = binding.hostInput.text.toString().trim()
-        val port = binding.portInput.text.toString().toIntOrNull() ?: 4210
+        val host = getSelectedHost() ?: return
         val interval = binding.intervalInput.text.toString().toLongOrNull() ?: 40L
         prefs.edit()
-            .putString("host", host)
-            .putInt("port", port)
+            .putString("last_ip", host)
             .putInt("interval_ms", interval.toInt())
             .apply()
 
         val intent = Intent(this, SensorService::class.java).apply {
             action = SensorService.ACTION_START
             putExtra(SensorService.EXTRA_HOST, host)
-            putExtra(SensorService.EXTRA_PORT, port)
+            putExtra(SensorService.EXTRA_PORT, 4210)
             putExtra(SensorService.EXTRA_INTERVAL_MS, interval)
             putExtra(SensorService.EXTRA_MIC_ENABLED, binding.micToggle.isChecked)
             putExtra(SensorService.EXTRA_GYRO_ENABLED, binding.gyroToggle.isChecked)
@@ -140,44 +186,112 @@ class MainActivity : AppCompatActivity() {
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
-    private fun discoverEsp() {
-        binding.discoverBtn.isEnabled = false
-        binding.discoverBtn.text = "..."
+    private fun scanForInstallations() {
+        binding.scanBtn.isEnabled = false
+        binding.scanBtn.text = "..."
         thread {
+            val found = mutableListOf<Installation>()
             try {
                 val sock = DatagramSocket()
                 sock.broadcast = true
-                sock.soTimeout = 2000
+                sock.soTimeout = 3000
                 val msg = "ROAD?".toByteArray()
                 val broadcast = InetAddress.getByName("255.255.255.255")
                 sock.send(DatagramPacket(msg, msg.size, broadcast, 4212))
-                val buf = ByteArray(64)
-                val resp = DatagramPacket(buf, buf.size)
-                sock.receive(resp)
-                val reply = String(resp.data, 0, resp.length)
-                if (reply.startsWith("ROAD!")) {
-                    val ip = resp.address.hostAddress ?: ""
-                    val mac = reply.substring(5)
-                    runOnUiThread {
-                        binding.hostInput.setText(ip)
-                        binding.discoverBtn.text = "Found"
+
+                val deadline = System.currentTimeMillis() + 3000
+                while (System.currentTimeMillis() < deadline) {
+                    try {
+                        val buf = ByteArray(128)
+                        val resp = DatagramPacket(buf, buf.size)
+                        sock.soTimeout = (deadline - System.currentTimeMillis()).toInt().coerceAtLeast(100)
+                        sock.receive(resp)
+                        val reply = String(resp.data, 0, resp.length)
+                        if (reply.startsWith("ROAD!")) {
+                            val payload = reply.substring(5)
+                            val ip = resp.address.hostAddress ?: continue
+                            val parts = payload.split("|", limit = 2)
+                            val name: String
+                            val mac: String
+                            if (parts.size == 2) {
+                                name = parts[0]
+                                mac = parts[1]
+                            } else {
+                                name = ip
+                                mac = parts[0]
+                            }
+                            if (found.none { it.ip == ip }) {
+                                found.add(Installation(name, ip, mac))
+                            }
+                        }
+                    } catch (_: Exception) {
+                        break
                     }
                 }
                 sock.close()
-            } catch (_: Exception) {
-                runOnUiThread { binding.discoverBtn.text = "N/A" }
-            }
+            } catch (_: Exception) {}
+
             runOnUiThread {
+                installations.clear()
+                if (found.isNotEmpty()) {
+                    installations.addAll(found)
+                    binding.scanBtn.text = "${found.size} found"
+                } else {
+                    binding.scanBtn.text = "None"
+                }
+                spinnerAdapter.notifyDataSetChanged()
+                if (installations.isNotEmpty()) {
+                    binding.installationSpinner.setSelection(0)
+                    selectedInstallation = installations[0]
+                }
                 handler.postDelayed({
-                    binding.discoverBtn.isEnabled = true
-                    binding.discoverBtn.text = "Find"
+                    binding.scanBtn.isEnabled = true
+                    binding.scanBtn.text = "Scan"
                 }, 2000)
             }
         }
     }
 
+    private fun throttledSlider(cmd: Char) = object : SeekBar.OnSeekBarChangeListener {
+        override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+            val now = System.currentTimeMillis()
+            if (now - lastSliderSendMs >= SLIDER_THROTTLE_MS) {
+                lastSliderSendMs = now
+                sendSlider(cmd, progress)
+            }
+        }
+        override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+        override fun onStopTrackingTouch(seekBar: SeekBar?) {
+            sendSlider(cmd, seekBar?.progress ?: 128)
+        }
+    }
+
+    private fun sendSlider(cmd: Char, value: Int) {
+        val host = getSelectedHost() ?: return
+        thread {
+            try {
+                val sock = DatagramSocket()
+                sock.soTimeout = 1000
+                val addr = InetAddress.getByName(host)
+                val data = byteArrayOf(cmd.code.toByte(), value.toByte())
+                sock.send(DatagramPacket(data, 2, addr, 4211))
+                sock.close()
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun updateSpeedSliderState(cmd: Char) {
+        val enabled = cmd == 'n' || cmd == 'i'
+        binding.speedSlider.isEnabled = enabled
+        binding.speedLabel.alpha = if (enabled) 1.0f else 0.4f
+    }
+
     private fun sendCommand(cmd: Char) {
-        val host = binding.hostInput.text.toString().trim()
+        if (cmd != 'x') {
+            lastEffect = cmd
+            updateSpeedSliderState(cmd)
+        }
+        val host = getSelectedHost() ?: return
         thread {
             try {
                 val sock = DatagramSocket()

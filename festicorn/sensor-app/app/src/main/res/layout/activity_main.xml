@@ -8,7 +8,7 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Target IP"
+        android:text="Installation"
         android:textStyle="bold" />
 
     <LinearLayout
@@ -16,35 +16,27 @@
         android:layout_height="wrap_content"
         android:orientation="horizontal">
 
-        <EditText
-            android:id="@+id/hostInput"
+        <Spinner
+            android:id="@+id/installationSpinner"
             android:layout_width="0dp"
             android:layout_weight="1"
-            android:layout_height="wrap_content"
-            android:inputType="text"
-            android:hint="192.168.86.127" />
+            android:layout_height="wrap_content" />
 
         <Button
-            android:id="@+id/discoverBtn"
+            android:id="@+id/scanBtn"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Find"
+            android:text="Scan"
             android:textAllCaps="false" />
     </LinearLayout>
 
     <TextView
+        android:id="@+id/networkHint"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:text="UDP port"
-        android:textStyle="bold" />
-
-    <EditText
-        android:id="@+id/portInput"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:inputType="number"
-        android:text="4210" />
+        android:text="Connect to 'cuteplant' WiFi hotspot before scanning"
+        android:textColor="#888888"
+        android:textSize="12sp" />
 
     <TextView
         android:layout_width="match_parent"
@@ -80,8 +72,8 @@
             android:layout_width="0dp"
             android:layout_weight="1"
             android:layout_height="wrap_content"
-            android:textOn="Gyro ON"
-            android:textOff="Gyro OFF"
+            android:textOn="Motion ON"
+            android:textOff="Motion OFF"
             android:checked="true" />
     </LinearLayout>
 
@@ -167,13 +159,66 @@
             android:textAllCaps="false" />
 
         <Button
-            android:id="@+id/fxSparkleSimple"
+            android:id="@+id/fxIdle"
             android:layout_width="0dp"
             android:layout_weight="1"
             android:layout_height="wrap_content"
-            android:text="Syllable"
+            android:text="Idle"
+            android:textAllCaps="false" />
+
+        <Button
+            android:id="@+id/fxNebula"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:text="Nebula"
             android:textAllCaps="false" />
     </LinearLayout>
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:text="Brightness"
+        android:textStyle="bold" />
+
+    <SeekBar
+        android:id="@+id/brightnessSlider"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:max="255"
+        android:progress="128" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="Sensitivity"
+        android:textStyle="bold" />
+
+    <SeekBar
+        android:id="@+id/sensitivitySlider"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:max="255"
+        android:progress="128" />
+
+    <TextView
+        android:id="@+id/speedLabel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="Speed (Nebula)"
+        android:textStyle="bold"
+        android:alpha="0.4" />
+
+    <SeekBar
+        android:id="@+id/speedSlider"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:max="255"
+        android:progress="128"
+        android:enabled="false" />
 
     <TextView
         android:id="@+id/statusText"

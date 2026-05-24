@@ -926,6 +926,68 @@ entries:
       (b) fewer LEDs/strip (wire-time scales), (c) SPI-clocked LED family
       (APA102/SK9822), or (d) different MCU.
 
+  - id: esp32-rmt-wifi-isr-white-flash
+    date: 2026-05-22
+    touched: 2026-05-22
+    title: "WiFi interrupts cause all-white flash glitches on 4+ concurrent RMT channels"
+    summary: >
+      When WiFi is active on classic ESP32, 6 concurrent RMT channels driving
+      WS2812B strips exhibit intermittent all-white flash frames. The glitch
+      does NOT occur with WiFi disabled, even at 6×300 LEDs per strip (1800
+      total). Staggering Show() calls into two batches of 3 (with CanShow()
+      wait between batches) eliminates the glitch with WiFi active.
+    status: mitigated
+    severity: high
+    scope: hardware
+    source: festicorn/bench-rmt-test/src/rmt_test.cpp
+    tags: [esp32, rmt, wifi, ws2812b, isr, glitch, measurement]
+    relates_to: [esp32-rmt-isr-cpu-overhead, esp32-rmt-6-channel-concurrency-cliff, esp32-rmt-8-channel-parallel-ws2812b]
+    notes: >
+      OBSERVED FACTS (tested on ESP32-D0WD-V3, bench-bulbs board A4:F0:0F:61:92:2C):
+
+        Test 1: 6×100 WS2812B, WiFi active, no stagger → intermittent all-white
+                flash frames on all strips simultaneously. Confirmed visually.
+        Test 2: 6×100 WS2812B, WiFi disabled, timer-driven sparkle onsets,
+                no stagger → zero glitches over extended observation.
+        Test 3: 6×300 WS2812B, WiFi disabled, randomized onset timer (300ms–3s),
+                no stagger → zero glitches. RMT under heavy load without WiFi
+                is stable.
+        Test 4: 6×100 WS2812B, WiFi active, staggered Show() (3+3 with
+                CanShow() wait) → zero glitches.
+        Test 5: 6×50 WS2812B, WiFi active, no stagger → zero glitches.
+
+      CONJECTURE on mechanism (not directly measured):
+        WiFi interrupt handlers run on core 0 and can preempt RMT block-refill
+        ISRs. With 6 channels refilling simultaneously (~296 ISR entries per
+        3ms window, see esp32-rmt-isr-cpu-overhead), a WiFi ISR preemption
+        may cause an RMT channel's 64-entry block to drain before the refill
+        ISR services it. When RMT memory underruns, the peripheral may output
+        all-high bits (= white) for the remaining LED data. All strips flash
+        simultaneously because a single WiFi ISR burst delays refills for all
+        channels at once.
+
+      WHY STAGGER WORKS (conjecture):
+        Batching 3 channels at a time halves the number of concurrent refill
+        ISRs competing for CPU time. With only 3 channels active, each refill
+        ISR fires less frequently and the WiFi preemption window is less likely
+        to cause a buffer underrun before the next refill.
+
+      OPEN QUESTIONS:
+        - Would pinning RMT ISRs to core 1 (away from WiFi on core 0) eliminate
+          the glitch without staggering? NeoPixelBus does not expose core affinity
+          for rmt_driver_install(); would require patching the library.
+        - Is ESP-NOW lighter than WiFi STA for ISR load? ESP-NOW still uses the
+          WiFi radio stack; likely similar interrupt behavior.
+        - What is the exact channel count threshold? 6×50 is fine, 6×100 glitches.
+          The threshold likely depends on strip length (more refill ISRs per frame
+          = wider vulnerability window).
+
+      PRACTICAL RULE:
+        When using WiFi (STA or ESP-NOW) with 4+ RMT channels at 50+ LEDs each,
+        stagger Show() in batches of 3. Cost is ~3ms added latency per frame
+        (one wire-time wait between batches). Below 4 channels or below ~50 LEDs
+        per strip, stagger is unnecessary.
+
   # ── Wireless Telemetry Protocol ──────────────────────────────────
 
   - id: bulb-imu-telemetry-wire-schema-v1

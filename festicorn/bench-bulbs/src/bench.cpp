@@ -48,6 +48,10 @@ static portMUX_TYPE pktMux = portMUX_INITIALIZER_UNLOCKED;
 // ── LED config ───────────────────────────────────────────────────
 #define LED_COUNT  50
 
+// ── Global sliders (set via UDP cmd) ────────────────────────────
+static float globalBrightness  = 1.0f;   // 0.0–2.0, midpoint=1.0 unchanged
+static float globalSensitivity = 1.0f;   // 0.05–2.0, scales RMS_CEILING
+
 #define DUCK_LED_PIN   4
 #define BIO_LED_PIN    18
 #define STICK_A_PIN    32
@@ -62,6 +66,12 @@ static NeoPixelBus<NeoGrbFeature,  NeoEsp32Rmt3Ws2812xMethod> stripStkB (STICK_B
 
 // Set a pixel on both Strip A (RGBW) and Strip B (RGB, no W).
 static inline void setBothPixel(uint16_t i, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
+    if (globalBrightness < 1.0f) {
+        r = (uint8_t)(r * globalBrightness);
+        g = (uint8_t)(g * globalBrightness);
+        b = (uint8_t)(b * globalBrightness);
+        w = (uint8_t)(w * globalBrightness);
+    }
     stripA.SetPixelColor(i, RgbwColor(r, g, b, w));
     stripB.SetPixelColor(i, RgbColor(r, g, b));
 }
@@ -143,12 +153,14 @@ struct __attribute__((packed)) SensorPacket {
 };  // 15 bytes
 
 enum Algorithm {
+    ALG_OFF,
     ALG_SPARKLE_BURST,
     ALG_FIRE_MELD,
     ALG_FIRE_FLICKER,
     ALG_QUIET_BLOOM,
     ALG_GRAVITY_PARTICLE,
     ALG_SPARKLE_SYLLABLE,
+    ALG_IDLE,
 };
 
 static Algorithm currentAlg = ALG_GRAVITY_PARTICLE;
@@ -317,7 +329,8 @@ static float updateAdaptiveFloor(float rms, float dt) {
 
 static float computeEnergy(uint16_t rawRms, float dt) {
     float rms = (float)rawRms;
-    frrCeiling = fmaxf(RMS_CEILING, frrCeiling * expf(-0.0025f * dt));
+    float scaledCeiling = RMS_CEILING / globalSensitivity;
+    frrCeiling = fmaxf(scaledCeiling, frrCeiling * expf(-0.0025f * dt));
     if (rms > frrCeiling) frrCeiling = rms;
     updateAdaptiveFloor(rms, dt);
     float effectiveFloor = adaptiveFloor * FLOOR_HEADROOM;
@@ -368,6 +381,7 @@ static void resetGravitySparkle();
 static void resetSyllableState();
 void startCalibration();
 void handleSerialCommand(char c);
+static void handleSliderCommand(const uint8_t *data, size_t len);
 
 // ── Setup ────────────────────────────────────────────────────────
 
@@ -444,15 +458,22 @@ void setup() {
         cmdUdp.onPacket([](AsyncUDPPacket packet) {
             if (packet.length() < 1) return;
             char c = (char)packet.data()[0];
+            if ((c == 'B' || c == 'S') && packet.length() >= 2) {
+                handleSliderCommand(packet.data(), packet.length());
+                packet.printf("OK:%c=%u", c, packet.data()[1]);
+                return;
+            }
             handleSerialCommand(c);
             const char *name = "unknown";
             switch (currentAlg) {
+                case ALG_OFF:             name = "off"; break;
                 case ALG_SPARKLE_BURST:   name = "sparkle"; break;
                 case ALG_FIRE_MELD:       name = "fire"; break;
                 case ALG_FIRE_FLICKER:    name = "flicker"; break;
                 case ALG_QUIET_BLOOM:     name = "bloom"; break;
                 case ALG_GRAVITY_PARTICLE: name = "gravity"; break;
                 case ALG_SPARKLE_SYLLABLE: name = "syllable"; break;
+                case ALG_IDLE:            name = "idle"; break;
             }
             packet.printf("FX:%s", name);
         });
@@ -463,7 +484,7 @@ void setup() {
         discoverUdp.onPacket([](AsyncUDPPacket packet) {
             if (packet.length() >= 5 && memcmp(packet.data(), "ROAD?", 5) == 0) {
                 char reply[64];
-                snprintf(reply, sizeof(reply), "ROAD!%s", macStr);
+                snprintf(reply, sizeof(reply), "ROAD!bench-bulbs|%s", macStr);
                 packet.printf("%s", reply);
             }
         });
@@ -643,6 +664,38 @@ static void resetSyllableState() {
     syllCooldown = 0.0f;
 }
 
+// ── Idle rainbow wash ───────────────────────────────────────────
+static float idlePhase = 0.0f;
+#define IDLE_BRIGHTNESS 0.30f
+#define IDLE_SPEED      0.03f
+
+static void renderIdle(float dt) {
+    idlePhase = fmodf(idlePhase + IDLE_SPEED * dt, 1.0f);
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        float pos = (float)i / (float)LED_COUNT;
+        float hue = fmodf(pos + idlePhase, 1.0f);
+        uint8_t idx = (uint8_t)(hue * 255.0f);
+        float bright = fastGamma24(IDLE_BRIGHTNESS);
+        setBothPixel(i,
+            (uint8_t)(oklchVarL[idx][0] * bright),
+            (uint8_t)(oklchVarL[idx][1] * bright),
+            (uint8_t)(oklchVarL[idx][2] * bright), 0);
+    }
+}
+
+static void handleSliderCommand(const uint8_t *data, size_t len) {
+    if (len < 2) return;
+    char cmd = (char)data[0];
+    uint8_t val = data[1];
+    if (cmd == 'B') {
+        globalBrightness = val / 128.0f;
+        Serial.printf("[SLIDER] brightness=%.0f%%\n", globalBrightness * 100.0f);
+    } else if (cmd == 'S') {
+        globalSensitivity = fmaxf(0.05f, val / 128.0f);
+        Serial.printf("[SLIDER] sensitivity=%.2f\n", globalSensitivity);
+    }
+}
+
 void handleSerialCommand(char c) {
     if (c == 'c' || c == 'C') {
         startCalibration();
@@ -670,6 +723,17 @@ void handleSerialCommand(char c) {
         currentAlg = ALG_SPARKLE_SYLLABLE;
         resetSyllableState();
         Serial.println("Algorithm: sparkle_syllable (alias)");
+    } else if (c == 'i' || c == 'I') {
+        currentAlg = ALG_IDLE;
+        idlePhase = 0.0f;
+        Serial.println("Algorithm: idle");
+    } else if (c == 'x' || c == 'X') {
+        currentAlg = ALG_OFF;
+        stripA.ClearTo(RgbwColor(0, 0, 0, 0));
+        stripB.ClearTo(RgbColor(0, 0, 0));
+        stripA.Show();
+        stripB.Show();
+        Serial.println("Algorithm: off");
     } else if (c == '?') {
         Serial.printf("[BOOT] role=bench-bulbs MAC=%s fw=bench_bulbs_wifi\n", macStr);
     }
@@ -928,10 +992,12 @@ static void renderFire(float dt, bool withDropout, float tiltBlend) {
     float colorDecay  = fminf(1.0f, dt / 2.0f);
 
     float colorTarget;
-    if (isPercussiveOnly || isSilent)
+    if (isPercussiveOnly)
         colorTarget = 0.0f;
+    else if (isSilent)
+        colorTarget = 0.3f;
     else
-        colorTarget = energy;
+        colorTarget = fmaxf(0.3f, energy);
 
     if (colorTarget > fireColorEnergy)
         fireColorEnergy += colorAttack * (colorTarget - fireColorEnergy);
@@ -1079,6 +1145,12 @@ void loop() {
         }
     }
 
+    if (currentAlg == ALG_QUIET_BLOOM && !connected) {
+        bloomHitIntensity = 0.0f;
+        drainEnvelope *= expf(-4.07f * dt);
+        if (drainEnvelope <= 0.001f) drainEnvelope = 0.0f;
+    }
+
     if (currentAlg == ALG_QUIET_BLOOM && connected) {
         if (pktCount != bloomPrevPktCount) {
             static uint32_t lastBloomPktMs = 0;
@@ -1124,6 +1196,10 @@ void loop() {
     }
 
     switch (currentAlg) {
+        case ALG_OFF:
+            stripA.ClearTo(RgbwColor(0, 0, 0, 0));
+            stripB.ClearTo(RgbColor(0, 0, 0));
+            break;
         case ALG_SPARKLE_BURST:
             renderSparkleSyllable(dt, angleDeg, tiltBlend, tiltR, tiltG, tiltB);
             break;
@@ -1141,6 +1217,9 @@ void loop() {
             break;
         case ALG_SPARKLE_SYLLABLE:
             renderSparkleSyllable(dt, angleDeg, tiltBlend, tiltR, tiltG, tiltB);
+            break;
+        case ALG_IDLE:
+            renderIdle(dt);
             break;
     }
 

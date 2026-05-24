@@ -1,16 +1,18 @@
 /*
- * BULB-FLEET — phone WiFi UDP architecture (ported from road-bulbs).
+ * rmt_test.cpp — RMT contention test, port of bulb-fleet.
  *
- * Phone (Sensor Logger app) → WiFi UDP → ESP32 listener. No ESP-NOW.
- * Connects to phone hotspot SSID "cuteplant".
+ * Exact copy of bulb-fleet firmware with two differences:
+ *   1. GPIO pins changed to bench-bulbs hardware (4 real + 2 phantom)
+ *   2. stripsShow() calls all 6 Show() in sequence with NO stagger
  *
- * 6× WS2812B RGB strips on a classic ESP32. Same physical board as
- * biolum/. Each strip gets a per-strip OKLCH hue offset so the 6 strips
- * fan out a rainbow chord during tilt.
+ * This isolates whether the bulb-fleet stagger is necessary by running
+ * the identical effect/UDP/sensor stack without it.
  *
- *   strip0: GPIO 4   RMT0     strip3: GPIO 5   RMT3
- *   strip1: GPIO 16  RMT1     strip4: GPIO 18  RMT4
- *   strip2: GPIO 17  RMT2     strip5: GPIO 19  RMT5
+ * 6× WS2812B RGB strips on a classic ESP32.
+ *
+ *   strip0: GPIO 4   RMT0     strip3: GPIO 12  RMT3
+ *   strip1: GPIO 18  RMT1     strip4: GPIO 25  RMT4
+ *   strip2: GPIO 32  RMT2     strip5: GPIO 26  RMT5
  *
  * Sacrificial first-LED (HEAD_OFFSET=1) on each strip: physical pixel 0
  * stays black and absorbs signal-shifter glitches. Effects use logical
@@ -21,17 +23,23 @@
  */
 
 #include <Arduino.h>
-#include <WiFi.h>
-#include <ESPmDNS.h>
-#include <AsyncUDP.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <esp_random.h>
 #include <esp_system.h>
+#include <esp_timer.h>
 #include <NeoPixelBus.h>
 #include <math.h>
 #include <oklch_lut.h>
 #include <fast_math.h>
+
+#define WIFI_ENABLED 0  // Set to 1 for WiFi test, 0 for no-WiFi test
+
+#if WIFI_ENABLED
+#include <WiFi.h>
+#include <ESPmDNS.h>
+#include <AsyncUDP.h>
+#endif
 
 // ── WiFi credentials (phone hotspot) ────────────────────────────
 #ifndef WIFI_SSID
@@ -41,6 +49,7 @@
 #define WIFI_PASS "bigboiredwood"
 #endif
 
+#if WIFI_ENABLED
 static AsyncUDP udp;
 static AsyncUDP cmdUdp;
 static AsyncUDP discoverUdp;
@@ -49,6 +58,7 @@ static AsyncUDP onsetUdp;
 #define CMD_PORT 4211
 #define DISCOVER_PORT 4212
 #define ONSET_PORT 4213
+#endif
 static portMUX_TYPE pktMux = portMUX_INITIALIZER_UNLOCKED;
 
 // ── Topology ────────────────────────────────────────────────────
@@ -67,15 +77,14 @@ static const uint8_t STRIP_HUE_OFFSET[NUM_STRIPS] = {
 
 // ── Global sliders (set via UDP cmd) ────────────────────────────
 static float globalBrightness  = 1.0f;   // 0.0–1.0, applied in stripSetPixel
-static float globalSensitivity = 1.0f;   // 0.05–2.0, scales RMS_CEILING
-static float globalSpeed       = 0.3f;   // 0.01–0.6, used by nebula
+static float globalSensitivity = 1.0f;   // 0.25–4.0, scales RMS_CEILING
 
 static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt0Ws2812xMethod> strip0(LEDS_PER_STRIP,  4);
-static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt1Ws2812xMethod> strip1(LEDS_PER_STRIP, 16);
-static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt2Ws2812xMethod> strip2(LEDS_PER_STRIP, 17);
-static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt3Ws2812xMethod> strip3(LEDS_PER_STRIP,  5);
-static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt4Ws2812xMethod> strip4(LEDS_PER_STRIP, 18);
-static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt5Ws2812xMethod> strip5(LEDS_PER_STRIP, 19);
+static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt1Ws2812xMethod> strip1(LEDS_PER_STRIP, 18);
+static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt2Ws2812xMethod> strip2(LEDS_PER_STRIP, 32);
+static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt3Ws2812xMethod> strip3(LEDS_PER_STRIP, 12);
+static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt4Ws2812xMethod> strip4(LEDS_PER_STRIP, 25);
+static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt5Ws2812xMethod> strip5(LEDS_PER_STRIP, 26);
 
 // Write logical pixel i on strip s (skips the sacrificial head pixel).
 static inline void stripSetPixel(uint8_t s, uint16_t i, uint8_t r, uint8_t g, uint8_t b) {
@@ -103,11 +112,7 @@ static inline void stripsBegin() {
 }
 
 static inline void stripsShow() {
-    // Stagger in two batches of 3 to avoid RMT ISR contention.
-    // 6 channels refilling simultaneously can miss ISR deadlines
-    // when WiFi interrupts land, causing all-white glitch frames.
     strip0.Show(); strip1.Show(); strip2.Show();
-    while (!strip0.CanShow() || !strip1.CanShow() || !strip2.CanShow()) {}
     strip3.Show(); strip4.Show(); strip5.Show();
 }
 
@@ -206,8 +211,6 @@ enum Algorithm {
     ALG_QUIET_BLOOM,
     ALG_GRAVITY_PARTICLE,
     ALG_SPARKLE_SYLLABLE,
-    ALG_IDLE,
-    ALG_NEBULA,
 };
 
 static Algorithm currentAlg = ALG_GRAVITY_PARTICLE;
@@ -428,6 +431,28 @@ void startCalibration();
 void handleSerialCommand(char c);
 static void handleSliderCommand(const uint8_t *data, size_t len);
 
+// ── Fake onset timer (no-WiFi mode) ─────────────────────────────
+#if !WIFI_ENABLED
+static esp_timer_handle_t fakeOnsetTimer = nullptr;
+
+static void IRAM_ATTR fakeOnsetCallback(void* arg) {
+    syllOnsetStrength = 150 + (esp_random() & 0x3F); // 150-213
+    syllOnsetMs = millis();
+    // Re-arm with random delay 300-800ms
+    esp_timer_stop(fakeOnsetTimer);
+    uint64_t nextUs = 300000 + (esp_random() % 2700000);
+    esp_timer_start_once(fakeOnsetTimer, nextUs);
+}
+
+static void startFakeOnsetTimer() {
+    esp_timer_create_args_t args = {};
+    args.callback = fakeOnsetCallback;
+    args.name = "fake_onset";
+    esp_timer_create(&args, &fakeOnsetTimer);
+    esp_timer_start_once(fakeOnsetTimer, 500000);
+}
+#endif
+
 // ── Setup ────────────────────────────────────────────────────────
 
 void setup() {
@@ -446,6 +471,7 @@ void setup() {
     resetBloomState();
     resetGravitySparkle();
 
+#if WIFI_ENABLED
     // Boot: green while connecting WiFi.
     fillAll(0, 40, 0);
     stripsShow();
@@ -491,7 +517,7 @@ void setup() {
         cmdUdp.onPacket([](AsyncUDPPacket packet) {
             if (packet.length() < 1) return;
             char c = (char)packet.data()[0];
-            if ((c == 'B' || c == 'S' || c == 'V') && packet.length() >= 2) {
+            if ((c == 'B' || c == 'S') && packet.length() >= 2) {
                 handleSliderCommand(packet.data(), packet.length());
                 packet.printf("OK:%c=%u", c, packet.data()[1]);
                 return;
@@ -506,8 +532,6 @@ void setup() {
                 case ALG_QUIET_BLOOM:     name = "bloom"; break;
                 case ALG_GRAVITY_PARTICLE: name = "gravity"; break;
                 case ALG_SPARKLE_SYLLABLE: name = "syllable"; break;
-                case ALG_IDLE:            name = "idle"; break;
-                case ALG_NEBULA:          name = "nebula"; break;
             }
             packet.printf("FX:%s", name);
         });
@@ -518,7 +542,7 @@ void setup() {
         discoverUdp.onPacket([](AsyncUDPPacket packet) {
             if (packet.length() >= 5 && memcmp(packet.data(), "ROAD?", 5) == 0) {
                 char reply[64];
-                snprintf(reply, sizeof(reply), "ROAD!bulb-fleet|%s", macStr);
+                snprintf(reply, sizeof(reply), "ROAD!%s", macStr);
                 packet.printf("%s", reply);
             }
         });
@@ -537,16 +561,22 @@ void setup() {
         Serial.printf("[ONSET] Listening on port %d\n", ONSET_PORT);
     }
 
-    if (MDNS.begin("bulb-fleet")) {
-        MDNS.addService("bulb-fleet", "udp", UDP_PORT);
-        Serial.println("[MDNS] bulb-fleet.local");
+    if (MDNS.begin("rmt-test")) {
+        MDNS.addService("rmt-test", "udp", UDP_PORT);
+        Serial.println("[MDNS] rmt-test.local");
     }
+#else
+    Serial.println("[BOOT] WiFi DISABLED — fake onset timer active");
+    currentAlg = ALG_SPARKLE_SYLLABLE;
+    resetSyllableState();
+    startFakeOnsetTimer();
+#endif
 
     stripsClear();
     stripsShow();
 
     Serial.println("Commands: 'c' recal, 's' sparkle, 'm' fire_meld, 'f' fire_flicker, 'b' bloom, 'g' gravity_particle, 'y' syllable, '?' identify");
-    Serial.printf("[BOOT] role=bulb-fleet MAC=%s fw=bulb_fleet_wifi\n", macStr);
+    Serial.printf("[BOOT] role=rmt-test MAC=%s fw=bulb_fleet_wifi\n", macStr);
 }
 
 // ── Calibration ──────────────────────────────────────────────────
@@ -714,172 +744,6 @@ static void resetSyllableState() {
     syllCooldown = 0.0f;
 }
 
-// ── Idle rainbow wash ───────────────────────────────────────────
-static float idlePhase = 0.0f;
-#define IDLE_BRIGHTNESS 0.30f
-#define IDLE_SPEED      0.10f   // scaled by globalSpeed; midpoint (0.3) ≈ original 0.03
-
-static void renderIdle(float dt) {
-    idlePhase = fmodf(idlePhase + IDLE_SPEED * globalSpeed * dt, 1.0f);
-    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
-        float stripOff = STRIP_HUE_OFFSET[s] / 256.0f;
-        for (uint16_t i = 0; i < LED_COUNT; i++) {
-            float pos = (float)i / (float)LED_COUNT;
-            float hue = fmodf(pos + idlePhase + stripOff, 1.0f);
-            uint8_t idx = (uint8_t)(hue * 255.0f);
-            float bright = fastGamma24(IDLE_BRIGHTNESS);
-            stripSetPixel(s, i,
-                (uint8_t)(oklchVarL[idx][0] * bright),
-                (uint8_t)(oklchVarL[idx][1] * bright),
-                (uint8_t)(oklchVarL[idx][2] * bright));
-        }
-    }
-}
-
-// ── Nebula ──────────────────────────────────────────────────────
-#define NEBULA_MAX_ORBS      5
-#define NEBULA_ORB_TAIL      30.0f
-#define NEBULA_ORB_BASE_SPEED 0.45f
-#define NEBULA_SPAWN_CHANCE  0.03f
-#define NEBULA_MIN_LIFETIME  200
-#define NEBULA_MAX_LIFETIME  300
-#define NEBULA_BRIGHTNESS    0.40f
-
-struct NebOrb {
-    float pos;
-    float vel;
-    uint16_t age;
-    uint16_t lifetime;
-    bool active;
-};
-
-static float nebulaTime = 0.0f;
-static NebOrb nebOrbs[NUM_STRIPS][NEBULA_MAX_ORBS];
-static float nebDecay[NUM_STRIPS][LEDS_PER_STRIP];
-
-static void resetNebula() {
-    nebulaTime = 0.0f;
-    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
-        for (uint8_t o = 0; o < NEBULA_MAX_ORBS; o++)
-            nebOrbs[s][o].active = false;
-        for (uint16_t i = 0; i < LED_COUNT; i++)
-            nebDecay[s][i] = 0.0f;
-    }
-}
-
-static void renderNebula(float dt) {
-    float spd = globalSpeed;
-    nebulaTime += dt * spd;
-    float t = nebulaTime * 60.0f;
-
-    // Decay rate: convert per-frame decay to time-based
-    float decayPerFrame = 1.0f - (1.0f / NEBULA_ORB_TAIL);
-    float decayPerSec = powf(decayPerFrame, 60.0f);
-    float decay = powf(decayPerSec, dt);
-
-    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
-        // Decay orb brightness buffer
-        for (uint16_t i = 0; i < LED_COUNT; i++) {
-            nebDecay[s][i] *= decay;
-            if (nebDecay[s][i] < 0.01f) nebDecay[s][i] = 0.0f;
-        }
-
-        // Spawn orbs
-        float spawnRoll = (float)(xorshift32() & 0xFFFF) / 65536.0f;
-        if (spawnRoll < NEBULA_SPAWN_CHANCE) {
-            for (uint8_t o = 0; o < NEBULA_MAX_ORBS; o++) {
-                if (!nebOrbs[s][o].active) {
-                    NebOrb &orb = nebOrbs[s][o];
-                    orb.pos = randFloat() * (float)LED_COUNT;
-                    float dir = (xorshift32() & 1) ? 1.0f : -1.0f;
-                    orb.vel = dir * NEBULA_ORB_BASE_SPEED * spd * (0.7f + randFloat() * 0.6f);
-                    orb.age = 0;
-                    orb.lifetime = NEBULA_MIN_LIFETIME + (uint16_t)(xorshift32() % (NEBULA_MAX_LIFETIME - NEBULA_MIN_LIFETIME));
-                    orb.active = true;
-                    break;
-                }
-            }
-        }
-
-        // Update orbs
-        for (uint8_t o = 0; o < NEBULA_MAX_ORBS; o++) {
-            NebOrb &orb = nebOrbs[s][o];
-            if (!orb.active) continue;
-
-            orb.age++;
-            orb.pos += orb.vel * dt * 60.0f;
-            orb.pos = fmodf(orb.pos + (float)LED_COUNT, (float)LED_COUNT);
-
-            if (orb.age >= orb.lifetime) {
-                orb.active = false;
-                continue;
-            }
-
-            // Smoothstep lifecycle brightness
-            float lc = (float)orb.age / (float)orb.lifetime;
-            float bright;
-            if (lc < 0.4f) {
-                float tf = lc / 0.4f;
-                bright = tf * tf * (3.0f - 2.0f * tf);
-            } else if (lc > 0.6f) {
-                float tf = (1.0f - lc) / 0.4f;
-                bright = tf * tf * (3.0f - 2.0f * tf);
-            } else {
-                bright = 1.0f;
-            }
-
-            // Sub-pixel interpolation into decay buffer
-            int base = (int)orb.pos;
-            int next = (base + 1) % LED_COUNT;
-            float frac = orb.pos - (float)base;
-            float val0 = bright * 0.6f * (1.0f - frac);
-            float val1 = bright * 0.6f * frac;
-            if (base >= 0 && base < LED_COUNT)
-                nebDecay[s][base] = fminf(1.0f, nebDecay[s][base] + val0);
-            if (next >= 0 && next < LED_COUNT)
-                nebDecay[s][next] = fminf(1.0f, nebDecay[s][next] + val1);
-        }
-
-        // Render
-        float sOff = (float)s * 0.167f; // strip phase offset
-        for (uint16_t i = 0; i < LED_COUNT; i++) {
-            float pos = (float)i / (float)LED_COUNT;
-
-            // Background: breathing wave
-            float breathing = 51.0f + 38.0f * fastSin((t * 0.0105f));
-            float phase = pos + sOff + t * 0.006f;
-            float spatial = 51.0f * (0.5f + 0.5f * fastSin(phase * 6.2832f));
-            float bgBright = clampf(breathing + spatial, 0.0f, 153.0f) / 255.0f;
-
-            // Color variation: blue to magenta
-            float colorPhase = pos * 6.2832f + sOff * 6.2832f + t * 0.009f;
-            float colorShift = 0.5f + 0.5f * fastSin(colorPhase);
-
-            float bgR = (20.0f + colorShift * 235.0f) / 255.0f;
-            float bgG = (30.0f - colorShift * 20.0f) / 255.0f;
-            float bgB = (255.0f - colorShift * 125.0f) / 255.0f;
-
-            float r = bgR * bgBright;
-            float g = bgG * bgBright;
-            float b = bgB * bgBright;
-
-            // Orb layer: warm white additive
-            float orbB = nebDecay[s][i];
-            if (orbB > 0.01f) {
-                r += orbB * 1.0f;
-                g += orbB * 0.94f;
-                b += orbB * 0.78f;
-            }
-
-            float cap = NEBULA_BRIGHTNESS;
-            stripSetPixel(s, i,
-                (uint8_t)clampf(r * cap * 255.0f, 0, 255),
-                (uint8_t)clampf(g * cap * 255.0f, 0, 255),
-                (uint8_t)clampf(b * cap * 255.0f, 0, 255));
-        }
-    }
-}
-
 void handleSerialCommand(char c) {
     if (c == 'c' || c == 'C') {
         startCalibration();
@@ -908,21 +772,13 @@ void handleSerialCommand(char c) {
         currentAlg = ALG_SPARKLE_SYLLABLE;
         resetSyllableState();
         Serial.println("Algorithm: sparkle_syllable");
-    } else if (c == 'n' || c == 'N') {
-        currentAlg = ALG_NEBULA;
-        resetNebula();
-        Serial.println("Algorithm: nebula");
-    } else if (c == 'i' || c == 'I') {
-        currentAlg = ALG_IDLE;
-        idlePhase = 0.0f;
-        Serial.println("Algorithm: idle");
     } else if (c == 'x' || c == 'X') {
         currentAlg = ALG_OFF;
         stripsClear();
         stripsShow();
         Serial.println("Algorithm: off");
     } else if (c == '?') {
-        Serial.printf("[BOOT] role=bulb-fleet MAC=%s fw=bulb_fleet_wifi\n", macStr);
+        Serial.printf("[BOOT] role=rmt-test MAC=%s fw=bulb_fleet_wifi\n", macStr);
     }
 }
 
@@ -936,9 +792,6 @@ static void handleSliderCommand(const uint8_t *data, size_t len) {
     } else if (cmd == 'S') {
         globalSensitivity = fmaxf(0.05f, val / 128.0f);
         Serial.printf("[SLIDER] sensitivity=%.2f\n", globalSensitivity);
-    } else if (cmd == 'V') {
-        globalSpeed = fmaxf(0.01f, (val / 128.0f) * 0.3f);
-        Serial.printf("[SLIDER] speed=%.2f\n", globalSpeed);
     }
 }
 
@@ -1216,12 +1069,10 @@ static void renderFire(float dt, bool withDropout, float tiltBlend) {
     float colorDecay  = fminf(1.0f, dt / 2.0f);
 
     float colorTarget;
-    if (isPercussiveOnly)
+    if (isPercussiveOnly || isSilent)
         colorTarget = 0.0f;
-    else if (isSilent)
-        colorTarget = 0.3f;
     else
-        colorTarget = fmaxf(0.3f, energy);
+        colorTarget = energy;
 
     if (colorTarget > fireColorEnergy)
         fireColorEnergy += colorAttack * (colorTarget - fireColorEnergy);
@@ -1358,12 +1209,6 @@ void loop() {
         }
     }
 
-    if (currentAlg == ALG_QUIET_BLOOM && !connected) {
-        bloomHitIntensity = 0.0f;
-        drainEnvelope *= expf(-4.07f * dt);
-        if (drainEnvelope <= 0.001f) drainEnvelope = 0.0f;
-    }
-
     if (currentAlg == ALG_QUIET_BLOOM && connected) {
         if (pktCount != bloomPrevPktCount) {
             static uint32_t lastBloomPktMs = 0;
@@ -1424,12 +1269,6 @@ void loop() {
             break;
         case ALG_SPARKLE_SYLLABLE:
             renderSparkleSyllable(dt, angleDeg, tiltBlend);
-            break;
-        case ALG_IDLE:
-            renderIdle(dt);
-            break;
-        case ALG_NEBULA:
-            renderNebula(dt);
             break;
     }
 

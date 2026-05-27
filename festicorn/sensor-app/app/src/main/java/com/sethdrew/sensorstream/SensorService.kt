@@ -247,7 +247,13 @@ class SensorService : Service(), SensorEventListener {
     }
 
     private fun startStreaming(host: String) {
-        if (running.get() != 0L) return
+        if (running.get() != 0L) {
+            scope.launch {
+                targetAddr = InetAddress.getByName(host)
+            }
+            updateMicCapture()
+            return
+        }
         running.set(System.currentTimeMillis())
         pktsSent.set(0); samplesTotal.set(0)
         lastStatus.set("starting")

@@ -38,16 +38,20 @@ static const Vec2 VERTICES[] = {
     { 0.25f, 0.15f },   // 6 — lower-left
 };
 
-// ── Strip path definitions (verified on hardware) ──────────────
+// ── Strip path definitions ──────────────────────────────────────
 // Each strip is a polyline from vertex 0 through waypoints to an endpoint.
-// Only strips 0, 2, 4, 5 are connected. Strips 1, 3 are floating/unused.
+// Endpoint can be a vertex or an arbitrary coordinate (orange strip).
 //
-//   strip 0 — blue:    0 → 6 → 2 → 4
-//   strip 1 — unused
-//   strip 2 — orange:  0 → 1 → 5 → near 3 (no-man's land)
-//   strip 3 — unused
-//   strip 4 — black:   0 → 3 → 5 → between 5 & 6
-//   strip 5 — pink:    0 → 4 → 1
+// Strip-to-color mapping (from diagram + hue offsets in firmware):
+//   strip 0 (hue   0) — black #1:  0 → 1 → 2 → 3
+//   strip 1 (hue  42) — blue  #1:  0 → 6 → 5 → 2
+//   strip 2 (hue  85) — pink  #1:  0 → 5 → 4 → 1
+//   strip 3 (hue 128) — orange:    0 → 1 → 6 → (no-man's land)
+//   strip 4 (hue 170) — blue  #2:  0 → 2 → 4
+//   strip 5 (hue 213) — black #2:  0 → 3 → between 5&6
+//
+// NOTE: strip↔color mapping is a best guess from the diagram.
+// Swap definitions here if a strip maps to the wrong physical path.
 
 static const int MAX_WAYPOINTS = 5;
 
@@ -57,23 +61,23 @@ struct StripPath {
 };
 
 static const StripPath STRIP_PATHS[6] = {
-    // strip 0 — blue: 0 → 6 → 2 → 4
-    { 4, { {0.00f,0.50f}, {0.25f,0.15f}, {0.50f,0.95f}, {0.95f,0.50f} } },
+    // strip 0 — black #1: 0 → 1 → 2 → 3
+    { 4, { {0.00f,0.50f}, {0.25f,0.85f}, {0.50f,0.95f}, {0.78f,0.80f} } },
 
-    // strip 1 — unused (straight line, won't render)
-    { 2, { {0.00f,0.50f}, {0.00f,0.50f} } },
+    // strip 1 — blue #1: 0 → 6 → 5 → 2
+    { 4, { {0.00f,0.50f}, {0.25f,0.15f}, {0.55f,0.10f}, {0.50f,0.95f} } },
 
-    // strip 2 — orange: 0 → 1 → 5 → near 3 (no-man's land)
-    { 4, { {0.00f,0.50f}, {0.25f,0.85f}, {0.55f,0.10f}, {0.72f,0.70f} } },
+    // strip 2 — pink: 0 → 5 → 4 → 1
+    { 4, { {0.00f,0.50f}, {0.55f,0.10f}, {0.95f,0.50f}, {0.25f,0.85f} } },
 
-    // strip 3 — unused (straight line, won't render)
-    { 2, { {0.00f,0.50f}, {0.00f,0.50f} } },
+    // strip 3 — orange: 0 → 1 → 6 → no-man's land (midpoint below 5-6 line)
+    { 4, { {0.00f,0.50f}, {0.25f,0.85f}, {0.25f,0.15f}, {0.40f,0.02f} } },
 
-    // strip 4 — black: 0 → 3 → 5 → between 5 & 6
-    { 4, { {0.00f,0.50f}, {0.78f,0.80f}, {0.55f,0.10f}, {0.40f,0.12f} } },
+    // strip 4 — blue #2: 0 → 2 → 4
+    { 3, { {0.00f,0.50f}, {0.50f,0.95f}, {0.95f,0.50f} } },
 
-    // strip 5 — pink: 0 → 4 → 1
-    { 3, { {0.00f,0.50f}, {0.95f,0.50f}, {0.25f,0.85f} } },
+    // strip 5 — black #2: 0 → 3 → between 5 & 6
+    { 3, { {0.00f,0.50f}, {0.78f,0.80f}, {0.40f,0.12f} } },
 };
 
 // ── Precomputed LED positions ───────────────────────────────────

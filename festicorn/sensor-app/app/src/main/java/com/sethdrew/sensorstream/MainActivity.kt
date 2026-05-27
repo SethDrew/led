@@ -84,6 +84,7 @@ class MainActivity : AppCompatActivity() {
         binding.fxBloom.setOnClickListener { sendEffect('b') }
         binding.fxRainbow.setOnClickListener { sendEffect('i') }
         binding.fxNebula.setOnClickListener { sendEffect('n') }
+        binding.fxWind.setOnClickListener { sendEffect('w') }
         binding.fxOff.setOnClickListener { sendEffect('x') }
 
         // Toggles
@@ -120,7 +121,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateSliderStates(cmd: Char) {
-        val speedEnabled = cmd == 'n' || cmd == 'i'
+        val speedEnabled = cmd == 'n' || cmd == 'i' || cmd == 'w'
         binding.speedSlider.isEnabled = speedEnabled
         binding.speedLabel.alpha = if (speedEnabled) 1.0f else 0.4f
         updateSensitivityState()

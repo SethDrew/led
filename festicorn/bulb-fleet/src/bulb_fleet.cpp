@@ -30,6 +30,7 @@
 #include <math.h>
 #include <oklch_lut.h>
 #include <fast_math.h>
+#include "topology.h"
 
 // ── WiFi credentials (phone hotspot) ────────────────────────────
 #ifndef WIFI_SSID
@@ -63,6 +64,16 @@ static const uint8_t STRIP_HUE_OFFSET[NUM_STRIPS] = {
     0, 42, 85, 128, 170, 213
 };
 
+// ── Potentiometer (GPIO 34, ADC1_CH6, ref 3.3V) ─────────────────
+// Input-only pin, no conflict with strip outputs. Read in loop(),
+// printed every 500ms. Effects can sample g_potByte / g_potValue at
+// will — wiring-verification stage, not yet bound to any effect.
+#define POT_PIN     34
+#define POT_PRINT_MS 500
+volatile uint16_t g_potRaw   = 0;     // 0..4095 (12-bit)
+volatile uint8_t  g_potByte  = 0;     // 0..255  (raw >> 4)
+volatile float    g_potValue = 0.0f;  // 0.0..1.0 (normalized)
+
 // ── Global sliders (set via UDP cmd) ────────────────────────────
 static float globalBrightness  = 0.50f;  // 0.0–1.0, slider is the single brightness control
 static float globalSensitivity = 1.0f;   // 0.05–2.0, scales RMS_CEILING
@@ -77,12 +88,6 @@ static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt5Ws2812xMethod> strip5(LEDS_PER_STR
 
 // Write pixel i on strip s.
 static inline void stripSetPixel(uint8_t s, uint16_t i, uint8_t r, uint8_t g, uint8_t b) {
-    float br = globalBrightness;
-    if (br != 1.0f) {
-        r = (uint8_t)fminf(r * br, 255.0f);
-        g = (uint8_t)fminf(g * br, 255.0f);
-        b = (uint8_t)fminf(b * br, 255.0f);
-    }
     RgbColor c(r, g, b);
     uint16_t pi = i + HEAD_OFFSET;
     if (pi >= LEDS_PER_STRIP) return;
@@ -102,11 +107,7 @@ static inline void stripsBegin() {
 }
 
 static inline void stripsShow() {
-    // Stagger in two batches of 3 to avoid RMT ISR contention.
-    // 6 channels refilling simultaneously can miss ISR deadlines
-    // when WiFi interrupts land, causing all-white glitch frames.
     strip0.Show(); strip1.Show(); strip2.Show();
-    while (!strip0.CanShow() || !strip1.CanShow() || !strip2.CanShow()) {}
     strip3.Show(); strip4.Show(); strip5.Show();
 }
 
@@ -126,8 +127,8 @@ static inline void fillAll(uint8_t r, uint8_t g, uint8_t b) {
 // ── Rendering ────────────────────────────────────────────────────
 #define GAMMA 2.4f
 // RGB-only — bumped from road-bulbs RGBW values since W headroom is gone.
-#define BRIGHTNESS_CAP          1.0f
-#define SPARKLE_BRIGHTNESS_CAP  1.0f
+#define BRIGHTNESS_CAP          0.60f
+#define SPARKLE_BRIGHTNESS_CAP  0.20f
 
 // ── Color / tilt mapping ─────────────────────────────────────────
 #define DEADZONE_DEG    10.0f
@@ -157,7 +158,7 @@ static inline void fillAll(uint8_t r, uint8_t g, uint8_t b) {
 #define FIRE_DROPOUT_DEPTH  0.85f
 
 // ── Quiet bloom (RGB — no W channel) ─────────────────────────────
-#define BLOOM_BRIGHTNESS_CAP   1.0f
+#define BLOOM_BRIGHTNESS_CAP   0.40f
 
 #define SURPRISE_RATIO         3.0f
 #define DRAIN_SCALE            100.0f
@@ -207,6 +208,7 @@ enum Algorithm {
     ALG_SPARKLE_SYLLABLE,
     ALG_RAINBOW,
     ALG_NEBULA,
+    ALG_LEAF_WIND,
 };
 
 static Algorithm currentAlg = ALG_GRAVITY_PARTICLE;
@@ -217,7 +219,7 @@ static Algorithm currentAlg = ALG_GRAVITY_PARTICLE;
 #define GS_VELOCITY_DAMP      0.92f
 #define GS_BOUNCE_REBOUND     0.5f
 #define GS_SPLAT_RADIUS       2.5f
-#define GS_BRIGHTNESS_CAP     1.0f
+#define GS_BRIGHTNESS_CAP     0.60f
 
 struct GsParticle {
     float pos;
@@ -434,6 +436,12 @@ void setup() {
     delay(300);
 
     initMacStr();
+    initTopology();
+
+    // ADC for pot on GPIO 34. 11dB attenuation = full 0–3.3V range.
+    analogReadResolution(12);
+    analogSetPinAttenuation(POT_PIN, ADC_11db);
+    pinMode(POT_PIN, INPUT);
 
     stripsBegin();
 
@@ -507,6 +515,7 @@ void setup() {
                 case ALG_SPARKLE_SYLLABLE: name = "syllable"; break;
                 case ALG_RAINBOW:            name = "rainbow"; break;
                 case ALG_NEBULA:          name = "nebula"; break;
+                case ALG_LEAF_WIND:       name = "wind"; break;
             }
             packet.printf("FX:%s", name);
         });
@@ -684,7 +693,7 @@ static void renderGravitySparkle(float dt) {
             float b = accB[i];
             float maxCh = fmaxf(r, fmaxf(g, b));
             float bright = clampf(maxCh / 255.0f, 0.0f, 1.0f);
-            float linBright = fastGamma24(bright) * GS_BRIGHTNESS_CAP;
+            float linBright = fastGamma24(bright) * GS_BRIGHTNESS_CAP * globalBrightness;
             float norm = (bright > 0.001f) ? (linBright / bright) : 0.0f;
             uint8_t rr = (uint8_t)clampf(r * norm + 0.5f, 0, 255);
             uint8_t gg = (uint8_t)clampf(g * norm + 0.5f, 0, 255);
@@ -715,7 +724,7 @@ static void resetSyllableState() {
 
 // ── Idle rainbow wash ───────────────────────────────────────────
 static float idlePhase = 0.0f;
-#define IDLE_BRIGHTNESS 1.0f
+#define IDLE_BRIGHTNESS 0.40f
 #define IDLE_SPEED      0.10f
 
 static void renderIdle(float dt) {
@@ -726,7 +735,7 @@ static void renderIdle(float dt) {
             float pos = (float)i / (float)LED_COUNT;
             float hue = fmodf(pos + idlePhase + stripOff, 1.0f);
             uint8_t idx = (uint8_t)(hue * 255.0f);
-            float bright = fastGamma24(IDLE_BRIGHTNESS);
+            float bright = fastGamma24(IDLE_BRIGHTNESS) * globalBrightness;
             stripSetPixel(s, i,
                 (uint8_t)(oklchVarL[idx][0] * bright),
                 (uint8_t)(oklchVarL[idx][1] * bright),
@@ -742,7 +751,7 @@ static void renderIdle(float dt) {
 #define NEBULA_SPAWN_CHANCE  0.03f
 #define NEBULA_MIN_LIFETIME  200
 #define NEBULA_MAX_LIFETIME  300
-#define NEBULA_BRIGHTNESS    1.0f
+#define NEBULA_BRIGHTNESS    0.50f
 
 struct NebOrb {
     float pos;
@@ -870,11 +879,208 @@ static void renderNebula(float dt) {
                 b += orbB * 0.78f;
             }
 
-            float cap = NEBULA_BRIGHTNESS;
+            float cap = NEBULA_BRIGHTNESS * globalBrightness;
             stripSetPixel(s, i,
                 (uint8_t)clampf(r * cap * 255.0f, 0, 255),
                 (uint8_t)clampf(g * cap * 255.0f, 0, 255),
                 (uint8_t)clampf(b * cap * 255.0f, 0, 255));
+        }
+    }
+}
+
+// ── Leaf Wind (2D screen-space, topology-aware) ─────────────────
+// Particles move through 2D (x,y) space. Every LED on every strip
+// lights up based on 2D distance to the particle — true cross-strip effect.
+
+#define LW_MAX_LEAVES     10
+#define LW_GLOW_RADIUS    0.08f
+#define LW_GLOW_SQ2       (2.0f * LW_GLOW_RADIUS * LW_GLOW_RADIUS)
+#define LW_WIND_SPEED     0.35f
+#define LW_SPAWN_INTERVAL 0.5f
+#define LW_FADE_IN        0.4f
+#define LW_DAMPING        0.85f
+#define LW_TURBULENCE     0.3f
+#define LW_BOOST_SPEED    0.25f
+#define LW_BOOST_TC       1.5f
+
+static const uint8_t LW_PALETTE[][3] = {
+    {255, 140, 20},
+    {240, 100, 10},
+    {220,  60,  5},
+    {200,  40, 10},
+    {180,  30,  5},
+    {255, 180, 40},
+    {160,  25,  5},
+};
+#define LW_PALETTE_SIZE (sizeof(LW_PALETTE) / sizeof(LW_PALETTE[0]))
+
+#define LW_WIND_ANGLE  (-45.0f * M_PI / 180.0f)
+
+struct LwLeaf {
+    float x, y;       // 2D position in topology space
+    float vx, vy;     // velocity
+    float bx, by;     // boost
+    float age;
+    float brightness;
+    uint8_t r, g, b;
+    bool active;
+};
+
+static LwLeaf lwLeaves[LW_MAX_LEAVES];
+static float lwTime = 0.0f;
+static float lwSpawnTimer = 0.0f;
+static float lwWindDirX, lwWindDirY;
+static const uint8_t LW_SPAWN_VERTS[] = {0, 1, 4, 5};
+#define LW_NUM_SPAWN_VERTS 4
+static uint8_t lwNextSpawnVert = 0;
+
+static float lwNoise1d(float pos, float t, int seed) {
+    return (sinf(pos * 0.4f + t * 0.3f + seed * 7.3f)
+          * cosf(pos * 0.17f - t * 0.19f + seed * 3.1f)
+          + sinf(pos * 0.09f + t * 0.13f + seed * 1.7f) * 0.5f) / 1.5f;
+}
+
+// Per-LED density: how many LEDs across all strips overlap this position.
+// Used to attenuate glow at vertex junctions where multiple strips converge.
+static float lwDensity[NUM_STRIPS][LED_COUNT];
+
+static void initLeafWind() {
+    lwWindDirX = cosf(LW_WIND_ANGLE);
+    lwWindDirY = sinf(LW_WIND_ANGLE);
+    for (int i = 0; i < LW_MAX_LEAVES; i++) lwLeaves[i].active = false;
+    lwTime = 0.0f;
+    lwSpawnTimer = 0.0f;
+    lwNextSpawnVert = 0;
+
+    // Precompute density: count co-located LEDs within glow radius
+    float threshold = LW_GLOW_RADIUS * 2.0f;
+    float threshSq = threshold * threshold;
+    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        for (uint16_t i = 0; i < LED_COUNT; i++) {
+            float count = 0.0f;
+            float lx = ledPos[s][i].x;
+            float ly = ledPos[s][i].y;
+            for (uint8_t s2 = 0; s2 < NUM_STRIPS; s2++) {
+                if (s2 == s) continue;
+                for (uint16_t j = 0; j < LED_COUNT; j++) {
+                    float dx = lx - ledPos[s2][j].x;
+                    float dy = ly - ledPos[s2][j].y;
+                    if (dx * dx + dy * dy < threshSq) count += 1.0f;
+                }
+            }
+            lwDensity[s][i] = 1.0f / (1.0f + logf(1.0f + count));
+        }
+    }
+}
+
+static void lwSpawnLeaf() {
+    for (int i = 0; i < LW_MAX_LEAVES; i++) {
+        if (lwLeaves[i].active) continue;
+        LwLeaf &lf = lwLeaves[i];
+        lf.active = true;
+        uint8_t vi = LW_SPAWN_VERTS[lwNextSpawnVert];
+        lwNextSpawnVert = (lwNextSpawnVert + 1) % LW_NUM_SPAWN_VERTS;
+        lf.x = VERTICES[vi].x + ((esp_random() % 100) - 50) / 2000.0f;
+        lf.y = VERTICES[vi].y + ((esp_random() % 100) - 50) / 2000.0f;
+        float boostMag = LW_BOOST_SPEED * (0.5f + (esp_random() % 100) / 200.0f);
+        lf.bx = lwWindDirX * boostMag;
+        lf.by = lwWindDirY * boostMag;
+        lf.vx = 0.0f;
+        lf.vy = 0.0f;
+        lf.age = 0.0f;
+        lf.brightness = 0.0f;
+        int ci = esp_random() % LW_PALETTE_SIZE;
+        lf.r = LW_PALETTE[ci][0];
+        lf.g = LW_PALETTE[ci][1];
+        lf.b = LW_PALETTE[ci][2];
+        return;
+    }
+}
+
+static void renderLeafWind(float dt) {
+    dt = fminf(dt, 0.1f);
+    float spd = globalSpeed;
+    lwTime += dt;
+
+    // Speed slider only affects spawn rate
+    lwSpawnTimer += dt * spd;
+    float interval = LW_SPAWN_INTERVAL;
+    while (lwSpawnTimer >= interval) {
+        lwSpawnTimer -= interval;
+        lwSpawnLeaf();
+    }
+
+    float boostDecay = expf(-dt / LW_BOOST_TC);
+
+    // Update leaves in 2D (constant wind, not affected by speed slider)
+    for (int i = 0; i < LW_MAX_LEAVES; i++) {
+        if (!lwLeaves[i].active) continue;
+        LwLeaf &lf = lwLeaves[i];
+
+        float noise = lwNoise1d(lf.x * 5.0f + lf.y * 3.0f, lwTime, i);
+        float speedMult = fmaxf(0.1f, 1.0f + noise * LW_TURBULENCE);
+        float noisePerp = lwNoise1d(lf.y * 4.0f - lf.x * 2.0f, lwTime + 100.0f, i + 37);
+
+        float fx = lwWindDirX * LW_WIND_SPEED * speedMult;
+        float fy = lwWindDirY * LW_WIND_SPEED * speedMult;
+        fx += (-lwWindDirY) * noisePerp * LW_WIND_SPEED * 0.3f;
+        fy += ( lwWindDirX) * noisePerp * LW_WIND_SPEED * 0.3f;
+
+        lf.vx = lf.vx * LW_DAMPING + fx * (1.0f - LW_DAMPING);
+        lf.vy = lf.vy * LW_DAMPING + fy * (1.0f - LW_DAMPING);
+        lf.bx *= boostDecay;
+        lf.by *= boostDecay;
+        lf.x += (lf.vx + lf.bx) * dt;
+        lf.y += (lf.vy + lf.by) * dt;
+        lf.age += dt;
+
+        if (lf.age < LW_FADE_IN) {
+            lf.brightness = lf.age / LW_FADE_IN;
+        } else {
+            lf.brightness = 1.0f;
+        }
+
+        // Kill if out of bounds
+        if (lf.x < -0.05f || lf.x > 1.05f || lf.y < -0.05f || lf.y > 1.05f) {
+            lf.active = false;
+        }
+    }
+
+    // Render: for each LED, accumulate glow from all leaves by 2D distance
+    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        for (uint16_t i = 0; i < LED_COUNT; i++) {
+            float lx = ledPos[s][i].x;
+            float ly = ledPos[s][i].y;
+            float totalGlow = 0.0f;
+            float cr = 0.0f, cg = 0.0f, cb = 0.0f;
+
+            for (int li = 0; li < LW_MAX_LEAVES; li++) {
+                if (!lwLeaves[li].active) continue;
+                LwLeaf &lf = lwLeaves[li];
+
+                float dx = lx - lf.x;
+                float dy = ly - lf.y;
+                float distSq = dx * dx + dy * dy;
+                float intensity = expf(-distSq / LW_GLOW_SQ2) * lf.brightness;
+                if (intensity < 0.005f) continue;
+                totalGlow += intensity;
+                cr += intensity * lf.r;
+                cg += intensity * lf.g;
+                cb += intensity * lf.b;
+            }
+
+            if (totalGlow > 0.01f) {
+                cr /= totalGlow;
+                cg /= totalGlow;
+                cb /= totalGlow;
+                float bright = fminf(totalGlow, 1.0f) * lwDensity[s][i] * globalBrightness;
+                stripSetPixel(s, i,
+                    (uint8_t)(cr * bright),
+                    (uint8_t)(cg * bright),
+                    (uint8_t)(cb * bright));
+            } else {
+                stripSetPixel(s, i, 0, 0, 0);
+            }
         }
     }
 }
@@ -911,6 +1117,10 @@ void handleSerialCommand(char c) {
         currentAlg = ALG_NEBULA;
         resetNebula();
         Serial.println("Algorithm: nebula");
+    } else if (c == 'w' || c == 'W') {
+        currentAlg = ALG_LEAF_WIND;
+        initLeafWind();
+        Serial.println("Algorithm: leaf_wind");
     } else if (c == 'i' || c == 'I') {
         currentAlg = ALG_RAINBOW;
         idlePhase = 0.0f;
@@ -1029,7 +1239,7 @@ static void renderQuietBloom(float dt, uint32_t now) {
             float colB = lerpf(lerpf(BLOOM_HUE_A_B, BLOOM_HUE_B_B, h),
                                BLOOM_FLASH_B, flashFrac);
 
-            float linBright = fastGamma24(g) * BLOOM_BRIGHTNESS_CAP;
+            float linBright = fastGamma24(g) * BLOOM_BRIGHTNESS_CAP * globalBrightness;
             float oG = colG * linBright;
             float oB = colB * linBright;
 
@@ -1153,7 +1363,7 @@ static void renderSparkleSyllable(float dt, float angleDeg, float tiltBlend) {
             colG = fminf(255.0f, colG + wFold);
             colB = fminf(255.0f, colB + wFold);
 
-            float linBright = fastGamma24(bright) * SPARKLE_BRIGHTNESS_CAP;
+            float linBright = fastGamma24(bright) * SPARKLE_BRIGHTNESS_CAP * globalBrightness;
             float fR = colR * linBright;
             float fG = colG * linBright;
             float fB = colB * linBright;
@@ -1290,7 +1500,7 @@ static void renderFire(float dt, bool withDropout, float tiltBlend) {
             float colG = baseColG * (1.0f - colorRedShift) + redG * colorRedShift;
             float colB = baseColB * (1.0f - colorRedShift) + redB * colorRedShift;
 
-            float linBright = fastGamma24(bright) * BRIGHTNESS_CAP;
+            float linBright = fastGamma24(bright) * BRIGHTNESS_CAP * globalBrightness;
             float oR = colR * linBright;
             float oG = colG * linBright;
             float oB = colB * linBright;
@@ -1305,6 +1515,24 @@ static void renderFire(float dt, bool withDropout, float tiltBlend) {
     (void)tiltBlend;
 }
 
+// ── Potentiometer poll ──────────────────────────────────────────
+
+static void potUpdate(uint32_t now) {
+    static uint32_t lastPrintMs = 0;
+    int raw = analogRead(POT_PIN);
+    if (raw < 0) raw = 0;
+    if (raw > 4095) raw = 4095;
+    g_potRaw   = (uint16_t)raw;
+    g_potByte  = (uint8_t)(raw >> 4);
+    g_potValue = (float)raw / 4095.0f;
+
+    if (now - lastPrintMs >= POT_PRINT_MS) {
+        lastPrintMs = now;
+        Serial.printf("[POT] raw=%4u byte=%3u\n",
+                      (unsigned)g_potRaw, (unsigned)g_potByte);
+    }
+}
+
 // ── Main loop ────────────────────────────────────────────────────
 
 void loop() {
@@ -1315,6 +1543,7 @@ void loop() {
     lastRenderMs = now;
 
     parseSerialCommands();
+    potUpdate(now);
 
     SensorPacket snap;
     uint32_t lastMs;
@@ -1429,6 +1658,9 @@ void loop() {
             break;
         case ALG_NEBULA:
             renderNebula(dt);
+            break;
+        case ALG_LEAF_WIND:
+            renderLeafWind(dt);
             break;
     }
 

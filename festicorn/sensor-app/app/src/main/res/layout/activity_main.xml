@@ -77,27 +77,6 @@
             android:checked="true" />
     </LinearLayout>
 
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
-        android:orientation="horizontal">
-
-        <Button
-            android:id="@+id/startBtn"
-            android:layout_width="0dp"
-            android:layout_weight="1"
-            android:layout_height="wrap_content"
-            android:text="START" />
-
-        <Button
-            android:id="@+id/stopBtn"
-            android:layout_width="0dp"
-            android:layout_weight="1"
-            android:layout_height="wrap_content"
-            android:text="STOP" />
-    </LinearLayout>
-
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -159,11 +138,11 @@
             android:textAllCaps="false" />
 
         <Button
-            android:id="@+id/fxIdle"
+            android:id="@+id/fxRainbow"
             android:layout_width="0dp"
             android:layout_weight="1"
             android:layout_height="wrap_content"
-            android:text="Idle"
+            android:text="Rainbow"
             android:textAllCaps="false" />
 
         <Button
@@ -172,6 +151,21 @@
             android:layout_weight="1"
             android:layout_height="wrap_content"
             android:text="Nebula"
+            android:textAllCaps="false" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/fxOff"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:text="Off"
             android:textAllCaps="false" />
     </LinearLayout>
 
@@ -190,25 +184,28 @@
         android:progress="128" />
 
     <TextView
+        android:id="@+id/sensitivityLabel"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
-        android:text="Sensitivity"
-        android:textStyle="bold" />
+        android:text="Mic Sensitivity"
+        android:textStyle="bold"
+        android:alpha="0.4" />
 
     <SeekBar
         android:id="@+id/sensitivitySlider"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:max="255"
-        android:progress="128" />
+        android:progress="128"
+        android:enabled="false" />
 
     <TextView
         android:id="@+id/speedLabel"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
-        android:text="Speed (Nebula)"
+        android:text="Speed"
         android:textStyle="bold"
         android:alpha="0.4" />
 

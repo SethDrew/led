@@ -12,9 +12,7 @@
  *   strip1: GPIO 16  RMT1     strip4: GPIO 18  RMT4
  *   strip2: GPIO 17  RMT2     strip5: GPIO 19  RMT5
  *
- * Sacrificial first-LED (HEAD_OFFSET=1) on each strip: physical pixel 0
- * stays black and absorbs signal-shifter glitches. Effects use logical
- * indices 0..LEDS_PER_STRIP-1; stripSetPixel maps logical i → physical i+1.
+ * No sacrificial LED — level-shifter glitch fix verified.
  *
  * UDP ports: 4210 sensor, 4211 cmd, 4212 discovery, 4213 onset.
  * Effects ported from road-bulbs/src/receiver.cpp.
@@ -57,7 +55,7 @@ static portMUX_TYPE pktMux = portMUX_INITIALIZER_UNLOCKED;
 #define LEDS_PER_STRIP   100
 #endif
 #define LED_COUNT        LEDS_PER_STRIP  // per-strip effect math uses this
-#define HEAD_OFFSET      1               // sacrificial first physical pixel
+#define HEAD_OFFSET      0
 
 // Per-strip OKLCH hue offsets (~60° apart on 256-step wheel) — gives the
 // 6 strips simultaneous hues that span a rainbow chord during tilt.
@@ -66,9 +64,9 @@ static const uint8_t STRIP_HUE_OFFSET[NUM_STRIPS] = {
 };
 
 // ── Global sliders (set via UDP cmd) ────────────────────────────
-static float globalBrightness  = 1.0f;   // 0.0–1.0, applied in stripSetPixel
+static float globalBrightness  = 0.50f;  // 0.0–1.0, slider is the single brightness control
 static float globalSensitivity = 1.0f;   // 0.05–2.0, scales RMS_CEILING
-static float globalSpeed       = 0.3f;   // 0.01–0.6, used by nebula
+static float globalSpeed       = 1.0f;   // 0–2x multiplier, midpoint slider = 1.0
 
 static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt0Ws2812xMethod> strip0(LEDS_PER_STRIP,  4);
 static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt1Ws2812xMethod> strip1(LEDS_PER_STRIP, 16);
@@ -77,12 +75,13 @@ static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt3Ws2812xMethod> strip3(LEDS_PER_STR
 static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt4Ws2812xMethod> strip4(LEDS_PER_STRIP, 18);
 static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt5Ws2812xMethod> strip5(LEDS_PER_STRIP, 19);
 
-// Write logical pixel i on strip s (skips the sacrificial head pixel).
+// Write pixel i on strip s.
 static inline void stripSetPixel(uint8_t s, uint16_t i, uint8_t r, uint8_t g, uint8_t b) {
-    if (globalBrightness < 1.0f) {
-        r = (uint8_t)(r * globalBrightness);
-        g = (uint8_t)(g * globalBrightness);
-        b = (uint8_t)(b * globalBrightness);
+    float br = globalBrightness;
+    if (br != 1.0f) {
+        r = (uint8_t)fminf(r * br, 255.0f);
+        g = (uint8_t)fminf(g * br, 255.0f);
+        b = (uint8_t)fminf(b * br, 255.0f);
     }
     RgbColor c(r, g, b);
     uint16_t pi = i + HEAD_OFFSET;
@@ -127,8 +126,8 @@ static inline void fillAll(uint8_t r, uint8_t g, uint8_t b) {
 // ── Rendering ────────────────────────────────────────────────────
 #define GAMMA 2.4f
 // RGB-only — bumped from road-bulbs RGBW values since W headroom is gone.
-#define BRIGHTNESS_CAP          0.60f
-#define SPARKLE_BRIGHTNESS_CAP  0.20f
+#define BRIGHTNESS_CAP          1.0f
+#define SPARKLE_BRIGHTNESS_CAP  1.0f
 
 // ── Color / tilt mapping ─────────────────────────────────────────
 #define DEADZONE_DEG    10.0f
@@ -158,7 +157,7 @@ static inline void fillAll(uint8_t r, uint8_t g, uint8_t b) {
 #define FIRE_DROPOUT_DEPTH  0.85f
 
 // ── Quiet bloom (RGB — no W channel) ─────────────────────────────
-#define BLOOM_BRIGHTNESS_CAP   0.40f
+#define BLOOM_BRIGHTNESS_CAP   1.0f
 
 #define SURPRISE_RATIO         3.0f
 #define DRAIN_SCALE            100.0f
@@ -206,7 +205,7 @@ enum Algorithm {
     ALG_QUIET_BLOOM,
     ALG_GRAVITY_PARTICLE,
     ALG_SPARKLE_SYLLABLE,
-    ALG_IDLE,
+    ALG_RAINBOW,
     ALG_NEBULA,
 };
 
@@ -218,7 +217,7 @@ static Algorithm currentAlg = ALG_GRAVITY_PARTICLE;
 #define GS_VELOCITY_DAMP      0.92f
 #define GS_BOUNCE_REBOUND     0.5f
 #define GS_SPLAT_RADIUS       2.5f
-#define GS_BRIGHTNESS_CAP     0.45f
+#define GS_BRIGHTNESS_CAP     1.0f
 
 struct GsParticle {
     float pos;
@@ -506,7 +505,7 @@ void setup() {
                 case ALG_QUIET_BLOOM:     name = "bloom"; break;
                 case ALG_GRAVITY_PARTICLE: name = "gravity"; break;
                 case ALG_SPARKLE_SYLLABLE: name = "syllable"; break;
-                case ALG_IDLE:            name = "idle"; break;
+                case ALG_RAINBOW:            name = "rainbow"; break;
                 case ALG_NEBULA:          name = "nebula"; break;
             }
             packet.printf("FX:%s", name);
@@ -716,8 +715,8 @@ static void resetSyllableState() {
 
 // ── Idle rainbow wash ───────────────────────────────────────────
 static float idlePhase = 0.0f;
-#define IDLE_BRIGHTNESS 0.30f
-#define IDLE_SPEED      0.10f   // scaled by globalSpeed; midpoint (0.3) ≈ original 0.03
+#define IDLE_BRIGHTNESS 1.0f
+#define IDLE_SPEED      0.10f
 
 static void renderIdle(float dt) {
     idlePhase = fmodf(idlePhase + IDLE_SPEED * globalSpeed * dt, 1.0f);
@@ -743,7 +742,7 @@ static void renderIdle(float dt) {
 #define NEBULA_SPAWN_CHANCE  0.03f
 #define NEBULA_MIN_LIFETIME  200
 #define NEBULA_MAX_LIFETIME  300
-#define NEBULA_BRIGHTNESS    0.40f
+#define NEBULA_BRIGHTNESS    1.0f
 
 struct NebOrb {
     float pos;
@@ -768,7 +767,7 @@ static void resetNebula() {
 }
 
 static void renderNebula(float dt) {
-    float spd = globalSpeed;
+    float spd = globalSpeed * 0.3f;
     nebulaTime += dt * spd;
     float t = nebulaTime * 60.0f;
 
@@ -913,9 +912,9 @@ void handleSerialCommand(char c) {
         resetNebula();
         Serial.println("Algorithm: nebula");
     } else if (c == 'i' || c == 'I') {
-        currentAlg = ALG_IDLE;
+        currentAlg = ALG_RAINBOW;
         idlePhase = 0.0f;
-        Serial.println("Algorithm: idle");
+        Serial.println("Algorithm: rainbow");
     } else if (c == 'x' || c == 'X') {
         currentAlg = ALG_OFF;
         stripsClear();
@@ -931,13 +930,13 @@ static void handleSliderCommand(const uint8_t *data, size_t len) {
     char cmd = (char)data[0];
     uint8_t val = data[1];
     if (cmd == 'B') {
-        globalBrightness = val / 128.0f;
+        globalBrightness = val / 255.0f;
         Serial.printf("[SLIDER] brightness=%.0f%%\n", globalBrightness * 100.0f);
     } else if (cmd == 'S') {
         globalSensitivity = fmaxf(0.05f, val / 128.0f);
         Serial.printf("[SLIDER] sensitivity=%.2f\n", globalSensitivity);
     } else if (cmd == 'V') {
-        globalSpeed = fmaxf(0.01f, (val / 128.0f) * 0.3f);
+        globalSpeed = fmaxf(0.01f, val / 128.0f);
         Serial.printf("[SLIDER] speed=%.2f\n", globalSpeed);
     }
 }
@@ -1425,7 +1424,7 @@ void loop() {
         case ALG_SPARKLE_SYLLABLE:
             renderSparkleSyllable(dt, angleDeg, tiltBlend);
             break;
-        case ALG_IDLE:
+        case ALG_RAINBOW:
             renderIdle(dt);
             break;
         case ALG_NEBULA:

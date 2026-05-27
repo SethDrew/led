@@ -32,7 +32,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var prefs: SharedPreferences
     private val handler = Handler(Looper.getMainLooper())
 
-    private var lastEffect: Char = 'g'
     private var lastSliderSendMs = 0L
     private val SLIDER_THROTTLE_MS = 500L
 
@@ -77,24 +76,19 @@ class MainActivity : AppCompatActivity() {
 
         binding.scanBtn.setOnClickListener { scanForInstallations() }
 
-        binding.startBtn.setOnClickListener {
-            sendCommand(lastEffect)
-            startService()
-        }
-        binding.stopBtn.setOnClickListener {
-            sendCommand('x')
-            stopService()
-        }
+        // Effect buttons
+        binding.fxGravity.setOnClickListener { sendEffect('g') }
+        binding.fxSparkle.setOnClickListener { sendEffect('s') }
+        binding.fxFireMeld.setOnClickListener { sendEffect('m') }
+        binding.fxFlicker.setOnClickListener { sendEffect('f') }
+        binding.fxBloom.setOnClickListener { sendEffect('b') }
+        binding.fxRainbow.setOnClickListener { sendEffect('i') }
+        binding.fxNebula.setOnClickListener { sendEffect('n') }
+        binding.fxOff.setOnClickListener { sendEffect('x') }
 
-        binding.fxGravity.setOnClickListener { sendCommand('g') }
-        binding.fxSparkle.setOnClickListener { sendCommand('s') }
-        binding.fxFireMeld.setOnClickListener { sendCommand('m') }
-        binding.fxFlicker.setOnClickListener { sendCommand('f') }
-        binding.fxBloom.setOnClickListener { sendCommand('b') }
-        binding.fxIdle.setOnClickListener { sendCommand('i') }
-        binding.fxNebula.setOnClickListener { sendCommand('n') }
-
+        // Toggles
         binding.micToggle.setOnCheckedChangeListener { _, isChecked ->
+            updateSensitivityState()
             if (isChecked) {
                 requestMicPermissionAndEnable()
             } else {
@@ -103,6 +97,7 @@ class MainActivity : AppCompatActivity() {
         }
         binding.gyroToggle.setOnCheckedChangeListener { _, _ -> sendToggleUpdate() }
 
+        // Sliders
         binding.brightnessSlider.setOnSeekBarChangeListener(throttledSlider('B'))
         binding.sensitivitySlider.setOnSeekBarChangeListener(throttledSlider('S'))
         binding.speedSlider.setOnSeekBarChangeListener(throttledSlider('V'))
@@ -114,6 +109,27 @@ class MainActivity : AppCompatActivity() {
                     arrayOf(Manifest.permission.POST_NOTIFICATIONS), 100)
             }
         }
+    }
+
+    private fun sendEffect(cmd: Char) {
+        sendCommand(cmd)
+        updateSliderStates(cmd)
+        if (cmd != 'x') {
+            startService()
+        }
+    }
+
+    private fun updateSliderStates(cmd: Char) {
+        val speedEnabled = cmd == 'n' || cmd == 'i'
+        binding.speedSlider.isEnabled = speedEnabled
+        binding.speedLabel.alpha = if (speedEnabled) 1.0f else 0.4f
+        updateSensitivityState()
+    }
+
+    private fun updateSensitivityState() {
+        val enabled = binding.micToggle.isChecked
+        binding.sensitivitySlider.isEnabled = enabled
+        binding.sensitivityLabel.alpha = if (enabled) 1.0f else 0.4f
     }
 
     private fun requestMicPermissionAndEnable() {
@@ -176,14 +192,6 @@ class MainActivity : AppCompatActivity() {
         }
         ContextCompat.startForegroundService(this, intent)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-    }
-
-    private fun stopService() {
-        val intent = Intent(this, SensorService::class.java).apply {
-            action = SensorService.ACTION_STOP
-        }
-        startService(intent)
-        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     private fun scanForInstallations() {
@@ -280,17 +288,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateSpeedSliderState(cmd: Char) {
-        val enabled = cmd == 'n' || cmd == 'i'
-        binding.speedSlider.isEnabled = enabled
-        binding.speedLabel.alpha = if (enabled) 1.0f else 0.4f
-    }
-
     private fun sendCommand(cmd: Char) {
-        if (cmd != 'x') {
-            lastEffect = cmd
-            updateSpeedSliderState(cmd)
-        }
         val host = getSelectedHost() ?: return
         thread {
             try {

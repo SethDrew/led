@@ -108,6 +108,7 @@ static inline void stripsBegin() {
 
 static inline void stripsShow() {
     strip0.Show(); strip1.Show(); strip2.Show();
+    while (!strip0.CanShow() || !strip1.CanShow() || !strip2.CanShow()) {}
     strip3.Show(); strip4.Show(); strip5.Show();
 }
 

@@ -87,6 +87,14 @@ class MainActivity : AppCompatActivity() {
         binding.fxWind.setOnClickListener { sendEffect('w') }
         binding.fxOff.setOnClickListener { sendEffect('x') }
 
+        binding.stopBtn.setOnClickListener {
+            val intent = Intent(this, SensorService::class.java).apply {
+                action = SensorService.ACTION_STOP
+            }
+            startService(intent)
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+
         // Toggles
         binding.micToggle.setOnCheckedChangeListener { _, isChecked ->
             updateSensitivityState()

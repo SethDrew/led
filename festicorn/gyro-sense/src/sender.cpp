@@ -257,22 +257,88 @@ static bool readIMU() {
 }
 
 // Variance-gated rest detection. Maintains a rolling 0.5 s window (100
-// samples @ 200 Hz) of raw gyro per axis. Each tick computes total
-// variance across 3 axes; when below STILL_VAR_THRESH we accumulate the
-// sample into the bias estimator. If motion is detected mid-calibration
-// the qualified-still counter resets. Once we have ~3 s of qualified-still
-// samples (BIAS_TARGET) we latch and proceed.
+// samples @ 200 Hz) of raw gyro per axis. Each tick computes a MAD-based
+// robust variance (resilient to MEMS resonance bursts on Y-axis) and a
+// median-of-3 pre-filter (rejects single-sample I2C corruption spikes).
+// When below STILL_VAR_THRESH we accumulate the sample into the bias
+// estimator. If motion is detected mid-calibration the qualified-still
+// counter resets. Once we have ~3 s of qualified-still samples
+// (BIAS_TARGET) we latch and proceed.
 //
-// This lets the bulb self-calibrate the moment someone sets it down,
-// rather than assuming bench-only static start.
+// Tiered timeout fallback ensures all boards boot:
+//   >15 s → relax threshold to 200
+//   >25 s → accept whatever bias we have
+//
+// I2C is dropped to 100 kHz during calibration to reduce bit errors,
+// then restored to 400 kHz afterward.
+
+// Median of 3 helper — rejects single-sample I2C corruption spikes.
+static int16_t med3(int16_t a, int16_t b, int16_t c) {
+    if (a > b) { int16_t t = a; a = b; b = t; }
+    if (b > c) { b = c; }
+    if (a > b) { b = a; }
+    return b;
+}
+
+// Compute MAD-based robust variance for one axis. Returns 1.4826²·MAD²
+// which equals population variance for Gaussian noise, but rejects
+// outlier bursts (e.g. MEMS resonance).
+static float madVariance(const int16_t* buf, int n) {
+    // Compute median
+    // For n=100 a simple selection is fine on the C3.
+    // We use a partial sort approach: compute median via two-pass.
+    int64_t sum = 0;
+    for (int i = 0; i < n; i++) sum += buf[i];
+    float med = (float)sum / n;  // mean as pivot for MAD (close enough for bias detection)
+
+    // Actually compute true median for robustness: accumulate sorted.
+    // Cheaper approach: use mean as center, compute MAD from mean.
+    // For Gaussian noise MAD-from-mean ≈ MAD-from-median. Good enough.
+    float absDevs[100];  // ROLL_N max
+    for (int i = 0; i < n; i++) {
+        float d = buf[i] - med;
+        absDevs[i] = (d >= 0) ? d : -d;
+    }
+    // Find median of absolute deviations via simple insertion sort
+    // (n=100, ~5000 comparisons worst case, trivial on C3)
+    for (int i = 1; i < n; i++) {
+        float key = absDevs[i];
+        int j = i - 1;
+        while (j >= 0 && absDevs[j] > key) {
+            absDevs[j + 1] = absDevs[j];
+            j--;
+        }
+        absDevs[j + 1] = key;
+    }
+    float madVal = (n % 2 == 0)
+        ? 0.5f * (absDevs[n/2 - 1] + absDevs[n/2])
+        : absDevs[n/2];
+    // Convert MAD to variance: var = (1.4826 * MAD)²
+    constexpr float K = 1.4826f;
+    return K * K * madVal * madVal;
+}
+
 static void calibrateGyroBias(float settleSecs) {
-    constexpr int   ROLL_N          = 100;        // 0.5 s @ 200 Hz
-    constexpr float STILL_VAR_THRESH = 50.0f;     // counts² per axis (sum across 3 axes)
-    const int       BIAS_TARGET     = (int)(settleSecs * IMU_HZ);
+    constexpr int   ROLL_N              = 100;        // 0.5 s @ 200 Hz
+    constexpr float STILL_VAR_THRESH    = 50.0f;      // counts² per axis (sum across 3 axes)
+    constexpr float RELAXED_VAR_THRESH  = 200.0f;     // fallback after 15 s
+    constexpr float TIER1_TIMEOUT_S     = 15.0f;      // relax threshold
+    constexpr float TIER2_TIMEOUT_S     = 25.0f;      // accept whatever we have
+    const int       BIAS_TARGET         = (int)(settleSecs * IMU_HZ);
+
+    // Drop I2C to 100 kHz during calibration to reduce bit errors
+    Wire.setClock(100000);
 
     static int16_t  rollX[ROLL_N], rollY[ROLL_N], rollZ[ROLL_N];
     int   rollIdx = 0;
     int   rollFill = 0;
+
+    // Median-of-3 filter history (per axis, last 3 raw samples)
+    int16_t histX[3] = {0, 0, 0};
+    int16_t histY[3] = {0, 0, 0};
+    int16_t histZ[3] = {0, 0, 0};
+    int     histIdx = 0;
+    int     histFill = 0;
 
     int64_t bsx = 0, bsy = 0, bsz = 0;   // bias accumulators
     int     bn = 0;                       // qualified-still samples
@@ -280,44 +346,78 @@ static void calibrateGyroBias(float settleSecs) {
     uint32_t nextUs = micros();
     const uint32_t periodUs = 1000000UL / IMU_HZ;
     uint32_t lastReportMs = millis();
+    uint32_t startMs = millis();
 
     while (bn < BIAS_TARGET) {
         uint32_t now = micros();
         if ((int32_t)(now - nextUs) < 0) continue;
         nextUs += periodUs;
-        if (!readIMU()) continue;        // bias not ready => raw values
+        if (!readIMU()) continue;
 
-        rollX[rollIdx] = imuGx;
-        rollY[rollIdx] = imuGy;
-        rollZ[rollIdx] = imuGz;
+        // Feed raw samples into median-of-3 history
+        histX[histIdx] = imuGx;
+        histY[histIdx] = imuGy;
+        histZ[histIdx] = imuGz;
+        histIdx = (histIdx + 1) % 3;
+        if (histFill < 3) histFill++;
+
+        // Use median-filtered values once we have 3 samples
+        int16_t fx, fy, fz;
+        if (histFill >= 3) {
+            fx = med3(histX[0], histX[1], histX[2]);
+            fy = med3(histY[0], histY[1], histY[2]);
+            fz = med3(histZ[0], histZ[1], histZ[2]);
+        } else {
+            fx = imuGx; fy = imuGy; fz = imuGz;
+        }
+
+        rollX[rollIdx] = fx;
+        rollY[rollIdx] = fy;
+        rollZ[rollIdx] = fz;
         rollIdx = (rollIdx + 1) % ROLL_N;
         if (rollFill < ROLL_N) rollFill++;
 
         if (rollFill < ROLL_N) continue; // need full window before judging
 
-        // Compute per-axis variance (population). Window is small enough
-        // that O(N) per tick is fine on the C3.
-        int64_t mx = 0, my = 0, mz = 0;
-        for (int i = 0; i < ROLL_N; i++) {
-            mx += rollX[i]; my += rollY[i]; mz += rollZ[i];
+        // Elapsed time for tiered timeout
+        float elapsedS = (millis() - startMs) * 0.001f;
+
+        // Tier 2: hard timeout — accept whatever bias we have
+        if (elapsedS >= TIER2_TIMEOUT_S) {
+            if (bn == 0) {
+                // No still samples at all — use rolling window mean as bias
+                int64_t sx = 0, sy = 0, sz = 0;
+                for (int i = 0; i < ROLL_N; i++) {
+                    sx += rollX[i]; sy += rollY[i]; sz += rollZ[i];
+                }
+                gyroBias[0] = (int16_t)(sx / ROLL_N);
+                gyroBias[1] = (int16_t)(sy / ROLL_N);
+                gyroBias[2] = (int16_t)(sz / ROLL_N);
+            } else {
+                gyroBias[0] = (int16_t)(bsx / bn);
+                gyroBias[1] = (int16_t)(bsy / bn);
+                gyroBias[2] = (int16_t)(bsz / bn);
+            }
+            gyroBiasReady = true;
+            Wire.setClock(400000);
+            Serial.printf("[bias] TIMEOUT after %.0fs — using best bias bx=%d by=%d bz=%d (n=%d)\n",
+                          elapsedS, gyroBias[0], gyroBias[1], gyroBias[2], bn);
+            return;
         }
-        float mxf = (float)mx / ROLL_N;
-        float myf = (float)my / ROLL_N;
-        float mzf = (float)mz / ROLL_N;
-        float vx = 0, vy = 0, vz = 0;
-        for (int i = 0; i < ROLL_N; i++) {
-            float dx = rollX[i] - mxf;
-            float dy = rollY[i] - myf;
-            float dz = rollZ[i] - mzf;
-            vx += dx*dx; vy += dy*dy; vz += dz*dz;
-        }
-        vx /= ROLL_N; vy /= ROLL_N; vz /= ROLL_N;
+
+        // Select threshold: relax after tier-1 timeout
+        float thresh = (elapsedS >= TIER1_TIMEOUT_S) ? RELAXED_VAR_THRESH : STILL_VAR_THRESH;
+
+        // MAD-based robust variance per axis (rejects MEMS resonance bursts)
+        float vx = madVariance(rollX, ROLL_N);
+        float vy = madVariance(rollY, ROLL_N);
+        float vz = madVariance(rollZ, ROLL_N);
         float vsum = vx + vy + vz;
 
-        bool still = (vsum < STILL_VAR_THRESH);
+        bool still = (vsum < thresh);
 
         if (still) {
-            bsx += imuGx; bsy += imuGy; bsz += imuGz;
+            bsx += fx; bsy += fy; bsz += fz;
             bn++;
         } else if (bn > 0) {
             // Motion detected mid-calibration — discard partial bias.
@@ -329,10 +429,11 @@ static void calibrateGyroBias(float settleSecs) {
         if (nowMs - lastReportMs >= 250) {
             lastReportMs = nowMs;
             if (still) {
-                Serial.printf("[bias] settling... var=%.1f bn=%d/%d\n",
-                              vsum, bn, BIAS_TARGET);
+                Serial.printf("[bias] settling... var=%.1f thr=%.0f bn=%d/%d (%.0fs)\n",
+                              vsum, thresh, bn, BIAS_TARGET, elapsedS);
             } else {
-                Serial.printf("[bias] waiting for stillness... var=%.1f\n", vsum);
+                Serial.printf("[bias] waiting for stillness... var=%.1f thr=%.0f (%.0fs)\n",
+                              vsum, thresh, elapsedS);
             }
         }
     }
@@ -341,6 +442,7 @@ static void calibrateGyroBias(float settleSecs) {
     gyroBias[1] = (int16_t)(bsy / bn);
     gyroBias[2] = (int16_t)(bsz / bn);
     gyroBiasReady = true;
+    Wire.setClock(400000);  // restore full-speed I2C
     Serial.printf("[bias] settled bx=%d by=%d bz=%d counts (n=%d)\n",
                   gyroBias[0], gyroBias[1], gyroBias[2], bn);
 }

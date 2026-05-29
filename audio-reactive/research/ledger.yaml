@@ -4619,3 +4619,49 @@ entries:
       more time with each before declaring winners. Companion technical doc:
       `audio-reactive/effects/INPUT_PATTERNS.md`.
 
+  # ── Methodology / Tools ──────────────────────────────────────────
+
+  - id: reverse-engineer-effect-from-clip
+    date: 2026-05-28
+    touched: 2026-05-28
+    title: Recipe — reverse-engineer an LED effect from a reference video
+    summary: >
+      Workflow to turn a phone clip of a real-world light effect into a
+      codeable spec, then onto hardware. Gets us to a good starting point to
+      iterate from — not a finished spec. Human attention-direction and the
+      human eye as final judge are load-bearing; the machine steps just make a
+      clean artifact to react to.
+    status: validated
+    warmth: high
+    confidence: medium
+    source:
+      - festicorn/bench-bulbs/src/bench.cpp
+    tags: [tools, effects, perception, art, taste, future]
+    relates_to: []
+    notes: >
+      ## The recipe
+
+      1. **Human points at what matters** — the right subject AND component
+         (e.g. "the sparkles, not the beams"). Biggest lever; wrong subject =
+         garbage in.
+      2. **Stabilize out camera motion FIRST** so readers see the lights, not
+         the shake.
+      3. **Read with several INDEPENDENT models, NEUTRAL prompts** (name no
+         behavior). Treat reader disagreement as the signal.
+      4. **Render the hypothesis and judge by EYE.** The analysis is never the
+         arbiter — the human watching the render is.
+
+      ## Two traps it dodges
+
+      - Leading prompts manufacture false consensus. Use neutral prompts.
+      - Camera motion fools vision models (false "traveling chase"); stabilize
+        before reading.
+
+      ## Conclusion (N=2)
+
+      Reliably lands a *good starting point*, not the final answer. The
+      machine narrows the search; the eye picks the final model and corrects
+      the last mile (it did both times). Scratch tooling outside the repo:
+      ~/vidcompare (gemini_one.py reader, build_stab.py stabilizer), plus
+      1D/2D screen-render tools.
+

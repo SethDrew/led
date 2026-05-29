@@ -60,7 +60,7 @@ static float globalSensitivity = 1.0f;   // 0.05–2.0, scales RMS_CEILING
 #define STICK_B_COUNT  11
 
 static NeoPixelBus<NeoGrbwFeature, NeoEsp32Rmt0Sk6812Method>  stripA (LED_COUNT,      DUCK_LED_PIN);
-static NeoPixelBus<NeoGrbFeature,  NeoEsp32Rmt1Ws2812xMethod> stripB (LED_COUNT,      BIO_LED_PIN);
+static NeoPixelBus<NeoRgbFeature,  NeoEsp32Rmt1Ws2812xMethod> stripB (LED_COUNT,      BIO_LED_PIN);
 static NeoPixelBus<NeoGrbFeature,  NeoEsp32Rmt2Ws2812xMethod> stripStkA (STICK_A_COUNT, STICK_A_PIN);
 static NeoPixelBus<NeoGrbFeature,  NeoEsp32Rmt3Ws2812xMethod> stripStkB (STICK_B_COUNT, STICK_B_PIN);
 
@@ -105,12 +105,31 @@ static inline void setBothPixel(uint16_t i, uint8_t r, uint8_t g, uint8_t b, uin
 // ── Sparkle ──────────────────────────────────────────────────────
 #define SPARKLE_DEADBAND 0.08f
 
+// ── Sparkle twinkle (variant B: crisp snap-on / fast snap-off) ───
+// Free-running ambient sparkle. Independent of audio/motion.
+#define TWINKLE_SPAWN_RATE   60.0f   // expected new sparkles per second (Poisson)
+#define TWINKLE_ATTACK_S     0.067f  // attack rise time to peak (~67 ms)
+#define TWINKLE_TAU_S        0.10f   // exponential decay time constant (s)
+#define TWINKLE_PEAK_MIN     0.6f    // peak brightness range
+#define TWINKLE_PEAK_MAX     1.0f
+// Color: clean white. Easy to tune — these are the per-channel 0..255
+// weights applied before brightness. On RGBW Strip A the white rides the
+// W channel; on RGB Strip B setBothPixel drops W so RGB carries it.
+#define TWINKLE_COL_R          0.0f
+#define TWINKLE_COL_G          0.0f
+#define TWINKLE_COL_B          0.0f
+#define TWINKLE_COL_W        255.0f
+// RGB fallback (Strip B has no W) — drive r=g=b so it still shows white.
+#define TWINKLE_RGB_FALLBACK 255.0f
+
 // ── Fire ─────────────────────────────────────────────────────────
 #define FIRE_FLICKER_SCALE  3.0f
 #define FIRE_DEADBAND       0.08f
 #define FIRE_DROPOUT_DEPTH  0.85f
 
 // ── Quiet bloom ──────────────────────────────────────────────────
+// Output stage — single brightness control, applied after gamma.
+// Effect code works in 0.0–1.0 intensity; color palette in 0–255.
 #define BLOOM_BRIGHTNESS_CAP   0.25f
 #define BLOOM_NOISE_GATE       256
 
@@ -133,13 +152,30 @@ static inline void setBothPixel(uint16_t i, uint8_t r, uint8_t g, uint8_t b, uin
 #define BLOOM_RECOVERY_RAMP    0.033f
 #define BLOOM_RECOVERY_SPREAD  0.70f
 
-#define BLOOM_HUE_A_G   20.0f
-#define BLOOM_HUE_A_B  100.0f
-#define BLOOM_HUE_B_G   70.0f
-#define BLOOM_HUE_B_B  110.0f
-#define BLOOM_FLASH_G  150.0f
-#define BLOOM_FLASH_B  170.0f
-#define BLOOM_W_ONSET    0.5f
+// Bloom palette — full-range 0–255 colors. Brightness is NOT baked in here;
+// the output stage applies BLOOM_BRIGHTNESS_CAP separately after gamma.
+//
+// Per-LED hue position h ∈ [0,1] interpolates between A and B endpoints.
+// Sweep: deep teal (h=0) → blue (h≈0.5) → violet (h=1).
+// Flash color: bright lavender (high-energy hit response).
+#define BLOOM_HUE_A_R    0.0f
+#define BLOOM_HUE_A_G  180.0f
+#define BLOOM_HUE_A_B  120.0f
+
+#define BLOOM_HUE_B_R  140.0f
+#define BLOOM_HUE_B_G   20.0f
+#define BLOOM_HUE_B_B  255.0f
+
+#define BLOOM_FLASH_R  200.0f
+#define BLOOM_FLASH_G  120.0f
+#define BLOOM_FLASH_B  255.0f
+
+#define BLOOM_W_SCALE  255.0f
+
+// Hue drift — each LED slowly wanders through the palette.
+// Full cycle takes 15–45 seconds. Direction randomized per LED.
+#define BLOOM_HUE_DRIFT_MIN  (1.0f / 45.0f)
+#define BLOOM_HUE_DRIFT_MAX  (1.0f / 15.0f)
 
 // ── Timeouts ─────────────────────────────────────────────────────
 #define TIMEOUT_MS     500
@@ -160,7 +196,9 @@ enum Algorithm {
     ALG_QUIET_BLOOM,
     ALG_GRAVITY_PARTICLE,
     ALG_SPARKLE_SYLLABLE,
+    ALG_SPARKLE_TWINKLE,
     ALG_IDLE,
+    ALG_WHITE_STRESS,
 };
 
 static Algorithm currentAlg = ALG_GRAVITY_PARTICLE;
@@ -230,6 +268,7 @@ static float bloomBreathPhase[LED_COUNT];
 static float bloomBreathPeriod[LED_COUNT];
 static float bloomBreathPeak[LED_COUNT];
 static float bloomHueT[LED_COUNT];
+static float bloomHueDrift[LED_COUNT];
 static float bloomFlashGlow[LED_COUNT];
 static float bloomFlashDecay[LED_COUNT];
 static float bloomColonyEnergy = 1.0f;
@@ -379,6 +418,7 @@ static void resetBloomState();
 static void resetFireState();
 static void resetGravitySparkle();
 static void resetSyllableState();
+static void resetTwinkleState();
 void startCalibration();
 void handleSerialCommand(char c);
 static void handleSliderCommand(const uint8_t *data, size_t len);
@@ -409,6 +449,7 @@ void setup() {
     resetSyllableState();
     resetBloomState();
     resetGravitySparkle();
+    resetTwinkleState();
 
     // Show green while connecting WiFi
     for (uint16_t i = 0; i < LED_COUNT; i++) setBothPixel(i, 0, 40, 0, 0);
@@ -473,7 +514,9 @@ void setup() {
                 case ALG_QUIET_BLOOM:     name = "bloom"; break;
                 case ALG_GRAVITY_PARTICLE: name = "gravity"; break;
                 case ALG_SPARKLE_SYLLABLE: name = "syllable"; break;
+                case ALG_SPARKLE_TWINKLE: name = "twinkle"; break;
                 case ALG_IDLE:            name = "idle"; break;
+                case ALG_WHITE_STRESS:   name = "white_stress"; break;
             }
             packet.printf("FX:%s", name);
         });
@@ -513,7 +556,7 @@ void setup() {
     stripA.Show();
     stripB.Show();
 
-    Serial.println("Commands: 'c' recal, 's' sparkle, 'm' fire_meld, 'f' fire_flicker, 'b' bloom, 'g' gravity_particle, 'y' syllable, '?' identify");
+    Serial.println("Commands: 'c' recal, 's' sparkle, 'm' fire_meld, 'f' fire_flicker, 'b' bloom, 'g' gravity_particle, 'y' syllable, 't' twinkle, '?' identify");
     Serial.printf("[BOOT] role=bench-bulbs MAC=%s fw=bench_bulbs_wifi\n", macStr);
 }
 
@@ -575,6 +618,9 @@ static void resetBloomState() {
         bloomBreathPeak[i] = BLOOM_BREATH_MIN_PEAK
             + randFloat() * (BLOOM_BREATH_MAX_PEAK - BLOOM_BREATH_MIN_PEAK);
         bloomHueT[i] = randFloat();
+        float rate = BLOOM_HUE_DRIFT_MIN
+            + randFloat() * (BLOOM_HUE_DRIFT_MAX - BLOOM_HUE_DRIFT_MIN);
+        bloomHueDrift[i] = (randFloat() > 0.5f) ? rate : -rate;
         bloomFlashGlow[i] = 0.0f;
         bloomFlashDecay[i] = BLOOM_FLASH_DECAY_LO
             + randFloat() * (BLOOM_FLASH_DECAY_HI - BLOOM_FLASH_DECAY_LO);
@@ -723,10 +769,17 @@ void handleSerialCommand(char c) {
         currentAlg = ALG_SPARKLE_SYLLABLE;
         resetSyllableState();
         Serial.println("Algorithm: sparkle_syllable (alias)");
+    } else if (c == 't' || c == 'T') {
+        currentAlg = ALG_SPARKLE_TWINKLE;
+        resetTwinkleState();
+        Serial.println("Algorithm: sparkle_twinkle");
     } else if (c == 'i' || c == 'I') {
         currentAlg = ALG_IDLE;
         idlePhase = 0.0f;
         Serial.println("Algorithm: idle");
+    } else if (c == 'w' || c == 'W') {
+        currentAlg = ALG_WHITE_STRESS;
+        Serial.println("Algorithm: white_stress (ALL LEDs full white)");
     } else if (c == 'x' || c == 'X') {
         currentAlg = ALG_OFF;
         stripA.ClearTo(RgbwColor(0, 0, 0, 0));
@@ -796,6 +849,10 @@ static void renderQuietBloom(float dt, uint32_t now) {
         bloomBreathPhase[i] += dt / bloomBreathPeriod[i];
         if (bloomBreathPhase[i] >= 1.0f) bloomBreathPhase[i] -= 1.0f;
 
+        bloomHueT[i] += bloomHueDrift[i] * dt;
+        if (bloomHueT[i] > 1.0f) bloomHueT[i] -= 1.0f;
+        else if (bloomHueT[i] < 0.0f) bloomHueT[i] += 1.0f;
+
         float wakeThresh = bloomHueT[i] * BLOOM_RECOVERY_SPREAD;
         float ledRecovery = clampf(
             (bloomColonyEnergy - wakeThresh) / 0.30f, 0.0f, 1.0f);
@@ -814,38 +871,43 @@ static void renderQuietBloom(float dt, uint32_t now) {
             }
         }
 
-        float g = fmaxf(breathGlow, bloomFlashGlow[i]);
-
+        // ── Layer 1: intensity envelope (0.0–1.0) ──
+        float intensity = fmaxf(breathGlow, bloomFlashGlow[i]);
         float flashFrac = (bloomFlashGlow[i] > breathGlow) ? 1.0f : 0.0f;
+
+        // ── Layer 2: color lookup (full-range 0–255) ──
         float h = bloomHueT[i];
+        float colR = lerpf(lerpf(BLOOM_HUE_A_R, BLOOM_HUE_B_R, h),
+                           BLOOM_FLASH_R, flashFrac);
         float colG = lerpf(lerpf(BLOOM_HUE_A_G, BLOOM_HUE_B_G, h),
                            BLOOM_FLASH_G, flashFrac);
         float colB = lerpf(lerpf(BLOOM_HUE_A_B, BLOOM_HUE_B_B, h),
                            BLOOM_FLASH_B, flashFrac);
 
-        float linBright = fastGamma24(g) * BLOOM_BRIGHTNESS_CAP;
-
-        float oG = colG * linBright;
-        float oB = colB * linBright;
-
-        float wFrac = clampf((g - BLOOM_W_ONSET) / (1.0f - BLOOM_W_ONSET),
-                             0.0f, 1.0f);
+        // W channel: ramps in at high intensity, gated by colony energy or flash
+        float wFrac = clampf((intensity - 0.5f) * 2.0f, 0.0f, 1.0f);
         float energyGate = clampf((bloomColonyEnergy - 0.7f) / 0.3f, 0.0f, 1.0f);
-        float wGate = fmaxf(energyGate, flashFrac);
-        float oW = wFrac * wGate * linBright * 200.0f;
+        float colW = wFrac * fmaxf(energyGate, flashFrac) * BLOOM_W_SCALE;
 
-        uint16_t tG16 = (uint16_t)clampf(oG * 256.0f, 0, 65535);
-        uint16_t tB16 = (uint16_t)clampf(oB * 256.0f, 0, 65535);
-        uint16_t tW16 = (uint16_t)clampf(oW * 256.0f, 0, 65535);
+        // ── Layer 3: output stage ──
+        float linBright = fastGamma24(intensity) * BLOOM_BRIGHTNESS_CAP;
 
+        uint16_t tR16 = (uint16_t)clampf(colR * linBright * 256.0f, 0, 65535);
+        uint16_t tG16 = (uint16_t)clampf(colG * linBright * 256.0f, 0, 65535);
+        uint16_t tB16 = (uint16_t)clampf(colB * linBright * 256.0f, 0, 65535);
+        uint16_t tW16 = (uint16_t)clampf(colW * linBright * 256.0f, 0, 65535);
+
+        if (tR16 < BLOOM_NOISE_GATE) tR16 = 0;
         if (tG16 < BLOOM_NOISE_GATE) tG16 = 0;
         if (tB16 < BLOOM_NOISE_GATE) tB16 = 0;
         if (tW16 < BLOOM_NOISE_GATE) tW16 = 0;
 
+        uint8_t rc = deltaSigma(dsR[i], tR16);
         uint8_t gc = deltaSigma(dsG[i], tG16);
         uint8_t b  = deltaSigma(dsB[i], tB16);
         uint8_t w  = deltaSigma(dsW[i], tW16);
-        setBothPixel(i, 0, gc, b, w);
+        setBothPixel(i, rc, gc, b, w);
+
     }
 
     if (draining) {
@@ -940,6 +1002,118 @@ static void renderSparkleSyllable(float dt, float angleDeg, float tiltBlend,
         uint8_t b = deltaSigma(dsB[i], tB16);
         uint8_t w = deltaSigma(dsW[i], tW16);
         setBothPixel(i, r, g, b, w);
+    }
+}
+
+// ── Sparkle twinkle render (variant B) ──────────────────────────
+//
+// 50 independent LEDs. New sparkles ignite at random positions as a
+// Poisson process (TWINKLE_SPAWN_RATE expected ignitions/sec across the
+// whole strip). Each sparkle does a short linear attack to a random peak,
+// then exponential decay in place. No motion, no base glow, no beams.
+// Collisions keep the brighter sparkle and restart its attack.
+//
+// Per LED we track current brightness, target peak, and attack progress.
+// While attacking (attack < 1) brightness ramps linearly to peak; once
+// peaked it decays multiplicatively by exp(-dt/TAU).
+
+static float twkBright[LED_COUNT];   // current brightness 0..1
+static float twkPeak[LED_COUNT];     // peak this sparkle is rising toward
+static float twkAttack[LED_COUNT];   // attack progress 0..1 (>=1 = decaying)
+
+static void resetTwinkleState() {
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        twkBright[i] = 0.0f;
+        twkPeak[i]   = 0.0f;
+        twkAttack[i] = 1.0f;  // idle LEDs sit "past attack" so they just decay
+    }
+}
+
+static void igniteTwinkle(uint16_t i) {
+    float peak = TWINKLE_PEAK_MIN
+        + randFloat() * (TWINKLE_PEAK_MAX - TWINKLE_PEAK_MIN);
+    // Collision: keep the brighter sparkle, but always restart the attack
+    // so a fresh hit re-snaps on.
+    if (peak < twkPeak[i] && twkBright[i] > peak) peak = twkPeak[i];
+    twkPeak[i]   = peak;
+    twkAttack[i] = 0.0f;
+}
+
+static void renderSparkleTwinkle(float dt) {
+    // ── Poisson spawn (frame-rate independent) ──
+    float expected = TWINKLE_SPAWN_RATE * dt;
+    int nSpawn = (int)expected;                 // floor
+    float frac = expected - (float)nSpawn;
+    if (randFloat() < frac) nSpawn++;           // one more with prob = frac
+    for (int s = 0; s < nSpawn; s++) {
+        uint16_t i = (uint16_t)(xorshift32() % LED_COUNT);
+        igniteTwinkle(i);
+    }
+
+    // ── Advance envelopes + render ──
+    float attackStep = (TWINKLE_ATTACK_S > 0.0f) ? (dt / TWINKLE_ATTACK_S) : 1.0f;
+    float decay = expf(-dt / TWINKLE_TAU_S);
+
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        if (twkAttack[i] < 1.0f) {
+            twkAttack[i] += attackStep;
+            if (twkAttack[i] >= 1.0f) {
+                twkAttack[i] = 1.0f;
+                twkBright[i] = twkPeak[i];
+            } else {
+                twkBright[i] = twkPeak[i] * twkAttack[i];
+            }
+        } else {
+            twkBright[i] *= decay;
+            if (twkBright[i] < 0.002f) twkBright[i] = 0.0f;
+        }
+
+        float bright = twkBright[i];
+        float linBright = fastGamma24(bright) * SPARKLE_BRIGHTNESS_CAP;
+
+        float fR = TWINKLE_COL_R * linBright;
+        float fG = TWINKLE_COL_G * linBright;
+        float fB = TWINKLE_COL_B * linBright;
+        float fW = TWINKLE_COL_W * linBright;
+
+        uint16_t tR16 = (uint16_t)clampf(fR * 256.0f, 0, 65535);
+        uint16_t tG16 = (uint16_t)clampf(fG * 256.0f, 0, 65535);
+        uint16_t tB16 = (uint16_t)clampf(fB * 256.0f, 0, 65535);
+        uint16_t tW16 = (uint16_t)clampf(fW * 256.0f, 0, 65535);
+
+        if (tR16 < 256) tR16 = 0;
+        if (tG16 < 256) tG16 = 0;
+        if (tB16 < 256) tB16 = 0;
+        if (tW16 < 256) tW16 = 0;
+
+        uint8_t r = deltaSigma(dsR[i], tR16);
+        uint8_t g = deltaSigma(dsG[i], tG16);
+        uint8_t b = deltaSigma(dsB[i], tB16);
+        uint8_t w = deltaSigma(dsW[i], tW16);
+
+        // If the color is pure-white (RGB weights all 0, white on W only),
+        // drive Strip A's W channel alone (clean RGBW white) and fold the
+        // white into Strip B's r=g=b (it has no W). This asymmetry can't go
+        // through setBothPixel, so write the strips directly, applying the
+        // same globalBrightness dimming setBothPixel would.
+        bool pureWhite = (TWINKLE_COL_R == 0.0f
+                          && TWINKLE_COL_G == 0.0f
+                          && TWINKLE_COL_B == 0.0f);
+        if (pureWhite) {
+            float fRGB = TWINKLE_RGB_FALLBACK * linBright;
+            uint16_t tRGB16 = (uint16_t)clampf(fRGB * 256.0f, 0, 65535);
+            if (tRGB16 < 256) tRGB16 = 0;
+            uint8_t rgb = deltaSigma(dsB[i], tRGB16);
+            if (globalBrightness < 1.0f) {
+                w   = (uint8_t)(w   * globalBrightness);
+                rgb = (uint8_t)(rgb * globalBrightness);
+            }
+            stripA.SetPixelColor(i, RgbwColor(0, 0, 0, w));
+            stripB.SetPixelColor(i, RgbColor(rgb, rgb, rgb));
+        } else {
+            // setBothPixel already applies globalBrightness to all channels.
+            setBothPixel(i, r, g, b, w);
+        }
     }
 }
 
@@ -1218,8 +1392,14 @@ void loop() {
         case ALG_SPARKLE_SYLLABLE:
             renderSparkleSyllable(dt, angleDeg, tiltBlend, tiltR, tiltG, tiltB);
             break;
+        case ALG_SPARKLE_TWINKLE:
+            renderSparkleTwinkle(dt);
+            break;
         case ALG_IDLE:
             renderIdle(dt);
+            break;
+        case ALG_WHITE_STRESS:
+            renderQuietBloom(dt, now);
             break;
     }
 
@@ -1233,6 +1413,22 @@ void loop() {
     stripStkB.ClearTo(stickColor);
     stickPhase += (2.0f * (float)M_PI / 4.0f) * dt;
     if (stickPhase > 6.2832f) stickPhase -= 6.2832f;
+
+    {
+        static uint32_t lastDbg = 0;
+        if (now - lastDbg > 500) {
+            lastDbg = now;
+            static char line[512];
+            int pos = 0;
+            pos += snprintf(line + pos, sizeof(line) - pos, "[PX]");
+            for (uint16_t j = 0; j < LED_COUNT; j += 5) {
+                RgbColor c = stripB.GetPixelColor(j);
+                pos += snprintf(line + pos, sizeof(line) - pos,
+                    " %d:%d/%d/%d", j, c.R, c.G, c.B);
+            }
+            Serial.println(line);
+        }
+    }
 
     stripA.Show();
     stripB.Show();

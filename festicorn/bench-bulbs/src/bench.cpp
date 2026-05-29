@@ -353,6 +353,8 @@ static float bloomHueT[LED_COUNT];
 static float bloomHueDrift[LED_COUNT];
 static float bloomFlashGlow[LED_COUNT];
 static float bloomFlashDecay[LED_COUNT];
+static float bloomBlackoutTimer[LED_COUNT];
+#define BLOOM_BLACKOUT_HOLD_S 1.0f
 static float bloomColonyEnergy = 1.0f;
 static uint32_t bloomLastMotionMs = 0;
 static float bloomMotionRate = 0.0f;
@@ -404,6 +406,11 @@ static inline float lerpf(float a, float b, float t) {
     return a + (b - a) * t;
 }
 
+// Noise gate hysteresis: per-pixel flag, true = currently gated off
+static bool gateOff[LED_COUNT];
+#define GATE_ON_THRESH  0.5f   // go dark below this
+#define GATE_OFF_THRESH 1.2f   // re-light above this
+
 // Unified output stage. See forward decl near setBothPixel.
 // Inputs are 0..255 float per channel (already gamma'd / capped).
 static void outputPixel(uint16_t i, float r, float g, float b, float w) {
@@ -412,9 +419,17 @@ static void outputPixel(uint16_t i, float r, float g, float b, float w) {
     float sb = b * globalBrightness;
     float sw = w * globalBrightness;
 
-    if (sr < OUTPUT_NOISE_GATE_F && sg < OUTPUT_NOISE_GATE_F &&
-        sb < OUTPUT_NOISE_GATE_F && sw < OUTPUT_NOISE_GATE_F) {
+    // Coordinated noise gate + ratio-preserving floor:
+    // Find min non-zero channel. If it's < 1.0, scale all channels up
+    // so the smallest becomes 1.0 (preserving hue ratios). If even the
+    // max channel is below the gate, zero everything.
+    float maxCh = fmaxf(fmaxf(sr, sg), fmaxf(sb, sw));
+    float thresh = gateOff[i] ? GATE_OFF_THRESH : GATE_ON_THRESH;
+    if (maxCh < thresh) {
         sr = sg = sb = sw = 0.0f;
+        gateOff[i] = true;
+    } else {
+        gateOff[i] = false;
     }
 
     uint8_t oR, oG, oB, oW;
@@ -432,14 +447,14 @@ static void outputPixel(uint16_t i, float r, float g, float b, float w) {
         oG = (uint8_t)clampf(sg, 0.0f, 255.0f);
         oB = (uint8_t)clampf(sb, 0.0f, 255.0f);
         oW = (uint8_t)clampf(sw, 0.0f, 255.0f);
-    }
-
-    // Proportional floor: protect originally-nonzero channels from rounding to zero.
-    if (oR | oG | oB | oW) {
-        if (r > 0.0f && oR == 0) oR = 1;
-        if (g > 0.0f && oG == 0) oG = 1;
-        if (b > 0.0f && oB == 0) oB = 1;
-        if (w > 0.0f && oW == 0) oW = 1;
+        // Post-quantization floor: if any channel is on, force intended-nonzero
+        // channels to at least 1. Prevents flicker from float→uint8 truncation.
+        if (oR | oG | oB | oW) {
+            if (!oR && sr > 0.0f) oR = 1;
+            if (!oG && sg > 0.0f) oG = 1;
+            if (!oB && sb > 0.0f) oB = 1;
+            if (!oW && sw > 0.0f) oW = 1;
+        }
     }
 
     stripA.SetPixelColor(i, RgbwColor(oR, oG, oB, oW));
@@ -674,6 +689,7 @@ static void resetBloomState() {
             + randFloat() * (BLOOM_HUE_DRIFT_MAX - BLOOM_HUE_DRIFT_MIN);
         bloomHueDrift[i] = (randFloat() > 0.5f) ? rate : -rate;
         bloomFlashGlow[i] = 0.0f;
+        bloomBlackoutTimer[i] = 0.0f;
         bloomFlashDecay[i] = BLOOM_FLASH_DECAY_LO
             + randFloat() * (BLOOM_FLASH_DECAY_HI - BLOOM_FLASH_DECAY_LO);
     }
@@ -1046,41 +1062,69 @@ static void renderQuietBloom(float dt, uint32_t now) {
     if (bloomFlash < 0.005f) bloomFlash = 0.0f;
 
     for (uint16_t i = 0; i < LED_COUNT; i++) {
-        bloomBreathPhase[i] += dt / bloomBreathPeriod[i];
-        if (bloomBreathPhase[i] >= 1.0f) bloomBreathPhase[i] -= 1.0f;
-
-        bloomHueT[i] += bloomHueDrift[i] * dt;
-        if (bloomHueT[i] > 1.0f) bloomHueT[i] -= 1.0f;
-        else if (bloomHueT[i] < 0.0f) bloomHueT[i] += 1.0f;
-
         float breath = (fastSinPhase(bloomBreathPhase[i]) * 0.5f + 0.5f);
         float breathGlow = bloomBreathFloor
             + breath * (bloomBreathPeak[i] - bloomBreathFloor);
+        float breathLin = fastGamma24(breathGlow) * bloomBrightnessCap;
+        float flashLin  = bloomFlash * bloomBrightnessCap;
 
-        // ── Layer 1: intensity = breath + flash bump ──
-        float intensity = clampf(breathGlow + bloomFlash, 0.0f, 1.0f);
+        float maxOut = fmaxf(breathLin, flashLin) * 255.0f;
+        float darkThresh = gateOff[i] ? GATE_OFF_THRESH : GATE_ON_THRESH;
+        bool wouldBeDark = (maxOut < darkThresh);
+
+        if (wouldBeDark) {
+            // Pixel is dark — hold black, drift hue, freeze breath
+            bloomBlackoutTimer[i] += dt;
+            bloomHueT[i] += bloomHueDrift[i] * dt;
+            if (bloomHueT[i] > 1.0f) bloomHueT[i] -= 1.0f;
+            else if (bloomHueT[i] < 0.0f) bloomHueT[i] += 1.0f;
+            outputPixel(i, 0, 0, 0, 0);
+            continue;
+        }
+
+        if (bloomBlackoutTimer[i] > 0.0f) {
+            if (bloomBlackoutTimer[i] < BLOOM_BLACKOUT_HOLD_S) {
+                // Still in hold period — stay dark, keep drifting
+                bloomBlackoutTimer[i] += dt;
+                bloomBreathPhase[i] += dt / bloomBreathPeriod[i];
+                if (bloomBreathPhase[i] >= 1.0f) bloomBreathPhase[i] -= 1.0f;
+                bloomHueT[i] += bloomHueDrift[i] * dt;
+                if (bloomHueT[i] > 1.0f) bloomHueT[i] -= 1.0f;
+                else if (bloomHueT[i] < 0.0f) bloomHueT[i] += 1.0f;
+                outputPixel(i, 0, 0, 0, 0);
+                continue;
+            }
+            bloomBlackoutTimer[i] = 0.0f;
+        }
+
+        // Normal rendering — advance breath, no hue drift
+        bloomBreathPhase[i] += dt / bloomBreathPeriod[i];
+        if (bloomBreathPhase[i] >= 1.0f) bloomBreathPhase[i] -= 1.0f;
+
         float flashFrac = (bloomFlash > 0.1f) ? clampf(bloomFlash / 0.3f, 0.0f, 1.0f) : 0.0f;
 
-        // ── Layer 2: color lookup (full-range 0–255) ──
+        // ── Color lookup ──
         float h = bloomHueT[i];
-        float colR = lerpf(lerpf(BLOOM_HUE_A_R, BLOOM_HUE_B_R, h),
-                           BLOOM_FLASH_R, flashFrac);
-        float colG = lerpf(lerpf(BLOOM_HUE_A_G, BLOOM_HUE_B_G, h),
-                           BLOOM_FLASH_G, flashFrac);
-        float colB = lerpf(lerpf(BLOOM_HUE_A_B, BLOOM_HUE_B_B, h),
-                           BLOOM_FLASH_B, flashFrac);
+        float baseR = lerpf(BLOOM_HUE_A_R, BLOOM_HUE_B_R, h);
+        float baseG = lerpf(BLOOM_HUE_A_G, BLOOM_HUE_B_G, h);
+        float baseB = lerpf(BLOOM_HUE_A_B, BLOOM_HUE_B_B, h);
 
-        // W channel: ramps in at high intensity
-        float wFrac = clampf((intensity - 0.5f) * 2.0f, 0.0f, 1.0f);
-        float colW = wFrac * flashFrac * BLOOM_W_SCALE;
+        float bR = baseR * breathLin;
+        float bG = baseG * breathLin;
+        float bB = baseB * breathLin;
 
-        // ── Layer 3: output stage ──
-        float linBright = fastGamma24(intensity) * bloomBrightnessCap;
+        float fR = lerpf(baseR, BLOOM_FLASH_R, flashFrac) * flashLin;
+        float fG = lerpf(baseG, BLOOM_FLASH_G, flashFrac) * flashLin;
+        float fB = lerpf(baseB, BLOOM_FLASH_B, flashFrac) * flashLin;
+
+        float colW = flashFrac * flashLin * BLOOM_W_SCALE;
+
+        // ── Output ──
         outputPixel(i,
-            colR * linBright,
-            colG * linBright,
-            colB * linBright,
-            colW * linBright);
+            fminf(bR + fR, 255.0f),
+            fminf(bG + fG, 255.0f),
+            fminf(bB + fB, 255.0f),
+            fminf(colW, 255.0f));
     }
 
 }

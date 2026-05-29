@@ -15,8 +15,10 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <ESPmDNS.h>
 #include <AsyncUDP.h>
+#include <esp_now.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <esp_random.h>
@@ -26,6 +28,7 @@
 #include <oklch_lut.h>
 #include <delta_sigma.h>
 #include <fast_math.h>
+#include "v1_packet.h"
 
 // ── WiFi credentials (phone hotspot) ────────────────────────────
 #ifndef WIFI_SSID
@@ -67,10 +70,18 @@ static NeoPixelBus<NeoGrbFeature,  NeoEsp32Rmt3Ws2812xMethod> stripStkB (STICK_B
 // Set a pixel on both Strip A (RGBW) and Strip B (RGB, no W).
 static inline void setBothPixel(uint16_t i, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
     if (globalBrightness < 1.0f) {
+        uint8_t ir = r, ig = g, ib = b, iw = w;
         r = (uint8_t)(r * globalBrightness);
         g = (uint8_t)(g * globalBrightness);
         b = (uint8_t)(b * globalBrightness);
         w = (uint8_t)(w * globalBrightness);
+        // Hold originally-non-zero channels at 1 to prevent hue shift on fadeout
+        if (r | g | b | w) {
+            if (ir && !r) r = 1;
+            if (ig && !g) g = 1;
+            if (ib && !b) b = 1;
+            if (iw && !w) w = 1;
+        }
     }
     stripA.SetPixelColor(i, RgbwColor(r, g, b, w));
     stripB.SetPixelColor(i, RgbColor(r, g, b));
@@ -79,7 +90,8 @@ static inline void setBothPixel(uint16_t i, uint8_t r, uint8_t g, uint8_t b, uin
 // ── Rendering ────────────────────────────────────────────────────
 #define GAMMA 2.4f
 #define BRIGHTNESS_CAP 0.25f
-#define SPARKLE_BRIGHTNESS_CAP 0.05f
+#define SPARKLE_BRIGHTNESS_CAP_DEF 0.05f
+static float sparkleBrightnessCap = SPARKLE_BRIGHTNESS_CAP_DEF;
 #define PURE_W_CEIL    0.10f
 #define PURE_W_BLEND   0.15f
 
@@ -107,11 +119,16 @@ static inline void setBothPixel(uint16_t i, uint8_t r, uint8_t g, uint8_t b, uin
 
 // ── Sparkle twinkle (variant B: crisp snap-on / fast snap-off) ───
 // Free-running ambient sparkle. Independent of audio/motion.
-#define TWINKLE_SPAWN_RATE   60.0f   // expected new sparkles per second (Poisson)
-#define TWINKLE_ATTACK_S     0.067f  // attack rise time to peak (~67 ms)
-#define TWINKLE_TAU_S        0.10f   // exponential decay time constant (s)
-#define TWINKLE_PEAK_MIN     0.6f    // peak brightness range
-#define TWINKLE_PEAK_MAX     1.0f
+#define TWINKLE_SPAWN_RATE_DEF   60.0f
+#define TWINKLE_ATTACK_S_DEF     0.067f
+#define TWINKLE_TAU_S_DEF        0.10f
+#define TWINKLE_PEAK_MIN_DEF     0.6f
+#define TWINKLE_PEAK_MAX_DEF     1.0f
+static float twinkleSpawnRate = TWINKLE_SPAWN_RATE_DEF;
+static float twinkleAttackS   = TWINKLE_ATTACK_S_DEF;
+static float twinkleTauS      = TWINKLE_TAU_S_DEF;
+static float twinklePeakMin   = TWINKLE_PEAK_MIN_DEF;
+static float twinklePeakMax   = TWINKLE_PEAK_MAX_DEF;
 // Color: clean white. Easy to tune — these are the per-channel 0..255
 // weights applied before brightness. On RGBW Strip A the white rides the
 // W channel; on RGB Strip B setBothPixel drops W so RGB carries it.
@@ -130,7 +147,14 @@ static inline void setBothPixel(uint16_t i, uint8_t r, uint8_t g, uint8_t b, uin
 // ── Quiet bloom ──────────────────────────────────────────────────
 // Output stage — single brightness control, applied after gamma.
 // Effect code works in 0.0–1.0 intensity; color palette in 0–255.
-#define BLOOM_BRIGHTNESS_CAP   0.25f
+#define BLOOM_BRIGHTNESS_CAP_DEF   0.50f
+#define BLOOM_FLASH_BUMP_DEF       0.06f
+#define BLOOM_ACCEL_THRESH_DEF     1.5f
+#define BLOOM_FLASH_DECAY_RATE_DEF 1.5f
+static float bloomBrightnessCap  = BLOOM_BRIGHTNESS_CAP_DEF;
+static float bloomFlashBump      = BLOOM_FLASH_BUMP_DEF;
+static float bloomAccelThresh    = BLOOM_ACCEL_THRESH_DEF;
+static float bloomFlashDecayRate = BLOOM_FLASH_DECAY_RATE_DEF;
 #define BLOOM_NOISE_GATE       256
 
 #define SURPRISE_RATIO         3.0f
@@ -144,7 +168,8 @@ static inline void setBothPixel(uint16_t i, uint8_t r, uint8_t g, uint8_t b, uin
 #define BLOOM_BREATH_MAX_PERIOD 8.0f
 #define BLOOM_BREATH_MIN_PEAK   0.65f
 #define BLOOM_BREATH_MAX_PEAK   1.00f
-#define BLOOM_BREATH_FLOOR      0.15f
+#define BLOOM_BREATH_FLOOR_DEF      0.15f
+static float bloomBreathFloor = BLOOM_BREATH_FLOOR_DEF;
 
 #define BLOOM_FLASH_DECAY_LO   0.96f
 #define BLOOM_FLASH_DECAY_HI   0.985f
@@ -180,6 +205,42 @@ static inline void setBothPixel(uint16_t i, uint8_t r, uint8_t g, uint8_t b, uin
 // ── Timeouts ─────────────────────────────────────────────────────
 #define TIMEOUT_MS     500
 
+// ── v1 telemetry decode ─────────────────────────────────────────
+#define MAG_FS              57000.0f
+#define COUNTS_PER_G         8192.0f
+#define COUNTS_PER_DPS         32.8f
+#define COUNTS_PER_INT8       256.0f
+
+static inline float magCountsFromByte(uint8_t b) {
+    float n = (float)b / 255.0f;
+    return n * n * MAG_FS;
+}
+static inline float amagGFromByte(uint8_t b) {
+    return magCountsFromByte(b) / COUNTS_PER_G;
+}
+static inline float gmagDpsFromByte(uint8_t b) {
+    return magCountsFromByte(b) / COUNTS_PER_DPS;
+}
+
+// ── ESP-NOW v1 packet state ─────────────────────────────────────
+static volatile uint32_t espnowPktCount = 0;
+static volatile uint32_t espnowLastMs = 0;
+static TelemetryPacketV1 espnowPacket = {0};
+// Track max motion across all senders since last consume
+static volatile uint8_t espnowPeakAmag = 0;
+static volatile uint8_t espnowPeakGmag = 0;
+
+void onEspNowReceive(const uint8_t *mac, const uint8_t *data, int len) {
+    espnowPktCount++;
+    if (len == sizeof(TelemetryPacketV1)) {
+        TelemetryPacketV1 pkt;
+        memcpy(&pkt, data, sizeof(TelemetryPacketV1));
+        if (pkt.amag_max > espnowPeakAmag) espnowPeakAmag = pkt.amag_max;
+        if (pkt.gmag_max > espnowPeakGmag) espnowPeakGmag = pkt.gmag_max;
+        memcpy((void*)&espnowPacket, &pkt, sizeof(TelemetryPacketV1));
+        espnowLastMs = millis();
+    }
+}
 
 struct __attribute__((packed)) SensorPacket {
     int16_t ax, ay, az;
@@ -199,17 +260,30 @@ enum Algorithm {
     ALG_SPARKLE_TWINKLE,
     ALG_IDLE,
     ALG_WHITE_STRESS,
+    ALG_RAW_COLOR,
 };
+
+static uint8_t rawR = 0, rawG = 0, rawB = 0, rawW = 0;
+static uint8_t rawBrightness = 255;
+static bool rawDither = false;
+static uint16_t rawTargetFps = 150;
 
 static Algorithm currentAlg = ALG_GRAVITY_PARTICLE;
 
 // ── Gravity sparkle ──────────────────────────────────────────────
-#define GS_PARTICLE_COUNT     7
-#define GS_GRAVITY_SCALE      40.0f
-#define GS_VELOCITY_DAMP      0.92f
-#define GS_BOUNCE_REBOUND     0.5f
-#define GS_SPLAT_RADIUS       2.5f
-#define GS_BRIGHTNESS_CAP     0.45f
+#define GS_PARTICLE_COUNT_DEF 7
+#define GS_PARTICLE_COUNT_MAX 32
+#define GS_GRAVITY_SCALE_DEF  40.0f
+#define GS_VELOCITY_DAMP_DEF  0.92f
+#define GS_BOUNCE_REBOUND_DEF 0.5f
+#define GS_SPLAT_RADIUS_DEF   2.5f
+#define GS_BRIGHTNESS_CAP_DEF 0.45f
+static int   gsParticleCount  = GS_PARTICLE_COUNT_DEF;
+static float gsGravityScale   = GS_GRAVITY_SCALE_DEF;
+static float gsVelocityDamp   = GS_VELOCITY_DAMP_DEF;
+static float gsBounceRebound  = GS_BOUNCE_REBOUND_DEF;
+static float gsSplatRadius    = GS_SPLAT_RADIUS_DEF;
+static float gsBrightnessCap  = GS_BRIGHTNESS_CAP_DEF;
 
 struct GsParticle {
     float pos;
@@ -217,7 +291,7 @@ struct GsParticle {
     float bright;
     float hue;
 };
-static GsParticle gsParticles[GS_PARTICLE_COUNT];
+static GsParticle gsParticles[GS_PARTICLE_COUNT_MAX];
 
 // ── Global state ─────────────────────────────────────────────────
 
@@ -451,104 +525,32 @@ void setup() {
     resetGravitySparkle();
     resetTwinkleState();
 
-    // Show green while connecting WiFi
-    for (uint16_t i = 0; i < LED_COUNT; i++) setBothPixel(i, 0, 40, 0, 0);
-    stripA.Show();
-    stripB.Show();
-
-    Serial.printf("[BOOT] Connecting to WiFi: %s\n", WIFI_SSID);
     WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-    WiFi.setAutoReconnect(true);
-    uint32_t wifiStart = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 30000) {
-        delay(500);
-        Serial.print(".");
+    WiFi.disconnect();
+
+    // Scan for "cuteplant" SSID to match gyro-sense channel
+    {
+        int n = WiFi.scanNetworks(false, false, true, 120);
+        uint8_t bestCh = 1;
+        int8_t bestRssi = -127;
+        for (int i = 0; i < n; i++) {
+            if (WiFi.SSID(i) == WIFI_SSID) {
+                int8_t rssi = WiFi.RSSI(i);
+                if (rssi > bestRssi) { bestRssi = rssi; bestCh = WiFi.channel(i); }
+            }
+        }
+        WiFi.scanDelete();
+        esp_wifi_set_promiscuous(true);
+        esp_wifi_set_channel(bestCh, WIFI_SECOND_CHAN_NONE);
+        esp_wifi_set_promiscuous(false);
+        Serial.printf("[BOOT] channel=%u (ssid %s)\n", bestCh, bestCh > 1 ? "found" : "fallback");
     }
 
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("\n[WIFI] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
-        for (uint16_t i = 0; i < LED_COUNT; i++) setBothPixel(i, 0, 0, 40, 0);
-        stripA.Show();
-        stripB.Show();
-        delay(300);
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("[ESPNOW] init FAILED");
     } else {
-        Serial.println("\n[WIFI] FAILED — running in idle-only mode");
-        for (uint16_t i = 0; i < LED_COUNT; i++) setBothPixel(i, 40, 0, 0, 0);
-        stripA.Show();
-        stripB.Show();
-        delay(500);
-    }
-
-    if (udp.listen(UDP_PORT)) {
-        udp.onPacket([](AsyncUDPPacket packet) {
-            if (packet.length() != sizeof(SensorPacket)) return;
-            uint32_t now = millis();
-            portENTER_CRITICAL(&pktMux);
-            memcpy((void*)&latestPacket, packet.data(), sizeof(SensorPacket));
-            lastPacketMs = now;
-            pktCount++;
-            portEXIT_CRITICAL(&pktMux);
-        });
-        Serial.printf("[UDP] Listening on port %d\n", UDP_PORT);
-    } else {
-        Serial.println("[UDP] FAILED to bind port");
-    }
-
-    if (cmdUdp.listen(CMD_PORT)) {
-        cmdUdp.onPacket([](AsyncUDPPacket packet) {
-            if (packet.length() < 1) return;
-            char c = (char)packet.data()[0];
-            if ((c == 'B' || c == 'S') && packet.length() >= 2) {
-                handleSliderCommand(packet.data(), packet.length());
-                packet.printf("OK:%c=%u", c, packet.data()[1]);
-                return;
-            }
-            handleSerialCommand(c);
-            const char *name = "unknown";
-            switch (currentAlg) {
-                case ALG_OFF:             name = "off"; break;
-                case ALG_SPARKLE_BURST:   name = "sparkle"; break;
-                case ALG_FIRE_MELD:       name = "fire"; break;
-                case ALG_FIRE_FLICKER:    name = "flicker"; break;
-                case ALG_QUIET_BLOOM:     name = "bloom"; break;
-                case ALG_GRAVITY_PARTICLE: name = "gravity"; break;
-                case ALG_SPARKLE_SYLLABLE: name = "syllable"; break;
-                case ALG_SPARKLE_TWINKLE: name = "twinkle"; break;
-                case ALG_IDLE:            name = "idle"; break;
-                case ALG_WHITE_STRESS:   name = "white_stress"; break;
-            }
-            packet.printf("FX:%s", name);
-        });
-        Serial.printf("[CMD] Listening on port %d\n", CMD_PORT);
-    }
-
-    if (discoverUdp.listen(DISCOVER_PORT)) {
-        discoverUdp.onPacket([](AsyncUDPPacket packet) {
-            if (packet.length() >= 5 && memcmp(packet.data(), "ROAD?", 5) == 0) {
-                char reply[64];
-                snprintf(reply, sizeof(reply), "ROAD!bench-bulbs|%s", macStr);
-                packet.printf("%s", reply);
-            }
-        });
-        Serial.printf("[DISC] Discovery on port %d\n", DISCOVER_PORT);
-    }
-
-    if (onsetUdp.listen(ONSET_PORT)) {
-        onsetUdp.onPacket([](AsyncUDPPacket packet) {
-            if (packet.length() == 4 &&
-                packet.data()[0] == 0xAA &&
-                packet.data()[3] == 0x55) {
-                syllOnsetStrength = packet.data()[1];
-                syllOnsetMs = millis();
-            }
-        });
-        Serial.printf("[ONSET] Listening on port %d\n", ONSET_PORT);
-    }
-
-    if (MDNS.begin("bench-bulbs")) {
-        MDNS.addService("bench-bulbs", "udp", UDP_PORT);
-        Serial.println("[MDNS] bench-bulbs.local");
+        esp_now_register_recv_cb(onEspNowReceive);
+        Serial.println("[ESPNOW] listening for v1 telemetry");
     }
 
     stripA.ClearTo(RgbwColor(0, 0, 0, 0));
@@ -557,7 +559,7 @@ void setup() {
     stripB.Show();
 
     Serial.println("Commands: 'c' recal, 's' sparkle, 'm' fire_meld, 'f' fire_flicker, 'b' bloom, 'g' gravity_particle, 'y' syllable, 't' twinkle, '?' identify");
-    Serial.printf("[BOOT] role=bench-bulbs MAC=%s fw=bench_bulbs_wifi\n", macStr);
+    Serial.printf("[BOOT] role=bench-bulbs MAC=%s fw=bench_bulbs_espnow\n", macStr);
 }
 
 // ── Calibration ──────────────────────────────────────────────────
@@ -628,11 +630,15 @@ static void resetBloomState() {
 }
 
 static void resetGravitySparkle() {
-    for (uint16_t i = 0; i < GS_PARTICLE_COUNT; i++) {
-        gsParticles[i].pos = (float)(LED_COUNT - 1) * (float)i / (float)(GS_PARTICLE_COUNT - 1);
+    if (gsParticleCount < 1) gsParticleCount = 1;
+    if (gsParticleCount > GS_PARTICLE_COUNT_MAX) gsParticleCount = GS_PARTICLE_COUNT_MAX;
+    int n = gsParticleCount;
+    float denom = (n > 1) ? (float)(n - 1) : 1.0f;
+    for (int i = 0; i < n; i++) {
+        gsParticles[i].pos = (float)(LED_COUNT - 1) * (float)i / denom;
         gsParticles[i].vel = 0.0f;
         gsParticles[i].bright = 1.0f;
-        gsParticles[i].hue = 256.0f * (float)i / (float)GS_PARTICLE_COUNT;
+        gsParticles[i].hue = 256.0f * (float)i / (float)n;
     }
 }
 
@@ -640,8 +646,8 @@ static void resetGravitySparkle() {
 
 static void renderGravitySparkle(float dt) {
     float gravG = clampf((float)latestPacket.ax / 16384.0f, -1.5f, 1.5f);
-    float accel = gravG * GS_GRAVITY_SCALE;
-    float damp = fastDecay(GS_VELOCITY_DAMP, dt * 30.0f);
+    float accel = gravG * gsGravityScale;
+    float damp = fastDecay(gsVelocityDamp, dt * 30.0f);
 
     static float accR[LED_COUNT], accG[LED_COUNT], accB[LED_COUNT];
     for (uint16_t i = 0; i < LED_COUNT; i++) {
@@ -649,9 +655,9 @@ static void renderGravitySparkle(float dt) {
     }
 
     const float maxPos = (float)(LED_COUNT - 1);
-    const float invTwoSigSq = 1.0f / (2.0f * GS_SPLAT_RADIUS * GS_SPLAT_RADIUS);
+    const float invTwoSigSq = 1.0f / (2.0f * gsSplatRadius * gsSplatRadius);
 
-    for (uint16_t i = 0; i < GS_PARTICLE_COUNT; i++) {
+    for (int i = 0; i < gsParticleCount; i++) {
         GsParticle &p = gsParticles[i];
 
         p.vel = p.vel * damp + accel * dt;
@@ -659,10 +665,10 @@ static void renderGravitySparkle(float dt) {
 
         if (p.pos < 0.0f) {
             p.pos = 0.0f;
-            if (p.vel < 0.0f) p.vel = -p.vel * GS_BOUNCE_REBOUND;
+            if (p.vel < 0.0f) p.vel = -p.vel * gsBounceRebound;
         } else if (p.pos > maxPos) {
             p.pos = maxPos;
-            if (p.vel > 0.0f) p.vel = -p.vel * GS_BOUNCE_REBOUND;
+            if (p.vel > 0.0f) p.vel = -p.vel * gsBounceRebound;
         }
 
         uint8_t hueIdx = (uint8_t)((uint32_t)p.hue & 0xFF);
@@ -671,8 +677,9 @@ static void renderGravitySparkle(float dt) {
         float colB = (float)oklchVarL[hueIdx][2];
 
         int center = (int)(p.pos + 0.5f);
-        int lo = center - 3; if (lo < 0) lo = 0;
-        int hi = center + 3; if (hi > (int)(LED_COUNT - 1)) hi = LED_COUNT - 1;
+        int half = (int)(gsSplatRadius * 2.0f + 1.0f);
+        int lo = center - half; if (lo < 0) lo = 0;
+        int hi = center + half; if (hi > (int)(LED_COUNT - 1)) hi = LED_COUNT - 1;
         for (int j = lo; j <= hi; j++) {
             float d = (float)j - p.pos;
             float w = expf(-(d * d) * invTwoSigSq);
@@ -688,7 +695,7 @@ static void renderGravitySparkle(float dt) {
         float b = accB[i];
         float maxCh = fmaxf(r, fmaxf(g, b));
         float bright = clampf(maxCh / 255.0f, 0.0f, 1.0f);
-        float linBright = fastGamma24(bright) * GS_BRIGHTNESS_CAP;
+        float linBright = fastGamma24(bright) * gsBrightnessCap;
         float norm = (bright > 0.001f) ? (linBright / bright) : 0.0f;
         uint8_t rr = (uint8_t)clampf(r * norm + 0.5f, 0, 255);
         uint8_t gg = (uint8_t)clampf(g * norm + 0.5f, 0, 255);
@@ -712,16 +719,18 @@ static void resetSyllableState() {
 
 // ── Idle rainbow wash ───────────────────────────────────────────
 static float idlePhase = 0.0f;
-#define IDLE_BRIGHTNESS 0.30f
-#define IDLE_SPEED      0.03f
+#define IDLE_BRIGHTNESS_DEF 0.30f
+#define IDLE_SPEED_DEF      0.03f
+static float idleBrightness = IDLE_BRIGHTNESS_DEF;
+static float idleSpeed      = IDLE_SPEED_DEF;
 
 static void renderIdle(float dt) {
-    idlePhase = fmodf(idlePhase + IDLE_SPEED * dt, 1.0f);
+    idlePhase = fmodf(idlePhase + idleSpeed * dt, 1.0f);
     for (uint16_t i = 0; i < LED_COUNT; i++) {
         float pos = (float)i / (float)LED_COUNT;
         float hue = fmodf(pos + idlePhase, 1.0f);
         uint8_t idx = (uint8_t)(hue * 255.0f);
-        float bright = fastGamma24(IDLE_BRIGHTNESS);
+        float bright = fastGamma24(idleBrightness);
         setBothPixel(i,
             (uint8_t)(oklchVarL[idx][0] * bright),
             (uint8_t)(oklchVarL[idx][1] * bright),
@@ -792,60 +801,202 @@ void handleSerialCommand(char c) {
     }
 }
 
+static char serialBuf[64];
+static uint8_t serialBufLen = 0;
+
+static bool parseHexByte(const char *s, uint8_t &out) {
+    uint8_t v = 0;
+    for (int i = 0; i < 2; i++) {
+        char c = s[i];
+        if (c >= '0' && c <= '9') v = v * 16 + (c - '0');
+        else if (c >= 'a' && c <= 'f') v = v * 16 + (c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v = v * 16 + (c - 'A' + 10);
+        else return false;
+    }
+    out = v;
+    return true;
+}
+
+static void applyRawColor() {
+    if (rawDither) {
+        memset(dsR, 0, sizeof(dsR));
+        memset(dsG, 0, sizeof(dsG));
+        memset(dsB, 0, sizeof(dsB));
+        memset(dsW, 0, sizeof(dsW));
+    } else {
+        uint8_t r = (uint8_t)((uint16_t)rawR * rawBrightness / 255);
+        uint8_t g = (uint8_t)((uint16_t)rawG * rawBrightness / 255);
+        uint8_t b = (uint8_t)((uint16_t)rawB * rawBrightness / 255);
+        uint8_t w = (uint8_t)((uint16_t)rawW * rawBrightness / 255);
+        for (uint16_t i = 0; i < LED_COUNT; i++) setBothPixel(i, r, g, b, w);
+        stripA.Show(); stripB.Show();
+    }
+}
+
+// ── Runtime parameter table ──────────────────────────────────────
+struct Param {
+    const char *name;
+    enum Type { F32, I32 } type;
+    void *ptr;
+    float lo, hi;
+    void (*onChange)();
+};
+
+static const Param PARAMS[] = {
+    // bloom
+    { "BLOOM_FLASH_BUMP",       Param::F32, &bloomFlashBump,       0.0f,  0.30f, nullptr },
+    { "BLOOM_ACCEL_THRESH",     Param::F32, &bloomAccelThresh,     1.05f, 3.0f,  nullptr },
+    { "BLOOM_BRIGHTNESS_CAP",   Param::F32, &bloomBrightnessCap,   0.05f, 1.0f,  nullptr },
+    { "BLOOM_FLASH_DECAY_RATE", Param::F32, &bloomFlashDecayRate,  0.5f,  5.0f,  nullptr },
+    { "BLOOM_BREATH_FLOOR",     Param::F32, &bloomBreathFloor,     0.0f,  0.5f,  nullptr },
+    // gravity
+    { "GS_PARTICLE_COUNT",      Param::I32, &gsParticleCount,      1.0f,  (float)GS_PARTICLE_COUNT_MAX, resetGravitySparkle },
+    { "GS_GRAVITY_SCALE",       Param::F32, &gsGravityScale,       5.0f,  200.0f, nullptr },
+    { "GS_VELOCITY_DAMP",       Param::F32, &gsVelocityDamp,       0.5f,  0.999f, nullptr },
+    { "GS_BOUNCE_REBOUND",      Param::F32, &gsBounceRebound,      0.0f,  1.0f,   nullptr },
+    { "GS_SPLAT_RADIUS",        Param::F32, &gsSplatRadius,        0.5f,  8.0f,   nullptr },
+    { "GS_BRIGHTNESS_CAP",      Param::F32, &gsBrightnessCap,      0.05f, 1.0f,   nullptr },
+    // twinkle
+    { "TWINKLE_SPAWN_RATE",     Param::F32, &twinkleSpawnRate,     1.0f,  300.0f, nullptr },
+    { "TWINKLE_ATTACK_S",       Param::F32, &twinkleAttackS,       0.005f,0.5f,   nullptr },
+    { "TWINKLE_TAU_S",          Param::F32, &twinkleTauS,          0.02f, 2.0f,   nullptr },
+    { "TWINKLE_PEAK_MIN",       Param::F32, &twinklePeakMin,       0.0f,  1.0f,   nullptr },
+    { "TWINKLE_PEAK_MAX",       Param::F32, &twinklePeakMax,       0.0f,  1.0f,   nullptr },
+    { "SPARKLE_BRIGHTNESS_CAP", Param::F32, &sparkleBrightnessCap, 0.01f, 0.5f,   nullptr },
+    // idle
+    { "IDLE_BRIGHTNESS",        Param::F32, &idleBrightness,       0.0f,  1.0f,   nullptr },
+    { "IDLE_SPEED",             Param::F32, &idleSpeed,            0.0f,  0.5f,   nullptr },
+    // global
+    { "GLOBAL_BRIGHTNESS",      Param::F32, &globalBrightness,     0.0f,  2.0f,   nullptr },
+    { "GLOBAL_SENSITIVITY",     Param::F32, &globalSensitivity,    0.05f, 2.0f,   nullptr },
+};
+static const size_t PARAM_COUNT = sizeof(PARAMS) / sizeof(PARAMS[0]);
+
+static void dumpParam(const Param &p) {
+    if (p.type == Param::F32) {
+        Serial.printf("[PARAM] %s=%.4f\n", p.name, *(float*)p.ptr);
+    } else {
+        Serial.printf("[PARAM] %s=%d\n", p.name, *(int*)p.ptr);
+    }
+}
+
+static void dumpAllParams() {
+    for (size_t i = 0; i < PARAM_COUNT; i++) dumpParam(PARAMS[i]);
+}
+
+static void setParamFromLine(const char *kv) {
+    // kv looks like "KEY=value" (leading spaces tolerated)
+    while (*kv == ' ') kv++;
+    const char *eq = strchr(kv, '=');
+    if (!eq) { Serial.println("[PARAM] bad syntax"); return; }
+    size_t nameLen = (size_t)(eq - kv);
+    const char *valStr = eq + 1;
+    for (size_t i = 0; i < PARAM_COUNT; i++) {
+        const Param &p = PARAMS[i];
+        if (strlen(p.name) == nameLen && strncmp(p.name, kv, nameLen) == 0) {
+            float v = atof(valStr);
+            if (v < p.lo) v = p.lo;
+            if (v > p.hi) v = p.hi;
+            if (p.type == Param::F32) *(float*)p.ptr = v;
+            else                       *(int*)p.ptr   = (int)(v + 0.5f);
+            if (p.onChange) p.onChange();
+            dumpParam(p);
+            return;
+        }
+    }
+    Serial.printf("[PARAM] unknown key (len=%u)\n", (unsigned)nameLen);
+}
+
+static void processSerialLine(const char *line, uint8_t len) {
+    if (len >= 7 && line[0] == '#') {
+        uint8_t r, g, b, w = 0;
+        if (parseHexByte(line + 1, r) && parseHexByte(line + 3, g) && parseHexByte(line + 5, b)) {
+            if (len >= 9) parseHexByte(line + 7, w);
+            rawR = r; rawG = g; rawB = b; rawW = w;
+            currentAlg = ALG_RAW_COLOR;
+            applyRawColor();
+            Serial.printf("[RAW] #%02X%02X%02X%02X brt=%u dith=%d fps=%u\n",
+                          r, g, b, w, rawBrightness, rawDither, rawTargetFps);
+            return;
+        }
+    }
+    if (len >= 2 && line[0] == '!') {
+        if (line[1] == 'B' && len >= 3) {
+            rawBrightness = (uint8_t)atoi(line + 2);
+            if (currentAlg == ALG_RAW_COLOR) applyRawColor();
+            Serial.printf("[RAW] brightness=%u\n", rawBrightness);
+            return;
+        }
+        if (line[1] == 'D' && len >= 3) {
+            rawDither = (line[2] == '1');
+            if (currentAlg == ALG_RAW_COLOR) applyRawColor();
+            Serial.printf("[RAW] dither=%d\n", rawDither);
+            return;
+        }
+        if (line[1] == 'F' && len >= 3) {
+            rawTargetFps = (uint16_t)atoi(line + 2);
+            if (rawTargetFps > 500) rawTargetFps = 500;
+            if (rawTargetFps < 1) rawTargetFps = 1;
+            Serial.printf("[RAW] fps=%u\n", rawTargetFps);
+            return;
+        }
+        if (line[1] == 'P') {
+            if (len >= 3 && line[2] == '?') { dumpAllParams(); return; }
+            if (len >= 4) { setParamFromLine(line + 2); return; }
+            return;
+        }
+    }
+    if (len == 1) handleSerialCommand(line[0]);
+}
+
 static void parseSerialCommands() {
     while (Serial.available()) {
         char c = (char)Serial.read();
-        if (c >= 32 && c < 127) {
-            handleSerialCommand(c);
+        if (c == '\n' || c == '\r') {
+            if (serialBufLen > 0) {
+                serialBuf[serialBufLen] = '\0';
+                processSerialLine(serialBuf, serialBufLen);
+                serialBufLen = 0;
+            }
+        } else if (c >= 32 && c < 127 && serialBufLen < sizeof(serialBuf) - 1) {
+            if (serialBufLen == 0 && c != '#' && c != '!') {
+                handleSerialCommand(c);
+            } else {
+                serialBuf[serialBufLen++] = c;
+            }
         }
     }
 }
 
 // ── Bloom motion ─────────────────────────────────────────────────
 
+static float bloomFlash = 0.0f;
+
 static void bloomProcessMotion(float pktDt, uint32_t now) {
-    float gyroRate = computeGyroRate(
-        latestPacket.gx, latestPacket.gy, latestPacket.gz);
-    float accelJolt = computeAccelJolt(
-        latestPacket.ax, latestPacket.ay, latestPacket.az);
-    bloomMotionRate = fmaxf(gyroRate, accelJolt * 300.0f);
+    uint8_t peakAmag = espnowPeakAmag;
+    espnowPeakAmag = 0;
+    espnowPeakGmag = 0;
 
-    float surprise = fmaxf(0.0f, bloomMotionRate - motionEMA * SURPRISE_RATIO);
+    float amagG = amagGFromByte(peakAmag);
 
-    float alpha = (bloomMotionRate > motionEMA) ? fminf(1.0f, pktDt / 0.77f)
-                                                : fminf(1.0f, pktDt / 0.16f);
-    motionEMA += alpha * (bloomMotionRate - motionEMA);
+    static uint32_t lastMotionLog = 0;
+    if (amagG > 1.2f || now - lastMotionLog > 2000) {
+        Serial.printf("[MOTION] amag=%.2fg flash=%.2f pkts=%lu\n",
+                      amagG, bloomFlash, (unsigned long)espnowPktCount);
+        lastMotionLog = now;
+    }
 
-    if (surprise > 1.0f) {
-        bloomLastMotionMs = now;
-        float hitIntensity = clampf(
-            log2f(1.0f + surprise) / log2f(1.0f + FLASH_MOTION_SCALE),
-            0.0f, 1.0f);
-        if (hitIntensity > bloomHitIntensity) bloomHitIntensity = hitIntensity;
-
-        float normMotion = surprise / DRAIN_SCALE;
-        float newDrain = normMotion * normMotion * normMotion
-                       * (1.0f - DRAIN_ENVELOPE_DECAY);
-        if (newDrain > drainEnvelope) drainEnvelope = newDrain;
+    if (amagG > bloomAccelThresh) {
+        bloomFlash = fminf(1.0f, bloomFlash + bloomFlashBump);
     }
 }
 
 static void renderQuietBloom(float dt, uint32_t now) {
-    bool draining = drainEnvelope > 0.001f;
-    if (!draining) {
-        bloomHitIntensity = 0.0f;
-    }
-
-    if (now - bloomLastMotionMs > MOTION_SETTLE_MS) {
-        bloomColonyEnergy = fminf(1.0f, bloomColonyEnergy + BLOOM_RECOVERY_RAMP * dt);
-    }
+    // Decay flash toward zero
+    bloomFlash *= expf(-bloomFlashDecayRate * dt);
+    if (bloomFlash < 0.005f) bloomFlash = 0.0f;
 
     for (uint16_t i = 0; i < LED_COUNT; i++) {
-        if (!draining) {
-            bloomFlashGlow[i] *= fastDecay(bloomFlashDecay[i], dt * 30.0f);
-            if (bloomFlashGlow[i] < 0.005f) bloomFlashGlow[i] = 0.0f;
-        }
-
         bloomBreathPhase[i] += dt / bloomBreathPeriod[i];
         if (bloomBreathPhase[i] >= 1.0f) bloomBreathPhase[i] -= 1.0f;
 
@@ -853,27 +1004,13 @@ static void renderQuietBloom(float dt, uint32_t now) {
         if (bloomHueT[i] > 1.0f) bloomHueT[i] -= 1.0f;
         else if (bloomHueT[i] < 0.0f) bloomHueT[i] += 1.0f;
 
-        float wakeThresh = bloomHueT[i] * BLOOM_RECOVERY_SPREAD;
-        float ledRecovery = clampf(
-            (bloomColonyEnergy - wakeThresh) / 0.30f, 0.0f, 1.0f);
-
         float breath = (fastSinPhase(bloomBreathPhase[i]) * 0.5f + 0.5f);
-        float breathGlow = BLOOM_BREATH_FLOOR
-            + breath * (bloomBreathPeak[i] - BLOOM_BREATH_FLOOR);
-        breathGlow *= ledRecovery;
+        float breathGlow = bloomBreathFloor
+            + breath * (bloomBreathPeak[i] - bloomBreathFloor);
 
-        if (draining) {
-            float target = breathGlow * bloomHitIntensity * ENERGY_MULTIPLIER;
-            if (target > bloomFlashGlow[i]) {
-                bloomFlashGlow[i] = target;
-                bloomFlashDecay[i] = BLOOM_FLASH_DECAY_LO
-                    + randFloat() * (BLOOM_FLASH_DECAY_HI - BLOOM_FLASH_DECAY_LO);
-            }
-        }
-
-        // ── Layer 1: intensity envelope (0.0–1.0) ──
-        float intensity = fmaxf(breathGlow, bloomFlashGlow[i]);
-        float flashFrac = (bloomFlashGlow[i] > breathGlow) ? 1.0f : 0.0f;
+        // ── Layer 1: intensity = breath + flash bump ──
+        float intensity = clampf(breathGlow + bloomFlash, 0.0f, 1.0f);
+        float flashFrac = (bloomFlash > 0.1f) ? clampf(bloomFlash / 0.3f, 0.0f, 1.0f) : 0.0f;
 
         // ── Layer 2: color lookup (full-range 0–255) ──
         float h = bloomHueT[i];
@@ -884,39 +1021,33 @@ static void renderQuietBloom(float dt, uint32_t now) {
         float colB = lerpf(lerpf(BLOOM_HUE_A_B, BLOOM_HUE_B_B, h),
                            BLOOM_FLASH_B, flashFrac);
 
-        // W channel: ramps in at high intensity, gated by colony energy or flash
+        // W channel: ramps in at high intensity
         float wFrac = clampf((intensity - 0.5f) * 2.0f, 0.0f, 1.0f);
-        float energyGate = clampf((bloomColonyEnergy - 0.7f) / 0.3f, 0.0f, 1.0f);
-        float colW = wFrac * fmaxf(energyGate, flashFrac) * BLOOM_W_SCALE;
+        float colW = wFrac * flashFrac * BLOOM_W_SCALE;
 
         // ── Layer 3: output stage ──
-        float linBright = fastGamma24(intensity) * BLOOM_BRIGHTNESS_CAP;
+        float linBright = fastGamma24(intensity) * bloomBrightnessCap;
 
         uint16_t tR16 = (uint16_t)clampf(colR * linBright * 256.0f, 0, 65535);
         uint16_t tG16 = (uint16_t)clampf(colG * linBright * 256.0f, 0, 65535);
         uint16_t tB16 = (uint16_t)clampf(colB * linBright * 256.0f, 0, 65535);
         uint16_t tW16 = (uint16_t)clampf(colW * linBright * 256.0f, 0, 65535);
 
-        if (tR16 < BLOOM_NOISE_GATE) tR16 = 0;
-        if (tG16 < BLOOM_NOISE_GATE) tG16 = 0;
-        if (tB16 < BLOOM_NOISE_GATE) tB16 = 0;
-        if (tW16 < BLOOM_NOISE_GATE) tW16 = 0;
+        // Noise gate: zero channels below threshold, but only if ALL
+        // channels are below gate — prevents per-channel dropout / hue shift.
+        if (tR16 < BLOOM_NOISE_GATE && tG16 < BLOOM_NOISE_GATE &&
+            tB16 < BLOOM_NOISE_GATE && tW16 < BLOOM_NOISE_GATE) {
+            tR16 = 0; tG16 = 0; tB16 = 0; tW16 = 0;
+        }
 
-        uint8_t rc = deltaSigma(dsR[i], tR16);
-        uint8_t gc = deltaSigma(dsG[i], tG16);
-        uint8_t b  = deltaSigma(dsB[i], tB16);
-        uint8_t w  = deltaSigma(dsW[i], tW16);
+        uint8_t rc = tR16 >> 8;
+        uint8_t gc = tG16 >> 8;
+        uint8_t b  = tB16 >> 8;
+        uint8_t w  = tW16 >> 8;
         setBothPixel(i, rc, gc, b, w);
 
     }
 
-    if (draining) {
-        float drain = drainEnvelope * dt;
-        drain = fminf(drain, bloomColonyEnergy);
-        bloomColonyEnergy -= drain;
-        drainEnvelope *= expf(-4.07f * dt);
-        if (drainEnvelope <= 0.001f) drainEnvelope = 0.0f;
-    }
 }
 
 // ── Sparkle syllable ─────────────────────────────────────────────
@@ -980,7 +1111,7 @@ static void renderSparkleSyllable(float dt, float angleDeg, float tiltBlend,
             colB = colB * (1.0f - tiltBlend) + tiltB * tiltBlend;
         }
 
-        float linBright = fastGamma24(bright) * SPARKLE_BRIGHTNESS_CAP;
+        float linBright = fastGamma24(bright) * sparkleBrightnessCap;
         float colW = 255.0f * (1.0f - tiltBlend);
         float fR = colR * linBright;
         float fG = colG * linBright;
@@ -1030,8 +1161,8 @@ static void resetTwinkleState() {
 }
 
 static void igniteTwinkle(uint16_t i) {
-    float peak = TWINKLE_PEAK_MIN
-        + randFloat() * (TWINKLE_PEAK_MAX - TWINKLE_PEAK_MIN);
+    float peak = twinklePeakMin
+        + randFloat() * (twinklePeakMax - twinklePeakMin);
     // Collision: keep the brighter sparkle, but always restart the attack
     // so a fresh hit re-snaps on.
     if (peak < twkPeak[i] && twkBright[i] > peak) peak = twkPeak[i];
@@ -1041,7 +1172,7 @@ static void igniteTwinkle(uint16_t i) {
 
 static void renderSparkleTwinkle(float dt) {
     // ── Poisson spawn (frame-rate independent) ──
-    float expected = TWINKLE_SPAWN_RATE * dt;
+    float expected = twinkleSpawnRate * dt;
     int nSpawn = (int)expected;                 // floor
     float frac = expected - (float)nSpawn;
     if (randFloat() < frac) nSpawn++;           // one more with prob = frac
@@ -1051,8 +1182,8 @@ static void renderSparkleTwinkle(float dt) {
     }
 
     // ── Advance envelopes + render ──
-    float attackStep = (TWINKLE_ATTACK_S > 0.0f) ? (dt / TWINKLE_ATTACK_S) : 1.0f;
-    float decay = expf(-dt / TWINKLE_TAU_S);
+    float attackStep = (twinkleAttackS > 0.0f) ? (dt / twinkleAttackS) : 1.0f;
+    float decay = expf(-dt / twinkleTauS);
 
     for (uint16_t i = 0; i < LED_COUNT; i++) {
         if (twkAttack[i] < 1.0f) {
@@ -1069,7 +1200,7 @@ static void renderSparkleTwinkle(float dt) {
         }
 
         float bright = twkBright[i];
-        float linBright = fastGamma24(bright) * SPARKLE_BRIGHTNESS_CAP;
+        float linBright = fastGamma24(bright) * sparkleBrightnessCap;
 
         float fR = TWINKLE_COL_R * linBright;
         float fG = TWINKLE_COL_G * linBright;
@@ -1319,14 +1450,8 @@ void loop() {
         }
     }
 
-    if (currentAlg == ALG_QUIET_BLOOM && !connected) {
-        bloomHitIntensity = 0.0f;
-        drainEnvelope *= expf(-4.07f * dt);
-        if (drainEnvelope <= 0.001f) drainEnvelope = 0.0f;
-    }
-
-    if (currentAlg == ALG_QUIET_BLOOM && connected) {
-        if (pktCount != bloomPrevPktCount) {
+    if (currentAlg == ALG_QUIET_BLOOM) {
+        if (espnowPktCount != bloomPrevPktCount) {
             static uint32_t lastBloomPktMs = 0;
             float pktDt = (lastBloomPktMs > 0)
                 ? (now - lastBloomPktMs) / 1000.0f
@@ -1334,7 +1459,7 @@ void loop() {
             if (pktDt > 0.2f) pktDt = 0.2f;
             lastBloomPktMs = now;
             bloomProcessMotion(pktDt, now);
-            bloomPrevPktCount = pktCount;
+            bloomPrevPktCount = espnowPktCount;
         }
     }
 
@@ -1401,6 +1526,21 @@ void loop() {
         case ALG_WHITE_STRESS:
             renderQuietBloom(dt, now);
             break;
+        case ALG_RAW_COLOR:
+            if (rawDither) {
+                uint16_t tR = (uint16_t)rawR * rawBrightness;  // 0–65025
+                uint16_t tG = (uint16_t)rawG * rawBrightness;
+                uint16_t tB = (uint16_t)rawB * rawBrightness;
+                uint16_t tW = (uint16_t)rawW * rawBrightness;
+                for (uint16_t i = 0; i < LED_COUNT; i++) {
+                    uint8_t oR = deltaSigma(dsR[i], tR);
+                    uint8_t oG = deltaSigma(dsG[i], tG);
+                    uint8_t oB = deltaSigma(dsB[i], tB);
+                    uint8_t oW = deltaSigma(dsW[i], tW);
+                    setBothPixel(i, oR, oG, oB, oW);
+                }
+            }
+            break;
     }
 
     // === STICK PIPELINE (green breathe) ===
@@ -1420,7 +1560,7 @@ void loop() {
             lastDbg = now;
             static char line[512];
             int pos = 0;
-            pos += snprintf(line + pos, sizeof(line) - pos, "[PX]");
+            pos += snprintf(line + pos, sizeof(line) - pos, "[PX] espnow=%lu", (unsigned long)espnowPktCount);
             for (uint16_t j = 0; j < LED_COUNT; j += 5) {
                 RgbColor c = stripB.GetPixelColor(j);
                 pos += snprintf(line + pos, sizeof(line) - pos,
@@ -1434,5 +1574,12 @@ void loop() {
     stripB.Show();
     stripStkA.Show();
     stripStkB.Show();
-    delay(1);
+
+    if (currentAlg == ALG_RAW_COLOR && rawDither && rawTargetFps > 0) {
+        uint32_t frameUs = 1000000UL / rawTargetFps;
+        uint32_t elapsed = micros() - now * 1000;
+        if (elapsed < frameUs) delayMicroseconds(frameUs - elapsed);
+    } else {
+        delay(1);
+    }
 }

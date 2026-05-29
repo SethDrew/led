@@ -408,7 +408,7 @@ static inline float lerpf(float a, float b, float t) {
 
 // Noise gate hysteresis: per-pixel flag, true = currently gated off
 static bool gateOff[LED_COUNT];
-#define GATE_ON_THRESH  0.5f   // go dark below this
+#define GATE_ON_THRESH  0.7f   // go dark below this
 #define GATE_OFF_THRESH 1.2f   // re-light above this
 
 // Unified output stage. See forward decl near setBothPixel.
@@ -419,10 +419,7 @@ static void outputPixel(uint16_t i, float r, float g, float b, float w) {
     float sb = b * globalBrightness;
     float sw = w * globalBrightness;
 
-    // Coordinated noise gate + ratio-preserving floor:
-    // Find min non-zero channel. If it's < 1.0, scale all channels up
-    // so the smallest becomes 1.0 (preserving hue ratios). If even the
-    // max channel is below the gate, zero everything.
+    // Hysteresis noise gate: go dark below GATE_ON, re-light above GATE_OFF.
     float maxCh = fmaxf(fmaxf(sr, sg), fmaxf(sb, sw));
     float thresh = gateOff[i] ? GATE_OFF_THRESH : GATE_ON_THRESH;
     if (maxCh < thresh) {
@@ -1068,9 +1065,7 @@ static void renderQuietBloom(float dt, uint32_t now) {
         float breathLin = fastGamma24(breathGlow) * bloomBrightnessCap;
         float flashLin  = bloomFlash * bloomBrightnessCap;
 
-        float maxOut = fmaxf(breathLin, flashLin) * 255.0f;
-        float darkThresh = gateOff[i] ? GATE_OFF_THRESH : GATE_ON_THRESH;
-        bool wouldBeDark = (maxOut < darkThresh);
+        bool wouldBeDark = gateOff[i];
 
         if (wouldBeDark) {
             // Pixel is dark — hold black, drift hue, freeze breath

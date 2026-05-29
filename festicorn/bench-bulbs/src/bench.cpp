@@ -67,7 +67,8 @@ static NeoPixelBus<NeoRgbFeature,  NeoEsp32Rmt1Ws2812xMethod> stripB (LED_COUNT,
 static NeoPixelBus<NeoGrbFeature,  NeoEsp32Rmt2Ws2812xMethod> stripStkA (STICK_A_COUNT, STICK_A_PIN);
 static NeoPixelBus<NeoGrbFeature,  NeoEsp32Rmt3Ws2812xMethod> stripStkB (STICK_B_COUNT, STICK_B_PIN);
 
-// Set a pixel on both Strip A (RGBW) and Strip B (RGB, no W).
+// Low-level raw writer: bytes straight to both strips, no processing.
+// Used by ALG_RAW_COLOR and twinkle's pure-white asymmetric path.
 static inline void setBothPixel(uint16_t i, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
     if (globalBrightness < 1.0f) {
         uint8_t ir = r, ig = g, ib = b, iw = w;
@@ -75,7 +76,6 @@ static inline void setBothPixel(uint16_t i, uint8_t r, uint8_t g, uint8_t b, uin
         g = (uint8_t)(g * globalBrightness);
         b = (uint8_t)(b * globalBrightness);
         w = (uint8_t)(w * globalBrightness);
-        // Hold originally-non-zero channels at 1 to prevent hue shift on fadeout
         if (r | g | b | w) {
             if (ir && !r) r = 1;
             if (ig && !g) g = 1;
@@ -86,6 +86,14 @@ static inline void setBothPixel(uint16_t i, uint8_t r, uint8_t g, uint8_t b, uin
     stripA.SetPixelColor(i, RgbwColor(r, g, b, w));
     stripB.SetPixelColor(i, RgbColor(r, g, b));
 }
+
+// outputPixel — unified output stage — defined after clampf / dsR
+// later in the file. Effects produce floats in 0..255 (post-gamma,
+// post per-effect cap); outputPixel handles brightness scale,
+// coordinated noise gate, optional dither, proportional floor.
+static int outputDitherEnabled = 0;
+#define OUTPUT_NOISE_GATE_F 1.0f
+static void outputPixel(uint16_t i, float r, float g, float b, float w);
 
 // ── Rendering ────────────────────────────────────────────────────
 #define GAMMA 2.4f
@@ -396,6 +404,48 @@ static inline float lerpf(float a, float b, float t) {
     return a + (b - a) * t;
 }
 
+// Unified output stage. See forward decl near setBothPixel.
+// Inputs are 0..255 float per channel (already gamma'd / capped).
+static void outputPixel(uint16_t i, float r, float g, float b, float w) {
+    float sr = r * globalBrightness;
+    float sg = g * globalBrightness;
+    float sb = b * globalBrightness;
+    float sw = w * globalBrightness;
+
+    if (sr < OUTPUT_NOISE_GATE_F && sg < OUTPUT_NOISE_GATE_F &&
+        sb < OUTPUT_NOISE_GATE_F && sw < OUTPUT_NOISE_GATE_F) {
+        sr = sg = sb = sw = 0.0f;
+    }
+
+    uint8_t oR, oG, oB, oW;
+    if (outputDitherEnabled) {
+        uint16_t tR16 = (uint16_t)clampf(sr * 256.0f, 0.0f, 65535.0f);
+        uint16_t tG16 = (uint16_t)clampf(sg * 256.0f, 0.0f, 65535.0f);
+        uint16_t tB16 = (uint16_t)clampf(sb * 256.0f, 0.0f, 65535.0f);
+        uint16_t tW16 = (uint16_t)clampf(sw * 256.0f, 0.0f, 65535.0f);
+        oR = deltaSigma(dsR[i], tR16);
+        oG = deltaSigma(dsG[i], tG16);
+        oB = deltaSigma(dsB[i], tB16);
+        oW = deltaSigma(dsW[i], tW16);
+    } else {
+        oR = (uint8_t)clampf(sr, 0.0f, 255.0f);
+        oG = (uint8_t)clampf(sg, 0.0f, 255.0f);
+        oB = (uint8_t)clampf(sb, 0.0f, 255.0f);
+        oW = (uint8_t)clampf(sw, 0.0f, 255.0f);
+    }
+
+    // Proportional floor: protect originally-nonzero channels from rounding to zero.
+    if (oR | oG | oB | oW) {
+        if (r > 0.0f && oR == 0) oR = 1;
+        if (g > 0.0f && oG == 0) oG = 1;
+        if (b > 0.0f && oB == 0) oB = 1;
+        if (w > 0.0f && oW == 0) oW = 1;
+    }
+
+    stripA.SetPixelColor(i, RgbwColor(oR, oG, oB, oW));
+    stripB.SetPixelColor(i, RgbColor(oR, oG, oB));
+}
+
 static float computeGyroRate(int16_t gx, int16_t gy, int16_t gz) {
     float fx = (float)gx, fy = (float)gy, fz = (float)gz;
     return sqrtf(fx * fx + fy * fy + fz * fz) / 131.0f;
@@ -697,10 +747,7 @@ static void renderGravitySparkle(float dt) {
         float bright = clampf(maxCh / 255.0f, 0.0f, 1.0f);
         float linBright = fastGamma24(bright) * gsBrightnessCap;
         float norm = (bright > 0.001f) ? (linBright / bright) : 0.0f;
-        uint8_t rr = (uint8_t)clampf(r * norm + 0.5f, 0, 255);
-        uint8_t gg = (uint8_t)clampf(g * norm + 0.5f, 0, 255);
-        uint8_t bb = (uint8_t)clampf(b * norm + 0.5f, 0, 255);
-        setBothPixel(i, rr, gg, bb, 0);
+        outputPixel(i, r * norm, g * norm, b * norm, 0.0f);
     }
 }
 
@@ -731,10 +778,10 @@ static void renderIdle(float dt) {
         float hue = fmodf(pos + idlePhase, 1.0f);
         uint8_t idx = (uint8_t)(hue * 255.0f);
         float bright = fastGamma24(idleBrightness);
-        setBothPixel(i,
-            (uint8_t)(oklchVarL[idx][0] * bright),
-            (uint8_t)(oklchVarL[idx][1] * bright),
-            (uint8_t)(oklchVarL[idx][2] * bright), 0);
+        outputPixel(i,
+            (float)oklchVarL[idx][0] * bright,
+            (float)oklchVarL[idx][1] * bright,
+            (float)oklchVarL[idx][2] * bright, 0.0f);
     }
 }
 
@@ -869,6 +916,8 @@ static const Param PARAMS[] = {
     // global
     { "GLOBAL_BRIGHTNESS",      Param::F32, &globalBrightness,     0.0f,  2.0f,   nullptr },
     { "GLOBAL_SENSITIVITY",     Param::F32, &globalSensitivity,    0.05f, 2.0f,   nullptr },
+    // output stage
+    { "OUTPUT_DITHER",          Param::I32, &outputDitherEnabled,  0.0f,  1.0f,  nullptr },
 };
 static const size_t PARAM_COUNT = sizeof(PARAMS) / sizeof(PARAMS[0]);
 
@@ -1027,25 +1076,11 @@ static void renderQuietBloom(float dt, uint32_t now) {
 
         // ── Layer 3: output stage ──
         float linBright = fastGamma24(intensity) * bloomBrightnessCap;
-
-        uint16_t tR16 = (uint16_t)clampf(colR * linBright * 256.0f, 0, 65535);
-        uint16_t tG16 = (uint16_t)clampf(colG * linBright * 256.0f, 0, 65535);
-        uint16_t tB16 = (uint16_t)clampf(colB * linBright * 256.0f, 0, 65535);
-        uint16_t tW16 = (uint16_t)clampf(colW * linBright * 256.0f, 0, 65535);
-
-        // Noise gate: zero channels below threshold, but only if ALL
-        // channels are below gate — prevents per-channel dropout / hue shift.
-        if (tR16 < BLOOM_NOISE_GATE && tG16 < BLOOM_NOISE_GATE &&
-            tB16 < BLOOM_NOISE_GATE && tW16 < BLOOM_NOISE_GATE) {
-            tR16 = 0; tG16 = 0; tB16 = 0; tW16 = 0;
-        }
-
-        uint8_t rc = tR16 >> 8;
-        uint8_t gc = tG16 >> 8;
-        uint8_t b  = tB16 >> 8;
-        uint8_t w  = tW16 >> 8;
-        setBothPixel(i, rc, gc, b, w);
-
+        outputPixel(i,
+            colR * linBright,
+            colG * linBright,
+            colB * linBright,
+            colW * linBright);
     }
 
 }
@@ -1113,26 +1148,11 @@ static void renderSparkleSyllable(float dt, float angleDeg, float tiltBlend,
 
         float linBright = fastGamma24(bright) * sparkleBrightnessCap;
         float colW = 255.0f * (1.0f - tiltBlend);
-        float fR = colR * linBright;
-        float fG = colG * linBright;
-        float fB = colB * linBright;
-        float fW = colW * linBright;
-
-        uint16_t tR16 = (uint16_t)clampf(fR * 256.0f, 0, 65535);
-        uint16_t tG16 = (uint16_t)clampf(fG * 256.0f, 0, 65535);
-        uint16_t tB16 = (uint16_t)clampf(fB * 256.0f, 0, 65535);
-        uint16_t tW16 = (uint16_t)clampf(fW * 256.0f, 0, 65535);
-
-        if (tR16 < 256) tR16 = 0;
-        if (tG16 < 256) tG16 = 0;
-        if (tB16 < 256) tB16 = 0;
-        if (tW16 < 256) tW16 = 0;
-
-        uint8_t r = deltaSigma(dsR[i], tR16);
-        uint8_t g = deltaSigma(dsG[i], tG16);
-        uint8_t b = deltaSigma(dsB[i], tB16);
-        uint8_t w = deltaSigma(dsW[i], tW16);
-        setBothPixel(i, r, g, b, w);
+        outputPixel(i,
+            colR * linBright,
+            colG * linBright,
+            colB * linBright,
+            colW * linBright);
     }
 }
 
@@ -1202,48 +1222,30 @@ static void renderSparkleTwinkle(float dt) {
         float bright = twkBright[i];
         float linBright = fastGamma24(bright) * sparkleBrightnessCap;
 
-        float fR = TWINKLE_COL_R * linBright;
-        float fG = TWINKLE_COL_G * linBright;
-        float fB = TWINKLE_COL_B * linBright;
-        float fW = TWINKLE_COL_W * linBright;
-
-        uint16_t tR16 = (uint16_t)clampf(fR * 256.0f, 0, 65535);
-        uint16_t tG16 = (uint16_t)clampf(fG * 256.0f, 0, 65535);
-        uint16_t tB16 = (uint16_t)clampf(fB * 256.0f, 0, 65535);
-        uint16_t tW16 = (uint16_t)clampf(fW * 256.0f, 0, 65535);
-
-        if (tR16 < 256) tR16 = 0;
-        if (tG16 < 256) tG16 = 0;
-        if (tB16 < 256) tB16 = 0;
-        if (tW16 < 256) tW16 = 0;
-
-        uint8_t r = deltaSigma(dsR[i], tR16);
-        uint8_t g = deltaSigma(dsG[i], tG16);
-        uint8_t b = deltaSigma(dsB[i], tB16);
-        uint8_t w = deltaSigma(dsW[i], tW16);
-
-        // If the color is pure-white (RGB weights all 0, white on W only),
-        // drive Strip A's W channel alone (clean RGBW white) and fold the
-        // white into Strip B's r=g=b (it has no W). This asymmetry can't go
-        // through setBothPixel, so write the strips directly, applying the
-        // same globalBrightness dimming setBothPixel would.
+        // Pure-white asymmetric write: Strip A drives W only (clean RGBW
+        // white), Strip B has no W so we fold white into r=g=b. This path
+        // can't go through outputPixel (asymmetric A vs B). Always uses
+        // delta-sigma dither — twinkle is dim by design and needs it.
         bool pureWhite = (TWINKLE_COL_R == 0.0f
                           && TWINKLE_COL_G == 0.0f
                           && TWINKLE_COL_B == 0.0f);
         if (pureWhite) {
-            float fRGB = TWINKLE_RGB_FALLBACK * linBright;
+            float fW   = TWINKLE_COL_W       * linBright * globalBrightness;
+            float fRGB = TWINKLE_RGB_FALLBACK * linBright * globalBrightness;
+            uint16_t tW16   = (uint16_t)clampf(fW   * 256.0f, 0, 65535);
             uint16_t tRGB16 = (uint16_t)clampf(fRGB * 256.0f, 0, 65535);
+            if (tW16   < 256) tW16   = 0;
             if (tRGB16 < 256) tRGB16 = 0;
+            uint8_t w   = deltaSigma(dsW[i], tW16);
             uint8_t rgb = deltaSigma(dsB[i], tRGB16);
-            if (globalBrightness < 1.0f) {
-                w   = (uint8_t)(w   * globalBrightness);
-                rgb = (uint8_t)(rgb * globalBrightness);
-            }
             stripA.SetPixelColor(i, RgbwColor(0, 0, 0, w));
             stripB.SetPixelColor(i, RgbColor(rgb, rgb, rgb));
         } else {
-            // setBothPixel already applies globalBrightness to all channels.
-            setBothPixel(i, r, g, b, w);
+            outputPixel(i,
+                TWINKLE_COL_R * linBright,
+                TWINKLE_COL_G * linBright,
+                TWINKLE_COL_B * linBright,
+                TWINKLE_COL_W * linBright);
         }
     }
 }
@@ -1379,22 +1381,7 @@ static void renderFire(float dt, bool withDropout, float tiltBlend) {
         float fG = oG * rgbBlend;
         float fB = oB * rgbBlend;
         float fW = avgRGB * (1.0f - rgbBlend) * (1.0f - tiltBlend);
-
-        uint16_t tR16 = (uint16_t)clampf(fR * 256.0f, 0, 65535);
-        uint16_t tG16 = (uint16_t)clampf(fG * 256.0f, 0, 65535);
-        uint16_t tB16 = (uint16_t)clampf(fB * 256.0f, 0, 65535);
-        uint16_t tW16 = (uint16_t)clampf(fW * 256.0f, 0, 65535);
-
-        if (tR16 < 256) tR16 = 0;
-        if (tG16 < 256) tG16 = 0;
-        if (tB16 < 256) tB16 = 0;
-        if (tW16 < 256) tW16 = 0;
-
-        uint8_t r = deltaSigma(dsR[i], tR16);
-        uint8_t g = deltaSigma(dsG[i], tG16);
-        uint8_t b = deltaSigma(dsB[i], tB16);
-        uint8_t w = deltaSigma(dsW[i], tW16);
-        setBothPixel(i, r, g, b, w);
+        outputPixel(i, fR, fG, fB, fW);
     }
 }
 
@@ -1562,9 +1549,9 @@ void loop() {
             int pos = 0;
             pos += snprintf(line + pos, sizeof(line) - pos, "[PX] espnow=%lu", (unsigned long)espnowPktCount);
             for (uint16_t j = 0; j < LED_COUNT; j += 5) {
-                RgbColor c = stripB.GetPixelColor(j);
+                RgbwColor c = stripA.GetPixelColor(j);
                 pos += snprintf(line + pos, sizeof(line) - pos,
-                    " %d:%d/%d/%d", j, c.R, c.G, c.B);
+                    " %d:%d/%d/%d/%d", j, c.R, c.G, c.B, c.W);
             }
             Serial.println(line);
         }

@@ -64,6 +64,13 @@ firmware_by_role:
       RGB on GPIO 18 — driven by gyro-sense v1 sender. Migrated from C3
       (GPIO 10/21) to classic ESP32 to fix single-core WiFi/RMT stutter.
       Dithering disabled, render target 60 FPS.
+  biolum:
+    deployment: static
+    source: festicorn/biolum/src/bloom.cpp
+    packet_format: v1-telemetry-16B (receiver, 6 senders)
+    notes: |
+      6-strip quiet bloom installation. 6× WS2812B RGB strips, one gyro
+      sender per strip. ESP-NOW receiver demuxes by sender MAC.
   noodles:
     deployment: dynamic
     source: null
@@ -221,7 +228,23 @@ boards:
     last_seq: 24
     git_sha: ca6d5e5
     dirty: true
-  notes: ''
+  notes: |
+    Dead IMU — gyro variance ~6000-7000 at rest (threshold 200). Joints
+    reflowed, no improvement. Replaced by 10:00:3B:B1:9E:F0 for biolum.
+- mac: 10:00:3B:B1:9E:F0
+  id: ''
+  chip: esp32-c3
+  role: bulb-sender
+  first_seen: '2026-05-29T00:00:00Z'
+  last_validated:
+    utc: '2026-05-29T00:00:00Z'
+    port: /dev/cu.usbmodem1114401
+    channel: 6
+    imu_status: ok
+    git_sha: ''
+  notes: |
+    Replacement for dead-IMU board F8:08. Standard wiring (SDA=8, SCL=7).
+    Assigned to biolum strip 5 (pin 19).
 
 # ── v0.1 duck installation (original-duck/) ──────────────────────────
 - mac: 38:44:BE:45:D9:CC
@@ -294,16 +317,30 @@ boards:
     WiFi/RMT stutter. Strip A SK6812 RGBW on GPIO 4 (was GPIO 10),
     Strip B WS2812 RGB on GPIO 18 (was GPIO 21).
 
+# ── biolum (6-strip bloom receiver) ──────────────────────────────────
+- mac: B4:BF:E9:C9:01:38
+  id: 'biolum-b'
+  chip: esp32-d0wd-v3
+  role: biolum
+  first_seen: '2026-05-29T00:00:00Z'
+  last_validated:
+    utc: '2026-05-29T00:00:00Z'
+    port: /dev/cu.usbserial-11130
+  notes: |
+    Second biolum receiver board. Pin 15 instead of 16 (differs from
+    board A). 6× WS2812B RGB strips on GPIO 4, 15, 17, 5, 18, 19.
+    150 LEDs per strip.
+
 # ── classic-ESP32 fixtures ───────────────────────────────────────────
 - mac: F4:2D:C9:6D:B2:58
-  id: 'noodles'
+  id: 'biolum-a'
   chip: esp32-d0wd-v3
-  role: noodles
+  role: biolum
   first_seen: '2026-04-28T18:00:00Z'
   notes: |
-    Formerly test-receiver. Repurposed 2026-05-06 for noodles installation.
-    2× 150 LED strips (WS2812 GRB) on GPIO 4 (strip A) and GPIO 19 (strip B).
-    CH340 USB serial, port /dev/cu.usbserial-11430 (re-enumerates on replug).
+    Formerly test-receiver, then noodles. Repurposed 2026-05-29 for biolum.
+    6× WS2812B RGB strips on GPIO 4, 16, 17, 5, 18, 19. 150 LEDs per strip.
+    CH340 USB serial, port /dev/cu.usbserial-111440 (re-enumerates on replug).
 - mac: null
   id: 'unknown-classic-1110'
   chip: esp32

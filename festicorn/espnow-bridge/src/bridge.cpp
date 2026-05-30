@@ -19,34 +19,16 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 
-static const char* WIFI_SSID_TARGET = "cuteplant";
-#define CHANNEL_FALLBACK 1
-#define CHANNEL_RESCAN_MS (5UL * 60UL * 1000UL)
+#define FIXED_CHANNEL 6
 
 static uint8_t broadcastAddr[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-static uint8_t currentChannel = CHANNEL_FALLBACK;
-static uint32_t lastScanMs = 0;
+static uint8_t currentChannel = FIXED_CHANNEL;
 
 static const uint8_t FRAME_M0 = 0xA5;
 static const uint8_t FRAME_M1 = 0x5A;
 #define MAX_PAYLOAD 250
 
-static uint8_t scanForSsidChannel(const char* ssid) {
-    int n = WiFi.scanNetworks(false, false, true, 120);
-    uint8_t found = 0;
-    int8_t bestRssi = -127;
-    for (int i = 0; i < n; i++) {
-        if (WiFi.SSID(i) == ssid) {
-            int8_t rssi = WiFi.RSSI(i);
-            if (rssi > bestRssi) { bestRssi = rssi; found = WiFi.channel(i); }
-        }
-    }
-    WiFi.scanDelete();
-    return found;
-}
-
 static void applyChannel(uint8_t ch) {
-    if (ch == 0) ch = CHANNEL_FALLBACK;
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
     esp_wifi_set_promiscuous(false);
@@ -74,6 +56,11 @@ static uint16_t rxIdx = 0;
 static void serialTick() {
     while (Serial.available()) {
         uint8_t b = (uint8_t)Serial.read();
+        if (b == '?' && rxState == WAIT_M0) {
+            Serial.printf("[BOOT] role=bridge MAC=%s fw=bridge ch=%u\n",
+                          WiFi.macAddress().c_str(), currentChannel);
+            continue;
+        }
         switch (rxState) {
             case WAIT_M0:
                 if (b == FRAME_M0) rxState = WAIT_M1;
@@ -111,11 +98,9 @@ void setup() {
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
 
-    uint8_t ch = scanForSsidChannel(WIFI_SSID_TARGET);
-    Serial.printf("[BOOT] role=bridge MAC=%s fw=bridge ch=%u ssid_found=%d\n",
-                  WiFi.macAddress().c_str(), ch ? ch : CHANNEL_FALLBACK, ch ? 1 : 0);
-    applyChannel(ch ? ch : CHANNEL_FALLBACK);
-    lastScanMs = millis();
+    Serial.printf("[BOOT] role=bridge MAC=%s fw=bridge ch=%u\n",
+                  WiFi.macAddress().c_str(), FIXED_CHANNEL);
+    applyChannel(FIXED_CHANNEL);
 
     esp_now_init();
     esp_now_register_recv_cb(onRecv);
@@ -130,11 +115,4 @@ void setup() {
 
 void loop() {
     serialTick();
-
-    uint32_t now = millis();
-    if (now - lastScanMs > CHANNEL_RESCAN_MS) {
-        uint8_t newCh = scanForSsidChannel(WIFI_SSID_TARGET);
-        if (newCh && newCh != currentChannel) applyChannel(newCh);
-        lastScanMs = millis();
-    }
 }

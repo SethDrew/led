@@ -2,35 +2,91 @@
 """
 bench-bulbs operator UI — effect selector + per-effect runtime knobs.
 
-Opens a browser UI. Talks to ESP32 over serial:
-  - single-char effect commands (b/g/t/y/f/m/i/w/x/c)
-  - `!P KEY=value` to set runtime params
-  - `!P?` on startup to read current values
+Auto-detects ESP-NOW bridge or direct bench-bulbs serial port.
+Opens a browser UI on localhost:8322.
 
 Usage:
-  python operator.py [serial_port]
+  python operator.py              # auto-detect
+  python operator.py /dev/cu...   # explicit port
 """
 
 import sys
+import glob
 import time
-import threading
-import serial
-import webbrowser
 import json
+import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-PORT = '/dev/cu.usbserial-0001'
+try:
+    import serial
+except ImportError:
+    print("pip install pyserial")
+    sys.exit(1)
+
 BAUD = 460800
 HTTP_PORT = 8322
+CMD_MAGIC = 0xC0
 
 ser = None
-params = {}        # name -> current float/int value
-params_lock = threading.Lock()
+use_bridge = False
 last_status = "ready"
 
 
-# ── per-effect knob definitions (must mirror firmware PARAMS table) ──
-# Each knob: (key, label, lo, hi, step, is_int)
+def probe_port(port):
+    """Open port briefly, send newline to trigger boot echo, read role."""
+    try:
+        s = serial.Serial(port, BAUD, timeout=0.8)
+        s.reset_input_buffer()
+        s.write(b'\n?\n')
+        time.sleep(0.5)
+        data = s.read(2048).decode('utf-8', 'replace')
+        s.close()
+        for line in data.split('\n'):
+            if '[BOOT]' in line and 'role=' in line:
+                role = line.split('role=')[1].split()[0].strip()
+                return role
+        return None
+    except Exception:
+        return None
+
+
+def find_serial_port():
+    """Auto-detect bridge or bench-bulbs by role in boot line."""
+    candidates = sorted(glob.glob('/dev/cu.usb*'))
+    bridge_port = None
+    direct_port = None
+    for port in candidates:
+        role = probe_port(port)
+        if role == 'bridge':
+            bridge_port = port
+        elif role and 'bench' in role:
+            direct_port = port
+    if bridge_port:
+        return bridge_port, True
+    if direct_port:
+        return direct_port, False
+    if candidates:
+        print(f"Warning: no role detected, using {candidates[0]} as direct serial")
+        return candidates[0], False
+    return None, False
+
+
+def send_cmd(cmd_str):
+    """Send command — framed for bridge, raw for direct serial."""
+    if use_bridge:
+        payload = bytes([CMD_MAGIC]) + cmd_str.encode('utf-8')
+        length = len(payload)
+        if length > 250:
+            return
+        xor = length
+        for b in payload:
+            xor ^= b
+        frame = bytes([0xA5, 0x5A, length]) + payload + bytes([xor & 0xFF])
+        ser.write(frame)
+    else:
+        ser.write((cmd_str + '\n').encode())
+
+
 EFFECTS = {
     'bloom': {
         'cmd': 'b',
@@ -74,16 +130,8 @@ EFFECTS = {
             ('SPARKLE_BRIGHTNESS_CAP', 'brightness cap',   0.01, 0.5, 0.005, False),
         ],
     },
-    'fire_flicker': {
-        'cmd': 'f',
-        'label': 'fire flicker',
-        'knobs': [],
-    },
-    'fire_meld': {
-        'cmd': 'm',
-        'label': 'fire meld',
-        'knobs': [],
-    },
+    'fire_flicker': {'cmd': 'f', 'label': 'fire flicker', 'knobs': []},
+    'fire_meld':    {'cmd': 'm', 'label': 'fire meld',    'knobs': []},
     'idle': {
         'cmd': 'i',
         'label': 'idle',
@@ -97,41 +145,17 @@ EFFECTS = {
 }
 
 GLOBAL_KNOBS = [
-    ('GLOBAL_BRIGHTNESS',  'brightness',  0.0,  2.0, 0.01, False),
-    ('GLOBAL_SENSITIVITY', 'sensitivity', 0.05, 2.0, 0.01, False),
+    ('GLOBAL_BRIGHTNESS',  'brightness',  0.0,  1.0, 0.01, False),
 ]
 
-
-def serial_reader():
-    """Drain serial; capture [PARAM] lines into the params dict."""
-    buf = b''
-    while True:
-        try:
-            data = ser.read(256)
-            if not data:
-                continue
-            buf += data
-            while b'\n' in buf:
-                line, buf = buf.split(b'\n', 1)
-                s = line.decode('utf-8', 'replace').strip()
-                if s.startswith('[PARAM]'):
-                    rest = s[len('[PARAM]'):].strip()
-                    if '=' in rest:
-                        k, v = rest.split('=', 1)
-                        k = k.strip()
-                        v = v.strip()
-                        try:
-                            fv = float(v)
-                            with params_lock:
-                                params[k] = fv
-                        except ValueError:
-                            pass
-        except Exception:
-            time.sleep(0.05)
-
-
-def request_param_dump():
-    ser.write(b'!P?\n')
+params = {}
+for eff in EFFECTS.values():
+    for k in eff['knobs']:
+        key, _, lo, hi, _, _ = k
+        params[key] = (lo + hi) / 2
+for k in GLOBAL_KNOBS:
+    key, _, lo, hi, _, _ = k
+    params[key] = 1.0 if 'BRIGHTNESS' in key or 'SENSITIVITY' in key else (lo + hi) / 2
 
 
 HTML = """<!DOCTYPE html>
@@ -161,9 +185,11 @@ HTML = """<!DOCTYPE html>
   #status { color: #666; font-size: 11px; margin-top: 16px;
             border-top: 1px solid #333; padding-top: 8px;
             white-space: pre-wrap; max-height: 80px; overflow-y: auto; }
+  .conn { font-size: 11px; color: #888; }
+  .conn .mode { color: #2a6; font-weight: bold; }
 </style></head><body>
 <h2>bench-bulbs operator</h2>
-<div id="conn" style="font-size:11px;color:#888;">--</div>
+<div class="conn">__MODE__ via __PORT__</div>
 
 <h3>effect</h3>
 <div class="effects" id="effects"></div>
@@ -176,7 +202,6 @@ HTML = """<!DOCTYPE html>
 
 <div class="actions">
   <button onclick="cmd('c')">calibrate</button>
-  <button onclick="refresh()">refresh</button>
 </div>
 
 <div id="status">--</div>
@@ -185,21 +210,13 @@ HTML = """<!DOCTYPE html>
 let EFFECTS = __EFFECTS_JSON__;
 let GLOBALS = __GLOBALS_JSON__;
 let currentEffect = 'bloom';
-let params = {};
+let params = __PARAMS_JSON__;
 
 function setStatus(s) {
   let el = document.getElementById('status');
   let t = new Date().toLocaleTimeString();
   el.textContent = '[' + t + '] ' + s + '\\n' + el.textContent;
   if (el.textContent.length > 1500) el.textContent = el.textContent.slice(0, 1500);
-}
-
-async function refresh() {
-  let r = await fetch('/params');
-  params = await r.json();
-  renderGlobal();
-  renderKnobs();
-  setStatus('refreshed (' + Object.keys(params).length + ' params)');
 }
 
 async function cmd(c) {
@@ -282,9 +299,10 @@ function renderEffects() {
   }
 }
 
-document.getElementById('conn').textContent = 'serial: __PORT__';
 renderEffects();
-refresh();
+renderGlobal();
+renderKnobs();
+cmd(EFFECTS[currentEffect].cmd);
 </script></body></html>"""
 
 
@@ -292,22 +310,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         global last_status
         if self.path == '/' or self.path == '/index.html':
+            mode = 'ESP-NOW bridge' if use_bridge else 'serial'
             html = (HTML
                     .replace('__EFFECTS_JSON__', json.dumps(EFFECTS))
                     .replace('__GLOBALS_JSON__', json.dumps(GLOBAL_KNOBS))
-                    .replace('__PORT__', PORT))
+                    .replace('__PARAMS_JSON__', json.dumps(params))
+                    .replace('__MODE__', mode)
+                    .replace('__PORT__', ser.port if ser else '?'))
             self._respond(200, 'text/html', html)
-        elif self.path == '/params':
-            request_param_dump()
-            time.sleep(0.25)
-            with params_lock:
-                snap = dict(params)
-            self._respond(200, 'application/json', json.dumps(snap))
         elif self.path.startswith('/cmd?'):
             p = self._params()
             c = p.get('c', '')
             if c:
-                ser.write(c.encode() + b'\n')
+                send_cmd(c)
                 last_status = f"cmd {c}"
             self._respond(200, 'text/plain', last_status)
         elif self.path.startswith('/set?'):
@@ -315,12 +330,10 @@ class Handler(BaseHTTPRequestHandler):
             k = p.get('k', '')
             v = p.get('v', '')
             if k and v:
-                line = f'!P {k}={v}\n'
-                ser.write(line.encode())
-                last_status = line.strip()
+                send_cmd(f'!P {k}={v}')
+                last_status = f'!P {k}={v}'
                 try:
-                    with params_lock:
-                        params[k] = float(v)
+                    params[k] = float(v)
                 except ValueError:
                     pass
             self._respond(200, 'text/plain', last_status)
@@ -343,16 +356,21 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global ser, PORT
-    PORT = sys.argv[1] if len(sys.argv) > 1 else PORT
-    ser = serial.Serial(PORT, BAUD, timeout=0.1)
-    print(f"Serial: {PORT}")
-    print(f"UI: http://localhost:{HTTP_PORT}")
+    global ser, use_bridge
+    if len(sys.argv) > 1:
+        port = sys.argv[1]
+        use_bridge = '--bridge' in sys.argv
+        ser = serial.Serial(port, BAUD, timeout=0.1)
+    else:
+        port, use_bridge = find_serial_port()
+        if not port:
+            print("No serial port found")
+            sys.exit(1)
+        ser = serial.Serial(port, BAUD, timeout=0.1)
 
-    threading.Thread(target=serial_reader, daemon=True).start()
-    time.sleep(0.3)
-    request_param_dump()
-    time.sleep(0.5)
+    mode = 'ESP-NOW bridge' if use_bridge else 'serial (direct)'
+    print(f"Port: {port} ({mode})")
+    print(f"UI:   http://localhost:{HTTP_PORT}")
 
     server = HTTPServer(('127.0.0.1', HTTP_PORT), Handler)
     webbrowser.open(f'http://localhost:{HTTP_PORT}')

@@ -238,6 +238,11 @@ static TelemetryPacketV1 espnowPacket = {0};
 static volatile uint8_t espnowPeakAmag = 0;
 static volatile uint8_t espnowPeakGmag = 0;
 
+#define CMD_PKT_MAGIC 0xC0
+static volatile bool espnowCmdPending = false;
+static char espnowCmdBuf[64];
+static volatile uint8_t espnowCmdLen = 0;
+
 void onEspNowReceive(const uint8_t *mac, const uint8_t *data, int len) {
     espnowPktCount++;
     if (len == sizeof(TelemetryPacketV1)) {
@@ -247,6 +252,12 @@ void onEspNowReceive(const uint8_t *mac, const uint8_t *data, int len) {
         if (pkt.gmag_max > espnowPeakGmag) espnowPeakGmag = pkt.gmag_max;
         memcpy((void*)&espnowPacket, &pkt, sizeof(TelemetryPacketV1));
         espnowLastMs = millis();
+    } else if (len >= 2 && data[0] == CMD_PKT_MAGIC && !espnowCmdPending) {
+        uint8_t cmdLen = (len - 1 < (int)sizeof(espnowCmdBuf) - 1) ? len - 1 : sizeof(espnowCmdBuf) - 1;
+        memcpy(espnowCmdBuf, data + 1, cmdLen);
+        espnowCmdBuf[cmdLen] = '\0';
+        espnowCmdLen = cmdLen;
+        espnowCmdPending = true;
     }
 }
 
@@ -1434,6 +1445,11 @@ void loop() {
     lastRenderMs = now;
 
     parseSerialCommands();
+
+    if (espnowCmdPending) {
+        processSerialLine(espnowCmdBuf, espnowCmdLen);
+        espnowCmdPending = false;
+    }
 
     SensorPacket snap;
     uint32_t lastMs;

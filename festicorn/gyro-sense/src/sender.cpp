@@ -36,8 +36,8 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <Preferences.h>
 #include <math.h>
-#include "wifi_credentials_local.h"
 #include "v1_packet.h"
 
 // ── Pin assignments ──────────────────────────────────────────────
@@ -102,11 +102,7 @@ static uint8_t broadcastAddr[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 // Channel rescan interval — receiver follows the home AP; if router moves
 // channel we'd otherwise fall silent. Scan is sync (~2-3s freeze) so keep
 // the cadence loose.
-#define CHANNEL_RESCAN_MS (5UL * 60UL * 1000UL)
-#define CHANNEL_FALLBACK   1
-
-static uint8_t  currentChannel = CHANNEL_FALLBACK;
-static uint32_t lastScanMs     = 0;
+#define FIXED_CHANNEL 6
 
 // v1 wire packet — defined in lib/v1_telemetry/v1_packet.h (shared with receivers).
 
@@ -173,31 +169,6 @@ static inline float companding_decode(uint8_t byte_val, float fs) {
     return r * r * fs;
 }
 
-// ── Channel discovery ────────────────────────────────────────────
-static uint8_t scanForSsidChannel(const char* ssid) {
-    int n = WiFi.scanNetworks(/*async=*/false, /*show_hidden=*/false,
-                              /*passive=*/true, /*max_ms_per_chan=*/120);
-    uint8_t found = 0;
-    int8_t bestRssi = -127;
-    for (int i = 0; i < n; i++) {
-        if (WiFi.SSID(i) == ssid) {
-            int8_t rssi = WiFi.RSSI(i);
-            if (rssi > bestRssi) {
-                bestRssi = rssi;
-                found = WiFi.channel(i);
-            }
-        }
-    }
-    WiFi.scanDelete();
-    return found;
-}
-
-static void applyChannel(uint8_t ch) {
-    if (ch == 0) ch = CHANNEL_FALLBACK;
-    esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-    currentChannel = ch;
-}
-
 // ── MPU init / read ──────────────────────────────────────────────
 
 static void initMPU() {
@@ -256,21 +227,38 @@ static bool readIMU() {
     return true;
 }
 
-// Variance-gated rest detection. Maintains a rolling 0.5 s window (100
-// samples @ 200 Hz) of raw gyro per axis. Each tick computes a MAD-based
-// robust variance (resilient to MEMS resonance bursts on Y-axis) and a
-// median-of-3 pre-filter (rejects single-sample I2C corruption spikes).
-// When below STILL_VAR_THRESH we accumulate the sample into the bias
-// estimator. If motion is detected mid-calibration the qualified-still
-// counter resets. Once we have ~3 s of qualified-still samples
-// (BIAS_TARGET) we latch and proceed.
+// ── NVS bias storage ─────────────────────────────────────────────
+static Preferences prefs;
+
+static bool loadBiasFromNVS() {
+    prefs.begin("gyro", true);
+    bool valid = prefs.getBool("valid", false);
+    if (valid) {
+        gyroBias[0] = prefs.getShort("bx", 0);
+        gyroBias[1] = prefs.getShort("by", 0);
+        gyroBias[2] = prefs.getShort("bz", 0);
+    }
+    prefs.end();
+    return valid;
+}
+
+static void saveBiasToNVS() {
+    prefs.begin("gyro", false);
+    prefs.putBool("valid", true);
+    prefs.putShort("bx", gyroBias[0]);
+    prefs.putShort("by", gyroBias[1]);
+    prefs.putShort("bz", gyroBias[2]);
+    prefs.end();
+}
+
+// ── Background calibration ───────────────────────────────────────
+// Runs in the main loop alongside packet emission. Maintains a rolling
+// variance window; when still, accumulates bias samples. When enough
+// quiet samples are collected AND the new bias differs meaningfully
+// from current, updates gyroBias and saves to NVS.
 //
-// Tiered timeout fallback ensures all boards boot:
-//   >15 s → relax threshold to 200
-//   >25 s → accept whatever bias we have
-//
-// I2C is dropped to 100 kHz during calibration to reduce bit errors,
-// then restored to 400 kHz afterward.
+// The board starts sending immediately — with NVS bias if available,
+// zero bias otherwise. Accel (which bloom uses) needs no calibration.
 
 // Median of 3 helper — rejects single-sample I2C corruption spikes.
 static int16_t med3(int16_t a, int16_t b, int16_t c) {
@@ -318,12 +306,108 @@ static float madVariance(const int16_t* buf, int n) {
     return K * K * madVal * madVal;
 }
 
-static void calibrateGyroBias(float settleSecs) {
+// calibrateGyroBias removed — replaced by greedy NVS load + bgCalibrateTick()
+
+#define BG_ROLL_N           100       // 0.5s @ 200 Hz
+#define BG_STILL_THRESH     200.0f    // counts variance sum
+#define BG_BIAS_TARGET      600       // 3s of still samples
+#define BG_BIAS_DIFF_THRESH 3         // counts change to trigger NVS save
+
+static int16_t  bgRollX[BG_ROLL_N], bgRollY[BG_ROLL_N], bgRollZ[BG_ROLL_N];
+static int      bgRollIdx  = 0;
+static int      bgRollFill = 0;
+static int16_t  bgHistX[3], bgHistY[3], bgHistZ[3];
+static int      bgHistIdx  = 0;
+static int      bgHistFill = 0;
+static int64_t  bgBsx = 0, bgBsy = 0, bgBsz = 0;
+static int      bgBn  = 0;
+static uint32_t bgLastReportMs = 0;
+
+static void bgCalibrateTick() {
+    // Recover raw gyro (undo bias subtraction from readIMU)
+    int16_t rawGx = imuGx, rawGy = imuGy, rawGz = imuGz;
+    if (gyroBiasReady) {
+        rawGx += gyroBias[0]; rawGy += gyroBias[1]; rawGz += gyroBias[2];
+    }
+
+    bgHistX[bgHistIdx] = rawGx;
+    bgHistY[bgHistIdx] = rawGy;
+    bgHistZ[bgHistIdx] = rawGz;
+    bgHistIdx = (bgHistIdx + 1) % 3;
+    if (bgHistFill < 3) bgHistFill++;
+
+    int16_t fx, fy, fz;
+    if (bgHistFill >= 3) {
+        fx = med3(bgHistX[0], bgHistX[1], bgHistX[2]);
+        fy = med3(bgHistY[0], bgHistY[1], bgHistY[2]);
+        fz = med3(bgHistZ[0], bgHistZ[1], bgHistZ[2]);
+    } else {
+        fx = rawGx; fy = rawGy; fz = rawGz;
+    }
+
+    bgRollX[bgRollIdx] = fx;
+    bgRollY[bgRollIdx] = fy;
+    bgRollZ[bgRollIdx] = fz;
+    bgRollIdx = (bgRollIdx + 1) % BG_ROLL_N;
+    if (bgRollFill < BG_ROLL_N) bgRollFill++;
+    if (bgRollFill < BG_ROLL_N) return;
+
+    float vx = madVariance(bgRollX, BG_ROLL_N);
+    float vy = madVariance(bgRollY, BG_ROLL_N);
+    float vz = madVariance(bgRollZ, BG_ROLL_N);
+    float vsum = vx + vy + vz;
+
+    bool still = (vsum < BG_STILL_THRESH);
+
+    if (still) {
+        bgBsx += fx; bgBsy += fy; bgBsz += fz;
+        bgBn++;
+    } else if (bgBn > 0) {
+        bgBsx = bgBsy = bgBsz = 0;
+        bgBn = 0;
+    }
+
+    uint32_t nowMs = millis();
+    if (nowMs - bgLastReportMs >= 2000) {
+        bgLastReportMs = nowMs;
+        Serial.printf("[bg-cal] var=%.0f %s bn=%d/%d bias=%d/%d/%d\n",
+                      vsum, still ? "still" : "moving", bgBn, BG_BIAS_TARGET,
+                      gyroBias[0], gyroBias[1], gyroBias[2]);
+    }
+
+    if (bgBn >= BG_BIAS_TARGET) {
+        int16_t newBx = (int16_t)(bgBsx / bgBn);
+        int16_t newBy = (int16_t)(bgBsy / bgBn);
+        int16_t newBz = (int16_t)(bgBsz / bgBn);
+
+        int diff = abs(newBx - gyroBias[0]) + abs(newBy - gyroBias[1]) + abs(newBz - gyroBias[2]);
+
+        gyroBias[0] = newBx;
+        gyroBias[1] = newBy;
+        gyroBias[2] = newBz;
+        gyroBiasReady = true;
+
+        if (diff >= BG_BIAS_DIFF_THRESH) {
+            saveBiasToNVS();
+            Serial.printf("[bg-cal] UPDATED + SAVED bx=%d by=%d bz=%d (diff=%d, n=%d)\n",
+                          newBx, newBy, newBz, diff, bgBn);
+        } else {
+            Serial.printf("[bg-cal] confirmed bx=%d by=%d bz=%d (diff=%d, no save)\n",
+                          newBx, newBy, newBz, diff);
+        }
+
+        bgBsx = bgBsy = bgBsz = 0;
+        bgBn = 0;
+    }
+}
+
+#if 0  // DEAD CODE — kept for reference only
+static void calibrateGyroBias_REMOVED(float settleSecs) {
     constexpr int   ROLL_N              = 100;        // 0.5 s @ 200 Hz
-    constexpr float STILL_VAR_THRESH    = 50.0f;      // counts² per axis (sum across 3 axes)
-    constexpr float RELAXED_VAR_THRESH  = 200.0f;     // fallback after 15 s
-    constexpr float TIER1_TIMEOUT_S     = 15.0f;      // relax threshold
-    constexpr float TIER2_TIMEOUT_S     = 25.0f;      // accept whatever we have
+    constexpr float STILL_VAR_THRESH    = 200.0f;     // counts² per axis (sum across 3 axes)
+    constexpr float RELAXED_VAR_THRESH  = 300.0f;     // fallback after tier-1
+    constexpr float TIER1_TIMEOUT_S     = 10.0f;      // relax threshold
+    constexpr float TIER2_TIMEOUT_S     = 15.0f;      // accept whatever we have
     const int       BIAS_TARGET         = (int)(settleSecs * IMU_HZ);
 
     // Drop I2C to 100 kHz during calibration to reduce bit errors
@@ -446,6 +530,7 @@ static void calibrateGyroBias(float settleSecs) {
     Serial.printf("[bias] settled bx=%d by=%d bz=%d counts (n=%d)\n",
                   gyroBias[0], gyroBias[1], gyroBias[2], bn);
 }
+#endif  // DEAD CODE
 
 // ── Window accumulation ──────────────────────────────────────────
 
@@ -581,15 +666,8 @@ void setup() {
     WiFi.setTxPower(WIFI_POWER_8_5dBm);
     esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
 
-    Serial.printf("Scanning for '%s'...\n", WIFI_SSID);
-    uint8_t ch = scanForSsidChannel(WIFI_SSID);
-    if (ch) {
-        Serial.printf("Found '%s' on ch=%d\n", WIFI_SSID, ch);
-    } else {
-        Serial.printf("'%s' not visible — falling back to ch=%d\n", WIFI_SSID, CHANNEL_FALLBACK);
-    }
-    applyChannel(ch);
-    lastScanMs = millis();
+    esp_wifi_set_channel(FIXED_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    Serial.printf("Channel fixed to %d\n", FIXED_CHANNEL);
 
     if (esp_now_init() != ESP_OK) {
         Serial.println("ESP-NOW init FAILED");
@@ -620,8 +698,14 @@ void setup() {
         Serial.printf("IMU: ok (accel=±%dg gyro=±%ddps)\n",
                       ACCEL_RANGE_G, GYRO_RANGE_DPS);
         readIMU();   // prime
-        Serial.println("Gyro bias: variance-gated rest detection — set bulb down to calibrate.");
-        calibrateGyroBias(3.0f);
+
+        if (loadBiasFromNVS()) {
+            gyroBiasReady = true;
+            Serial.printf("Gyro bias loaded from NVS: bx=%d by=%d bz=%d\n",
+                          gyroBias[0], gyroBias[1], gyroBias[2]);
+        } else {
+            Serial.println("No saved bias — starting with zero, will calibrate in background");
+        }
     } else {
         Serial.println("IMU: NOT FOUND — sender will idle");
     }
@@ -656,6 +740,7 @@ static void sampleTick() {
     }
     failStreak = 0;
 
+    bgCalibrateTick();
     accumulateSample();
     if (win.filled >= WINDOW_SAMPLES) {
         finalizeAndEmit();
@@ -666,20 +751,6 @@ static void sampleTick() {
 
 void loop() {
     uint32_t nowMs = millis();
-
-    // Periodic channel rescan — heals if router moved channel since boot.
-    // Sync scan freezes the loop ~2-3s; receiver tolerates the gap. Window
-    // accumulator is reset after the rescan to avoid emitting a packet
-    // built from a partial window plus a 3 s stale tail.
-    if (nowMs - lastScanMs > CHANNEL_RESCAN_MS) {
-        uint8_t ch = scanForSsidChannel(WIFI_SSID);
-        if (ch && ch != currentChannel) {
-            Serial.printf("[heal] channel drift %d -> %d\n", currentChannel, ch);
-            applyChannel(ch);
-        }
-        lastScanMs = millis();
-        resetWindow();
-    }
 
     sampleTick();
 }

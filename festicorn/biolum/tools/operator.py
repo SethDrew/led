@@ -72,22 +72,30 @@ def send_cmd(cmd_str):
 
 
 KNOBS = [
-    ('BRIGHTNESS_CAP_A', 'brightness cap (0–64)',  0.05, 1.0,  0.01),
-    ('BRIGHTNESS_CAP_B', 'brightness cap (65–99)', 0.05, 1.0,  0.01),
-    ('REST_G',           'rest threshold (g)',      0.9,  2.0,  0.01),
-    ('BUFFER_DRAIN',     'buffer drain rate',       0.5,  20.0, 0.5),
-    ('FLASH_DECAY_RATE', 'flash decay rate',        0.2,  10.0, 0.1),
-    ('BREATH_FLOOR',     'breath floor',            0.0,  0.5,  0.01),
+    ('BRIGHTNESS_CAP_A',   'brightness cap (0–64)',     0.05, 1.0,  0.01),
+    ('BRIGHTNESS_CAP_B',   'brightness cap (65–99)',    0.05, 1.0,  0.01),
+    ('SURPRISE_RATIO',     'surprise threshold',        1.5,  10.0, 0.1),
+    ('MOTION_GAIN',        'motion gain',               0.5,  20.0, 0.5),
+    ('BUFFER_DRAIN',       'buffer drain rate',         0.5,  20.0, 0.5),
+    ('FLASH_DECAY_RATE',   'flash decay rate',          0.2,  10.0, 0.1),
+    ('SURPRISE_RISE_TAU',  'EMA rise tau (s)',          0.1,  5.0,  0.05),
+    ('SURPRISE_FALL_TAU',  'EMA fall tau (s)',          0.05, 2.0,  0.05),
+    ('GYRO_WEIGHT',        'gyro weight',               0.0,  0.1,  0.001),
+    ('BREATH_FLOOR',       'breath floor',              0.0,  0.5,  0.01),
 ]
 
 params = {}
 defaults = {
-    'BRIGHTNESS_CAP_A': 0.10,
-    'BRIGHTNESS_CAP_B': 0.50,
-    'REST_G': 1.07,
-    'BUFFER_DRAIN': 4.0,
-    'FLASH_DECAY_RATE': 1.5,
-    'BREATH_FLOOR': 0.15,
+    'BRIGHTNESS_CAP_A':   0.10,
+    'BRIGHTNESS_CAP_B':   0.50,
+    'SURPRISE_RATIO':     1.8,
+    'MOTION_GAIN':        2.0,
+    'BUFFER_DRAIN':       15.0,
+    'FLASH_DECAY_RATE':   3.0,
+    'SURPRISE_RISE_TAU':  0.80,
+    'SURPRISE_FALL_TAU':  0.15,
+    'GYRO_WEIGHT':        0.012,
+    'BREATH_FLOOR':       0.15,
 }
 for k in KNOBS:
     key = k[0]

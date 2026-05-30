@@ -19,6 +19,7 @@
 #include <math.h>
 #include <fast_math.h>
 #include "v1_packet.h"
+#include <delta_sigma.h>
 
 // ── Strip layout ─────────────────────────────────────────────────
 #ifndef LEDS_PER_STRIP
@@ -30,10 +31,14 @@ static const uint8_t NUM_STRIPS = 6;
 // ── Bloom parameters (runtime-tunable via operator) ─────────────
 static float bloomBrightnessCapA  = 0.10f;   // LEDs 0–64
 static float bloomBrightnessCapB  = 0.50f;   // LEDs 65–99
-static float bloomRestG           = 1.07f;
-static float bloomBufferDrain     = 4.0f;
-static float bloomFlashDecayRate  = 1.5f;
+static float bloomBufferDrain     = 15.0f;
+static float bloomFlashDecayRate  = 3.0f;
 static float bloomBreathFloor     = 0.15f;
+static float surpriseRiseTau     = 0.80f;
+static float surpriseFallTau     = 0.15f;
+static float surpriseRatio       = 1.8f;
+static float gyroWeight          = 0.012f;
+static float motionGain          = 2.0f;
 
 #define BLOOM_BREATH_MIN_PERIOD 3.0f
 #define BLOOM_BREATH_MAX_PERIOD 8.0f
@@ -73,6 +78,13 @@ static float bloomBreathFloor     = 0.15f;
 static inline float amagGFromByte(uint8_t b) {
     float n = (float)b / 255.0f;
     return n * n * MAG_FS / COUNTS_PER_G;
+}
+
+#define COUNTS_PER_DPS 32.8f
+
+static inline float gmagDpsFromByte(uint8_t b) {
+    float n = (float)b / 255.0f;
+    return n * n * MAG_FS / COUNTS_PER_DPS;
 }
 
 // ── PRNG ─────────────────────────────────────────────────────────
@@ -122,6 +134,7 @@ static volatile uint8_t espnowCmdLen = 0;
 // ── Per-sender ESP-NOW state ─────────────────────────────────────
 static volatile uint32_t senderLastMs[NUM_STRIPS] = {0};
 static volatile uint8_t  senderPeakAmag[NUM_STRIPS] = {0};
+static volatile uint8_t  senderPeakGmag[NUM_STRIPS] = {0};
 static volatile uint32_t senderPktCount[NUM_STRIPS] = {0};
 static volatile uint16_t senderSeq[NUM_STRIPS] = {0};
 static volatile uint16_t senderPrevSeq[NUM_STRIPS] = {0};
@@ -151,6 +164,7 @@ void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
     TelemetryPacketV1 pkt;
     memcpy(&pkt, data, sizeof(TelemetryPacketV1));
     if (pkt.amag_mean > senderPeakAmag[idx]) senderPeakAmag[idx] = pkt.amag_mean;
+    if (pkt.gmag_mean > senderPeakGmag[idx]) senderPeakGmag[idx] = pkt.gmag_mean;
     senderPrevSeq[idx] = senderSeq[idx];
     senderSeq[idx] = pkt.seq;
     senderLastMs[idx] = millis();
@@ -191,9 +205,14 @@ struct BloomStrip {
     float hueDrift[LEDS_PER_STRIP];
     float blackoutTimer[LEDS_PER_STRIP];
     bool  gateOff[LEDS_PER_STRIP];
+    uint16_t ditherR[LEDS_PER_STRIP];
+    uint16_t ditherG[LEDS_PER_STRIP];
+    uint16_t ditherB[LEDS_PER_STRIP];
     float flash;
     float energyBuffer;
     uint32_t prevPktCount;
+    float motionEma;
+    bool  emaSeeded;
 };
 
 static BloomStrip bloom[NUM_STRIPS];
@@ -202,6 +221,8 @@ static void resetBloomStrip(BloomStrip &bs) {
     bs.flash = 0.0f;
     bs.energyBuffer = 0.0f;
     bs.prevPktCount = 0;
+    bs.motionEma = 0.0f;
+    bs.emaSeeded = false;
     for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
         bs.breathPhase[i]  = randFloat();
         bs.breathPeriod[i] = BLOOM_BREATH_MIN_PERIOD
@@ -214,21 +235,40 @@ static void resetBloomStrip(BloomStrip &bs) {
         bs.hueDrift[i]     = (randFloat() > 0.5f) ? rate : -rate;
         bs.blackoutTimer[i] = 0.0f;
         bs.gateOff[i]      = false;
+        bs.ditherR[i] = 0;
+        bs.ditherG[i] = 0;
+        bs.ditherB[i] = 0;
     }
 }
 
 // ── Bloom motion processing (per strip) ──────────────────────────
 static void bloomProcessMotion(uint8_t s) {
     uint8_t peakAmag = senderPeakAmag[s];
+    uint8_t peakGmag = senderPeakGmag[s];
     senderPeakAmag[s] = 0;
+    senderPeakGmag[s] = 0;
 
     uint16_t dSeq = senderSeq[s] - senderPrevSeq[s];
     float pktDt = (dSeq > 0 && dSeq < 250) ? (float)dSeq / SENSOR_HZ : (1.0f / SENSOR_HZ);
 
-    float amagG = amagGFromByte(peakAmag);
-    float excess = fmaxf(0.0f, amagG - bloomRestG);
+    float aG   = amagGFromByte(peakAmag);
+    float gDps = gmagDpsFromByte(peakGmag);
+    float motion = fmaxf(aG, gDps * gyroWeight);
 
-    bloom[s].energyBuffer += excess * pktDt * 3.0f;
+    BloomStrip &bs = bloom[s];
+
+    if (!bs.emaSeeded) {
+        bs.motionEma = motion;
+        bs.emaSeeded = true;
+        return;
+    }
+
+    float alpha = fminf(1.0f, pktDt / ((motion > bs.motionEma) ? surpriseRiseTau : surpriseFallTau));
+    bs.motionEma += alpha * (motion - bs.motionEma);
+
+    float excess = fmaxf(0.0f, motion - bs.motionEma * surpriseRatio);
+    bs.energyBuffer += excess * pktDt * motionGain;
+    if (bs.energyBuffer > 0.5f) bs.energyBuffer = 0.5f;
 }
 
 // ── Bloom render (per strip) ─────────────────────────────────────
@@ -244,39 +284,33 @@ static void renderBloomStrip(uint8_t s, float dt) {
     bs.flash *= expf(-bloomFlashDecayRate * dt);
     if (bs.flash < 0.005f) bs.flash = 0.0f;
 
+    // Hoist per-strip constants out of pixel loop
+    float flashA = bs.flash * bloomBrightnessCapA;
+    float flashB = bs.flash * bloomBrightnessCapB;
+    float flashFrac = (bs.flash > 0.1f) ? clampf(bs.flash / 0.3f, 0.0f, 1.0f) : 0.0f;
+    float oneMinusFF = 1.0f - flashFrac;
     for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
-        float cap = (i < 65) ? bloomBrightnessCapA : bloomBrightnessCapB;
-        float breath = (fastSinPhase(bs.breathPhase[i]) * 0.5f + 0.5f);
-        float breathGlow = bloomBreathFloor
-            + breath * (bs.breathPeak[i] - bloomBreathFloor);
+        float breath = fastSinPhase(bs.breathPhase[i]) * 0.5f + 0.5f;
+        float breathGlow = bloomBreathFloor + breath * (bs.breathPeak[i] - bloomBreathFloor);
+        bool zoneB = (i >= 65);
+        float cap = zoneB ? bloomBrightnessCapB : bloomBrightnessCapA;
         float breathLin = fastGamma24(breathGlow) * cap;
-        float flashLin  = bs.flash * cap;
+        float flashLin  = zoneB ? flashB : flashA;
 
-        // Always advance phase + hue
         bs.breathPhase[i] += dt / bs.breathPeriod[i];
         if (bs.breathPhase[i] >= 1.0f) bs.breathPhase[i] -= 1.0f;
         bs.hueT[i] += bs.hueDrift[i] * dt;
         if (bs.hueT[i] > 1.0f) bs.hueT[i] -= 1.0f;
         else if (bs.hueT[i] < 0.0f) bs.hueT[i] += 1.0f;
 
-        float flashFrac = (bs.flash > 0.1f) ? clampf(bs.flash / 0.3f, 0.0f, 1.0f) : 0.0f;
-
         float h = bs.hueT[i];
         float baseR = lerpf(BLOOM_HUE_A_R, BLOOM_HUE_B_R, h);
         float baseG = lerpf(BLOOM_HUE_A_G, BLOOM_HUE_B_G, h);
         float baseB = lerpf(BLOOM_HUE_A_B, BLOOM_HUE_B_B, h);
 
-        float bR = baseR * breathLin;
-        float bG = baseG * breathLin;
-        float bB = baseB * breathLin;
-
-        float fR = lerpf(baseR, BLOOM_FLASH_R, flashFrac) * flashLin;
-        float fG = lerpf(baseG, BLOOM_FLASH_G, flashFrac) * flashLin;
-        float fB = lerpf(baseB, BLOOM_FLASH_B, flashFrac) * flashLin;
-
-        float oR = fminf(bR + fR, 255.0f);
-        float oG = fminf(bG + fG, 255.0f);
-        float oB = fminf(bB + fB, 255.0f);
+        float oR = baseR * breathLin + (baseR * oneMinusFF + BLOOM_FLASH_R * flashFrac) * flashLin;
+        float oG = baseG * breathLin + (baseG * oneMinusFF + BLOOM_FLASH_G * flashFrac) * flashLin;
+        float oB = baseB * breathLin + (baseB * oneMinusFF + BLOOM_FLASH_B * flashFrac) * flashLin;
 
         // Hysteresis noise gate with blackout hold
         float maxCh = fmaxf(fmaxf(oR, oG), oB);
@@ -295,14 +329,15 @@ static void renderBloomStrip(uint8_t s, float dt) {
             }
         }
 
-        uint8_t r8 = (uint8_t)clampf(oR, 0.0f, 255.0f);
-        uint8_t g8 = (uint8_t)clampf(oG, 0.0f, 255.0f);
-        uint8_t b8 = (uint8_t)clampf(oB, 0.0f, 255.0f);
-        if (r8 | g8 | b8) {
-            if (!r8 && oR > 0.0f) r8 = 1;
-            if (!g8 && oG > 0.0f) g8 = 1;
-            if (!b8 && oB > 0.0f) b8 = 1;
+        uint16_t t16R = (uint16_t)fminf(oR * 256.0f, 65535.0f);
+        uint16_t t16G = (uint16_t)fminf(oG * 256.0f, 65535.0f);
+        uint16_t t16B = (uint16_t)fminf(oB * 256.0f, 65535.0f);
+        if ((t16R | t16G | t16B) == 0) {
+            bs.ditherR[i] = bs.ditherG[i] = bs.ditherB[i] = 0;
         }
+        uint8_t r8 = deltaSigma(bs.ditherR[i], t16R);
+        uint8_t g8 = deltaSigma(bs.ditherG[i], t16G);
+        uint8_t b8 = deltaSigma(bs.ditherB[i], t16B);
 
         setPixel(s, i, r8, g8, b8);
     }
@@ -321,10 +356,14 @@ struct Param {
 static const Param PARAMS[] = {
     { "BRIGHTNESS_CAP_A", Param::F32, &bloomBrightnessCapA,  0.05f, 1.0f  },
     { "BRIGHTNESS_CAP_B", Param::F32, &bloomBrightnessCapB,  0.05f, 1.0f  },
-    { "REST_G",           Param::F32, &bloomRestG,           0.9f,  2.0f  },
-    { "BUFFER_DRAIN",     Param::F32, &bloomBufferDrain,     0.5f,  20.0f },
-    { "FLASH_DECAY_RATE", Param::F32, &bloomFlashDecayRate,  0.2f,  10.0f },
-    { "BREATH_FLOOR",     Param::F32, &bloomBreathFloor,     0.0f,  0.5f  },
+    { "SURPRISE_RISE_TAU", Param::F32, &surpriseRiseTau,      0.1f,  5.0f  },
+    { "SURPRISE_FALL_TAU", Param::F32, &surpriseFallTau,     0.05f, 2.0f  },
+    { "SURPRISE_RATIO",    Param::F32, &surpriseRatio,       1.5f,  10.0f },
+    { "GYRO_WEIGHT",       Param::F32, &gyroWeight,          0.0f,  0.1f  },
+    { "MOTION_GAIN",       Param::F32, &motionGain,          0.5f,  20.0f },
+    { "BUFFER_DRAIN",      Param::F32, &bloomBufferDrain,    0.5f,  20.0f },
+    { "FLASH_DECAY_RATE",  Param::F32, &bloomFlashDecayRate, 0.2f,  10.0f },
+    { "BREATH_FLOOR",      Param::F32, &bloomBreathFloor,    0.0f,  0.5f  },
 };
 static const size_t PARAM_COUNT = sizeof(PARAMS) / sizeof(PARAMS[0]);
 
@@ -435,17 +474,23 @@ void loop() {
     if (dt > 0.1f) dt = 0.1f;
     lastRenderMs = now;
 
+    uint32_t t0 = micros();
+
     for (uint8_t s = 0; s < NUM_STRIPS; s++) {
-        // Process motion if new packets arrived
         if (senderPktCount[s] != bloom[s].prevPktCount) {
             bloomProcessMotion(s);
             bloom[s].prevPktCount = senderPktCount[s];
         }
-
         renderBloomStrip(s, dt);
     }
 
+    uint32_t t1 = micros();
     showAll();
+    uint32_t t2 = micros();
+
+    static uint32_t renderUsAccum = 0, showUsAccum = 0;
+    renderUsAccum += (t1 - t0);
+    showUsAccum   += (t2 - t1);
 
     // Process ESP-NOW commands
     if (espnowCmdPending) {
@@ -457,7 +502,17 @@ void loop() {
 
     // Status logging
     static uint32_t lastLogMs = 0;
+    static uint32_t frameCount = 0;
+    frameCount++;
     if (now - lastLogMs > 2000) {
+        float fps = frameCount * 1000.0f / (now - lastLogMs);
+        float avgRenderUs = (float)renderUsAccum / frameCount;
+        float avgShowUs   = (float)showUsAccum / frameCount;
+        Serial.printf("  FPS=%.1f  render=%.0fus  show=%.0fus  total=%.0fus\n",
+                      fps, avgRenderUs, avgShowUs, avgRenderUs + avgShowUs);
+        frameCount = 0;
+        renderUsAccum = 0;
+        showUsAccum = 0;
         lastLogMs = now;
         for (uint8_t s = 0; s < NUM_STRIPS; s++) {
             bool active = senderLastMs[s] > 0 && (now - senderLastMs[s] < TIMEOUT_MS);
@@ -468,10 +523,10 @@ void loop() {
             float breathLin = fastGamma24(breathGlow) * ((mid < 65) ? bloomBrightnessCapA : bloomBrightnessCapB);
             float h = bloom[s].hueT[mid];
             float sampleG = lerpf(BLOOM_HUE_A_G, BLOOM_HUE_B_G, h) * breathLin;
-            Serial.printf("  [%d] %s pkts=%lu flash=%.2f breath=%.3f glow=%.3f lin=%.4f hue=%.2f G=%.1f gate=%d\n",
+            Serial.printf("  [%d] %s pkts=%lu flash=%.4f buf=%.4f ema=%.3f gate=%d\n",
                           s, active ? "LIVE" : "----",
                           (unsigned long)senderPktCount[s], bloom[s].flash,
-                          breathVal, breathGlow, breathLin, h, sampleG,
+                          bloom[s].energyBuffer, bloom[s].motionEma,
                           bloom[s].gateOff[mid] ? 1 : 0);
         }
     }

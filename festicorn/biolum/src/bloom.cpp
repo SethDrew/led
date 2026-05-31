@@ -29,7 +29,8 @@
 static const uint8_t NUM_STRIPS = 6;
 
 // ── Bloom parameters (runtime-tunable via operator) ─────────────
-static float bloomBrightnessCapA  = 0.10f;   // LEDs 0–64
+static float bloomBrightnessCapSrc = 0.03f;   // LEDs 0–9 (source cluster, very sparse)
+static float bloomBrightnessCapA  = 0.10f;   // LEDs 10–64
 static float bloomBrightnessCapB  = 0.50f;   // LEDs 65–99
 static float bloomBufferDrain     = 15.0f;
 static float bloomFlashDecayRate  = 3.0f;
@@ -285,6 +286,7 @@ static void renderBloomStrip(uint8_t s, float dt) {
     if (bs.flash < 0.005f) bs.flash = 0.0f;
 
     // Hoist per-strip constants out of pixel loop
+    float flashSrc = bs.flash * bloomBrightnessCapSrc;
     float flashA = bs.flash * bloomBrightnessCapA;
     float flashB = bs.flash * bloomBrightnessCapB;
     float flashFrac = (bs.flash > 0.1f) ? clampf(bs.flash / 0.3f, 0.0f, 1.0f) : 0.0f;
@@ -292,10 +294,9 @@ static void renderBloomStrip(uint8_t s, float dt) {
     for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
         float breath = fastSinPhase(bs.breathPhase[i]) * 0.5f + 0.5f;
         float breathGlow = bloomBreathFloor + breath * (bs.breathPeak[i] - bloomBreathFloor);
-        bool zoneB = (i >= 65);
-        float cap = zoneB ? bloomBrightnessCapB : bloomBrightnessCapA;
+        float cap = (i < 10) ? bloomBrightnessCapSrc : (i >= 65) ? bloomBrightnessCapB : bloomBrightnessCapA;
         float breathLin = fastGamma24(breathGlow) * cap;
-        float flashLin  = zoneB ? flashB : flashA;
+        float flashLin  = (i < 10) ? flashSrc : (i >= 65) ? flashB : flashA;
 
         bs.breathPhase[i] += dt / bs.breathPeriod[i];
         if (bs.breathPhase[i] >= 1.0f) bs.breathPhase[i] -= 1.0f;

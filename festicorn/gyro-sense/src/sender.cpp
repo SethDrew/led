@@ -39,6 +39,7 @@
 #include <Preferences.h>
 #include <math.h>
 #include "v1_packet.h"
+#include "gyro_packet_v1.h"
 
 // ── Pin assignments ──────────────────────────────────────────────
 #define SDA_PIN    8
@@ -112,6 +113,10 @@ struct WindowAccum {
     int16_t  axMax,  ayMax,  azMax;
     int16_t  axMin,  ayMin,  azMin;
     int32_t  axSum,  aySum,  azSum;
+    // Per-axis gyro running stats (counts, int16 domain)
+    int16_t  gxMax,  gyMax,  gzMax;
+    int16_t  gxMin,  gyMin,  gzMin;
+    int32_t  gxSum,  gySum,  gzSum;
     // Magnitude stats (counts; sqrt computed at finalize)
     float    amagMax,  amagSum;
     float    gmagMax,  gmagSum;
@@ -538,6 +543,9 @@ static void resetWindow() {
     win.axMax = win.ayMax = win.azMax = INT16_MIN;
     win.axMin = win.ayMin = win.azMin = INT16_MAX;
     win.axSum = win.aySum = win.azSum = 0;
+    win.gxMax = win.gyMax = win.gzMax = INT16_MIN;
+    win.gxMin = win.gyMin = win.gzMin = INT16_MAX;
+    win.gxSum = win.gySum = win.gzSum = 0;
     win.amagMax = win.gmagMax = 0.0f;
     win.amagSum = win.gmagSum = 0.0f;
     win.accelClips = 0;
@@ -555,6 +563,17 @@ static void accumulateSample() {
     win.axSum += imuAx;
     win.aySum += imuAy;
     win.azSum += imuAz;
+
+    // Per-axis gyro stats
+    if (imuGx > win.gxMax) win.gxMax = imuGx;
+    if (imuGy > win.gyMax) win.gyMax = imuGy;
+    if (imuGz > win.gzMax) win.gzMax = imuGz;
+    if (imuGx < win.gxMin) win.gxMin = imuGx;
+    if (imuGy < win.gyMin) win.gyMin = imuGy;
+    if (imuGz < win.gzMin) win.gzMin = imuGz;
+    win.gxSum += imuGx;
+    win.gySum += imuGy;
+    win.gzSum += imuGz;
 
     // Magnitudes in counts (float to keep sqrt cheap on C3)
     float fax = (float)imuAx, fay = (float)imuAy, faz = (float)imuAz;
@@ -614,6 +633,34 @@ static void finalizeAndEmit() {
     esp_err_t r = esp_now_send(broadcastAddr, (uint8_t*)&pkt, sizeof(pkt));
     if (r != ESP_OK) sendErrs++;
     windowsSent++;
+
+    // ── Gyro per-axis packet ─────────────────────────────────────
+    int16_t gxMean = (int16_t)(win.gxSum / WINDOW_SAMPLES);
+    int16_t gyMean = (int16_t)(win.gySum / WINDOW_SAMPLES);
+    int16_t gzMean = (int16_t)(win.gzSum / WINDOW_SAMPLES);
+
+    int gxMaxAc = (int)win.gxMax - (int)gxMean;
+    int gyMaxAc = (int)win.gyMax - (int)gyMean;
+    int gzMaxAc = (int)win.gzMax - (int)gzMean;
+    int gxMinAc = (int)win.gxMin - (int)gxMean;
+    int gyMinAc = (int)win.gyMin - (int)gyMean;
+    int gzMinAc = (int)win.gzMin - (int)gzMean;
+
+    GyroPacketV1 gpkt;
+    gpkt.seq      = pkt.seq;
+    gpkt.gx_max   = clampI8(gxMaxAc >> 8);
+    gpkt.gy_max   = clampI8(gyMaxAc >> 8);
+    gpkt.gz_max   = clampI8(gzMaxAc >> 8);
+    gpkt.gx_min   = clampI8(gxMinAc >> 8);
+    gpkt.gy_min   = clampI8(gyMinAc >> 8);
+    gpkt.gz_min   = clampI8(gzMinAc >> 8);
+    gpkt.gx_mean  = clampI8((int)gxMean >> 8);
+    gpkt.gy_mean  = clampI8((int)gyMean >> 8);
+    gpkt.gz_mean  = clampI8((int)gzMean >> 8);
+    gpkt.gmag_max = companding_encode(win.gmagMax, GMAG_FS);
+
+    esp_err_t r2 = esp_now_send(broadcastAddr, (uint8_t*)&gpkt, sizeof(gpkt));
+    if (r2 != ESP_OK) sendErrs++;
 
     // ── Periodic serial verification (every ~1 s) ────────────────
     // Decode the bytes back to physical units so we can eyeball that

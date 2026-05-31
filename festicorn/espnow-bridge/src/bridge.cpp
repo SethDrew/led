@@ -1,17 +1,7 @@
 /*
  * BRIDGE — ESP-NOW <-> USB serial pipe.
  *
- * Listens for broadcast ESP-NOW packets on the same channel as the duck
- * (discovered via "cuteplant" SSID scan) and forwards each packet to the
- * laptop framed over USB CDC. Conversely, when the laptop writes a frame
- * back, the bridge re-broadcasts it via ESP-NOW so the bulb receiver sees
- * the same 15-byte SensorPacket bytes during playback.
- *
- * Frame format (both directions, identical):
- *   [0xA5][0x5A][LEN:1][PAYLOAD: LEN bytes][XOR8: LEN ^ payload bytes]
- *
- * The bridge does not parse the payload — it is opaque. Length is bounded
- * to 250 (ESP-NOW MTU) so a corrupted byte cannot stall the parser.
+ * Mirrors sender WiFi/ESP-NOW setup exactly for reliable TX.
  */
 
 #include <Arduino.h>
@@ -22,18 +12,10 @@
 #define FIXED_CHANNEL 6
 
 static uint8_t broadcastAddr[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-static uint8_t currentChannel = FIXED_CHANNEL;
 
 static const uint8_t FRAME_M0 = 0xA5;
 static const uint8_t FRAME_M1 = 0x5A;
 #define MAX_PAYLOAD 250
-
-static void applyChannel(uint8_t ch) {
-    esp_wifi_set_promiscuous(true);
-    esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-    esp_wifi_set_promiscuous(false);
-    currentChannel = ch;
-}
 
 // ── ESP-NOW RX → laptop ─────────────────────────────────────────────
 static void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
@@ -44,6 +26,12 @@ static void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
     uint8_t x = (uint8_t)len;
     for (int i = 0; i < len; i++) x ^= data[i];
     Serial.write(&x, 1);
+}
+
+static void onSent(const uint8_t* mac, esp_now_send_status_t status) {
+    if (status != ESP_NOW_SEND_SUCCESS) {
+        Serial.printf("[SEND] FAIL\n");
+    }
 }
 
 // ── Laptop → ESP-NOW TX (frame parser state machine) ────────────────
@@ -58,7 +46,7 @@ static void serialTick() {
         uint8_t b = (uint8_t)Serial.read();
         if (b == '?' && rxState == WAIT_M0) {
             Serial.printf("[BOOT] role=bridge MAC=%s fw=bridge ch=%u\n",
-                          WiFi.macAddress().c_str(), currentChannel);
+                          WiFi.macAddress().c_str(), (unsigned)WiFi.channel());
             continue;
         }
         switch (rxState) {
@@ -95,15 +83,23 @@ void setup() {
     Serial.begin(460800);
     delay(300);
 
+    // Mirror sender WiFi setup exactly
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
+    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
 
-    Serial.printf("[BOOT] role=bridge MAC=%s fw=bridge ch=%u\n",
-                  WiFi.macAddress().c_str(), FIXED_CHANNEL);
-    applyChannel(FIXED_CHANNEL);
+    esp_wifi_set_channel(FIXED_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
-    esp_now_init();
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("ESP-NOW init FAILED");
+        while (1) delay(1000);
+    }
     esp_now_register_recv_cb(onRecv);
+    esp_now_register_send_cb(onSent);
+
+    Serial.printf("[BOOT] role=bridge MAC=%s fw=bridge ch=%d\n",
+                  WiFi.macAddress().c_str(), WiFi.channel());
 
     esp_now_peer_info_t peer;
     memset(&peer, 0, sizeof(peer));

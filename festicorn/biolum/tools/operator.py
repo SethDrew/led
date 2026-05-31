@@ -72,7 +72,7 @@ def send_cmd(cmd_str):
 
 
 KNOBS = [
-    ('BRIGHTNESS_CAP_A',   'brightness cap (0–64)',     0.05, 1.0,  0.01),
+    ('BRIGHTNESS_CAP_A',   'brightness cap (10–64)',    0.05, 1.0,  0.01),
     ('BRIGHTNESS_CAP_B',   'brightness cap (65–99)',    0.05, 1.0,  0.01),
     ('SURPRISE_RATIO',     'surprise threshold',        1.5,  10.0, 0.1),
     ('MOTION_GAIN',        'motion gain',               0.5,  20.0, 0.5),

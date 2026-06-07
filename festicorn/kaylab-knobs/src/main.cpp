@@ -283,25 +283,23 @@ void loop() {
         }
     }
 
-    // Meters mirror the values the tree-of-record receiver derives from the
-    // same knobs (see tree-of-record/src/main.cpp). A knob move re-arms auto.
+    // Meters track knob position: uA ← brightness (tens), V ← speed
+    // (hundreds). Needle maps the knob across its full travel, 0 at the
+    // minimum detent → full scale at the top, so the lowest position reads
+    // a true zero. A knob move re-arms auto (command-override clears).
     static int prevTensForMeter = -1, prevHundredsForMeter = -1;
-    if (tensPos != prevTensForMeter)         { vAuto  = true; prevTensForMeter = tensPos; }
-    if (hundredsPos != prevHundredsForMeter) { uaAuto = true; prevHundredsForMeter = hundredsPos; }
+    if (tensPos != prevTensForMeter)         { uaAuto = true; prevTensForMeter = tensPos; }
+    if (hundredsPos != prevHundredsForMeter) { vAuto  = true; prevHundredsForMeter = hundredsPos; }
 
-    if (vAuto) {
-        // V meter ← brightness: tens 0–9 → 0.01–1.0 (receiver's linear lerp).
-        int t = tensPos > 9 ? 9 : tensPos;
-        float brightness = 0.01f + (1.0f - 0.01f) * (t / 9.0f);
-        vDac = (int)(brightness * METER_V_MAX + 0.5f);
-    }
     if (uaAuto) {
-        // uA meter ← speed: receiver's 5-step ramp, indexed exactly as the
-        // receiver does (clamp 1–5, then -1). BS-26 reports hundreds 0–4.
-        static const float HUNDREDS_SPEED[5] = { 0.3f, 0.6f, 1.0f, 1.8f, 3.0f };
-        int hi = hundredsPos < 1 ? 1 : (hundredsPos > 5 ? 5 : hundredsPos);
-        float speed = HUNDREDS_SPEED[hi - 1];
-        uaDac = (int)((speed / 3.0f) * METER_UA_MAX + 0.5f);
+        // uA meter ← brightness: tens 0–9 → 0 .. full scale.
+        int t = tensPos > 9 ? 9 : tensPos;
+        uaDac = (int)((t / 9.0f) * METER_UA_MAX + 0.5f);
+    }
+    if (vAuto) {
+        // V meter ← speed: hundreds 0–4 → 0 .. full scale.
+        int h = hundredsPos > 4 ? 4 : hundredsPos;
+        vDac = (int)((h / 4.0f) * METER_V_MAX + 0.5f);
     }
 
     int uaVal = uaDac > METER_UA_MAX ? METER_UA_MAX : uaDac;

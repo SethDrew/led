@@ -1091,16 +1091,16 @@ static void renderQuietBloom(float dt) {
 #define NEBULA_MAX_ORBS       5
 #define NEBULA_ORB_TAIL       30.0f
 #define NEBULA_ORB_BASE_SPEED 0.45f
-#define NEBULA_SPAWN_CHANCE   0.03f
-#define NEBULA_MIN_LIFETIME   200
+#define NEBULA_SPAWN_CHANCE   0.03f   // per-frame @30fps reference; dt-scaled at spawn
+#define NEBULA_MIN_LIFETIME   200     // frames @60fps reference; /60 to seconds at spawn
 #define NEBULA_MAX_LIFETIME   300
 #define NEBULA_INTRINSIC_SPD  0.3f
 
 struct NebOrb {
     float pos;
     float vel;
-    uint16_t age;
-    uint16_t lifetime;
+    float age;
+    float lifetime;
     bool active;
 };
 
@@ -1134,16 +1134,17 @@ static void renderNebula(float dt) {
         }
 
         float spawnRoll = (float)(xorshift32() & 0xFFFF) / 65536.0f;
-        if (spawnRoll < NEBULA_SPAWN_CHANCE) {
+        if (spawnRoll < NEBULA_SPAWN_CHANCE * dt * 30.0f) {
             for (uint8_t o = 0; o < NEBULA_MAX_ORBS; o++) {
                 if (!nebOrbs[s][o].active) {
                     NebOrb &orb = nebOrbs[s][o];
                     orb.pos = randFloat() * (float)LEDS_PER_STRIP;
                     float dir = (xorshift32() & 1) ? 1.0f : -1.0f;
                     orb.vel = dir * NEBULA_ORB_BASE_SPEED * spd * (0.7f + randFloat() * 0.6f);
-                    orb.age = 0;
-                    orb.lifetime = NEBULA_MIN_LIFETIME
-                        + (uint16_t)(xorshift32() % (NEBULA_MAX_LIFETIME - NEBULA_MIN_LIFETIME));
+                    orb.age = 0.0f;
+                    orb.lifetime = (NEBULA_MIN_LIFETIME
+                        + (float)(xorshift32() % (NEBULA_MAX_LIFETIME - NEBULA_MIN_LIFETIME)))
+                        / 60.0f;
                     orb.active = true;
                     break;
                 }
@@ -1154,7 +1155,7 @@ static void renderNebula(float dt) {
             NebOrb &orb = nebOrbs[s][o];
             if (!orb.active) continue;
 
-            orb.age++;
+            orb.age += dt;
             orb.pos += orb.vel * dt * 60.0f;
             orb.pos = fmodf(orb.pos + (float)LEDS_PER_STRIP, (float)LEDS_PER_STRIP);
 
@@ -1261,10 +1262,10 @@ static void renderRainbow(float dt) {
 #define LW_WIND_SPEED     0.35f
 #define LW_SPAWN_INTERVAL 0.5f
 #define LW_FADE_IN        0.4f
-#define LW_DAMPING        0.85f
+#define LW_VEL_TAU        0.22f   // velocity EMA time constant (sec); = orig 0.85/frame @30fps
 #define LW_TURBULENCE     0.3f
 #define LW_BOOST_SPEED    0.25f
-#define LW_BOOST_TC       1.5f
+#define LW_BOOST_TC       2.5f
 
 static const uint8_t LW_PALETTE[][3] = {
     {255, 140, 20}, {240, 100, 10}, {220, 60, 5}, {200, 40, 10},
@@ -1316,6 +1317,7 @@ static void lwSpawnLeaf(uint8_t s) {
 static void renderLeafWind(float dt) {
     lwTime += dt;
     float boostDecay = expf(-dt / LW_BOOST_TC);
+    float lwAlpha = fminf(1.0f, dt / LW_VEL_TAU);
 
     for (uint8_t s = 0; s < NUM_STRIPS; s++) {
         lwSpawnTimer[s] += dt;
@@ -1332,7 +1334,7 @@ static void renderLeafWind(float dt) {
             float speedMult = fmaxf(0.1f, 1.0f + noise * LW_TURBULENCE);
             float force = LW_WIND_SPEED * speedMult;
 
-            lf.vel = lf.vel * LW_DAMPING + force * (1.0f - LW_DAMPING);
+            lf.vel = fmaxf(LW_WIND_SPEED * 0.4f, lf.vel + lwAlpha * (force - lf.vel));
             lf.boost *= boostDecay;
             lf.pos += (lf.vel + lf.boost) * dt;
             lf.age += dt;

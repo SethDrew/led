@@ -15,7 +15,8 @@
 //   seq        shared 25 Hz tick counter (matches accel/gyro packets, wraps)
 //   rms_mean   sqrt-companded mean RMS over the window
 //   rms_max    sqrt-companded max RMS over the window
-//   flags      reserved (0)
+//   flags      bit0 = mic muted (shake-toggle on sender; rms fields are 0
+//              when set). Other bits reserved (0).
 
 #ifndef AUDIO_PACKET_V1_H
 #define AUDIO_PACKET_V1_H

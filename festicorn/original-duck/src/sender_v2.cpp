@@ -131,6 +131,30 @@ struct WindowAccum {
 static WindowAccum win;
 static uint16_t    seqCounter = 0;
 
+// ── Shake-to-toggle mic mute (sender-local UI gesture) ───────────
+// Ported from this board's frozen sender.cpp: 3 reversals of the dynamic
+// accel magnitude (raw |a| minus a slow gravity EMA) within 800 ms toggles
+// the mic. Sampled off the same 200 Hz accel stream. When muted, the audio
+// packet's rms fields are zeroed and AUDIO_FLAG_MIC_MUTED is set so the
+// receiver knows audio is alive but intentionally silent. Default: enabled.
+#define AUDIO_FLAG_MIC_MUTED 0x01
+// Original sender.cpp ran the IMU at ±2g (16384 counts/g) and used a 6000-count
+// dynamic threshold. sender_v2 runs at ±ACCEL_RANGE_G, so counts/g scale by
+// (2 / ACCEL_RANGE_G). Scale both the gravity seed and the threshold to keep
+// the gesture feeling identical regardless of build-time range.
+#define ACCEL_COUNTS_PER_G   (32768.0f / (float)ACCEL_RANGE_G)
+#define SHAKE_THRESH         (6000.0f * ACCEL_COUNTS_PER_G / 16384.0f)
+#define SHAKE_REVERSALS      3
+#define SHAKE_WINDOW_MS      800
+#define SHAKE_COOLDOWN_MS    1500
+
+static bool     micEnabled        = true;
+static float    shakeGravityEma   = ACCEL_COUNTS_PER_G;   // seed ≈ 1g
+static int8_t   shakeLastSign     = 0;
+static uint8_t  shakeReversals    = 0;
+static uint32_t shakeFirstRevMs   = 0;
+static uint32_t shakeCooldownUntil = 0;
+
 // IMU read buffer
 static int16_t imuAx, imuAy, imuAz;
 static int16_t imuGx, imuGy, imuGz;
@@ -547,9 +571,17 @@ static void finalizeAndEmit() {
 
     AudioPacketV1 apkt;
     apkt.seq      = seq;
-    apkt.rms_mean = companding_encode(rmsMean,    RMS_FS);
-    apkt.rms_max  = companding_encode(win.rmsMax, RMS_FS);
-    apkt.flags    = 0;
+    if (micEnabled) {
+        apkt.rms_mean = companding_encode(rmsMean,    RMS_FS);
+        apkt.rms_max  = companding_encode(win.rmsMax, RMS_FS);
+        apkt.flags    = 0;
+    } else {
+        // Muted: still send so the receiver knows audio is alive, but zero
+        // the levels and flag the mute so it can show silence intentionally.
+        apkt.rms_mean = 0;
+        apkt.rms_max  = 0;
+        apkt.flags    = AUDIO_FLAG_MIC_MUTED;
+    }
 
     if (esp_now_send(broadcastAddr, (uint8_t*)&apkt, sizeof(apkt)) != ESP_OK) sendErrs++;
 
@@ -563,9 +595,10 @@ static void finalizeAndEmit() {
         float rms_mean_v  = companding_decode(apkt.rms_mean, RMS_FS);
         Serial.printf(
             "seq=%5u  amag_max=%4.2f g  gmag_max=%6.0f dps  "
-            "rms(max/mean)=%5.0f/%5.0f  clip=%u sat=%u  "
+            "rms(max/mean)=%5.0f/%5.0f  mic=%s  clip=%u sat=%u  "
             "errs=send/imu/i2c=%u/%u/%u  ch=%d\n",
             seq, amag_max_g, gmag_max_d, rms_max_v, rms_mean_v,
+            micEnabled ? "on" : "MUTE",
             pkt.flags >> 4, pkt.flags & 0x0F,
             (unsigned)sendErrs, (unsigned)imuFails, (unsigned)i2cResets,
             WiFi.channel());
@@ -642,6 +675,37 @@ void setup() {
                   "200 Hz inner / 25 Hz emit\n");
 }
 
+// ── Shake-to-toggle detection (runs per 200 Hz accel sample) ─────
+static void shakeDetectTick() {
+    float rawMag = sqrtf((float)imuAx * imuAx
+                       + (float)imuAy * imuAy
+                       + (float)imuAz * imuAz);
+    shakeGravityEma += 0.01f * (rawMag - shakeGravityEma);
+    float dynamic = rawMag - shakeGravityEma;
+
+    uint32_t now = millis();
+    if (now > shakeCooldownUntil && fabsf(dynamic) > SHAKE_THRESH) {
+        int8_t sign = (dynamic > 0) ? 1 : -1;
+        if (sign != shakeLastSign && shakeLastSign != 0) {
+            if (shakeReversals == 0) shakeFirstRevMs = now;
+            shakeReversals++;
+            if (shakeReversals >= SHAKE_REVERSALS
+                && (now - shakeFirstRevMs) < SHAKE_WINDOW_MS) {
+                micEnabled = !micEnabled;
+                shakeCooldownUntil = now + SHAKE_COOLDOWN_MS;
+                shakeReversals = 0;
+                shakeLastSign = 0;
+                Serial.printf("[shake] mic=%d\n", micEnabled ? 1 : 0);
+            }
+        }
+        shakeLastSign = sign;
+    }
+    if (shakeReversals > 0 && (now - shakeFirstRevMs) > SHAKE_WINDOW_MS) {
+        shakeReversals = 0;
+        shakeLastSign = 0;
+    }
+}
+
 // ── Sample tick (gated by IMU_PERIOD_US) ─────────────────────────
 
 static void sampleTick() {
@@ -674,6 +738,7 @@ static void sampleTick() {
     }
     failStreak = 0;
 
+    shakeDetectTick();
     bgCalibrateTick();
     accumulateSample();
     if (win.filled >= WINDOW_SAMPLES) {

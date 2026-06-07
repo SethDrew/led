@@ -9,8 +9,10 @@
  *   hundreds (0–4)     → speed      (0.3–3.0)   breathing rate, 2=normal
  *   decmid (0–9)       → hue        36° rotation steps (full wheel)
  *   decinner (0–9)     → saturation 0=full color, 9=white
- *   DC switch          → dormancy on/off (DORMANCY_FRAC = dc ? 0.3 : 0.0)
- *   ones, decouter, AC, uA, V → parsed but unused (reserved)
+ *   AC switch          → global on/off (false = all strips dark)
+ *   ones (0–11)        → effect select
+ *   decouter (0–11)    → stick-rainbow subset; 11 = secret pulse mode
+ *   DC, uA, V          → parsed but unused (reserved)
  *
  * BS-26 live → knobs control. No signal → serial PARAMS control.
  * BS-26 state arrives as JSON over ESP-NOW broadcast on channel 1.
@@ -60,6 +62,10 @@ static float bloomDormancyMin  = 3.0f;
 static float bloomDormancyMax  = 7.0f;
 static float bloomDormancyFrac = 0.0f;
 
+// AC switch on the BS-26 → global on/off. Default true so the board renders
+// without a console (serial/standalone). Set from bs26.ac when live.
+static bool acOn = true;
+
 #define GATE_ON_THRESH  0.7f
 #define GATE_OFF_THRESH 1.2f
 
@@ -77,7 +83,7 @@ static float renderBrightness = 1.0f;   // effective scale the render reads each
 
 // ── BS-26 ESP-NOW config ─────────────────────────────────────────
 #define FIXED_CHANNEL        1
-#define HEARTBEAT_TIMEOUT_MS 3000
+#define HEARTBEAT_TIMEOUT_MS 6000
 
 // ── BS-26 state ──────────────────────────────────────────────────
 struct Bs26State {
@@ -101,6 +107,9 @@ static volatile Bs26State bs26 = {};
 static volatile uint32_t  bs26LastMs = 0;
 static volatile uint32_t  bs26PktCount = 0;
 static volatile bool      bs26Updated = false;
+// Guards the multi-field bs26 write (onReceive task) against the bulk read
+// (loop). Without it a torn read can momentarily mix fields and spike brightness.
+static portMUX_TYPE bs26Mux = portMUX_INITIALIZER_UNLOCKED;
 
 // ── Sensor layer (v1 accel / gyro / audio packets over ESP-NOW) ──
 // Coexists with BS-26 JSON; disambiguated by packet length in onReceive.
@@ -251,28 +260,35 @@ static void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
 
     if (!doc.containsKey("seq")) return;
 
-    bs26.dc       = doc["dc"] | false;
-    bs26.ac       = doc["ac"] | false;
-    bs26.hundreds = doc["hundreds"] | 0;
-    bs26.tens     = doc["tens"] | 0;
-    bs26.ones     = doc["ones"] | 0;
-    bs26.decade   = doc["decade"] | 0;
-    bs26.decouter = doc["decouter"] | 0;
-    bs26.decmid   = doc["decmid"] | 0;
-    bs26.decinner = doc["decinner"] | 0;
+    // Build the full state in a scratch copy, then publish it to bs26 in one
+    // critical section so loop never reads a half-updated struct.
+    Bs26State next = {};
+    next.dc       = doc["dc"] | false;
+    next.ac       = doc["ac"] | false;
+    next.hundreds = doc["hundreds"] | 0;
+    next.tens     = doc["tens"] | 0;
+    next.ones     = doc["ones"] | 0;
+    next.decade   = doc["decade"] | 0;
+    next.decouter = doc["decouter"] | 0;
+    next.decmid   = doc["decmid"] | 0;
+    next.decinner = doc["decinner"] | 0;
 
     JsonObject ua = doc["ua"];
     if (ua) {
-        bs26.ua_dac = ua["dac"] | 0;
-        bs26.ua_max = ua["max"] | 0;
+        next.ua_dac = ua["dac"] | 0;
+        next.ua_max = ua["max"] | 0;
     }
     JsonObject v = doc["v"];
     if (v) {
-        bs26.v_dac = v["dac"] | 0;
-        bs26.v_max = v["max"] | 0;
+        next.v_dac = v["dac"] | 0;
+        next.v_max = v["max"] | 0;
     }
+    next.seq = doc["seq"] | 0;
 
-    bs26.seq = doc["seq"] | 0;
+    portENTER_CRITICAL(&bs26Mux);
+    memcpy((void*)&bs26, &next, sizeof(bs26));
+    portEXIT_CRITICAL(&bs26Mux);
+
     bs26LastMs = millis();
     bs26PktCount++;
     bs26Updated = true;
@@ -302,6 +318,19 @@ static void showAll() {
     strip0.Show(); strip1.Show(); strip2.Show();
     strip3.Show(); strip4.Show(); strip5.Show();
 }
+
+// ── Stick topology ──────────────────────────────────────────────
+// Physical mapping (from topo_test): each "stick" is a contiguous LED range
+// on a strip. start/end are inclusive LED indices. Strips 1 and 3 have no
+// sticks. Hand-measured against the static block test pattern.
+struct Stick { uint8_t strip; uint8_t start; uint8_t end; };
+static const Stick STICKS[] = {
+    { 0, 18,  22 }, { 0, 27,  49 }, { 0, 54,  99 },
+    { 2, 14,  50 },
+    { 4, 18,  38 }, { 4, 47,  99 },
+    { 5, 14,  30 }, { 5, 45,  74 }, { 5, 83,  99 },
+};
+static const uint8_t STICK_COUNT = sizeof(STICKS) / sizeof(STICKS[0]);
 
 // ── Generic delta-sigma output stage (shared by ported effects) ──
 // Ported bulb-fleet/biolum effects write 0–255-range float color here;
@@ -369,7 +398,7 @@ enum EffectId : uint8_t {
     FX_LEAF_WIND,
     FX_CREATURES,
     FX_LIGHT_THROUGH,
-    FX_OFF_11,
+    FX_STICK_RAINBOW,
     FX_COUNT
 };
 
@@ -655,9 +684,26 @@ static GsParticle gsParticles[NUM_STRIPS][GS_PARTICLE_COUNT];
 
 static void resetGravity() {
     for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        // Seed positions from this strip's stick boundaries so the topology is
+        // visible the instant gravity starts; particles then fall from there.
+        float seedPos[GS_PARTICLE_COUNT];
+        uint8_t nSeed = 0;
+        for (uint8_t k = 0; k < STICK_COUNT && nSeed < GS_PARTICLE_COUNT; k++) {
+            if (STICKS[k].strip != s) continue;
+            seedPos[nSeed++] = (float)STICKS[k].start;
+            if (nSeed < GS_PARTICLE_COUNT)
+                seedPos[nSeed++] = (float)STICKS[k].end;
+        }
+        // Strips with no sticks (1, 3): fall back to an even spread.
+        if (nSeed == 0) {
+            for (uint8_t k = 0; k < GS_PARTICLE_COUNT; k++)
+                seedPos[k] = (float)(LEDS_PER_STRIP - 1)
+                    * (float)k / (float)(GS_PARTICLE_COUNT - 1);
+            nSeed = GS_PARTICLE_COUNT;
+        }
+
         for (uint16_t i = 0; i < GS_PARTICLE_COUNT; i++) {
-            gsParticles[s][i].pos = (float)(LEDS_PER_STRIP - 1)
-                * (float)i / (float)(GS_PARTICLE_COUNT - 1);
+            gsParticles[s][i].pos = seedPos[i % nSeed];
             gsParticles[s][i].vel = 0.0f;
             gsParticles[s][i].bright = 1.0f;
             float baseHue = 256.0f * (float)i / (float)GS_PARTICLE_COUNT;
@@ -1250,6 +1296,139 @@ static void renderRainbow(float dt) {
     }
 }
 
+// ── Stick rainbow + secret pulse (effect slot 11) ───────────────
+// Only mapped sticks light. decouter selects an active subset (0=fewest,
+// 10=all); decouter==11 is the secret center-out pulse mode. dt is pre-scaled
+// by effSpeed at the call site. Output via setPixelDither (renderBrightness).
+#define SR_SCROLL_SPEED  0.10f   // hue scroll along a stick (cycles/sec at speed 1)
+#define SR_PULSE_WIDTH   3.0f    // half-width (LEDs) of the bright band
+
+#define SR_PULSE_PERIOD_MIN 1.2f  // sec between a stick's pulse starts (random)
+#define SR_PULSE_PERIOD_MAX 3.5f
+
+static float srPhase = 0.0f;
+static uint8_t srDecouter = 0;           // 0–11, from decouter (set at call site)
+static bool srActive[STICK_COUNT];       // which sticks are lit this frame
+static uint8_t srActiveDecouter = 0xFF;  // decouter value srActive was computed for
+
+// Per-stick independent pulse state (secret pulse mode, decouter==11). Each
+// stick runs its own pulse cycle on a random period with a random hue, so the
+// sticks pulse staggered rather than all together.
+static float srPulsePhase[STICK_COUNT];   // 0→1 within the current pulse
+static float srPulsePeriod[STICK_COUNT];  // seconds for a full cycle
+static uint8_t srPulseHue[STICK_COUNT];    // OKLCH LUT index for this cycle
+
+static void srStartStickPulse(uint8_t si) {
+    srPulsePhase[si] = 0.0f;
+    srPulsePeriod[si] = SR_PULSE_PERIOD_MIN
+        + randFloat() * (SR_PULSE_PERIOD_MAX - SR_PULSE_PERIOD_MIN);
+    srPulseHue[si] = (uint8_t)(xorshift32() & 0xFF);
+}
+
+static void resetStickRainbow() {
+    srPhase = 0.0f;
+    srActiveDecouter = 0xFF;   // force recompute of the active subset
+    // Stagger each stick's pulse so they don't start in sync.
+    for (uint8_t si = 0; si < STICK_COUNT; si++) {
+        srStartStickPulse(si);
+        srPulsePhase[si] = randFloat();  // random initial offset
+    }
+}
+
+// Curated active-stick subsets per decouter 0–10. Each row is a hand-picked
+// spread so every position feels distinct and covers different spatial areas.
+// Stick indices: 0,1,2 on strip 0; 3 on strip 2; 4,5 on strip 4; 6,7,8 on
+// strip 5. 0xFF terminates a row. Position 10 = all 9 sticks.
+static const uint8_t SR_SUBSETS[11][STICK_COUNT] = {
+    { 0, 4, 0xFF },
+    { 1, 5, 8, 0xFF },
+    { 0, 3, 6, 0xFF },
+    { 2, 4, 7, 0xFF },
+    { 0, 1, 5, 8, 0xFF },
+    { 1, 3, 4, 6, 8, 0xFF },
+    { 0, 2, 3, 5, 7, 0xFF },
+    { 0, 1, 3, 4, 6, 8, 0xFF },
+    { 0, 1, 2, 4, 5, 7, 8, 0xFF },
+    { 0, 1, 2, 3, 5, 6, 7, 8, 0xFF },
+    { 0, 1, 2, 3, 4, 5, 6, 7, 8 },
+};
+
+static void srComputeActive(uint8_t decouter) {
+    if (decouter > 10) decouter = 10;
+    for (uint8_t i = 0; i < STICK_COUNT; i++) srActive[i] = false;
+    for (uint8_t k = 0; k < STICK_COUNT; k++) {
+        uint8_t idx = SR_SUBSETS[decouter][k];
+        if (idx == 0xFF) break;
+        srActive[idx] = true;
+    }
+}
+
+static void renderStickRainbow(float dt) {
+    if (srDecouter != srActiveDecouter) {
+        srComputeActive(srDecouter);
+        srActiveDecouter = srDecouter;
+    }
+    bool pulseMode = (srDecouter >= 11);
+
+    // Blank everything first; only sticks light.
+    for (uint8_t s = 0; s < NUM_STRIPS; s++)
+        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++)
+            setPixelDither(s, i, 0.0f, 0.0f, 0.0f);
+
+    if (pulseMode) {
+        // Each stick pulses independently and continuously: its own phase,
+        // random period and random hue per cycle. Loops forever — never
+        // switches back to rainbow mode.
+        for (uint8_t si = 0; si < STICK_COUNT; si++) {
+            const Stick &st = STICKS[si];
+
+            srPulsePhase[si] += dt / srPulsePeriod[si];
+            while (srPulsePhase[si] >= 1.0f) {
+                srPulsePhase[si] -= 1.0f;
+                // New cycle: fresh random hue + period.
+                srPulseHue[si] = (uint8_t)(xorshift32() & 0xFF);
+                srPulsePeriod[si] = SR_PULSE_PERIOD_MIN
+                    + randFloat() * (SR_PULSE_PERIOD_MAX - SR_PULSE_PERIOD_MIN);
+            }
+
+            float phase = srPulsePhase[si];
+            float pr = (float)oklchVarL[srPulseHue[si]][0];
+            float pg = (float)oklchVarL[srPulseHue[si]][1];
+            float pb = (float)oklchVarL[srPulseHue[si]][2];
+
+            float center = 0.5f * (float)(st.start + st.end);
+            float halfLen = 0.5f * (float)(st.end - st.start) + 1.0f;
+            float bandPos = phase * (halfLen + SR_PULSE_WIDTH);
+            for (uint16_t i = st.start; i <= st.end; i++) {
+                float d = fabsf((float)i - center);
+                float edge = fabsf(d - bandPos);
+                float a = expf(-(edge * edge) / (2.0f * SR_PULSE_WIDTH * SR_PULSE_WIDTH));
+                a *= 1.0f - phase;   // fade as the band reaches the edges
+                if (a < 0.004f) continue;
+                setPixelDither(st.strip, i, pr * a, pg * a, pb * a);
+            }
+        }
+        return;
+    }
+
+    // Rainbow mode: hue scrolls along each active stick's length.
+    srPhase = fmodf(srPhase + SR_SCROLL_SPEED * dt, 1.0f);
+    for (uint8_t si = 0; si < STICK_COUNT; si++) {
+        if (!srActive[si]) continue;
+        const Stick &st = STICKS[si];
+        uint16_t len = (uint16_t)(st.end - st.start);
+        for (uint16_t i = st.start; i <= st.end; i++) {
+            float pos = (len == 0) ? 0.0f : (float)(i - st.start) / (float)len;
+            float hue = fmodf(pos + srPhase, 1.0f);
+            uint8_t idx = (uint8_t)(hue * 255.0f);
+            setPixelDither(st.strip, i,
+                (float)oklchVarL[idx][0],
+                (float)oklchVarL[idx][1],
+                (float)oklchVarL[idx][2]);
+        }
+    }
+}
+
 // ── Leaf wind (ported from bulb-fleet renderLeafWind) ───────────
 // 1D drift along each strip: leaves blow from one end to the other, each LED
 // lights by 1D distance to each leaf. Bulb-fleet's 2D topology.h is a hex map
@@ -1257,10 +1436,10 @@ static void renderRainbow(float dt) {
 // topology — LED index → position 0..1 (i / (LEDS_PER_STRIP-1)). Each leaf
 // drifts independently per strip. No per-effect cap — output via setPixelDither.
 #define LW_MAX_LEAVES     8     // per strip
-#define LW_GLOW_RADIUS    0.10f
+#define LW_GLOW_RADIUS    0.05f
 #define LW_GLOW_SQ2       (2.0f * LW_GLOW_RADIUS * LW_GLOW_RADIUS)
 #define LW_WIND_SPEED     0.35f
-#define LW_SPAWN_INTERVAL 0.5f
+#define LW_SPAWN_INTERVAL 0.9f
 #define LW_FADE_IN        0.4f
 #define LW_VEL_TAU        0.22f   // velocity EMA time constant (sec); = orig 0.85/frame @30fps
 #define LW_TURBULENCE     0.3f
@@ -1917,6 +2096,9 @@ static void resetEffect(uint8_t fx) {
         case FX_LIGHT_THROUGH:
             resetLightThrough();
             break;
+        case FX_STICK_RAINBOW:
+            resetStickRainbow();
+            break;
         default:
             break;
     }
@@ -2027,6 +2209,19 @@ void setup() {
     }
     esp_now_register_recv_cb(onReceive);
 
+    // Some core/IDF builds reset the WiFi channel during esp_now_init — re-assert
+    // it so RX stays on the sender's channel.
+    esp_wifi_set_channel(FIXED_CHANNEL, WIFI_SECOND_CHAN_NONE);
+
+    // Register the broadcast peer so broadcast frames from the BS-26 sender are
+    // accepted (mirrors the sender's broadcast peer setup).
+    static const uint8_t BROADCAST_ADDR[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, BROADCAST_ADDR, 6);
+    peer.channel = FIXED_CHANNEL;
+    peer.encrypt = false;
+    esp_now_add_peer(&peer);
+
     Serial.printf("Tree-of-record ready — ch=%u\n", FIXED_CHANNEL);
     Serial.printf("  Bloom: 6 strips × %u LEDs (ambient, BS-26 driven)\n", LEDS_PER_STRIP);
 }
@@ -2045,11 +2240,21 @@ void loop() {
     // ── Map BS-26 knobs to effect parameters ────────────────────
     // BS-26 live → knobs drive the effect. No signal → serial PARAMS.
     bool bs26Live = (bs26LastMs > 0 && (now - bs26LastMs) < HEARTBEAT_TIMEOUT_MS);
+    bool bs26EverSeen = (bs26LastMs > 0);
+    // Last knob-derived brightness/speed, held across brief packet gaps so a
+    // dropout doesn't snap brightness to the serial-param default. The other
+    // knob params (hue/sat/decouter/effect/acOn) are persistent globals and
+    // simply retain their last value when a frame is skipped.
+    static float bs26LastBrightness = 1.0f;
+    static float bs26LastSpeed      = 1.0f;
+
     float effBrightness = globalBrightness;
     float effSpeed      = speedScale;
     if (bs26Live) {
         Bs26State s;
+        portENTER_CRITICAL(&bs26Mux);
         memcpy(&s, (const void*)&bs26, sizeof(s));
+        portEXIT_CRITICAL(&bs26Mux);
 
         // tens (10-position knob) → brightness 0.01–1.0 (linear)
         uint8_t tens = s.tens > 9 ? 9 : s.tens;
@@ -2069,17 +2274,60 @@ void loop() {
             applyPalette(paletteHueIdx, paletteSatIdx);
         }
 
+        // decouter (0–11) → stick-rainbow subset / pulse mode
+        srDecouter = s.decouter > 11 ? 11 : s.decouter;
+
         // ones (0–11) → effect select
         currentEffect = s.ones >= FX_COUNT ? FX_COUNT - 1 : s.ones;
 
-        // DC switch → dormancy on/off
-        bloomDormancyFrac = s.dc ? 0.3f : 0.0f;
+        // AC switch → global on/off (false = all strips dark)
+        acOn = s.ac;
+
+        bs26LastBrightness = effBrightness;
+        bs26LastSpeed      = effSpeed;
+    } else if (bs26EverSeen) {
+        // Brief packet gap — hold the last knob-derived values rather than
+        // reverting to the serial-param defaults (which would spike brightness).
+        effBrightness = bs26LastBrightness;
+        effSpeed      = bs26LastSpeed;
     }
+
+    // Dormancy machinery retained in bloom but driven off (DC now reserved).
+    bloomDormancyFrac = 0.0f;
 
     renderBrightness = effBrightness;
 
-    // Reset effect state on change.
-    if (currentEffect != prevEffect) {
+    // AC off → blank everything and skip rendering (still log state so the
+    // board is observable over serial while output is suppressed).
+    if (!acOn) {
+        for (uint8_t s = 0; s < NUM_STRIPS; s++)
+            for (uint16_t i = 0; i < LEDS_PER_STRIP; i++)
+                setPixel(s, i, 0, 0, 0);
+        showAll();
+        static uint32_t acLogMs = 0;
+        if (now - acLogMs > 2000) {
+            acLogMs = now;
+            Serial.printf("  [bs26] %s pkts=%lu fx=%u AC=OFF (output gated) "
+                          "bright=%.3f speed=%.2f hue=%u sat=%u decouter=%u\n",
+                          bs26Live ? "LIVE" : "----", (unsigned long)bs26PktCount,
+                          currentEffect, renderBrightness, effSpeed,
+                          paletteHueIdx, paletteSatIdx, srDecouter);
+        }
+        return;
+    }
+
+    // Reset effect state on change, but debounce so spinning the ones knob
+    // through intermediate slots (e.g. gravity, whose reset does a white seed
+    // flash) doesn't fire their resets in passing. Only the settled selection
+    // resets.
+    static uint8_t pendingEffect = 0xFF;
+    static uint32_t effectSettleMs = 0;
+    if (currentEffect != pendingEffect) {
+        pendingEffect = currentEffect;
+        effectSettleMs = now;
+    }
+    if (currentEffect != prevEffect &&
+        (prevEffect == 0xFF || now - effectSettleMs >= 250)) {
         resetEffect(currentEffect);
         prevEffect = currentEffect;
     }
@@ -2122,8 +2370,10 @@ void loop() {
         case FX_LIGHT_THROUGH:
             renderLightThrough(fxDt);
             break;
+        case FX_STICK_RAINBOW:
+            renderStickRainbow(fxDt);
+            break;
         default:
-            // Reserved off slot (11): black.
             renderOff();
             break;
     }

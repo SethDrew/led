@@ -27,7 +27,6 @@ const int ONES_PIN = 34;
 int hundredsPos = 0;
 int tensPos = 0;
 int onesPos = 0;
-int onesConfirm = 0;
 
 // Decade knob bank — ESP32 ADC fallback (until ADS1115 works)
 // Ones (white-green): 510Ω pullup to 3.3V, 1µF cap, 0-8.9Ω
@@ -83,6 +82,13 @@ uint32_t espnowSeq = 0;
 uint8_t broadcastAddr[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 unsigned long lastBroadcast = 0;
 const unsigned long HEARTBEAT_MS = 1000;
+
+// Native-ADC knob noise rejection: hysteresis margin (counts a reading must
+// cross a neighboring threshold by before switching bins) and consecutive-read
+// confirm count. Both filter the high-impedance ADC jitter that worsens when
+// the controller loses a clean USB ground reference.
+const int KNOB_HYST = 40;
+const int KNOB_CONFIRM = 3;
 bool stateChanged = false;
 
 // Previous state for change detection
@@ -92,6 +98,48 @@ int prevDecValue = 0, prevUaDac = 0, prevVDac = 0;
 int prevUaMax = 0, prevVMax = 0;
 
 String serialBuf = "";
+
+// N-sample debounce for a quantized knob position. A candidate must be read
+// `need` times in a row before it commits to `out`, so brief ADC jitter never
+// propagates. Each knob owns its own pending/count state. Returns true on change.
+bool debouncePos(int cand, int &out, int &pending, int &pendingCount, int need) {
+    if (cand == out) { pending = -1; pendingCount = 0; return false; }
+    if (cand == pending) {
+        if (++pendingCount >= need) {
+            out = cand;
+            pending = -1;
+            pendingCount = 0;
+            return true;
+        }
+    } else {
+        pending = cand;
+        pendingCount = 1;
+    }
+    return false;
+}
+
+// Decode a raw ADC value into a bin using a DESCENDING threshold ladder, with
+// hysteresis: the reading must cross a neighboring threshold by `margin` counts
+// before leaving the current bin, killing chatter when the knob sits on a
+// boundary. thresh[k] is the lower bound of bin k; bin count is nThresh+1.
+//   raw > thresh[0]         → bin 0
+//   thresh[1] < raw <= [0]  → bin 1  ... raw <= thresh[last] → bin nThresh
+int decodeBinHyst(int raw, int cur, const int *thresh, int nThresh, int margin) {
+    // Plain candidate (no hysteresis).
+    int cand = nThresh;
+    for (int k = 0; k < nThresh; k++) {
+        if (raw > thresh[k]) { cand = k; break; }
+    }
+    if (cand == cur) return cur;
+    // Moving to a LOWER bin index (raw rose): require raw above the boundary
+    // between cur and cur-1 (thresh[cur-1]) by +margin.
+    if (cand < cur) {
+        if (cur - 1 >= 0 && raw <= thresh[cur - 1] + margin) return cur;
+    } else { // moving to a HIGHER bin index (raw fell)
+        if (cur < nThresh && raw > thresh[cur] - margin) return cur;
+    }
+    return cand;
+}
 
 int parseIntField(const String &line, const char *key) {
     int idx = line.indexOf(key);
@@ -186,40 +234,21 @@ void loop() {
     int vp_adc = adc1_get_raw(ADC1_CHANNEL_0);  // GPIO 36
     int vn_adc = adc1_get_raw(ADC1_CHANNEL_3);  // GPIO 39
 
-    // Tens: 10-pos, 5.6MΩ pullup, cap filtered, GPIO 32
-    int tensCand;
-    if      (tensRaw > 3150) tensCand = 0;
-    else if (tensRaw > 2132) tensCand = 1;
-    else if (tensRaw > 1980) tensCand = 2;
-    else if (tensRaw > 1802) tensCand = 3;
-    else if (tensRaw > 1589) tensCand = 4;
-    else if (tensRaw > 1330) tensCand = 5;
-    else if (tensRaw > 1015) tensCand = 6;
-    else if (tensRaw >  624) tensCand = 7;
-    else if (tensRaw >  203) tensCand = 8;
-    else                      tensCand = 9;
-    tensPos = tensCand;
+    // Tens: 10-pos, 5.6MΩ pullup, cap filtered, GPIO 32. Two-layer noise
+    // rejection: ±KNOB_HYST-count threshold hysteresis + 3-sample confirm.
+    static const int TENS_THRESH[9] =
+        { 3150, 2132, 1980, 1802, 1589, 1330, 1015, 624, 203 };
+    int tensCand = decodeBinHyst(tensRaw, tensPos, TENS_THRESH, 9, KNOB_HYST);
+    static int tensPending = -1, tensPendingCount = 0;
+    debouncePos(tensCand, tensPos, tensPending, tensPendingCount, KNOB_CONFIRM);
 
-    // Ones: 11-pos (labeled 1.02, 2–11), 1MΩ pullup to 3.3V, GPIO 34
-    int onesCand;
-    if      (onesRaw > 1950) onesCand = 0;
-    else if (onesRaw > 1824) onesCand = 1;
-    else if (onesRaw > 1717) onesCand = 2;
-    else if (onesRaw > 1595) onesCand = 3;
-    else if (onesRaw > 1466) onesCand = 4;
-    else if (onesRaw > 1305) onesCand = 5;
-    else if (onesRaw > 1148) onesCand = 6;
-    else if (onesRaw >  959) onesCand = 7;
-    else if (onesRaw >  734) onesCand = 8;
-    else if (onesRaw >  400) onesCand = 9;
-    else if (onesRaw >   86) onesCand = 10;
-    else                      onesCand = 11;
-    if (onesCand != onesPos) {
-        onesConfirm++;
-        if (onesConfirm >= 3) { onesPos = onesCand; onesConfirm = 0; }
-    } else {
-        onesConfirm = 0;
-    }
+    // Ones: 11-pos (labeled 1.02, 2–11), 1MΩ pullup to 3.3V, GPIO 34. Same
+    // two-layer rejection as tens (drives effect select, so chatter is worst).
+    static const int ONES_THRESH[11] =
+        { 1950, 1824, 1717, 1595, 1466, 1305, 1148, 959, 734, 400, 86 };
+    int onesCand = decodeBinHyst(onesRaw, onesPos, ONES_THRESH, 11, KNOB_HYST);
+    static int onesPending = -1, onesPendingCount = 0;
+    debouncePos(onesCand, onesPos, onesPending, onesPendingCount, KNOB_CONFIRM);
 
     // Hundreds: 5-pos rotary switch, 10kΩ pullup to 3.3V, GPIO 35
     // Measured ADC readings (±20 variance):
@@ -228,11 +257,12 @@ void loop() {
     //   Pos 3 (4.4kΩ): 1100
     //   Pos 4 (2.2kΩ):  570
     //   Pos 5 (short):    0
-    if      (hundredsRaw > 1630) hundredsPos = 0;
-    else if (hundredsRaw > 1290) hundredsPos = 1;
-    else if (hundredsRaw >  835) hundredsPos = 2;
-    else if (hundredsRaw >  285) hundredsPos = 3;
-    else                       hundredsPos = 4;
+    static const int HUNDREDS_THRESH[4] = { 1630, 1290, 835, 285 };
+    int hundredsCand =
+        decodeBinHyst(hundredsRaw, hundredsPos, HUNDREDS_THRESH, 4, KNOB_HYST);
+    static int hundredsPending = -1, hundredsPendingCount = 0;
+    debouncePos(hundredsCand, hundredsPos, hundredsPending,
+                hundredsPendingCount, KNOB_CONFIRM);
 
     if (adsOk) {
         adsTensRaw = ads.readADC_SingleEnded(0);
@@ -247,9 +277,11 @@ void loop() {
         ads.setGain(GAIN_ONE);
 
         float onesR = onesRawToR(adsOnesRaw);
-        decInner = (int)(onesR + 0.5);
-        if (decInner > 9) decInner = 9;
-        if (decInner < 0) decInner = 0;
+        int decInnerCand = (int)(onesR + 0.5);
+        if (decInnerCand > 9) decInnerCand = 9;
+        if (decInnerCand < 0) decInnerCand = 0;
+        static int decInnerPending = -1, decInnerPendingCount = 0;
+        debouncePos(decInnerCand, decInner, decInnerPending, decInnerPendingCount, 2);
 
         int newH = 0;
         for (int i = 10; i >= 0; i--) {
@@ -319,7 +351,10 @@ void loop() {
                     METER_UA_MAX != prevUaMax || METER_V_MAX != prevVMax);
 
     if (stateChanged || millis() - lastBroadcast >= HEARTBEAT_MS) {
-        broadcastState();
+        // On a knob change, burst 3 packets for redundancy against single-packet
+        // ESP-NOW drops. Steady-state heartbeat sends just one.
+        int bursts = stateChanged ? 3 : 1;
+        for (int b = 0; b < bursts; b++) broadcastState();
         lastBroadcast = millis();
         prevDcOn = dcOn; prevAcOn = acOn;
         prevHundredsPos = hundredsPos; prevTensPos = tensPos;

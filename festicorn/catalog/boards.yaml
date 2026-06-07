@@ -71,6 +71,16 @@ firmware_by_role:
     notes: |
       6-strip quiet bloom installation. 6× WS2812B RGB strips, one gyro
       sender per strip. ESP-NOW receiver demuxes by sender MAC.
+  bs26:
+    deployment: static
+    source: festicorn/kaylab-knobs/src/main.cpp
+    packet_format: json-espnow (knobs/switches/meters)
+    notes: |
+      Kay Lab 508-25 retrofit. ESP32 reads vintage panel switches/knobs and
+      drives two analog meters, broadcasting full panel state over ESP-NOW
+      (broadcast, channel 1, on-change + 1 s heartbeat). ADS1115 (I2C
+      SDA=23/SCL=22) reads the decade box; dual onboard DAC (GPIO 25 µA,
+      GPIO 26 V) drives the moving-coil meters. No mic/audio.
   noodles:
     deployment: dynamic
     source: null
@@ -309,9 +319,9 @@ boards:
   role: bench-bulbs
   first_seen: '2026-05-08T00:00:00Z'
   last_validated:
-    utc: '2026-05-08T00:00:00Z'
-    port: /dev/cu.usbserial-0001
-    notes: MAC confirmed via esptool read_mac.
+    utc: '2026-06-02T00:00:00Z'
+    port: /dev/cu.usbserial-6
+    notes: Flashed bench-bulbs firmware (commit 83bba04+), confirmed working.
   notes: |
     Replaces C3 board 10:00:3B:B0:6E:04 to eliminate single-core
     WiFi/RMT stutter. Strip A SK6812 RGBW on GPIO 4 (was GPIO 10),
@@ -330,6 +340,17 @@ boards:
     Second biolum receiver board. Pin 15 instead of 16 (differs from
     board A). 6× WS2812B RGB strips on GPIO 4, 15, 17, 5, 18, 19.
     150 LEDs per strip.
+
+# ── bs26 (Kay Lab 508-25 retrofit controller) ───────────────────────
+- mac: E0:8C:FE:57:A1:18
+  id: 'bs26'
+  chip: esp32-d0wd-v3
+  role: bs26
+  notes: |
+    Kay Lab 508-25 retrofit. ESP-NOW broadcast sender on channel 1
+    (knobs/switches/meters JSON). ADS1115 for decade box, dual DAC for
+    analog meters. No mic/audio. Port /dev/cu.usbserial-7 (re-enumerates
+    on replug). Firmware: festicorn/kaylab-knobs/ (see firmware_by_role.bs26).
 
 # ── classic-ESP32 fixtures ───────────────────────────────────────────
 - mac: F4:2D:C9:6D:B2:58

@@ -30,9 +30,9 @@ What happens in music that LEDs should respond to.
 
 **Genre is excluded as an axis** -- it's derivative of observable feature properties. See ledger: `genre-awareness-is-derivative`.
 
-### Axis 3: Audio Features
+### Axis 3: Sensing Features
 
-What we can compute. Two key principles; full catalog in `AUDIO_FEATURES.md` (library).
+What we can sense and compute -- across all input modalities (audio, IMU/accel, gyro, protocol layers). Two key principles below are stated in audio terms but generalize to any sensed signal; full audio catalog in `AUDIO_FEATURES.md` (library).
 
 **Derivatives over absolutes:** Build vs climax has identical static features (RMS +/-0.5%) but climax brightens 58x faster. The derivative is the signal, not position. (Ledger: `derivatives-over-absolutes`)
 

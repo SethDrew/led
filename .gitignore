@@ -86,3 +86,5 @@ festicorn/gyro-sense/data/recordings/**/*.csv
 festicorn/gyro-sense/data/recordings/**/*.png
 festicorn/gyro-sense/data/recordings/**/_episodes.json
 festicorn/gyro-sense/data/recordings/wire_packets/*.json
+festicorn/tree-of-record/tools/sim/bloom_dither_sim
+*.o

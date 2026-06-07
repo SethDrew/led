@@ -22,7 +22,7 @@ Stages:
   EMARatioNormalize    — running-mean ratio: emits current/EMA, raw.
   PulseDriver          — max-of-N + argmax with threshold + cooldown.
 
-See library/arch-impl/axis3-audio-features/PER_BAND_NORMALIZATION.md.
+See library/arch-impl/axis3-sensing-features/PER_BAND_NORMALIZATION.md.
 
 == Other primitives ==
 
@@ -346,7 +346,7 @@ class EMARatioNormalize:
     periods) so the running mean tracks the actual ambient floor. Only
     the output is gated.
 
-    See library/arch-impl/axis3-audio-features/PER_BAND_NORMALIZATION.md
+    See library/arch-impl/axis3-sensing-features/PER_BAND_NORMALIZATION.md
     for design rationale.
     """
 

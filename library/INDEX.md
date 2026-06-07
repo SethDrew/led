@@ -15,12 +15,13 @@ Deep-dive documents organized by the seven axes defined in ARCHITECTURE.md. Brow
 
 - **NATURE_TOPOLOGY_EFFECTS_CATALOG.md** — Effects that exploit physical sculpture form: hub-and-spoke, height-mapped, radial, and diamond-specific idioms with audio hooks.
 
-### axis3-audio-features/
+### axis3-sensing-features/
 
 - **AUDIO_FEATURES.md** — Full catalog of computable audio features.
 - **AUDIO_ANALYSIS_ALGORITHMS.md** — Algorithm details for audio analysis.
 - **SIGNAL_NORMALIZATION.md** — The normalization primitive: EMA multi-output design (peak_normalized, ema_ratio, sigmoid), time constants in wall-clock seconds, feature-specific normalization strategies.
 - **PER_BAND_NORMALIZATION.md** — Per-band EMA-ratio normalization with noise-floor gating. Standard pipeline (PerBandEMANormalize → PerBandAbsIntegral → PulseDriver) for band-decomposition RMS amplitude effects.
+- **SENSOR_LAYER_PROTOCOL.md** — The composable sender→receiver wire protocol for standalone installs: accel/gyro/audio layers, size-based disambiguation, current senders, and how layers bind to input roles. Audio layer not yet standardized.
 
 ### axis4-led-behaviors/
 

@@ -4665,3 +4665,73 @@ entries:
       ~/vidcompare (gemini_one.py reader, build_stab.py stabilizer), plus
       1D/2D screen-render tools.
 
+  - id: subharmonic-dither-flicker-bench
+    date: 2026-06-08
+    touched: 2026-06-08
+    title: Sub-LSB dither flicker — bench measurements and perceptual thresholds
+    summary: >
+      Hardware A/B test on WS2812B strip at 200fps measuring delta-sigma
+      temporal dithering across the 0↔1/255 boundary. Dithering between 0 and 1
+      produces visible flicker at all duty cycles because the contrast ratio is
+      infinite (on/off). The critical finding is the 40Hz subharmonic boundary.
+    status: validated
+    warmth: high
+    confidence: high
+    source:
+      - festicorn/bench-bulbs/src/dither_test.cpp
+      - festicorn/tree-of-record/docs/SUBHARMONIC_FLICKER.md
+    tags: [perception, dithering, hardware, output-pipeline]
+    relates_to: []
+    notes: >
+      ## Setup
+
+      WS2812B RGB strip, 50 LEDs, ESP32 at 200fps. First 25 LEDs vs last 25
+      with different treatments. Delta-sigma first-order dithering. Measured
+      actual transition rate on the wire per pixel.
+
+      ## Key findings
+
+      1. **Below 40Hz dither rate: clearly annoying.** 0.1/255 = 19.5Hz,
+         0.2/255 = 39.8Hz. Both visibly flicker. 0.1 is worst — individual
+         pulses are trackable by eye.
+
+      2. **40–100Hz: perceptible but tolerable.** 0.3/255 = 59Hz,
+         0.5/255 = 100Hz. Slight luminance variation visible if you look,
+         not distracting in context.
+
+      3. **Color matters.** Red flickers more visibly than blue at the same
+         dither rate — consistent with higher temporal sensitivity of L/M cones
+         vs S cones.
+
+      4. **0↔1 boundary is fundamentally broken for dithering.** Infinite
+         contrast ratio (on/off) means no duty cycle looks clean. Even 0.8/255
+         (80% on, 20% off) flickers at 40Hz because the 20% dark frames are
+         individually visible.
+
+      5. **1↔2 and above: dithering works.** Contrast ratio 2:1 or better.
+         Smooth fade between integer values with no perceptible flicker.
+
+      6. **Dithered 1–10/255 fade is smoother than stepped** but keeps
+         brightness slightly higher and still shows trace flicker at the
+         lowest values.
+
+      ## Conclusions
+
+      - Temporal dithering across the 0↔1 boundary is perceptually broken
+        at any duty cycle. The infinite contrast ratio (on vs off) makes
+        individual dark frames visible even at 100Hz.
+
+      - Temporal dithering between adjacent non-zero values (1↔2, 2↔3, etc.)
+        produces perceptually smooth gradients that stepped output cannot
+        match. This is where dithering belongs.
+
+      - 40Hz is the subharmonic annoyance boundary for 0↔1 dithering.
+        Below 40Hz: clearly annoying. 40–100Hz: perceptible but tolerable.
+
+      - Red dithers more visibly than blue at the same rate — L/M cone
+        temporal sensitivity is higher than S cone.
+
+      - Effect pipelines routinely land channels in the sub-LSB zone via
+        brightness scaling and weak secondary channels (e.g. red in teal).
+        This is the primary source of subharmonic flicker in production.
+

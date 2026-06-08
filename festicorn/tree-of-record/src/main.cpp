@@ -5,14 +5,14 @@
  * 100 LEDs each. No senders, no motion — pure ambient breathing bloom
  * (ported from biolum board B), modulated by a BS-26 console:
  *
- *   tens (10-pos knob) → brightness (0.01–1.0)  uniform output scale
- *   hundreds (0–4)     → speed      (0.3–3.0)   breathing rate, 2=normal
+ *   tens (10-pos knob) → brightness; 0 = fully off
+ *   ones (0–11)        → speed (12 steps, log-spaced 0.2–4.0)
+ *   decouter (0–11)    → effect select
+ *   hundreds (0–4)     → recording slot select (0–4)
  *   decmid (0–9)       → hue        36° rotation steps (full wheel)
  *   decinner (0–9)     → saturation 0=full color, 9=white
- *   AC switch          → global on/off (false = all strips dark)
- *   ones (0–11)        → effect select
- *   decouter (0–11)    → stick-rainbow subset; 11 = secret pulse mode
- *   DC, uA, V          → parsed but unused (reserved)
+ *   AC switch          → record (toggle: start/stop recording to selected slot)
+ *   DC switch          → playback (toggle: start/stop playback from selected slot)
  *
  * BS-26 live → knobs control. No signal → serial PARAMS control.
  * BS-26 state arrives as JSON over ESP-NOW broadcast on channel 1.
@@ -25,6 +25,7 @@
 #include <esp_random.h>
 #include <NeoPixelBus.h>
 #include <ArduinoJson.h>
+#include <SPIFFS.h>
 #include <math.h>
 #include <fast_math.h>
 #include <delta_sigma.h>
@@ -62,9 +63,100 @@ static float bloomDormancyMin  = 3.0f;
 static float bloomDormancyMax  = 7.0f;
 static float bloomDormancyFrac = 0.0f;
 
-// AC switch on the BS-26 → global on/off. Default true so the board renders
-// without a console (serial/standalone). Set from bs26.ac when live.
+// AC switch on the BS-26 → record toggle. DC switch → playback toggle.
+// acOn retained for the "tens=0 means off" path but no longer driven by AC.
 static bool acOn = true;
+
+// ── Recording system ─────────────────────────────────────────────
+// Up to 5 slots of 30s input recordings stored in SPIFFS.
+// Each slot: a binary file of Bs26State structs at capture framerate (~60fps).
+// Audio placeholder: /audio_N.raw (16kHz mono 8-bit, reserved for future mic).
+#define REC_MAX_SLOTS     5
+#define REC_MAX_FRAMES    1800   // 30s × 60fps
+#define REC_FPS           60
+
+enum RecState { REC_IDLE, REC_RECORDING, REC_PLAYING };
+static RecState recState = REC_IDLE;
+static uint8_t  recSlot = 0;          // selected via hundreds knob (0–4)
+static bool     recAcPrev = false;     // edge detect for AC toggle
+static bool     recDcPrev = false;     // edge detect for DC toggle
+
+struct RecFrame {
+    uint8_t tens, ones, hundreds, decouter, decmid, decinner;
+};
+
+static RecFrame* recBuffer = nullptr;  // heap-allocated on first use
+static uint32_t  recFrameCount = 0;    // frames written/total in buffer
+static uint32_t  recPlayIdx = 0;       // current playback position
+static bool      recSlotHasData[REC_MAX_SLOTS] = {};
+
+static void recInit() {
+    if (!SPIFFS.begin(true)) {
+        Serial.println("[REC] SPIFFS mount failed");
+        return;
+    }
+    for (int i = 0; i < REC_MAX_SLOTS; i++) {
+        char path[20];
+        snprintf(path, sizeof(path), "/rec_%d.bin", i);
+        recSlotHasData[i] = SPIFFS.exists(path);
+    }
+    Serial.printf("[REC] SPIFFS ready, %lu bytes free\n",
+                  (unsigned long)SPIFFS.totalBytes() - SPIFFS.usedBytes());
+}
+
+static bool recAllocBuffer() {
+    if (recBuffer) return true;
+    recBuffer = (RecFrame*)malloc(REC_MAX_FRAMES * sizeof(RecFrame));
+    if (!recBuffer) {
+        Serial.println("[REC] buffer alloc failed");
+        return false;
+    }
+    return true;
+}
+
+static void recStartRecording() {
+    if (!recAllocBuffer()) return;
+    recFrameCount = 0;
+    recState = REC_RECORDING;
+    Serial.printf("[REC] recording to slot %u...\n", recSlot);
+}
+
+static void recStopRecording() {
+    recState = REC_IDLE;
+    if (recFrameCount == 0) return;
+    char path[20];
+    snprintf(path, sizeof(path), "/rec_%d.bin", recSlot);
+    File f = SPIFFS.open(path, "w");
+    if (!f) { Serial.println("[REC] write failed"); return; }
+    f.write((uint8_t*)recBuffer, recFrameCount * sizeof(RecFrame));
+    f.close();
+    recSlotHasData[recSlot] = true;
+    Serial.printf("[REC] saved slot %u: %lu frames (%.1fs)\n",
+                  recSlot, recFrameCount, recFrameCount / (float)REC_FPS);
+}
+
+static void recStartPlayback() {
+    if (!recSlotHasData[recSlot]) {
+        Serial.printf("[REC] slot %u empty\n", recSlot);
+        return;
+    }
+    if (!recAllocBuffer()) return;
+    char path[20];
+    snprintf(path, sizeof(path), "/rec_%d.bin", recSlot);
+    File f = SPIFFS.open(path, "r");
+    if (!f) return;
+    size_t bytes = f.read((uint8_t*)recBuffer, REC_MAX_FRAMES * sizeof(RecFrame));
+    f.close();
+    recFrameCount = bytes / sizeof(RecFrame);
+    recPlayIdx = 0;
+    recState = REC_PLAYING;
+    Serial.printf("[REC] playing slot %u: %lu frames\n", recSlot, recFrameCount);
+}
+
+static void recStopPlayback() {
+    recState = REC_IDLE;
+    Serial.println("[REC] playback stopped");
+}
 
 #define GATE_ON_THRESH  0.7f
 #define GATE_OFF_THRESH 1.2f
@@ -79,7 +171,9 @@ static bool acOn = true;
 // BS-26 live → knobs control. No signal → serial PARAMS control.
 static float globalBrightness = 1.0f;   // serial-controlled, 0.0–1.0
 static float speedScale       = 1.0f;   // serial-controlled, 0.2–3.0
-static float renderBrightness = 1.0f;   // effective scale the render reads each frame
+static float renderBrightness = 1.0f;   // ceiling: max output scale
+static float renderFloor      = 0.0f;   // floor: min output scale (preserves effect dynamics)
+static float gDt = 1.0f / 60.0f;        // current frame dt, set each loop iteration
 
 // ── BS-26 ESP-NOW config ─────────────────────────────────────────
 #define FIXED_CHANNEL        1
@@ -340,10 +434,46 @@ static uint16_t fxDitherR[NUM_STRIPS][LEDS_PER_STRIP];
 static uint16_t fxDitherG[NUM_STRIPS][LEDS_PER_STRIP];
 static uint16_t fxDitherB[NUM_STRIPS][LEDS_PER_STRIP];
 
+// ── Hysteretic floor: anti-flicker policy for sub-LSB channels ───
+// Each channel per pixel has a timer (seconds, float). Positive = time spent
+// below threshold (trending toward dormant). Negative = time spent above
+// (trending toward active). State transitions:
+//   ACTIVE  → DORMANT: timer reaches +FLOOR_DEACTIVATE_S (channel goes dark)
+//   DORMANT → ACTIVE:  timer reaches -FLOOR_REACTIVATE_S (channel re-enables)
+// While active and sub-threshold: output floored at 1/255 (steady, no flicker).
+// While dormant: output true zero regardless of target.
+#define FLOOR_DEACTIVATE_S  1.0f
+#define FLOOR_REACTIVATE_S  0.5f
+#define FLOOR_THRESHOLD     256    // target16 below this = sub-LSB danger zone
+
+static float fxFloorTimer[NUM_STRIPS][LEDS_PER_STRIP][3];
+
 static void resetFxDither() {
     memset(fxDitherR, 0, sizeof(fxDitherR));
     memset(fxDitherG, 0, sizeof(fxDitherG));
     memset(fxDitherB, 0, sizeof(fxDitherB));
+    memset(fxFloorTimer, 0, sizeof(fxFloorTimer));
+}
+
+static inline uint16_t applyFloorPolicy(uint16_t target16, float &timer, float dt) {
+    if (target16 < FLOOR_THRESHOLD) {
+        timer += dt;
+        if (timer >= FLOOR_DEACTIVATE_S) {
+            timer = FLOOR_DEACTIVATE_S;
+            return 0;  // dormant: true zero
+        }
+        return FLOOR_THRESHOLD;  // active but sub-LSB: floor at 1/255
+    } else {
+        timer -= dt;
+        if (timer <= -FLOOR_REACTIVATE_S) {
+            timer = 0.0f;  // fully reactivated
+            return target16;
+        }
+        if (timer > 0.0f) {
+            return 0;  // was dormant, waiting to reactivate
+        }
+        return target16;  // active, above threshold
+    }
 }
 
 // Global palette transform: rotate hue by paletteHueIdx×36° and scale
@@ -361,17 +491,23 @@ static inline void applyGlobalPalette(float &r, float &g, float &b) {
     hsvToRgb(h, sv, v, r, g, b);
 }
 
-// fr/fg/fb in 0–255 linear range (already gamma-shaped by the effect),
-// pre-brightness. renderBrightness applies here so the tens knob is the
-// sole global output scale (no per-effect caps).
+// fr/fg/fb in 0–255 linear range (already gamma-shaped by the effect).
+// Remaps each channel into [renderFloor, renderBrightness] so effect dynamics
+// are visible even at low tens positions.
 static inline void setPixelDither(uint8_t s, uint16_t i, float fr, float fg, float fb) {
     applyGlobalPalette(fr, fg, fb);
-    fr *= renderBrightness;
-    fg *= renderBrightness;
-    fb *= renderBrightness;
+    if (fr > 0.0f || fg > 0.0f || fb > 0.0f) {
+        float range = renderBrightness - renderFloor;
+        fr = renderFloor * 255.0f + range * fr;
+        fg = renderFloor * 255.0f + range * fg;
+        fb = renderFloor * 255.0f + range * fb;
+    }
     uint16_t t16R = (uint16_t)fminf(fr * 256.0f, 65535.0f);
     uint16_t t16G = (uint16_t)fminf(fg * 256.0f, 65535.0f);
     uint16_t t16B = (uint16_t)fminf(fb * 256.0f, 65535.0f);
+    t16R = applyFloorPolicy(t16R, fxFloorTimer[s][i][0], gDt);
+    t16G = applyFloorPolicy(t16G, fxFloorTimer[s][i][1], gDt);
+    t16B = applyFloorPolicy(t16B, fxFloorTimer[s][i][2], gDt);
     if ((t16R | t16G | t16B) == 0) {
         fxDitherR[s][i] = fxDitherG[s][i] = fxDitherB[s][i] = 0;
     }
@@ -645,10 +781,12 @@ static void renderBloomStrip(uint8_t s, float dt) {
             }
         }
 
-        // Uniform global brightness scale before dither.
-        oR *= renderBrightness;
-        oG *= renderBrightness;
-        oB *= renderBrightness;
+        if (oR > 0.0f || oG > 0.0f || oB > 0.0f) {
+            float range = renderBrightness - renderFloor;
+            oR = renderFloor * 255.0f + range * oR;
+            oG = renderFloor * 255.0f + range * oG;
+            oB = renderFloor * 255.0f + range * oB;
+        }
 
         uint16_t t16R = (uint16_t)fminf(oR * 256.0f, 65535.0f);
         uint16_t t16G = (uint16_t)fminf(oG * 256.0f, 65535.0f);
@@ -2222,6 +2360,8 @@ void setup() {
     peer.encrypt = false;
     esp_now_add_peer(&peer);
 
+    recInit();
+
     Serial.printf("Tree-of-record ready — ch=%u\n", FIXED_CHANNEL);
     Serial.printf("  Bloom: 6 strips × %u LEDs (ambient, BS-26 driven)\n", LEDS_PER_STRIP);
 }
@@ -2232,6 +2372,7 @@ void loop() {
     static uint32_t lastRenderMs = 0;
     float dt = (lastRenderMs > 0) ? (now - lastRenderMs) / 1000.0f : (1.0f / SENSOR_HZ);
     if (dt > 0.1f) dt = 0.1f;
+    gDt = dt;
     lastRenderMs = now;
 
     // Decode sensor packets → effect feature globals (real-time dt).
@@ -2256,14 +2397,24 @@ void loop() {
         memcpy(&s, (const void*)&bs26, sizeof(s));
         portEXIT_CRITICAL(&bs26Mux);
 
-        // tens (10-position knob) → brightness 0.01–1.0 (linear)
+        // tens (10-position knob) → brightness; 0 = fully off
         uint8_t tens = s.tens > 9 ? 9 : s.tens;
-        effBrightness = lerpf(0.01f, 1.0f, (float)tens / 9.0f);
+        if (tens == 0) {
+            effBrightness = 0.0f;
+        } else {
+            effBrightness = powf((float)tens / 9.0f, 2.5f);
+        }
 
-        // hundreds 0–4 → speed (index 2 = 1.0 normal); log-ish 5-step ramp
-        static const float HUNDREDS_SPEED[5] = { 0.3f, 0.6f, 1.0f, 1.8f, 3.0f };
-        uint8_t hi = s.hundreds > 4 ? 4 : s.hundreds;
-        effSpeed = HUNDREDS_SPEED[hi];
+        // ones (0–11) → speed, log-spaced 0.2–4.0
+        static const float ONES_SPEED[12] = {
+            0.20f, 0.30f, 0.45f, 0.60f, 0.80f, 1.00f,
+            1.30f, 1.70f, 2.20f, 2.80f, 3.50f, 4.00f
+        };
+        uint8_t spd = s.ones > 11 ? 11 : s.ones;
+        effSpeed = ONES_SPEED[spd];
+
+        // hundreds (0–4) → recording slot select
+        recSlot = s.hundreds > 4 ? 4 : s.hundreds;
 
         // decmid (0–9) → hue rotation, decinner (0–9) → saturation
         uint8_t hue = s.decmid > 9 ? 9 : s.decmid;
@@ -2274,14 +2425,25 @@ void loop() {
             applyPalette(paletteHueIdx, paletteSatIdx);
         }
 
-        // decouter (0–11) → stick-rainbow subset / pulse mode
-        srDecouter = s.decouter > 11 ? 11 : s.decouter;
+        // decouter (0–11) → effect select
+        currentEffect = s.decouter >= FX_COUNT ? FX_COUNT - 1 : s.decouter;
 
-        // ones (0–11) → effect select
-        currentEffect = s.ones >= FX_COUNT ? FX_COUNT - 1 : s.ones;
+        // stick-rainbow always shows all sticks (subset control removed)
+        srDecouter = 10;
 
-        // AC switch → global on/off (false = all strips dark)
-        acOn = s.ac;
+        // AC switch → record toggle (edge-triggered)
+        if (s.ac && !recAcPrev) {
+            if (recState == REC_RECORDING) recStopRecording();
+            else if (recState == REC_IDLE) recStartRecording();
+        }
+        recAcPrev = s.ac;
+
+        // DC switch → playback toggle (edge-triggered)
+        if (s.dc && !recDcPrev) {
+            if (recState == REC_PLAYING) recStopPlayback();
+            else if (recState == REC_IDLE) recStartPlayback();
+        }
+        recDcPrev = s.dc;
 
         bs26LastBrightness = effBrightness;
         bs26LastSpeed      = effSpeed;
@@ -2292,27 +2454,47 @@ void loop() {
         effSpeed      = bs26LastSpeed;
     }
 
-    // Dormancy machinery retained in bloom but driven off (DC now reserved).
     bloomDormancyFrac = 0.0f;
 
-    renderBrightness = effBrightness;
+    // ── Recording: capture current frame ──
+    if (recState == REC_RECORDING && recBuffer && recFrameCount < REC_MAX_FRAMES) {
+        RecFrame rf;
+        rf.tens = (uint8_t)(effBrightness * 255);
+        rf.ones = (uint8_t)(effSpeed * 64);
+        rf.hundreds = recSlot;
+        rf.decouter = currentEffect;
+        rf.decmid = paletteHueIdx;
+        rf.decinner = paletteSatIdx;
+        recBuffer[recFrameCount++] = rf;
+        if (recFrameCount >= REC_MAX_FRAMES) recStopRecording();
+    }
 
-    // AC off → blank everything and skip rendering (still log state so the
-    // board is observable over serial while output is suppressed).
-    if (!acOn) {
+    // ── Playback: override effect params from recorded frames ──
+    if (recState == REC_PLAYING && recBuffer && recFrameCount > 0) {
+        RecFrame &rf = recBuffer[recPlayIdx];
+        effBrightness = (float)rf.tens / 255.0f;
+        effSpeed = (float)rf.ones / 64.0f;
+        currentEffect = rf.decouter >= FX_COUNT ? FX_COUNT - 1 : rf.decouter;
+        uint8_t hue = rf.decmid;
+        uint8_t sat = rf.decinner;
+        if (hue != paletteHueIdx || sat != paletteSatIdx) {
+            paletteHueIdx = hue;
+            paletteSatIdx = sat;
+            applyPalette(paletteHueIdx, paletteSatIdx);
+        }
+        recPlayIdx++;
+        if (recPlayIdx >= recFrameCount) recPlayIdx = 0;  // loop
+    }
+
+    renderBrightness = effBrightness;
+    renderFloor = effBrightness * 0.2f;
+
+    // tens=0 → all off (blank and skip rendering)
+    if (effBrightness == 0.0f) {
         for (uint8_t s = 0; s < NUM_STRIPS; s++)
             for (uint16_t i = 0; i < LEDS_PER_STRIP; i++)
                 setPixel(s, i, 0, 0, 0);
         showAll();
-        static uint32_t acLogMs = 0;
-        if (now - acLogMs > 2000) {
-            acLogMs = now;
-            Serial.printf("  [bs26] %s pkts=%lu fx=%u AC=OFF (output gated) "
-                          "bright=%.3f speed=%.2f hue=%u sat=%u decouter=%u\n",
-                          bs26Live ? "LIVE" : "----", (unsigned long)bs26PktCount,
-                          currentEffect, renderBrightness, effSpeed,
-                          paletteHueIdx, paletteSatIdx, srDecouter);
-        }
         return;
     }
 
@@ -2335,7 +2517,22 @@ void loop() {
     uint32_t t0 = micros();
 
     // ── Render the selected effect on all 6 strips ──────────────
-    float fxDt = dt * effSpeed;
+    // Per-effect speed normalization so the ones knob feels consistent.
+    static const float SPEED_SCALE[] = {
+        1.4f,   // FX_AMBIENT_BLOOM
+        1.4f,   // FX_QUIET_BLOOM
+        0.5f,   // FX_GRAVITY_PARTICLE
+        1.0f,   // FX_SPARKLE_SYLLABLE
+        1.0f,   // FX_FIRE_MELD
+        1.0f,   // FX_FIRE_FLICKER
+        2.0f,   // FX_RAINBOW
+        1.5f,   // FX_NEBULA
+        0.25f,  // FX_LEAF_WIND
+        1.5f,   // FX_CREATURES
+        1.0f,   // FX_LIGHT_THROUGH
+        0.9f,   // FX_STICK_RAINBOW
+    };
+    float fxDt = dt * effSpeed * SPEED_SCALE[currentEffect];
     switch (currentEffect) {
         case FX_AMBIENT_BLOOM:
             for (uint8_t s = 0; s < NUM_STRIPS; s++) renderBloomStrip(s, fxDt);

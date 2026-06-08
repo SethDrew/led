@@ -2,176 +2,120 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
-#include "v1_packet.h"
+#include <ArduinoJson.h>
 
-static const char* WIFI_SSID_TARGET = "cuteplant";
-#define CHANNEL_FALLBACK 1
-#define CHANNEL_RESCAN_MS (5UL * 60UL * 1000UL)
+// BS-26 knob stability monitor: receives ESP-NOW JSON packets on ch1,
+// prints every packet's knob fields, flags any change from previous.
 
-static uint8_t currentChannel = CHANNEL_FALLBACK;
-static uint32_t lastScanMs = 0;
-
-struct SenderStats {
-    uint8_t mac[6];
-    volatile uint32_t pktCount;
-    volatile uint32_t lastMs;
-    volatile uint16_t lastSeq;
-    volatile bool isV1;
-    volatile bool isNew;
-    volatile TelemetryPacketV1 lastPkt;
+struct KnobState {
+    int ones, tens, hundreds, decouter, decmid, decinner, seq;
+    bool valid;
 };
 
-#define MAX_SENDERS 16
-static volatile SenderStats senders[MAX_SENDERS];
-static volatile uint8_t numSenders = 0;
+static volatile bool pktReady = false;
+static uint8_t pktBuf[300];
+static int pktLen = 0;
+static uint8_t pktMac[6];
 
-void onReceive(const uint8_t* mac, const uint8_t* data, int len) {
-    int idx = -1;
-    for (uint8_t i = 0; i < numSenders; i++) {
-        if (memcmp((const void*)senders[i].mac, mac, 6) == 0) { idx = i; break; }
-    }
-    if (idx < 0) {
-        if (numSenders >= MAX_SENDERS) return;
-        idx = numSenders++;
-        memcpy((void*)senders[idx].mac, mac, 6);
-        senders[idx].pktCount = 0;
-        senders[idx].lastSeq = 0;
-        senders[idx].isV1 = false;
-        senders[idx].isNew = true;
-    }
-
-    senders[idx].pktCount++;
-    senders[idx].lastMs = millis();
-
-    if (len == sizeof(TelemetryPacketV1)) {
-        TelemetryPacketV1 pkt;
-        memcpy(&pkt, data, sizeof(pkt));
-        senders[idx].lastSeq = pkt.seq;
-        senders[idx].isV1 = true;
-        memcpy((void*)&senders[idx].lastPkt, &pkt, sizeof(pkt));
-
-        // Emit binary frame: [0xA5][0x5A][LEN+6][MAC:6][PAYLOAD:LEN][XOR8]
-        uint8_t frameLen = 6 + len;
-        uint8_t frame[2 + 1 + 6 + sizeof(TelemetryPacketV1) + 1];
-        frame[0] = 0xA5;
-        frame[1] = 0x5A;
-        frame[2] = frameLen;
-        memcpy(&frame[3], mac, 6);
-        memcpy(&frame[9], data, len);
-        uint8_t xor8 = 0;
-        for (uint8_t i = 2; i < 3 + frameLen; i++) xor8 ^= frame[i];
-        frame[3 + frameLen] = xor8;
-        Serial.write(frame, 4 + frameLen);
-    }
-}
-
-#define AMAG_FS 57000.0f
-#define GMAG_FS 57000.0f
-#define COUNTS_PER_G (32768.0f / 4.0f)
-#define COUNTS_PER_DPS (32768.0f / 1000.0f)
-static inline float magFromByte(uint8_t b) {
-    float n = (float)b / 255.0f;
-    return n * n * AMAG_FS;
-}
-static inline float amagG(uint8_t b) { return magFromByte(b) / COUNTS_PER_G; }
-static inline float gmagDps(uint8_t b) { return magFromByte(b) / COUNTS_PER_DPS; }
-static inline float axisMeanG(int8_t m) { return ((float)m * 256.0f) / COUNTS_PER_G; }
-
-static uint8_t scanForSsidChannel(const char* ssid) {
-    int n = WiFi.scanNetworks(false, false, true, 120);
-    uint8_t found = 0;
-    int8_t bestRssi = -127;
-    for (int i = 0; i < n; i++) {
-        if (WiFi.SSID(i) == ssid) {
-            int8_t rssi = WiFi.RSSI(i);
-            if (rssi > bestRssi) { bestRssi = rssi; found = WiFi.channel(i); }
-        }
-    }
-    WiFi.scanDelete();
-    return found;
-}
-
-static void applyChannel(uint8_t ch) {
-    if (ch == 0) ch = CHANNEL_FALLBACK;
-    esp_wifi_set_promiscuous(true);
-    esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-    esp_wifi_set_promiscuous(false);
-    currentChannel = ch;
+static void onReceive(const uint8_t* mac, const uint8_t* data, int len) {
+    if (pktReady) return;  // drop if main loop hasn't consumed yet
+    if (len < 2 || len > 299) return;
+    memcpy(pktBuf, data, len);
+    pktBuf[len] = 0;
+    pktLen = len;
+    memcpy(pktMac, mac, 6);
+    pktReady = true;
 }
 
 void setup() {
-    Serial.begin(460800);
-    delay(500);
+    Serial.begin(115200);
+    delay(1000);
 
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
 
-    uint8_t ch = scanForSsidChannel(WIFI_SSID_TARGET);
-    Serial.printf("\n[BOOT] espnow-sniffer MAC=%s ch=%u ssid_found=%d\n",
-                  WiFi.macAddress().c_str(), ch ? ch : CHANNEL_FALLBACK, ch ? 1 : 0);
-    applyChannel(ch ? ch : CHANNEL_FALLBACK);
-    lastScanMs = millis();
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_promiscuous(false);
 
     esp_now_init();
     esp_now_register_recv_cb(onReceive);
 
-    Serial.println("[READY] listening for ESP-NOW packets...\n");
+    // Add broadcast peer (same fix as tree-of-record)
+    esp_now_peer_info_t peer = {};
+    memset(peer.peer_addr, 0xFF, 6);
+    peer.channel = 1;
+    peer.encrypt = false;
+    esp_now_add_peer(&peer);
+
+    // Re-assert channel after init
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_promiscuous(false);
+
+    Serial.printf("\n[BOOT] bs26-stability-monitor MAC=%s ch=1\n",
+                  WiFi.macAddress().c_str());
+    Serial.println("[READY] waiting for BS-26 packets...\n");
+    Serial.println("seq     ones tens hund dout dmid din  | changes");
+    Serial.println("------- ---- ---- ---- ---- ---- ---- | -------");
 }
 
 void loop() {
-    uint32_t now = millis();
+    static KnobState prev = {0, 0, 0, 0, 0, 0, 0, false};
+    static uint32_t pktCount = 0;
+    static uint32_t changeCount = 0;
 
-    // Print new sender alerts
-    uint8_t n = numSenders;
-    for (uint8_t i = 0; i < n; i++) {
-        if (senders[i].isNew) {
-            senders[i].isNew = false;
-            Serial.printf("[NEW] sender %u: %02X:%02X:%02X:%02X:%02X:%02X  %s\n",
-                          i,
-                          senders[i].mac[0], senders[i].mac[1], senders[i].mac[2],
-                          senders[i].mac[3], senders[i].mac[4], senders[i].mac[5],
-                          senders[i].isV1 ? "v1" : "unknown");
+    if (!pktReady) {
+        // Heartbeat every 5s if no packets
+        static uint32_t lastHb = 0;
+        if (millis() - lastHb > 5000) {
+            lastHb = millis();
+            Serial.printf("[%lus] pkts=%lu changes=%lu (waiting...)\n",
+                          millis() / 1000, pktCount, changeCount);
         }
+        delay(10);
+        return;
     }
 
-    // Summary every 3 seconds
-    static uint32_t lastSummaryMs = 0;
-    if (now - lastSummaryMs > 3000 && n > 0) {
-        lastSummaryMs = now;
-        Serial.printf("\n=== %u senders | %lus uptime ===\n", n, now / 1000);
-        for (uint8_t i = 0; i < n; i++) {
-            uint32_t age = now - senders[i].lastMs;
-            const char* status = (age > 1000) ? " STALE" : "";
-            if (senders[i].isV1 && age <= 1000) {
-                TelemetryPacketV1 p;
-                memcpy(&p, (const void*)&senders[i].lastPkt, sizeof(p));
-                Serial.printf("  [%u] %02X:%02X  seq=%-5u amag=%.2f/%.2fg gmag=%d/%ddps grav=(%.2f,%.2f,%.2f) clip=%u sat=%u\n",
-                              i, senders[i].mac[4], senders[i].mac[5],
-                              p.seq,
-                              amagG(p.amag_max), amagG(p.amag_mean),
-                              (int)gmagDps(p.gmag_max), (int)gmagDps(p.gmag_mean),
-                              axisMeanG(p.ax_mean), axisMeanG(p.ay_mean), axisMeanG(p.az_mean),
-                              (p.flags >> 4) & 0x0F, p.flags & 0x0F);
-            } else {
-                Serial.printf("  [%u] %02X:%02X  pkts=%-6lu seq=%-5u %s%s\n",
-                              i, senders[i].mac[4], senders[i].mac[5],
-                              senders[i].pktCount, senders[i].lastSeq,
-                              senders[i].isV1 ? "v1" : "??",
-                              status);
-            }
-        }
-        Serial.println();
+    // Parse JSON
+    StaticJsonDocument<512> doc;
+    DeserializationError err = deserializeJson(doc, (const char*)pktBuf, pktLen);
+    pktReady = false;
+
+    if (err || !doc.containsKey("seq")) {
+        Serial.printf("[?] non-JSON or no seq: len=%d from %02X:%02X\n",
+                      pktLen, pktMac[4], pktMac[5]);
+        return;
     }
 
-    // Channel rescan
-    if (now - lastScanMs > CHANNEL_RESCAN_MS) {
-        uint8_t newCh = scanForSsidChannel(WIFI_SSID_TARGET);
-        if (newCh && newCh != currentChannel) {
-            Serial.printf("[RESCAN] ch %u -> %u\n", currentChannel, newCh);
-            applyChannel(newCh);
-        }
-        lastScanMs = millis();
+    KnobState cur;
+    cur.seq      = doc["seq"] | 0;
+    cur.ones     = doc["ones"] | -1;
+    cur.tens     = doc["tens"] | -1;
+    cur.hundreds = doc["hundreds"] | -1;
+    cur.decouter = doc["decouter"] | -1;
+    cur.decmid   = doc["decmid"] | -1;
+    cur.decinner = doc["decinner"] | -1;
+    cur.valid    = true;
+    pktCount++;
+
+    // Check for changes
+    char changes[128] = "";
+    if (prev.valid) {
+        char* p = changes;
+        if (cur.ones != prev.ones)         p += sprintf(p, "ones:%d→%d ", prev.ones, cur.ones);
+        if (cur.tens != prev.tens)         p += sprintf(p, "tens:%d→%d ", prev.tens, cur.tens);
+        if (cur.hundreds != prev.hundreds) p += sprintf(p, "hund:%d→%d ", prev.hundreds, cur.hundreds);
+        if (cur.decouter != prev.decouter) p += sprintf(p, "dout:%d→%d ", prev.decouter, cur.decouter);
+        if (cur.decmid != prev.decmid)     p += sprintf(p, "dmid:%d→%d ", prev.decmid, cur.decmid);
+        if (cur.decinner != prev.decinner) p += sprintf(p, "din:%d→%d ", prev.decinner, cur.decinner);
+        if (changes[0]) changeCount++;
     }
 
-    delay(50);
+    Serial.printf("%-7d %4d %4d %4d %4d %4d %4d | %s\n",
+                  cur.seq, cur.ones, cur.tens, cur.hundreds,
+                  cur.decouter, cur.decmid, cur.decinner,
+                  changes[0] ? changes : "—");
+
+    prev = cur;
 }

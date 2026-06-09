@@ -313,15 +313,15 @@ boards:
     with esptool chip_id if uncertain).
 
 # ── bench-bulbs (classic-ESP32 port of C3 receiver) ──────────────────
-- mac: A4:F0:0F:61:92:2C
+- mac: E0:8C:FE:57:A1:18
   id: 'bench-bulbs'
   chip: esp32-d0wd-v3
   role: bench-bulbs
   first_seen: '2026-05-08T00:00:00Z'
   last_validated:
-    utc: '2026-06-02T00:00:00Z'
-    port: /dev/cu.usbserial-6
-    notes: Flashed bench-bulbs firmware (commit 83bba04+), confirmed working.
+    utc: '2026-06-08T00:00:00Z'
+    port: /dev/cu.usbserial-0001
+    notes: MAC corrected (was swapped with bs26). Reflashed bench-bulbs firmware.
   notes: |
     Replaces C3 board 10:00:3B:B0:6E:04 to eliminate single-core
     WiFi/RMT stutter. Strip A SK6812 RGBW on GPIO 4 (was GPIO 10),
@@ -342,15 +342,18 @@ boards:
     150 LEDs per strip.
 
 # ── bs26 (Kay Lab 508-25 retrofit controller) ───────────────────────
-- mac: E0:8C:FE:57:A1:18
+- mac: A4:F0:0F:61:92:2C
   id: 'bs26'
   chip: esp32-d0wd-v3
   role: bs26
+  last_validated:
+    utc: '2026-06-08T00:00:00Z'
+    port: /dev/cu.usbserial-6
+    notes: MAC corrected (was swapped with bench-bulbs). Flashed unified thresholds.
   notes: |
     Kay Lab 508-25 retrofit. ESP-NOW broadcast sender on channel 1
     (knobs/switches/meters JSON). ADS1115 for decade box, dual DAC for
-    analog meters. No mic/audio. Port /dev/cu.usbserial-7 (re-enumerates
-    on replug). Firmware: festicorn/kaylab-knobs/ (see firmware_by_role.bs26).
+    analog meters. No mic/audio. Firmware: festicorn/kaylab-knobs/ (see firmware_by_role.bs26).
 
 # ── classic-ESP32 fixtures ───────────────────────────────────────────
 - mac: F4:2D:C9:6D:B2:58

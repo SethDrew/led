@@ -9,6 +9,9 @@
 
 struct KnobState {
     int ones, tens, hundreds, decouter, decmid, decinner, seq;
+    unsigned long up;
+    int boot;
+    int rawH, rawT, rawO, adsT, adsO, adsRef;
     bool valid;
 };
 
@@ -56,12 +59,12 @@ void setup() {
     Serial.printf("\n[BOOT] bs26-stability-monitor MAC=%s ch=1\n",
                   WiFi.macAddress().c_str());
     Serial.println("[READY] waiting for BS-26 packets...\n");
-    Serial.println("seq     ones tens hund dout dmid din  | changes");
-    Serial.println("------- ---- ---- ---- ---- ---- ---- | -------");
+    Serial.println("seq     ones tens hund dout dmid din  | up(s)  boot | rawH  rawT  rawO  adsT  adsO  aRef | changes");
+    Serial.println("------- ---- ---- ---- ---- ---- ---- | ------ ---- | ----- ----- ----- ----- ----- ---- | -------");
 }
 
 void loop() {
-    static KnobState prev = {0, 0, 0, 0, 0, 0, 0, false};
+    static KnobState prev = {};
     static uint32_t pktCount = 0;
     static uint32_t changeCount = 0;
 
@@ -82,20 +85,29 @@ void loop() {
     DeserializationError err = deserializeJson(doc, (const char*)pktBuf, pktLen);
     pktReady = false;
 
-    if (err || !doc.containsKey("seq")) {
+    if (err || (!doc.containsKey("s") && !doc.containsKey("seq"))) {
         Serial.printf("[?] non-JSON or no seq: len=%d from %02X:%02X\n",
                       pktLen, pktMac[4], pktMac[5]);
         return;
     }
 
     KnobState cur;
-    cur.seq      = doc["seq"] | 0;
-    cur.ones     = doc["ones"] | -1;
-    cur.tens     = doc["tens"] | -1;
-    cur.hundreds = doc["hundreds"] | -1;
-    cur.decouter = doc["decouter"] | -1;
-    cur.decmid   = doc["decmid"] | -1;
-    cur.decinner = doc["decinner"] | -1;
+    // Support both old (long key) and new (short key) formats
+    cur.seq      = doc["s"] | (doc["seq"] | 0);
+    cur.ones     = doc["o"] | (doc["ones"] | -1);
+    cur.tens     = doc["t"] | (doc["tens"] | -1);
+    cur.hundreds = doc["h"] | (doc["hundreds"] | -1);
+    cur.decouter = doc["do"] | (doc["decouter"] | -1);
+    cur.decmid   = doc["dm"] | (doc["decmid"] | -1);
+    cur.decinner = doc["di"] | (doc["decinner"] | -1);
+    cur.up       = doc["up"] | 0UL;
+    cur.boot     = doc["b"] | (doc["boot"] | -1);
+    cur.rawH     = doc["rh"] | (doc["raw"]["hundreds"] | -1);
+    cur.rawT     = doc["rt"] | (doc["raw"]["tens"] | -1);
+    cur.rawO     = doc["ro"] | (doc["raw"]["ones"] | -1);
+    cur.adsT     = doc["at"] | (doc["raw"]["adsTens"] | -1);
+    cur.adsO     = doc["ao"] | (doc["raw"]["adsOnes"] | -1);
+    cur.adsRef   = doc["ar"] | -1;
     cur.valid    = true;
     pktCount++;
 
@@ -109,12 +121,15 @@ void loop() {
         if (cur.decouter != prev.decouter) p += sprintf(p, "dout:%d→%d ", prev.decouter, cur.decouter);
         if (cur.decmid != prev.decmid)     p += sprintf(p, "dmid:%d→%d ", prev.decmid, cur.decmid);
         if (cur.decinner != prev.decinner) p += sprintf(p, "din:%d→%d ", prev.decinner, cur.decinner);
+        if (cur.boot != prev.boot && prev.boot > 0) p += sprintf(p, "**REBOOT** ");
         if (changes[0]) changeCount++;
     }
 
-    Serial.printf("%-7d %4d %4d %4d %4d %4d %4d | %s\n",
+    Serial.printf("%-7d %4d %4d %4d %4d %4d %4d | %5lu %4d | %5d %5d %5d %5d %5d %4d | %s\n",
                   cur.seq, cur.ones, cur.tens, cur.hundreds,
                   cur.decouter, cur.decmid, cur.decinner,
+                  cur.up / 1000, cur.boot,
+                  cur.rawH, cur.rawT, cur.rawO, cur.adsT, cur.adsO, cur.adsRef,
                   changes[0] ? changes : "—");
 
     prev = cur;

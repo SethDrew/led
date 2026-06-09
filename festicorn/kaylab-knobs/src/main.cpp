@@ -5,6 +5,10 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <esp_now.h>
+#include <Preferences.h>
+
+Preferences prefs;
+uint32_t bootCount = 0;
 
 // Meters: 500µA full-scale, 5.6kΩ series resistor
 // µA meter: DAC 230 = 500µA full-scale
@@ -163,20 +167,37 @@ void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
     handleCommand(msg);
 }
 
+static int lastHundredsRaw = 0, lastTensRaw = 0, lastOnesRaw = 0;
+static int16_t lastAdsTensRaw = 0, lastAdsOnesRaw = 0, lastAdsVccRef = 0;
+// ADS Vcc ref reading when thresholds were calibrated (USB-grounded, 7.5k/7.5k divider)
+static const float adsVccRefBaseline = 13249.0f;
+
 void broadcastState() {
-    char buf[300];
+    char buf[250];
     int n = snprintf(buf, sizeof(buf),
-        "{\"dc\":%s,\"ac\":%s,\"hundreds\":%d,\"tens\":%d,\"ones\":%d,"
-        "\"decade\":%d,\"decouter\":%d,\"decmid\":%d,\"decinner\":%d,"
-        "\"ua\":{\"dac\":%d,\"max\":%d},\"v\":{\"dac\":%d,\"max\":%d},\"seq\":%u}",
-        dcOn ? "true" : "false", acOn ? "true" : "false",
+        "{\"dc\":%d,\"ac\":%d,\"h\":%d,\"t\":%d,\"o\":%d,"
+        "\"dec\":%d,\"do\":%d,\"dm\":%d,\"di\":%d,"
+        "\"ua\":%d,\"v\":%d,"
+        "\"rh\":%d,\"rt\":%d,\"ro\":%d,\"at\":%d,\"ao\":%d,\"ar\":%d,"
+        "\"up\":%lu,\"b\":%u,\"s\":%u}",
+        (int)dcOn, (int)acOn,
         hundredsPos, tensPos, onesPos, decValue, decOuter, decMid, decInner,
-        uaDac, METER_UA_MAX, vDac, METER_V_MAX, espnowSeq++);
+        uaDac, vDac,
+        lastHundredsRaw, lastTensRaw, lastOnesRaw,
+        (int)lastAdsTensRaw, (int)lastAdsOnesRaw, (int)lastAdsVccRef,
+        millis(), bootCount, espnowSeq++);
+    if (n > 250) n = 250;
     esp_now_send(broadcastAddr, (uint8_t *)buf, n);
 }
 
 void setup() {
     Serial.begin(115200);
+
+    prefs.begin("bs26", false);
+    bootCount = prefs.getUInt("boots", 0) + 1;
+    prefs.putUInt("boots", bootCount);
+    prefs.end();
+
     pinMode(DC_SWITCH_PIN, INPUT);
     pinMode(AC_SWITCH_PIN, INPUT);
 
@@ -228,25 +249,30 @@ void loop() {
     int hundredsRaw = analogRead(HUNDREDS_PIN);
     int tensRaw = analogRead(TENS_PIN);
     int onesRaw = analogRead(ONES_PIN);
+    lastHundredsRaw = hundredsRaw;
+    lastTensRaw = tensRaw;
+    lastOnesRaw = onesRaw;
     int decInnerRaw = analogRead(DECADE_ONES_PIN);
     int decThRaw = analogRead(DECADE_TH_PIN);
     // Debug: try reading VP/VN by ADC channel directly
     int vp_adc = adc1_get_raw(ADC1_CHANNEL_0);  // GPIO 36
     int vn_adc = adc1_get_raw(ADC1_CHANNEL_3);  // GPIO 39
 
-    // Tens: 10-pos, 5.6MΩ pullup, cap filtered, GPIO 32. Two-layer noise
-    // rejection: ±KNOB_HYST-count threshold hysteresis + 3-sample confirm.
+    // Tens: 10-pos, 5.6MΩ pullup, cap filtered, GPIO 32.
+    // Unified thresholds calibrated for both USB-grounded and ungrounded operation.
     static const int TENS_THRESH[9] =
-        { 3150, 2132, 1980, 1802, 1589, 1330, 1015, 624, 203 };
+        { 3133, 2095, 1942, 1767, 1565, 1304, 995, 602, 197 };
     int tensCand = decodeBinHyst(tensRaw, tensPos, TENS_THRESH, 9, KNOB_HYST);
     static int tensPending = -1, tensPendingCount = 0;
     debouncePos(tensCand, tensPos, tensPending, tensPendingCount, KNOB_CONFIRM);
 
-    // Ones: 11-pos (labeled 1.02, 2–11), 1MΩ pullup to 3.3V, GPIO 34. Same
-    // two-layer rejection as tens (drives effect select, so chatter is worst).
+    // Ones: 11-pos (labeled 1.02, 2–11), 1MΩ pullup to 3.3V, GPIO 34.
+    // Tighter spacing than tens — reduced hysteresis (15) keeps all 11
+    // positions reachable in both grounded and ungrounded modes.
     static const int ONES_THRESH[11] =
-        { 1950, 1824, 1717, 1595, 1466, 1305, 1148, 959, 734, 400, 86 };
-    int onesCand = decodeBinHyst(onesRaw, onesPos, ONES_THRESH, 11, KNOB_HYST);
+        { 1950, 1846, 1736, 1624, 1478, 1330, 1161, 971, 743, 408, 93 };
+    static const int ONES_HYST = 15;
+    int onesCand = decodeBinHyst(onesRaw, onesPos, ONES_THRESH, 11, ONES_HYST);
     static int onesPending = -1, onesPendingCount = 0;
     debouncePos(onesCand, onesPos, onesPending, onesPendingCount, KNOB_CONFIRM);
 
@@ -267,6 +293,7 @@ void loop() {
     if (adsOk) {
         adsTensRaw = ads.readADC_SingleEnded(0);
         adsTensV = ads.computeVolts(adsTensRaw);
+        lastAdsTensRaw = adsTensRaw;
 
         ads.setGain(GAIN_TWO);
         delay(5);
@@ -274,9 +301,18 @@ void loop() {
         for (int i = 0; i < 4; i++) onesSum += ads.readADC_SingleEnded(1);
         adsOnesRaw = onesSum / 4;
         adsOnesV = adsOnesRaw * ADS_LSB_GAIN2;
+        lastAdsOnesRaw = adsOnesRaw;
         ads.setGain(GAIN_ONE);
 
-        float onesR = onesRawToR(adsOnesRaw);
+        lastAdsVccRef = ads.readADC_SingleEnded(2);
+
+        // Ratiometric correction: scale ADS readings to match calibration-time Vcc.
+        float vccScale = (lastAdsVccRef > 1000)
+            ? adsVccRefBaseline / (float)lastAdsVccRef : 1.0f;
+        int16_t adsTensCorrected = (int16_t)(adsTensRaw * vccScale);
+        int16_t adsOnesCorrected = (int16_t)(adsOnesRaw * vccScale);
+
+        float onesR = onesRawToR(adsOnesCorrected);
         int decInnerCand = (int)(onesR + 0.5);
         if (decInnerCand > 9) decInnerCand = 9;
         if (decInnerCand < 0) decInnerCand = 0;
@@ -285,12 +321,12 @@ void loop() {
 
         int newH = 0;
         for (int i = 10; i >= 0; i--) {
-            if (adsTensRaw >= hundredsThresh[i]) { newH = i + 1; break; }
+            if (adsTensCorrected >= hundredsThresh[i]) { newH = i + 1; break; }
         }
         int bracketLow = hundredsLUT[newH];
         int bracketHigh = hundredsLUT[newH + 1];
         float countsPerTen = (bracketHigh - bracketLow) / 10.0;
-        int newT = (int)((adsTensRaw - bracketLow) / countsPerTen + 0.5);
+        int newT = (int)((adsTensCorrected - bracketLow) / countsPerTen + 0.5);
         if (newT > 9) newT = 9;
         if (newT < 0) newT = 0;
 
@@ -324,14 +360,14 @@ void loop() {
     if (hundredsPos != prevHundredsForMeter) { vAuto  = true; prevHundredsForMeter = hundredsPos; }
 
     if (uaAuto) {
-        // uA meter ← brightness: tens 0–9 → 0 .. full scale.
+        // µA meter: tens 0–9 → 0,10,20…90 on 500µA face.
         int t = tensPos > 9 ? 9 : tensPos;
-        uaDac = (int)((t / 9.0f) * METER_UA_MAX + 0.5f);
+        uaDac = (int)((t * 10.0f / 500.0f) * METER_UA_MAX + 0.5f);
     }
     if (vAuto) {
-        // V meter ← speed: hundreds 0–4 → 0 .. full scale.
+        // V meter: hundreds 0–4 → 0,100,200,300,400 on 500V face.
         int h = hundredsPos > 4 ? 4 : hundredsPos;
-        vDac = (int)((h / 4.0f) * METER_V_MAX + 0.5f);
+        vDac = (int)((h * 100.0f / 500.0f) * METER_V_MAX + 0.5f);
     }
 
     int uaVal = uaDac > METER_UA_MAX ? METER_UA_MAX : uaDac;
@@ -351,10 +387,7 @@ void loop() {
                     METER_UA_MAX != prevUaMax || METER_V_MAX != prevVMax);
 
     if (stateChanged || millis() - lastBroadcast >= HEARTBEAT_MS) {
-        // On a knob change, burst 3 packets for redundancy against single-packet
-        // ESP-NOW drops. Steady-state heartbeat sends just one.
-        int bursts = stateChanged ? 3 : 1;
-        for (int b = 0; b < bursts; b++) broadcastState();
+        broadcastState();
         lastBroadcast = millis();
         prevDcOn = dcOn; prevAcOn = acOn;
         prevHundredsPos = hundredsPos; prevTensPos = tensPos;

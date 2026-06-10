@@ -10,7 +10,7 @@
  *   decouter (0–11)    → effect select
  *   hundreds (0–4)     → recording slot select (0–4)
  *   decmid (0–9)       → hue        36° rotation steps (full wheel)
- *   decinner (0–9)     → saturation 0=full color, 9=white
+ *   decinner (0–9)     → saturation 5=original, 0=boosted to full, 9=white
  *   AC switch          → record (toggle: start/stop recording to selected slot)
  *   DC switch          → playback (toggle: start/stop playback from selected slot)
  *
@@ -43,10 +43,16 @@
 static const uint8_t NUM_STRIPS = 6;
 
 // ── Bloom parameters (runtime-tunable via operator) ─────────────
-static float bloomBrightnessCap  = 0.15f;
+static float bloomBrightnessCap  = 1.0f;
 static float bloomBufferDrain     = 15.0f;
 static float bloomFlashDecayRate  = 3.0f;
-static float bloomBreathFloor     = 0.15f;
+static float bloomBreathFloor     = 0.32f;   // glow trough (pulses, doesn't blink)
+// Audio-energy overdrive: audioEnergy5s drives a per-pixel boost ADDED after the
+// brightness knob/cap, so loud audio punches bright pixels THROUGH the cap toward
+// saturation (up to bloomAudioCeil ≈ 2–3×) even when the brightness knob is low,
+// while below-mean pixels are pushed dark. Knob sets the quiet ambient level.
+static float bloomStretchGain     = 2.5f;   // overdrive level at full energy (× cap)
+static float bloomAudioCeil       = 3.0f;   // max level; ×baseColor saturates at 255
 
 #define BLOOM_BREATH_MIN_PERIOD 3.0f
 #define BLOOM_BREATH_MAX_PERIOD 8.0f
@@ -116,6 +122,8 @@ static const char REC_MAGIC[4]      = { 'T', 'R', 'R', '1' };
 static RecFrame* recBuffer = nullptr;  // heap-allocated on first use
 static uint32_t  recFrameCount = 0;    // frames written/total in buffer
 static uint32_t  recPlayIdx = 0;       // current playback position
+static float     recFrameAcc = 0.0f;   // record: dt accumulator for fixed-rate capture
+static float     recPlayClock = 0.0f;  // playback: wall-clock fallback when no audio
 static bool      recSlotHasData[REC_MAX_SLOTS] = {};
 
 // ── Audio waveform record/playback (8 kHz/8-bit, /rec_N.audio) ──
@@ -329,6 +337,7 @@ static bool playbackAudioTick(float dt) {
 static void recStartRecording() {
     if (!recAllocBuffer()) return;
     recFrameCount = 0;
+    recFrameAcc   = 0.0f;
     recAudioBegin(recSlot);
     recState = REC_RECORDING;
     Serial.printf("[REC] recording to slot %u...\n", recSlot);
@@ -424,6 +433,7 @@ static void recStartPlayback() {
         return;
     }
     recPlayIdx = 0;
+    recPlayClock = 0.0f;
     // Reseed audio adaptive state so the re-derived energy/onset converges
     // cleanly from this recording rather than from prior live audio.
     audioResetAdaptiveState();
@@ -588,18 +598,33 @@ static float bloomHueB_G = BLOOM_HUE_B_G_BASE;
 static float bloomHueB_B = BLOOM_HUE_B_B_BASE;
 
 static uint8_t paletteHueIdx = 0;   // 0–9, from decmid
-static uint8_t paletteSatIdx = 0;   // 0–9, from decinner
+static uint8_t paletteSatIdx = 5;   // 0–9, from decinner; 5 = neutral (originals)
 
-// Rotate base endpoint hues by hueIdx * 36° and desaturate by satIdx.
+// Saturation knob curve: 5 leaves the effect's original saturation untouched.
+// 0–4 boosts toward full saturation, linear in knob position, weighted by
+// existing saturation with an ease-out (s·(2−s)) so mid-vivid colors push
+// hard while neutral pixels (s≈0, hue meaningless) stay neutral. 6–9
+// desaturates on a quadratic falloff so 6–7 stay colorful and only 8–9
+// read as washed → white.
+static inline float satKnob(float s, uint8_t satIdx) {
+    if (satIdx < 5) {
+        float t = (5.0f - (float)satIdx) / 5.0f;
+        float w = s * (2.0f - s);
+        return s + (1.0f - s) * t * w;
+    }
+    float u = (float)(satIdx - 5) / 4.0f;
+    return s * (1.0f - u * u);
+}
+
+// Rotate base endpoint hues by hueIdx * 36° and re-saturate by satIdx.
 static void applyPalette(uint8_t hueIdx, uint8_t satIdx) {
     float rot = (float)hueIdx * 36.0f;
-    float satScale = 1.0f - (float)satIdx / 9.0f;  // 0=full sat, 9=white
     float h, s, v, r, g, b;
     rgbToHsv(BLOOM_HUE_A_R_BASE, BLOOM_HUE_A_G_BASE, BLOOM_HUE_A_B_BASE, h, s, v);
-    hsvToRgb(fmodf(h + rot, 360.0f), s * satScale, v, r, g, b);
+    hsvToRgb(fmodf(h + rot, 360.0f), satKnob(s, satIdx), v, r, g, b);
     bloomHueA_R = r; bloomHueA_G = g; bloomHueA_B = b;
     rgbToHsv(BLOOM_HUE_B_R_BASE, BLOOM_HUE_B_G_BASE, BLOOM_HUE_B_B_BASE, h, s, v);
-    hsvToRgb(fmodf(h + rot, 360.0f), s * satScale, v, r, g, b);
+    hsvToRgb(fmodf(h + rot, 360.0f), satKnob(s, satIdx), v, r, g, b);
     bloomHueB_R = r; bloomHueB_G = g; bloomHueB_B = b;
 }
 
@@ -776,18 +801,19 @@ static inline uint16_t applyFloorPolicy(uint16_t target16, float &timer, float d
     }
 }
 
-// Global palette transform: rotate hue by paletteHueIdx×36° and scale
-// saturation by (1 - paletteSatIdx/9), matching applyPalette()'s rule. This
-// is the shared path for every effect that routes through setPixelScaled, so
-// the decmid/decinner knobs affect all of them. Bloom does NOT come through
-// here (it uses setPixel directly and rotates its own base colors), so there
-// is no double-rotation. No-op fast path when both knobs are at 0.
+// Global palette transform: rotate hue by paletteHueIdx×36° and re-saturate
+// via satKnob() (5 = original, <5 boost, >5 desaturate), matching
+// applyPalette()'s rule. This is the shared path for every effect that routes
+// through setPixelScaled, so the decmid/decinner knobs affect all of them.
+// Bloom does NOT come through here (it uses setPixel directly and rotates its
+// own base colors), so there is no double-rotation. No-op fast path at the
+// neutral knob position.
 static inline void applyGlobalPalette(float &r, float &g, float &b) {
-    if (paletteHueIdx == 0 && paletteSatIdx == 0) return;
+    if (paletteHueIdx == 0 && paletteSatIdx == 5) return;
     float h, sv, v;
     rgbToHsv(r, g, b, h, sv, v);
     h = fmodf(h + (float)paletteHueIdx * 36.0f, 360.0f);
-    sv *= 1.0f - (float)paletteSatIdx / 9.0f;
+    sv = satKnob(sv, paletteSatIdx);
     hsvToRgb(h, sv, v, r, g, b);
 }
 
@@ -852,6 +878,13 @@ static float fxOnset    = 0.0f;   // 0–1 transient onset
 static float fxTiltBlend = 0.0f;  // 0–1 tilt engagement
 static float fxAngleDeg = 0.0f;   // tilt angle for hue mapping
 
+// "Energy in the system": leaky integral of fxEnergy over ~tau seconds. Builds
+// while audio is present, bleeds off over ~tau when it stops. Drives the bloom
+// contrast stretch. energyForce >= 0 overrides it for live tuning without audio.
+static float audioEnergy5s = 0.0f;
+static float energy5sTau   = 3.0f;   // integration/decay window (s)
+static float energyForce   = -1.0f;  // -1 = use real audio; 0–1 = forced override
+
 // Creature interaction values, refreshed each frame from the sensor packets.
 static float crShakeG_live  = 1.0f;   // accel magnitude in g (rest = 1g)
 static float crScrollDps_live = 0.0f; // gyro yaw rate in deg/s
@@ -882,8 +915,16 @@ static float crScrollDps_live = 0.0f; // gyro yaw rate in deg/s
 static float snsAdaptiveFloor = 0.0f;
 static float snsRmsCeiling    = SNS_RMS_FLOOR_MIN;
 static int   snsBelowFloorCnt = 0;
-static float snsPrevRms       = 0.0f;
-static float snsOnsetPeak     = 1e-6f;
+
+// Energy-flux onset detector state + feel knobs (tunable live via !P).
+// Onset = rmsMean rising sharply above its recent baseline — a discrete event
+// at each attack, unlike the old self-normalizing max/mean ratio that sat near
+// 1.0 through all continuous sound and fired on the noise floor.
+static float onsetFast    = 0.0f;   // ~30 ms energy envelope
+static float onsetSlow    = 0.0f;   // ~300 ms baseline
+static float onsetLock    = 0.0f;   // refractory countdown (s)
+static float onsetRefrac  = 0.120f; // refractory lockout: max ~1/this fires/s
+static float onsetRiseFrac= 0.5f;   // fire when (fast-slow) > riseFrac*slow (floored at SNS_ONSET_FLOOR)
 
 static float snsUpdateFloor(float rms, float dt) {
     if (snsAdaptiveFloor < 1.0f) {
@@ -913,8 +954,9 @@ static void audioResetAdaptiveState() {
     snsAdaptiveFloor = 0.0f;
     snsRmsCeiling    = SNS_RMS_FLOOR_MIN;
     snsBelowFloorCnt = 0;
-    snsPrevRms       = 0.0f;
-    snsOnsetPeak     = 1e-6f;
+    onsetFast = 0.0f;
+    onsetSlow = 0.0f;
+    onsetLock = 0.0f;
 }
 
 // Stage-2 → stage-3 audio derivation: companded RMS bytes → fxEnergy/fxOnset
@@ -946,22 +988,24 @@ static void audioDeriveFeaturesRms(float rmsMean, float rmsMax, float dt) {
         fxEnergy = clampf(db / dbRange, 0.0f, 1.0f);
     }
 
-    // Onset: in-window transient is the gap between window max and mean,
-    // normalized against a decaying peak (mirrors computeOnset). The decay runs
-    // EVERY call so the peak stays continuous across gated/quiet windows — we
-    // gate the output below, never this state update. That keeps the dt math
-    // honest: no frozen state to snap when sound returns (dt itself is the
-    // loop-level, 0.1s-clamped delta, so it can't accumulate across windows).
-    float delta = fmaxf(0.0f, rmsMax - rmsMean);
-    snsPrevRms = rmsMean;
-    snsOnsetPeak = fmaxf(delta, snsOnsetPeak * expf(-1.3f * dt));
-    float onset = (snsOnsetPeak > 1e-6f) ? clampf(delta / snsOnsetPeak, 0.0f, 1.0f) : 0.0f;
-    // Presence gate on absolute window max: in a silent room the decaying peak
-    // shrinks to mic-noise level and tiny noise deltas normalize up to phantom
-    // onsets. Requiring the loudest sample to clear SNS_ONSET_FLOOR kills that
-    // without desensitizing real transients. Gated on max (not mean) so a sharp
-    // transient over a quiet bed still fires — preserving clap-to-interact.
-    fxOnset = (rmsMax >= SNS_ONSET_FLOOR) ? onset : 0.0f;
+    // Onset: positive flux of the energy envelope. A syllable/word attack is
+    // rmsMean RISING above its recent baseline — a discrete event. The old
+    // detector used the within-window max/mean gap normalized by a decaying
+    // peak, which sat near 1.0 through all continuous sound and fired on the
+    // noise floor (over-active sparkle). Two EMAs (fast envelope, slow
+    // baseline); fire on the rise crossing an adaptive threshold, then a
+    // refractory lockout swallows the attack's sustain so it fires once.
+    onsetFast += fminf(1.0f, dt / 0.030f) * (rmsMean - onsetFast);
+    onsetSlow += fminf(1.0f, dt / 0.300f) * (rmsMean - onsetSlow);
+    float rise   = onsetFast - onsetSlow;
+    float thresh = fmaxf(SNS_ONSET_FLOOR, onsetRiseFrac * onsetSlow);  // self-scales to the room
+    onsetLock = fmaxf(0.0f, onsetLock - dt);
+    if (rise > thresh && onsetLock <= 0.0f) {
+        onsetLock = onsetRefrac;
+        fxOnset = clampf(rise / fmaxf(onsetSlow, 1.0f), 0.0f, 1.0f);   // strength for sparkle density
+    } else {
+        fxOnset = 0.0f;                                                // discrete: zero between events
+    }
 }
 
 static void processSensors(float dt) {
@@ -1029,6 +1073,11 @@ static void processSensors(float dt) {
         fxOnset = 0.0f;
         audioResetAdaptiveState();
     }
+
+    // Slow "energy in the system": leaky integral of fxEnergy. Builds while
+    // audio is present, bleeds off over ~energy5sTau when it stops.
+    float a5 = fminf(1.0f, dt / energy5sTau);
+    audioEnergy5s += a5 * (fxEnergy - audioEnergy5s);
 }
 
 // ── Per-strip bloom state ────────────────────────────────────────
@@ -1093,10 +1142,29 @@ static void renderBloomStrip(uint8_t s, float dt) {
     float flashLin = bs.flash * bloomBrightnessCap;
     float flashFrac = (bs.flash > 0.1f) ? clampf(bs.flash / 0.3f, 0.0f, 1.0f) : 0.0f;
     float oneMinusFF = 1.0f - flashFrac;
+
+    // Pass 1: breath glow per pixel + field mean (the pivot for the stretch).
+    float glow[LEDS_PER_STRIP];
+    float glowSum = 0.0f;
     for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
         float breath = fastSinPhase(bs.breathPhase[i]) * 0.5f + 0.5f;
-        float breathGlow = bloomBreathFloor + breath * (bs.breathPeak[i] - bloomBreathFloor);
-        float breathLin = fastGamma24(breathGlow) * bloomBrightnessCap;
+        glow[i] = bloomBreathFloor + breath * (bs.breathPeak[i] - bloomBreathFloor);
+        glowSum += glow[i];
+    }
+    float glowMean = glowSum * (1.0f / (float)LEDS_PER_STRIP);
+    // Audio energy → per-pixel overdrive added AFTER the knob/cap. Pixels above
+    // the field mean blow through toward saturation; below-mean pixels go dark.
+    float eStretch = (energyForce >= 0.0f) ? energyForce : audioEnergy5s;
+    float audioDrive = bloomStretchGain * eStretch;   // 0 .. ~gain
+
+    // Pass 2: ambient (knob-scaled) + audio overdrive (knob-independent).
+    for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
+        // Signed deviation from the field mean, normalized to ~[-1, +1.2].
+        float w = clampf((glow[i] - glowMean) * 4.0f, -1.0f, 1.5f);
+        // Ambient breathing: dim when the brightness knob is low.
+        float ambient = fastGamma24(glow[i]) * bloomBrightnessCap * renderBrightness;
+        // Audio punch is full-scale linear (NOT knob-scaled) so it blows through.
+        float breathLin = clampf(ambient + audioDrive * w, 0.0f, bloomAudioCeil);
 
         bs.breathPhase[i] += dt / bs.breathPeriod[i];
         if (bs.breathPhase[i] >= 1.0f) bs.breathPhase[i] -= 1.0f;
@@ -1134,11 +1202,8 @@ static void renderBloomStrip(uint8_t s, float dt) {
             }
         }
 
-        if (oR > 0.0f || oG > 0.0f || oB > 0.0f) {
-            oR *= renderBrightness;
-            oG *= renderBrightness;
-            oB *= renderBrightness;
-        }
+        // renderBrightness already folded into `ambient`; the audio overdrive is
+        // intentionally NOT scaled by it so loud audio punches through a low knob.
 
         uint16_t t16R = (uint16_t)fminf(oR * 256.0f, 65535.0f);
         uint16_t t16G = (uint16_t)fminf(oG * 256.0f, 65535.0f);
@@ -1163,13 +1228,21 @@ static void renderBloomStrip(uint8_t s, float dt) {
 #define GS_VELOCITY_DAMP  0.92f
 #define GS_BOUNCE_REBOUND 0.5f
 #define GS_SPLAT_RADIUS   2.5f
+// Audio-driven breathing: speech (energy) springs each particle OUT from its
+// origin toward the strip ends; silence relaxes it back home. Spread is the
+// max outward displacement at full energy; stiff is the spring pull strength.
+#define GS_SPREAD         (LEDS_PER_STRIP * 0.40f)
+#define GS_SPRING_STIFF   55.0f
 
 struct GsParticle {
     float pos;
     float vel;
     float bright;
     float hue;
+    float origin;   // home position; particle springs out from / back to this
+    float dir;      // outward direction (+1/-1), away from strip center
 };
+static float gsEnergyEma = 0.0f;   // smoothed speech energy driving the spread
 static GsParticle gsParticles[NUM_STRIPS][GS_PARTICLE_COUNT];
 
 static void resetGravity() {
@@ -1192,8 +1265,14 @@ static void resetGravity() {
             nSeed = GS_PARTICLE_COUNT;
         }
 
+        const float center = (float)(LEDS_PER_STRIP - 1) * 0.5f;
         for (uint16_t i = 0; i < GS_PARTICLE_COUNT; i++) {
-            gsParticles[s][i].pos = seedPos[i % nSeed];
+            float home = seedPos[i % nSeed];
+            gsParticles[s][i].pos = home;
+            gsParticles[s][i].origin = home;
+            // Outward = away from the strip's midpoint, so speech expands the
+            // whole field toward both ends. Particles exactly at center go up.
+            gsParticles[s][i].dir = (home >= center) ? 1.0f : -1.0f;
             gsParticles[s][i].vel = 0.0f;
             gsParticles[s][i].bright = 1.0f;
             float baseHue = 256.0f * (float)i / (float)GS_PARTICLE_COUNT;
@@ -1203,8 +1282,10 @@ static void resetGravity() {
 }
 
 static void renderGravity(float dt) {
-    float gravG = clampf((float)sensorStub.ax / 16384.0f, -1.5f, 1.5f);
-    float accel = gravG * GS_GRAVITY_SCALE;
+    // Speech energy springs particles out from origin; silence relaxes them home.
+    // gDt, not the speed-scaled dt: the ones knob shapes motion, never reaction
+    // latency — sensing stays real-time like the rest of the audio path.
+    gsEnergyEma += fminf(1.0f, gDt / 0.15f) * (fxEnergy - gsEnergyEma);
     float damp = fastDecay(GS_VELOCITY_DAMP, dt * 30.0f);
 
     static float accR[LEDS_PER_STRIP], accG[LEDS_PER_STRIP], accB[LEDS_PER_STRIP];
@@ -1219,7 +1300,12 @@ static void renderGravity(float dt) {
         for (uint16_t i = 0; i < GS_PARTICLE_COUNT; i++) {
             GsParticle &p = gsParticles[s][i];
 
-            p.vel = p.vel * damp + accel * dt;
+            // Target = origin pushed outward in proportion to speech energy.
+            // Silence → target collapses to origin → spring pulls the particle home.
+            float target = p.origin + p.dir * gsEnergyEma * GS_SPREAD;
+            target = clampf(target, 0.0f, maxPos);
+            p.vel += GS_SPRING_STIFF * (target - p.pos) * dt;   // spring toward target
+            p.vel *= damp;                                       // damping for settle
             p.pos += p.vel * dt;
 
             if (p.pos < 0.0f) {
@@ -2451,6 +2537,12 @@ static const Param PARAMS[] = {
     { "DORMANCY_MIN",     Param::F32, &bloomDormancyMin,   0.0f,  60.0f },
     { "DORMANCY_MAX",     Param::F32, &bloomDormancyMax,   0.0f,  60.0f },
     { "DORMANCY_FRAC",    Param::F32, &bloomDormancyFrac,  0.0f,  1.0f  },
+    { "ONSET_REFRAC",     Param::F32, &onsetRefrac,        0.02f, 1.0f  },
+    { "ONSET_RISEFRAC",   Param::F32, &onsetRiseFrac,      0.05f, 4.0f  },
+    { "STRETCH_GAIN",     Param::F32, &bloomStretchGain,   0.0f,  6.0f  },
+    { "AUDIO_CEIL",       Param::F32, &bloomAudioCeil,     1.0f,  4.0f  },
+    { "ENERGY5S_TAU",     Param::F32, &energy5sTau,        0.5f,  20.0f },
+    { "ENERGY_FORCE",     Param::F32, &energyForce,       -1.0f,  1.0f  },
 };
 static const size_t PARAM_COUNT = sizeof(PARAMS) / sizeof(PARAMS[0]);
 
@@ -2660,8 +2752,13 @@ void loop() {
 
     bloomDormancyFrac = 0.0f;
 
-    // ── Recording: capture current frame ──
-    if (recState == REC_RECORDING && recBuffer && recFrameCount < REC_MAX_FRAMES) {
+    // ── Recording: sample frames onto a fixed REC_FPS wall-clock grid ──
+    // A RecFrame is a *param snapshot* (effect/brightness/palette + companded
+    // audio bytes), not pixels — playback re-renders the effect live. Sampling
+    // at a fixed rate instead of one-per-loop decouples the recording from the
+    // render rate, so frame index == elapsed time. That's what lets playback
+    // lock the frame to the audio clock no matter how heavy the effect is.
+    if (recState == REC_RECORDING && recBuffer) {
         RecFrame rf;
         rf.tens = (uint8_t)(effBrightness * 255);
         rf.ones = (uint8_t)(effSpeed * 64);
@@ -2684,7 +2781,14 @@ void loop() {
             }
         }
 
-        recBuffer[recFrameCount++] = rf;
+        // Emit zero, one, or several copies to keep the grid filled: loop faster
+        // than REC_FPS → skip until the next tick; slower → backfill duplicates.
+        recFrameAcc += dt;
+        const float frameDt = 1.0f / REC_FPS;
+        while (recFrameAcc >= frameDt && recFrameCount < REC_MAX_FRAMES) {
+            recFrameAcc -= frameDt;
+            recBuffer[recFrameCount++] = rf;
+        }
         if (recFrameCount >= REC_MAX_FRAMES) recStopRecording();
     }
 
@@ -2692,8 +2796,27 @@ void loop() {
     // Runs every loop while recording, independent of the 60 fps frame capture.
     if (recState == REC_RECORDING) recAudioDrain();
 
-    // ── Playback: override effect params from recorded frames ──
+    // ── Playback: drive effect params from recorded frames ──
     if (recState == REC_PLAYING && recBuffer && recFrameCount > 0) {
+        // Advance + output audio first: it's the master clock. For waveform slots
+        // playbackAudioTick also re-derives fxEnergy/fxOnset and returns true; it
+        // loops the file itself at EOF. Silent slots return false → we fall back
+        // to the envelope bytes and a wall-clock frame counter.
+        bool haveAudio = playbackAudioTick(dt);
+
+        if (haveAudio) {
+            // Lock the frame index to audio position: frame == time × REC_FPS.
+            // Both were captured for the same wall-clock span (fixed-rate frames,
+            // 8 kHz audio), so this can't drift regardless of render load.
+            uint32_t pos = playAudioFile.position();
+            recPlayIdx = (uint32_t)((float)pos / REC_AUDIO_RATE * REC_FPS);
+            if (recPlayIdx >= recFrameCount) recPlayIdx = recFrameCount - 1;
+        } else {
+            recPlayClock += dt * REC_FPS;                 // frames at fixed REC_FPS
+            recPlayIdx = (uint32_t)recPlayClock;
+            if (recPlayIdx >= recFrameCount) { recPlayClock = 0.0f; recPlayIdx = 0; }
+        }
+
         RecFrame &rf = recBuffer[recPlayIdx];
         effBrightness = (float)rf.tens / 255.0f;
         effSpeed = (float)rf.ones / 64.0f;
@@ -2705,19 +2828,8 @@ void loop() {
             paletteSatIdx = sat;
             applyPalette(paletteHueIdx, paletteSatIdx);
         }
-
-        // Re-derive fxEnergy/fxOnset from the recorded audio + feed the DAC.
-        // For waveform slots, playbackAudioTick derives from the real samples and
-        // outputs to the jack; legacy envelope-only slots fall back to the bytes.
-        // dt is the real per-frame delta so decay stays correct.
-        if (!playbackAudioTick(dt))
+        if (!haveAudio)
             audioDeriveFeatures(rf.rms_mean, rf.rms_max, dt);
-
-        recPlayIdx++;
-        if (recPlayIdx >= recFrameCount) {
-            recPlayIdx = 0;                               // loop frames…
-            if (playAudioOpen) playAudioFile.seek(0);     // …and realign audio
-        }
     }
 
     renderBrightness = effBrightness;
@@ -2823,6 +2935,21 @@ void loop() {
                       fps, avgRenderUs, avgShowUs, avgRenderUs + avgShowUs);
         RgbColor px = strip0.GetPixelColor(50);
         Serial.printf("  [px50] R=%u G=%u B=%u\n", px.R, px.G, px.B);
+        if (currentEffect == FX_AMBIENT_BLOOM) {
+            // Field span on strip 0: min/max per-pixel max-channel. Opens/closes
+            // with the audio-energy contrast stretch — objective spread readout.
+            uint8_t bMin = 255, bMax = 0;
+            for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
+                RgbColor c = strip0.GetPixelColor(i);
+                uint8_t m = c.R; if (c.G > m) m = c.G; if (c.B > m) m = c.B;
+                if (m < bMin) bMin = m;
+                if (m > bMax) bMax = m;
+            }
+            float eDbg = (energyForce >= 0.0f) ? energyForce : audioEnergy5s;
+            Serial.printf("  [bloom] span=%u..%u e5s=%.3f force=%.2f stretch=%.2f\n",
+                          bMin, bMax, audioEnergy5s, energyForce,
+                          1.0f + bloomStretchGain * eDbg);
+        }
         Serial.printf("  [bs26] %s pkts=%lu fx=%u bright=%.3f speed=%.2f hue=%u sat=%u dorm=%.2f"
                       " | ac=%d dc=%d slot=%u rec=%s\n",
                       bs26Live ? "LIVE" : "----",

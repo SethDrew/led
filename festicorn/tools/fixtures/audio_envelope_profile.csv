@@ -1,0 +1,35 @@
+# audio_envelope_profile.csv — recorded RMS-envelope telemetry for offline effect dev
+#
+# Source: live capture, duck INMP441 mic over ESP-NOW, session 2026-06-09.
+#   The user's labeled "music / direct speech / further speech" profiling run.
+#   This is the trace the tree-of-record SNS_RMS_FLOOR_MIN (20k) calibration came from.
+#
+# Domain : RMS in the 24-bit sample domain (rawI2S >> 8), sqrt(mean(s^2)) per window.
+#          Full-scale reference RMS_FS = 200000 (the value that compands to byte 255).
+#          To get a companded byte: round(sqrt(clamp(rms/200000,0..1)) * 255).
+# Rate   : ~1 Hz. These are SERIAL STATUS SNAPSHOTS (one printed per second), NOT the
+#          25 Hz / 40 ms packet envelope. Good for energy tiers & dynamic range; too
+#          coarse for syllable-onset structure (for that, capture at packet rate).
+# Tiers  : silent room floor ~2000 (max ~2600); music body 16k-37k w/ transients to ~75k;
+#          direct close speech peaks 92k-133k; loudest single window rms_max=140857 (no clip).
+#
+# columns: t_s, rms_mean, rms_max, phase
+t_s,rms_mean,rms_max,phase
+0.1,19196,20180,music
+1.1,69204,74851,music
+2.1,15945,17765,music
+3.2,33910,35214,music
+4.2,36543,37216,music
+5.2,28940,29539,music
+6.2,92054,95274,direct_speech
+7.2,97452,100764,direct_speech
+8.2,31376,38582,direct_speech
+9.2,30757,35875,direct_speech
+10.2,133069,140857,direct_speech
+12.1,27759,34559,direct_speech
+13.2,16391,23280,further_speech
+13.3,13398,14222,further_speech
+14.2,22748,23819,further_speech
+15.2,19196,23280,further_speech
+16.4,35214,37216,further_speech
+17.2,36543,37896,further_speech

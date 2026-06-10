@@ -71,6 +71,19 @@ firmware_by_role:
     notes: |
       6-strip quiet bloom installation. 6× WS2812B RGB strips, one gyro
       sender per strip. ESP-NOW receiver demuxes by sender MAC.
+  tree-of-record:
+    deployment: static
+    source: festicorn/tree-of-record/src/main.cpp
+    packet_format: json-espnow (BS-26) + v1 telemetry/audio + AudioStreamV1 (204B)
+    notes: |
+      Audio record/playback installation. ESP32-D0WD-V3, 6× WS2812B RGB strips
+      on RMT 0..5. BS-26 switches drive record/playback; hundreds knob selects
+      one of 5 slots. Records LED-effect frames + 8 kHz/8-bit audio waveform to
+      SPIFFS; playback re-runs the recorded effect and plays audio out the
+      GPIO25 internal-DAC jack (24 kHz / 3× upsample — see #5938 mclk_div bug).
+      Duck (original-duck sender_v3) streams telemetry/audio while recording.
+      Build env tree-of-record-v2 = current board (pin16/150 LEDs); v1 = legacy
+      board (pin15/100 LEDs).
   bs26:
     deployment: static
     source: festicorn/kaylab-knobs/src/main.cpp
@@ -375,14 +388,17 @@ boards:
 
 # ── classic-ESP32 fixtures ───────────────────────────────────────────
 - mac: F4:2D:C9:6D:B2:58
-  id: 'biolum-a'
+  id: 'tree-of-record-v2'
   chip: esp32-d0wd-v3
-  role: biolum
+  role: tree-of-record
   first_seen: '2026-04-28T18:00:00Z'
   notes: |
-    Formerly test-receiver, then noodles. Repurposed 2026-05-29 for biolum.
+    Lineage: test-receiver → noodles → biolum (2026-05-29) → tree-of-record
+    (2026-06-09, "the new tree-of-record board", formerly id biolum-a).
     6× WS2812B RGB strips on GPIO 4, 16, 17, 5, 18, 19. 150 LEDs per strip.
-    CH340 USB serial, port /dev/cu.usbserial-111440 (re-enumerates on replug).
+    3.5mm DAC jack on GPIO25 (Tip+Ring1, 330Ω + 0.1µF, 10µF coupling −→jack).
+    Build/flash with env tree-of-record-v2. CH340 USB serial, port
+    /dev/cu.usbserial-11440 (re-enumerates on replug — identify by MAC).
 - mac: null
   id: 'unknown-classic-1110'
   chip: esp32

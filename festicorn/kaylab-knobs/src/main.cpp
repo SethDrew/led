@@ -360,12 +360,11 @@ void loop() {
     if (hundredsPos != prevHundredsForMeter) { vAuto  = true; prevHundredsForMeter = hundredsPos; }
 
     if (uaAuto) {
-        // µA meter: tens 0–9 → 0,10,20…90 on 500µA face.
         int t = tensPos > 9 ? 9 : tensPos;
-        uaDac = (int)((t * 10.0f / 500.0f) * METER_UA_MAX + 0.5f);
+        uaDac = (int)((float)t / 9.0f * METER_UA_MAX + 0.5f);
     }
     if (vAuto) {
-        // V meter: hundreds 0–4 → 0,100,200,300,400 on 500V face.
+        // 5 positions → 0,100,200,300,400 on 500V face
         int h = hundredsPos > 4 ? 4 : hundredsPos;
         vDac = (int)((h * 100.0f / 500.0f) * METER_V_MAX + 0.5f);
     }

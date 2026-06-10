@@ -6,7 +6,7 @@
  * (ported from biolum board B), modulated by a BS-26 console:
  *
  *   tens (10-pos knob) → brightness; 0 = fully off
- *   ones (0–11)        → speed (12 steps, log-spaced 0.2–4.0)
+ *   ones (0–11)        → speed (12 steps, log-spaced 0.2–8.0)
  *   decouter (0–11)    → effect select
  *   hundreds (0–4)     → recording slot select (0–4)
  *   decmid (0–9)       → hue        36° rotation steps (full wheel)
@@ -16,6 +16,26 @@
  *
  * BS-26 live → knobs control. No signal → serial PARAMS control.
  * BS-26 state arrives as JSON over ESP-NOW broadcast on channel 1.
+ *
+ * ── INVARIANTS (hold these when editing any effect) ──────────────
+ * 1. Two clocks. Effects receive fxDt (= dt × speed knob × SPEED_SCALE) for
+ *    motion, fades, spawning. Anything that REACTS to audio or sensors —
+ *    envelopes, onset cooldowns, energy EMAs — uses real gDt. The ones knob
+ *    shapes motion, never reaction latency.
+ * 2. Gamma goes on a scalar brightness (fastGamma24), which then scales all
+ *    three channels uniformly. Never gamma R/G/B individually — it shifts
+ *    hue on mixed colors as they dim.
+ * 3. New effects take color from oklchVarL (perceptually tuned LUT). The
+ *    hand-RGB palettes in fire/nebula/light-through/leaf-wind/creatures are
+ *    deliberate per-effect artistic choices, not the default.
+ * 4. All output goes through setPixelScaled — that's where the hue/sat
+ *    knobs, renderBrightness, and the floor policy live. Bloom is the one
+ *    sanctioned exception (rotates its own endpoints via applyPalette).
+ * 5. PARAMS[] exposes values tuned live in the field; constants tuned once
+ *    stay #defines. Don't expose by reflex.
+ * 6. All decay/smoothing is dt-based (festicorn/CLAUDE.md). Legacy
+ *    fastDecay(rate, dt×30) sites are dt-correct — the ×30 is a reference
+ *    frame rate baked into the rate constant, not an FPS assumption to fix.
  */
 
 #include <Arduino.h>
@@ -844,18 +864,23 @@ static inline void setPixelScaled(uint8_t s, uint16_t i, float fr, float fg, flo
 // strips span a rainbow chord. From bulb-fleet.
 static const uint8_t STRIP_HUE_OFFSET[NUM_STRIPS] = { 0, 42, 85, 128, 170, 213 };
 
-// ── Effect selection (BS-26 ones knob, 0–11) ────────────────────
+// ── Effect selection (BS-26 decouter ring, 0–11) ────────────────
+// Knob order groups by what drives the effect: audio-reactive first (0–4,
+// quietest response to busiest), then ambient effects that ignore the
+// sensors entirely (5–8, organic → cosmic → pure color).
+// Positions ≥ FX_COUNT clamp to the last effect.
 enum EffectId : uint8_t {
-    FX_AMBIENT_BLOOM = 0,
-    FX_GRAVITY_PARTICLE,
-    FX_SPARKLE_SYLLABLE,
-    FX_FIRE,
-    FX_RAINBOW,
-    FX_NEBULA,
+    // audio-reactive
+    FX_AMBIENT_BLOOM = 0,   // slow energy swell (audioEnergy5s contrast)
+    FX_GRAVITY_PARTICLE,    // speech envelope springs particles outward
+    FX_SPARKLE_SYLLABLE,    // discrete onsets spawn sparks (+ tilt hue)
+    FX_FIRE,                // energy = flame height, onsets = flicker
+    FX_CREATURES,           // speech-energy excitement (was accel shake)
+    // ambient (no sensor input)
     FX_LEAF_WIND,
-    FX_CREATURES,
     FX_LIGHT_THROUGH,
-    FX_STICK_RAINBOW,
+    FX_NEBULA,
+    FX_RAINBOW,
     FX_COUNT
 };
 
@@ -885,10 +910,6 @@ static float audioEnergy5s = 0.0f;
 static float energy5sTau   = 3.0f;   // integration/decay window (s)
 static float energyForce   = -1.0f;  // -1 = use real audio; 0–1 = forced override
 
-// Creature interaction values, refreshed each frame from the sensor packets.
-static float crShakeG_live  = 1.0f;   // accel magnitude in g (rest = 1g)
-static float crScrollDps_live = 0.0f; // gyro yaw rate in deg/s
-
 // ── Sensor → feature processing ──────────────────────────────────
 // Decodes the v1 packets and drives the effect globals. Audio uses an
 // adaptive floor + log scaling (ported from bulb-fleet computeEnergy/Onset,
@@ -900,6 +921,14 @@ static float crScrollDps_live = 0.0f; // gyro yaw rate in deg/s
 // 20k sits above music/distant talk so only deliberate close speech drives
 // energy. The adaptive floor floats above this when ambient is louder.
 #define SNS_RMS_FLOOR_MIN  20000.0f
+// Ceiling seed + leak floor. The ceiling used to boot at the 20k floor min —
+// below the 28k effective floor — which clamped dbRange to its 1 dB minimum
+// and mapped the FIRST sound after boot/playback-start to fxEnergy = 1.0
+// regardless of loudness (gravity slammed outward at first speech). Seed at
+// the measured direct-close-speech scale (peaks 92-133k, max 141k @
+// FS=200000) so the first utterance lands ~0.7-1.0 honestly; louder peaks
+// still raise the ceiling above this.
+#define SNS_RMS_CEIL_MIN   130000.0f
 // Onset presence floor — gates onset on the absolute window MAX (not mean), so a
 // sharp transient over a quiet bed still counts (clap-to-interact). Set just
 // above the measured silent-room noise ceiling (~2.6k max) so mic-noise jitter
@@ -913,7 +942,7 @@ static float crScrollDps_live = 0.0f; // gyro yaw rate in deg/s
 #define SNS_FLOOR_SOFT_SIG 0.6f
 
 static float snsAdaptiveFloor = 0.0f;
-static float snsRmsCeiling    = SNS_RMS_FLOOR_MIN;
+static float snsRmsCeiling    = SNS_RMS_CEIL_MIN;
 static int   snsBelowFloorCnt = 0;
 
 // Energy-flux onset detector state + feel knobs (tunable live via !P).
@@ -952,7 +981,7 @@ static float snsUpdateFloor(float rms, float dt) {
 // inheriting the prior live-audio state.
 static void audioResetAdaptiveState() {
     snsAdaptiveFloor = 0.0f;
-    snsRmsCeiling    = SNS_RMS_FLOOR_MIN;
+    snsRmsCeiling    = SNS_RMS_CEIL_MIN;
     snsBelowFloorCnt = 0;
     onsetFast = 0.0f;
     onsetSlow = 0.0f;
@@ -975,7 +1004,7 @@ static void audioDeriveFeatures(uint8_t rmsMeanByte, uint8_t rmsMaxByte, float d
 // for live packets, legacy envelope frames, and waveform-derived playback.
 static void audioDeriveFeaturesRms(float rmsMean, float rmsMax, float dt) {
     // Energy: adaptive floor + log scaling against a leaky ceiling.
-    snsRmsCeiling = fmaxf(SNS_RMS_FLOOR_MIN, snsRmsCeiling * expf(-0.0025f * dt));
+    snsRmsCeiling = fmaxf(SNS_RMS_CEIL_MIN, snsRmsCeiling * expf(-0.0025f * dt));
     if (rmsMean > snsRmsCeiling) snsRmsCeiling = rmsMean;
     snsUpdateFloor(rmsMean, dt);
     float effFloor = snsAdaptiveFloor * SNS_FLOOR_HEADROOM;
@@ -1012,7 +1041,11 @@ static void processSensors(float dt) {
     uint32_t now = millis();
 
     // ── Accel ────────────────────────────────────────────────────
-    if (accelLastMs > 0 && (now - accelLastMs) < SENSOR_TIMEOUT_MS) {
+    // Liveness deltas are signed: the RX callback updates xLastMs
+    // asynchronously, so a packet landing after `now` was captured makes
+    // (now - xLastMs) wrap to ~2^32 unsigned — a fresh packet would read as
+    // timed out, zeroing energy and reseeding the adaptive state for a frame.
+    if (accelLastMs > 0 && (int32_t)(now - accelLastMs) < (int32_t)SENSOR_TIMEOUT_MS) {
         TelemetryPacketV1 a;
         memcpy(&a, (const void*)&accelPkt, sizeof(a));
 
@@ -1031,26 +1064,19 @@ static void processSensors(float dt) {
         fxAngleDeg = atan2f(horiz, fabsf(azg)) * 180.0f / (float)M_PI;
         fxTiltBlend = clampf((fxAngleDeg - DEADZONE_DEG)
                              / (MAX_ANGLE_DEG - DEADZONE_DEG), 0.0f, 1.0f);
-
-        // Shake magnitude for creatures: decode amag_max (gravity included).
-        float amagCounts = decodeCompand(a.amag_max, V1_AMAG_FS);
-        crShakeG_live = amagCounts / V1_COUNTS_PER_G;
     } else {
         sensorStub.ax = 0; sensorStub.ay = 0; sensorStub.az = 16384;
         fxAngleDeg = 0.0f;
         fxTiltBlend = 0.0f;
-        crShakeG_live = 1.0f;
     }
 
     // ── Gyro ─────────────────────────────────────────────────────
-    if (gyroLastMs > 0 && (now - gyroLastMs) < SENSOR_TIMEOUT_MS) {
+    if (gyroLastMs > 0 && (int32_t)(now - gyroLastMs) < (int32_t)SENSOR_TIMEOUT_MS) {
         GyroPacketV1 g;
         memcpy(&g, (const void*)&gyroPkt, sizeof(g));
         // gz_mean is the yaw-rate mean (int8 LSB ≈ V1_DPS_PER_LSB dps).
-        crScrollDps_live = (float)g.gz_mean * V1_DPS_PER_LSB;
-        sensorStub.gz = (int16_t)crScrollDps_live;
+        sensorStub.gz = (int16_t)((float)g.gz_mean * V1_DPS_PER_LSB);
     } else {
-        crScrollDps_live = 0.0f;
         sensorStub.gz = 0;
     }
 
@@ -1060,7 +1086,7 @@ static void processSensors(float dt) {
     // two sources never both update the adaptive state in one frame.
     if (recState == REC_PLAYING) {
         // No-op: see the playback block, which calls audioDeriveFeatures().
-    } else if (audioLastMs > 0 && (now - audioLastMs) < SENSOR_TIMEOUT_MS) {
+    } else if (audioLastMs > 0 && (int32_t)(now - audioLastMs) < (int32_t)SENSOR_TIMEOUT_MS) {
         AudioPacketV1 au;
         memcpy(&au, (const void*)&audioPkt, sizeof(au));
         audioDeriveFeatures(au.rms_mean, au.rms_max, dt);
@@ -1308,6 +1334,15 @@ static void renderGravity(float dt) {
             p.vel *= damp;                                       // damping for settle
             p.pos += p.vel * dt;
 
+            // Home is a one-way wall: the underdamped spring would otherwise
+            // slosh past the origin to the inward side on release. Arrest the
+            // particle at home instead — outward stays bouncy, return settles.
+            float outDisp = (p.pos - p.origin) * p.dir;
+            if (outDisp < 0.0f) {
+                p.pos = p.origin;
+                if (p.vel * p.dir < 0.0f) p.vel = 0.0f;
+            }
+
             if (p.pos < 0.0f) {
                 p.pos = 0.0f;
                 if (p.vel < 0.0f) p.vel = -p.vel * GS_BOUNCE_REBOUND;
@@ -1376,14 +1411,17 @@ static void renderSparkle(float dt) {
     float angleDeg = fxAngleDeg;
     float tiltBlend = fxTiltBlend;
 
-    float attackAlpha = fminf(1.0f, dt / 0.030f);
-    float decayAlpha  = fminf(1.0f, dt / 0.400f);
+    // gDt, not the speed-scaled dt: the ones knob shapes motion, never
+    // reaction latency — envelope and onset cooldown track speech in real
+    // time at any speed (same rule as gravity's gsEnergyEma).
+    float attackAlpha = fminf(1.0f, gDt / 0.030f);
+    float decayAlpha  = fminf(1.0f, gDt / 0.400f);
     if (energy > syllEnvelope)
         syllEnvelope += attackAlpha * (energy - syllEnvelope);
     else
         syllEnvelope += decayAlpha * (energy - syllEnvelope);
 
-    syllCooldown = fmaxf(0.0f, syllCooldown - dt);
+    syllCooldown = fmaxf(0.0f, syllCooldown - gDt);
 
     if (onsetNorm > 0.1f && syllCooldown <= 0.0f) {
         syllCooldown = 0.060f;
@@ -1453,37 +1491,22 @@ static void renderSparkle(float dt) {
     }
 }
 
-// ── Fire — procedural per-LED chaos flame (no audio) ────────────────
-// Each LED is an independent full-swing flicker built from three layered
-// noise octaves (slow bands + medium + fine crackle), contrast-expanded
-// so individual LEDs reach both ~0 and ~1 → full dynamic range with no
-// audio input. Audio will later ride on top (see AUDIO HOOK in renderFire).
-// Constants are explicit so they can be tuned against hardware measurement.
-#define FIRE_MID      0.50f   // field average brightness (pre-gamma)
-#define FIRE_GAIN     0.75f   // swing amplitude; >0.5 saturates the extremes
-// octave: weight, spatial freq (rad/LED), temporal freq (rad/s)
-#define FIRE_O1_W 0.50f
-#define FIRE_O1_SF 0.35f
-#define FIRE_O1_TF 1.70f
-#define FIRE_O2_W 0.30f
-#define FIRE_O2_SF 1.10f
-#define FIRE_O2_TF 2.90f
-#define FIRE_O3_W 0.20f
-#define FIRE_O3_SF 2.40f
-#define FIRE_O3_TF 5.10f
-// Fire palette: mostly red, amber only at the hottest pixels. No white,
-// no blue — real fire is B≈0 below ~2000K (blackbody: 1000K ember = ff3800,
-// 1800K flame = ff7e00). Anchors are WS2811-corrected: G pulled well below
-// the blackbody value because these LEDs are green-dominant (~2× red), so a
-// literal blackbody G reads yellow/pale. Color tracks per-LED brightness via
-// FIRE_AMBER_KNEE — below the knee = red, above = ramps to amber. Tunable.
-#define FIRE_RED_R   255.0f   // ember base (~1000K perceptual), dominant tone
-#define FIRE_RED_G    20.0f
-#define FIRE_RED_B     0.0f
-#define FIRE_AMBER_R 255.0f   // hot-pixel accent (~1800K perceptual)
-#define FIRE_AMBER_G  75.0f
-#define FIRE_AMBER_B   5.0f
-#define FIRE_AMBER_KNEE 0.70f // brightness above which color tips red→amber
+// ── Fire — audio-driven flame (ported from bulb-fleet renderFire) ───
+// Base brightness rides speech energy (50 ms attack, 2 s decay; faint ember
+// glow in silence). Onsets pump a flicker term on top. Sustained steady
+// sound slowly "burns down" patches of LEDs toward ember-red (dropout) so
+// held notes read as settling coals; transients re-ignite them. Color rides
+// energy too: cool white when quiet → amber → red when loud; percussive-only
+// input (onset with little energy) suppresses color toward white.
+// Palette anchors are WS2811-corrected for these green-dominant LEDs (~2×
+// red): G pulled well below the bulb-fleet values so amber doesn't read
+// yellow and white doesn't read green. Eyeball-tune on hardware.
+#define FIRE_FLICKER_SCALE  3.0f
+#define FIRE_DEADBAND       0.08f
+#define FIRE_DROPOUT_DEPTH  0.85f
+// bulb-fleet shipped two slots (FIRE_MELD without dropout, FIRE_FLICKER
+// with); we have one slot, so dropout is a compile-time toggle to compare.
+static const bool FIRE_WITH_DROPOUT = true;
 
 static float fireTime[NUM_STRIPS];
 static float fireBaseBrightness = 0.0f;
@@ -1494,6 +1517,7 @@ static float fireEnergyDerivSmooth = 0.0f;
 static float fireDropoutAmount = 0.0f;
 
 static void resetFire() {
+    // Stagger phase per strip so flicker isn't lockstep.
     for (uint8_t s = 0; s < NUM_STRIPS; s++) fireTime[s] = (float)s * 1.37f;
     fireBaseBrightness = 0.0f;
     fireFlickerIntensity = 0.0f;
@@ -1504,33 +1528,119 @@ static void resetFire() {
 }
 
 static void renderFire(float dt) {
-    // AUDIO HOOK (stubbed): no audio → unity. Later, drive this from
-    // fxEnergy/fxOnset to flare the whole flame brighter on transients.
-    const float audioGain = 1.0f;
+    // Audio-feature EMAs use gDt (real time), not the speed-scaled dt: the
+    // ones knob shapes flame motion, never reaction latency — same convention
+    // as gravity's gsEnergyEma.
+    float energy = fxEnergy;
+    float onset  = fxOnset;
+    bool isSilent = energy < 0.001f;
+    bool isPercussiveOnly = (!isSilent && energy < 0.15f && onset > 0.5f);
+
+    float attackAlpha = fminf(1.0f, gDt / 0.050f);
+    float decayAlpha  = fminf(1.0f, gDt / 2.0f);
+    float targetBrightness = isSilent ? 0.25f : fmaxf(0.25f, energy);
+    if (targetBrightness > fireBaseBrightness)
+        fireBaseBrightness += attackAlpha * (targetBrightness - fireBaseBrightness);
+    else
+        fireBaseBrightness += decayAlpha * (targetBrightness - fireBaseBrightness);
+
+    // fxOnset is discrete (zero between events, refractory-gated) where
+    // bulb-fleet's onset was continuous; the 200 ms EMA turns each event
+    // into a flicker pulse that decays back — pumps on attacks either way.
+    float flickerAlpha = fminf(1.0f, gDt / 0.200f);
+    float deltaTarget = isSilent ? 0.0f : onset;
+    fireFlickerIntensity += flickerAlpha * (deltaTarget - fireFlickerIntensity);
+
+    float dropoutAmount = 0.0f;
+    if (FIRE_WITH_DROPOUT) {
+        // Sustained sound = energy present but barely changing → coals settle.
+        float energyDeriv = (energy - firePrevEnergyForDeriv) / fmaxf(gDt, 0.001f);
+        firePrevEnergyForDeriv = energy;
+        float derivAlpha = fminf(1.0f, gDt / 0.200f);
+        fireEnergyDerivSmooth += derivAlpha * (energyDeriv - fireEnergyDerivSmooth);
+        bool isSustaining = (!isSilent && energy > 0.05f
+                             && fabsf(fireEnergyDerivSmooth) <= 0.5f);
+        if (isSustaining)
+            fireDropoutAmount = fminf(1.0f, fireDropoutAmount + gDt * 0.35f);
+        else
+            fireDropoutAmount = fmaxf(0.0f, fireDropoutAmount - gDt * 1.0f);
+        dropoutAmount = fireDropoutAmount;
+    }
+
+    float colorAttack = fminf(1.0f, gDt / 0.080f);
+    float colorDecay  = fminf(1.0f, gDt / 2.0f);
+    float colorTarget;
+    if (isPercussiveOnly)  colorTarget = 0.0f;
+    else if (isSilent)     colorTarget = 0.3f;
+    else                   colorTarget = fmaxf(0.3f, energy);
+    if (colorTarget > fireColorEnergy)
+        fireColorEnergy += colorAttack * (colorTarget - fireColorEnergy);
+    else
+        fireColorEnergy += colorDecay * (colorTarget - fireColorEnergy);
+
+    // Base color from smoothed color-energy: white below the blend threshold,
+    // amber through the mid range, red at RED_FULL and above.
+    float ce = fireColorEnergy;
+    const float WHITE_BLEND_THRESHOLD = 0.15f;
+    const float RED_FULL = 0.5f;
+    const float amberR = 255.0f, amberG = 75.0f, amberB = 5.0f;
+    const float redR   = 200.0f, redG   = 15.0f, redB   = 0.0f;
+    const float whiteR = 180.0f, whiteG = 85.0f, whiteB = 160.0f;
+    float baseColR, baseColG, baseColB;
+    if (ce < WHITE_BLEND_THRESHOLD) {
+        float tw = 1.0f - (ce / WHITE_BLEND_THRESHOLD);
+        baseColR = amberR * (1.0f - tw) + whiteR * tw;
+        baseColG = amberG * (1.0f - tw) + whiteG * tw;
+        baseColB = amberB * (1.0f - tw) + whiteB * tw;
+    } else {
+        float tr = (ce - WHITE_BLEND_THRESHOLD) / (RED_FULL - WHITE_BLEND_THRESHOLD);
+        if (tr > 1.0f) tr = 1.0f;
+        baseColR = amberR * (1.0f - tr) + redR * tr;
+        baseColG = amberG * (1.0f - tr) + redG * tr;
+        baseColB = amberB * (1.0f - tr) + redB * tr;
+    }
+
+    float base = fireBaseBrightness;
+    if (base < FIRE_DEADBAND) base = 0.0f;
+    float sScl = FIRE_FLICKER_SCALE;
 
     for (uint8_t s = 0; s < NUM_STRIPS; s++) {
         fireTime[s] = fmodf(fireTime[s] + dt, 6283.1853f);
         float t = fireTime[s];
+        // Per-strip spatial offset so noise patterns don't align.
         float sOff = (float)s * 17.0f;
 
         for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
             float fi = (float)i + sOff;
-            // Three layered octaves, weights sum to 1 → n in [-1, 1].
-            float n = FIRE_O1_W * fastSin(fi * FIRE_O1_SF + t * FIRE_O1_TF)
-                    + FIRE_O2_W * fastSin(fi * FIRE_O2_SF - t * FIRE_O2_TF)
-                    + FIRE_O3_W * fastSin(fi * FIRE_O3_SF + t * FIRE_O3_TF);
-            // Contrast-expand around the mid level; saturate the extremes
-            // so each LED reaches both full-dark and full-bright over time.
-            float bright = clampf(FIRE_MID + n * FIRE_GAIN, 0.0f, 1.0f) * audioGain;
 
-            // Color tracks this LED's brightness: pure red below the knee,
-            // ramping to amber at full bright. Most of the field sits below
-            // the knee → mostly-red flame with amber only on the hot peaks.
-            float amberMix = clampf((bright - FIRE_AMBER_KNEE) /
-                                    (1.0f - FIRE_AMBER_KNEE), 0.0f, 1.0f);
-            float colR = FIRE_RED_R + (FIRE_AMBER_R - FIRE_RED_R) * amberMix;
-            float colG = FIRE_RED_G + (FIRE_AMBER_G - FIRE_RED_G) * amberMix;
-            float colB = FIRE_RED_B + (FIRE_AMBER_B - FIRE_RED_B) * amberMix;
+            float noise = fastSin(fi * 7.3f + t * 2.5f) *
+                          fastSin(fi * 3.7f + t * 1.4f) * 0.5f + 0.5f;
+
+            // Relative flicker grows as the base dims so quiet fire still
+            // visibly dances; flicker term adds onset-driven sparkle on top.
+            float noiseAmp = fmaxf(0.15f * sScl, 0.10f * sScl / fmaxf(base, 0.1f));
+            float bright = base * (1.0f + noiseAmp * (noise - 0.5f))
+                         + fireFlickerIntensity * (noise - 0.5f) * 0.25f * sScl;
+
+            float perLedDim = 0.0f;
+            float colorRedShift = 0.0f;
+            if (FIRE_WITH_DROPOUT && dropoutAmount > 0.0f) {
+                // Slow-moving resilience field: low-resilience LEDs burn down
+                // first, dimming and red-shifting toward embers.
+                float resilience = fastSin(fi * 13.7f + t * 0.3f) *
+                                   fastSin(fi * 9.1f + t * 0.2f) * 0.5f + 0.5f;
+                perLedDim = clampf(
+                    (dropoutAmount - resilience * 0.7f) / 0.3f, 0.0f, 1.0f
+                ) * FIRE_DROPOUT_DEPTH;
+                colorRedShift = clampf(perLedDim / 0.3f, 0.0f, 1.0f);
+            }
+
+            bright *= (1.0f - perLedDim);
+            bright = clampf(bright, 0.0f, 1.0f);
+
+            float colR = baseColR * (1.0f - colorRedShift) + redR * colorRedShift;
+            float colG = baseColG * (1.0f - colorRedShift) + redG * colorRedShift;
+            float colB = baseColB * (1.0f - colorRedShift) + redB * colorRedShift;
 
             float linBright = fastGamma24(bright);
             setPixelScaled(s, i,
@@ -1707,139 +1817,6 @@ static void renderRainbow(float dt) {
     }
 }
 
-// ── Stick rainbow + secret pulse (effect slot 11) ───────────────
-// Only mapped sticks light. decouter selects an active subset (0=fewest,
-// 10=all); decouter==11 is the secret center-out pulse mode. dt is pre-scaled
-// by effSpeed at the call site. Output via setPixelScaled (renderBrightness).
-#define SR_SCROLL_SPEED  0.10f   // hue scroll along a stick (cycles/sec at speed 1)
-#define SR_PULSE_WIDTH   3.0f    // half-width (LEDs) of the bright band
-
-#define SR_PULSE_PERIOD_MIN 1.2f  // sec between a stick's pulse starts (random)
-#define SR_PULSE_PERIOD_MAX 3.5f
-
-static float srPhase = 0.0f;
-static uint8_t srDecouter = 0;           // 0–11, from decouter (set at call site)
-static bool srActive[STICK_COUNT];       // which sticks are lit this frame
-static uint8_t srActiveDecouter = 0xFF;  // decouter value srActive was computed for
-
-// Per-stick independent pulse state (secret pulse mode, decouter==11). Each
-// stick runs its own pulse cycle on a random period with a random hue, so the
-// sticks pulse staggered rather than all together.
-static float srPulsePhase[STICK_COUNT];   // 0→1 within the current pulse
-static float srPulsePeriod[STICK_COUNT];  // seconds for a full cycle
-static uint8_t srPulseHue[STICK_COUNT];    // OKLCH LUT index for this cycle
-
-static void srStartStickPulse(uint8_t si) {
-    srPulsePhase[si] = 0.0f;
-    srPulsePeriod[si] = SR_PULSE_PERIOD_MIN
-        + randFloat() * (SR_PULSE_PERIOD_MAX - SR_PULSE_PERIOD_MIN);
-    srPulseHue[si] = (uint8_t)(xorshift32() & 0xFF);
-}
-
-static void resetStickRainbow() {
-    srPhase = 0.0f;
-    srActiveDecouter = 0xFF;   // force recompute of the active subset
-    // Stagger each stick's pulse so they don't start in sync.
-    for (uint8_t si = 0; si < STICK_COUNT; si++) {
-        srStartStickPulse(si);
-        srPulsePhase[si] = randFloat();  // random initial offset
-    }
-}
-
-// Curated active-stick subsets per decouter 0–10. Each row is a hand-picked
-// spread so every position feels distinct and covers different spatial areas.
-// Stick indices: 0,1,2 on strip 0; 3 on strip 2; 4,5 on strip 4; 6,7,8 on
-// strip 5. 0xFF terminates a row. Position 10 = all 9 sticks.
-static const uint8_t SR_SUBSETS[11][STICK_COUNT] = {
-    { 0, 4, 0xFF },
-    { 1, 5, 8, 0xFF },
-    { 0, 3, 6, 0xFF },
-    { 2, 4, 7, 0xFF },
-    { 0, 1, 5, 8, 0xFF },
-    { 1, 3, 4, 6, 8, 0xFF },
-    { 0, 2, 3, 5, 7, 0xFF },
-    { 0, 1, 3, 4, 6, 8, 0xFF },
-    { 0, 1, 2, 4, 5, 7, 8, 0xFF },
-    { 0, 1, 2, 3, 5, 6, 7, 8, 0xFF },
-    { 0, 1, 2, 3, 4, 5, 6, 7, 8 },
-};
-
-static void srComputeActive(uint8_t decouter) {
-    if (decouter > 10) decouter = 10;
-    for (uint8_t i = 0; i < STICK_COUNT; i++) srActive[i] = false;
-    for (uint8_t k = 0; k < STICK_COUNT; k++) {
-        uint8_t idx = SR_SUBSETS[decouter][k];
-        if (idx == 0xFF) break;
-        srActive[idx] = true;
-    }
-}
-
-static void renderStickRainbow(float dt) {
-    if (srDecouter != srActiveDecouter) {
-        srComputeActive(srDecouter);
-        srActiveDecouter = srDecouter;
-    }
-    bool pulseMode = (srDecouter >= 11);
-
-    // Blank everything first; only sticks light.
-    for (uint8_t s = 0; s < NUM_STRIPS; s++)
-        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++)
-            setPixelScaled(s, i, 0.0f, 0.0f, 0.0f);
-
-    if (pulseMode) {
-        // Each stick pulses independently and continuously: its own phase,
-        // random period and random hue per cycle. Loops forever — never
-        // switches back to rainbow mode.
-        for (uint8_t si = 0; si < STICK_COUNT; si++) {
-            const Stick &st = STICKS[si];
-
-            srPulsePhase[si] += dt / srPulsePeriod[si];
-            while (srPulsePhase[si] >= 1.0f) {
-                srPulsePhase[si] -= 1.0f;
-                // New cycle: fresh random hue + period.
-                srPulseHue[si] = (uint8_t)(xorshift32() & 0xFF);
-                srPulsePeriod[si] = SR_PULSE_PERIOD_MIN
-                    + randFloat() * (SR_PULSE_PERIOD_MAX - SR_PULSE_PERIOD_MIN);
-            }
-
-            float phase = srPulsePhase[si];
-            float pr = (float)oklchVarL[srPulseHue[si]][0];
-            float pg = (float)oklchVarL[srPulseHue[si]][1];
-            float pb = (float)oklchVarL[srPulseHue[si]][2];
-
-            float center = 0.5f * (float)(st.start + st.end);
-            float halfLen = 0.5f * (float)(st.end - st.start) + 1.0f;
-            float bandPos = phase * (halfLen + SR_PULSE_WIDTH);
-            for (uint16_t i = st.start; i <= st.end; i++) {
-                float d = fabsf((float)i - center);
-                float edge = fabsf(d - bandPos);
-                float a = expf(-(edge * edge) / (2.0f * SR_PULSE_WIDTH * SR_PULSE_WIDTH));
-                a *= 1.0f - phase;   // fade as the band reaches the edges
-                if (a < 0.004f) continue;
-                setPixelScaled(st.strip, i, pr * a, pg * a, pb * a);
-            }
-        }
-        return;
-    }
-
-    // Rainbow mode: hue scrolls along each active stick's length.
-    srPhase = fmodf(srPhase + SR_SCROLL_SPEED * dt, 1.0f);
-    for (uint8_t si = 0; si < STICK_COUNT; si++) {
-        if (!srActive[si]) continue;
-        const Stick &st = STICKS[si];
-        uint16_t len = (uint16_t)(st.end - st.start);
-        for (uint16_t i = st.start; i <= st.end; i++) {
-            float pos = (len == 0) ? 0.0f : (float)(i - st.start) / (float)len;
-            float hue = fmodf(pos + srPhase, 1.0f);
-            uint8_t idx = (uint8_t)(hue * 255.0f);
-            setPixelScaled(st.strip, i,
-                (float)oklchVarL[idx][0],
-                (float)oklchVarL[idx][1],
-                (float)oklchVarL[idx][2]);
-        }
-    }
-}
-
 // ── Leaf wind (ported from bulb-fleet renderLeafWind) ───────────
 // 1D drift along each strip: leaves blow from one end to the other, each LED
 // lights by 1D distance to each leaf. Bulb-fleet's 2D topology.h is a hex map
@@ -1970,11 +1947,12 @@ static void renderLeafWind(float dt) {
 // ── Creatures (ported from biolum_mixed) ────────────────────────
 // Bloom + crawl creatures drift along a virtual buffer, one independent
 // simulation per physical strip (no mirroring — every strip is its own world).
-// Shake (accel) and gyro-scroll interaction are driven by crShakeFeedG()/
-// crScrollDps(), which processSensors() feeds from the v1 accel/gyro packets.
-// On sensor timeout they return rest (1g shake, 0 rotation) and the visuals
-// fall back to pure ambient drift. Virtual buffer is 100
-// physical LEDs + a SCROLL_MARGIN each side (was 150/200 on the bullet build).
+// Excitement is audio-driven: the speech-energy envelope (same signal as
+// gravity's spread) stands in for the original accel shake — this install
+// has no motion input, so the old shake/gyro-scroll feeds were retired.
+// In silence the visuals fall back to pure ambient drift. Virtual buffer is
+// 100 physical LEDs + a SCROLL_MARGIN each side (margin kept for the buffer
+// layout even though gyro scroll is gone).
 // No per-effect cap — output via setPixelScaled.
 #define CR_NUM_UNITS     6     // one independent creature world per strip
 #define CR_MAX_CREATURES 7
@@ -1988,8 +1966,14 @@ static void renderLeafWind(float dt) {
 #define CR_COLOR_G 180.0f
 #define CR_COLOR_B 220.0f
 
-// --- Shake interaction params (from biolum_mixed) ---
-#define CR_SHAKE_THRESH_G       2.0f
+// --- Excitement params (buffer/drain machinery from biolum_mixed shake) ---
+// Audio feed: smoothed speech energy above CR_AUDIO_THRESH stands in for the
+// old accel excess-g. After the ceiling calibration, deliberate close speech
+// rides ~0.7–1.0 and room music ~0.2, so 0.25 keeps music from exciting the
+// creatures. CR_AUDIO_GAIN maps the max excess (~0.75) onto the ~2 scale the
+// buffer gain/drain constants were tuned for.
+#define CR_AUDIO_THRESH         0.25f
+#define CR_AUDIO_GAIN           2.7f
 #define CR_SHAKE_BUFFER_GAIN    0.8f
 #define CR_SHAKE_BUFFER_MAX     0.5f
 #define CR_SHAKE_DRAIN_RATE     0.8f
@@ -1998,10 +1982,6 @@ static void renderLeafWind(float dt) {
 #define CR_SHAKE_SCATTER_RADIUS 1.5f
 #define CR_SHAKE_BRIGHT_BOOST   0.8f
 #define CR_SHAKE_HUE_DRIFT      90.0f
-
-// --- Gyro scroll params (from biolum_mixed) ---
-#define CR_SCROLL_GAIN  ((float)CR_SCROLL_MARGIN / 360.0f)  // px per degree
-#define CR_SCROLL_DECAY 0.3f
 
 #define CR_PULSE_EXPANSION_SPEED 3.3f
 // Ratio doubled (was 1.9) → drift halved → each creature lives ~2x longer on
@@ -2045,35 +2025,27 @@ struct CrUnit {
 };
 static CrUnit crUnits[CR_NUM_UNITS];
 
-// --- Global shake / scroll state (driven by processInteraction) ---
+// --- Global excitement state (driven by processInteraction) ---
 static float crShakeLevel   = 0.0f;   // smooth 0→1 controlling visual effects
 static float crShakeBuffer  = 0.0f;   // energy buffer (spiky input → smooth drain)
-static float crShakeTime    = 0.0f;   // accumulated seconds shaking
-static float crScrollOffset = 0.0f;
+static float crShakeTime    = 0.0f;   // accumulated seconds excited
 static bool  crShakeActive  = false;
 static float crShakeCooldown = 2.0f;
 static bool  crLifecycleFrozen = false;
 static float crShakeHueDrift = 0.0f;
+static float crEnergyEma    = 0.0f;   // smoothed speech energy (audio feed)
 
 static inline float crRandf(float lo, float hi) {
     return lo + randFloat() * (hi - lo);
 }
 
-// Sensor accessors — driven by processSensors() from the v1 accel/gyro
-// packets. On timeout these fall back to rest (1g shake, 0 scroll).
-static inline float crShakeFeedG() {
-    return crShakeG_live;   // accel magnitude in g (rest = 1g → no shake)
-}
-static inline float crScrollDps() {
-    return crScrollDps_live;  // gyro yaw rate in deg/s
-}
-
 static void crProcessInteraction(float dt) {
-    float aG = crShakeFeedG();
-    // At rest aG ≈ 1g (gravity), well under the 2g shake threshold.
-    if (aG > CR_SHAKE_THRESH_G) {
+    // gDt for the envelope, not the speed-scaled dt: the ones knob shapes the
+    // creatures' motion, never reaction latency (gravity convention).
+    crEnergyEma += fminf(1.0f, gDt / 0.15f) * (fxEnergy - crEnergyEma);
+    float excess = (crEnergyEma - CR_AUDIO_THRESH) * CR_AUDIO_GAIN;
+    if (excess > 0.0f) {
         crShakeActive = true;
-        float excess = aG - CR_SHAKE_THRESH_G;
         crShakeBuffer += excess * CR_SHAKE_BUFFER_GAIN * dt;
         if (crShakeBuffer > CR_SHAKE_BUFFER_MAX) crShakeBuffer = CR_SHAKE_BUFFER_MAX;
         crShakeTime += dt;
@@ -2098,10 +2070,6 @@ static void crProcessInteraction(float dt) {
 
     crShakeHueDrift += crShakeLevel * CR_SHAKE_HUE_DRIFT * dt;
     if (crShakeHueDrift > 360.0f) crShakeHueDrift -= 360.0f;
-
-    // Gyro scroll: integrate angular velocity, decay back to center.
-    crScrollOffset += crScrollDps() * dt * CR_SCROLL_GAIN;
-    crScrollOffset *= expf(-dt / CR_SCROLL_DECAY);
 }
 
 static void crInitCreature(CrCreature &c) {
@@ -2286,7 +2254,6 @@ static void crRenderCrawl(const CrCreature &c, float *bufR, float *bufG, float *
 
 static void renderCreatures(float dt) {
     crProcessInteraction(dt);
-    int scrollPixels = (int)roundf(crScrollOffset);
 
     for (int p = 0; p < CR_NUM_UNITS; p++) {
         CrUnit &ps = crUnits[p];
@@ -2308,18 +2275,19 @@ static void renderCreatures(float dt) {
         // One unit drives one physical strip — no mirroring.
         uint8_t s = p;
         for (int i = 0; i < LEDS_PER_STRIP; i++) {
-            int src = CR_SCROLL_MARGIN + i + scrollPixels;
-            if (src < 0) src = 0;
-            if (src >= CR_VIRTUAL_LEDS) src = CR_VIRTUAL_LEDS - 1;
+            int src = CR_SCROLL_MARGIN + i;
             float vR = clampf(ps.bufR[src], 0.0f, 1.0f);
             float vG = clampf(ps.bufG[src], 0.0f, 1.0f);
             float vB = clampf(ps.bufB[src], 0.0f, 1.0f);
-            // Original used vv (gamma 2.0); fastGamma24 matches the rest of
-            // this build's pipeline. Output 0–255 range for setPixelScaled.
-            float oR = fastGamma24(vR) * 255.0f;
-            float oG = fastGamma24(vG) * 255.0f;
-            float oB = fastGamma24(vB) * 255.0f;
-            setPixelScaled(s, i, oR, oG, oB);
+            // Gamma the scalar brightness and rescale channels proportionally
+            // (gravity's pattern). Per-channel gamma — what the original port
+            // did — shifts hue on mixed colors as they dim (doctrine rule:
+            // gamma the brightness multiplier, never individual channels).
+            float bright = fmaxf(vR, fmaxf(vG, vB));
+            float norm = (bright > 0.001f) ? fastGamma24(bright) / bright : 0.0f;
+            setPixelScaled(s, i, vR * norm * 255.0f,
+                                 vG * norm * 255.0f,
+                                 vB * norm * 255.0f);
         }
     }
 }
@@ -2487,12 +2455,6 @@ static void resetEffect(uint8_t fx) {
         case FX_AMBIENT_BLOOM:
             for (uint8_t s = 0; s < NUM_STRIPS; s++) resetBloomStrip(bloom[s]);
             break;
-        case FX_RAINBOW:
-            resetRainbow();
-            break;
-        case FX_NEBULA:
-            resetNebula();
-            break;
         case FX_GRAVITY_PARTICLE:
             resetGravity();
             break;
@@ -2502,17 +2464,20 @@ static void resetEffect(uint8_t fx) {
         case FX_FIRE:
             resetFire();
             break;
-        case FX_LEAF_WIND:
-            resetLeafWind();
-            break;
         case FX_CREATURES:
             resetCreatures();
+            break;
+        case FX_LEAF_WIND:
+            resetLeafWind();
             break;
         case FX_LIGHT_THROUGH:
             resetLightThrough();
             break;
-        case FX_STICK_RAINBOW:
-            resetStickRainbow();
+        case FX_NEBULA:
+            resetNebula();
+            break;
+        case FX_RAINBOW:
+            resetRainbow();
             break;
         default:
             break;
@@ -2663,7 +2628,7 @@ void loop() {
 
     // ── Map BS-26 knobs to effect parameters ────────────────────
     // BS-26 live → knobs drive the effect. No signal → serial PARAMS.
-    bool bs26Live = (bs26LastMs > 0 && (now - bs26LastMs) < HEARTBEAT_TIMEOUT_MS);
+    bool bs26Live = (bs26LastMs > 0 && (int32_t)(now - bs26LastMs) < (int32_t)HEARTBEAT_TIMEOUT_MS);
     bool bs26EverSeen = (bs26LastMs > 0);
     // Last knob-derived brightness/speed, held across brief packet gaps so a
     // dropout doesn't snap brightness to the serial-param default. The other
@@ -2711,9 +2676,6 @@ void loop() {
 
         // decouter (0–11) → effect select
         currentEffect = s.decouter >= FX_COUNT ? FX_COUNT - 1 : s.decouter;
-
-        // stick-rainbow always shows all sticks (subset control removed)
-        srDecouter = 10;
 
         // AC switch = record, DC switch = playback, both LEVEL (on = active).
         // Record has priority over playback. Releasing a switch re-arms it.
@@ -2772,7 +2734,7 @@ void loop() {
         // when the packet is stale or the sender flagged the mic muted (bit0).
         rf.rms_mean = 0;
         rf.rms_max  = 0;
-        if (audioLastMs > 0 && (now - audioLastMs) < SENSOR_TIMEOUT_MS) {
+        if (audioLastMs > 0 && (int32_t)(now - audioLastMs) < (int32_t)SENSOR_TIMEOUT_MS) {
             AudioPacketV1 au;
             memcpy(&au, (const void*)&audioPkt, sizeof(au));
             if (!(au.flags & 0x01)) {   // bit0 = mic muted
@@ -2869,23 +2831,16 @@ void loop() {
         0.5f,   // FX_GRAVITY_PARTICLE
         1.0f,   // FX_SPARKLE_SYLLABLE
         1.0f,   // FX_FIRE
-        2.0f,   // FX_RAINBOW
-        1.5f,   // FX_NEBULA
-        0.25f,  // FX_LEAF_WIND
         1.5f,   // FX_CREATURES
+        0.25f,  // FX_LEAF_WIND
         1.0f,   // FX_LIGHT_THROUGH
-        0.9f,   // FX_STICK_RAINBOW
+        1.5f,   // FX_NEBULA
+        2.0f,   // FX_RAINBOW
     };
     float fxDt = dt * effSpeed * SPEED_SCALE[currentEffect];
     switch (currentEffect) {
         case FX_AMBIENT_BLOOM:
             for (uint8_t s = 0; s < NUM_STRIPS; s++) renderBloomStrip(s, fxDt);
-            break;
-        case FX_RAINBOW:
-            renderRainbow(fxDt);
-            break;
-        case FX_NEBULA:
-            renderNebula(fxDt);
             break;
         case FX_GRAVITY_PARTICLE:
             renderGravity(fxDt);
@@ -2896,17 +2851,20 @@ void loop() {
         case FX_FIRE:
             renderFire(fxDt);
             break;
-        case FX_LEAF_WIND:
-            renderLeafWind(fxDt);
-            break;
         case FX_CREATURES:
             renderCreatures(fxDt);
+            break;
+        case FX_LEAF_WIND:
+            renderLeafWind(fxDt);
             break;
         case FX_LIGHT_THROUGH:
             renderLightThrough(fxDt);
             break;
-        case FX_STICK_RAINBOW:
-            renderStickRainbow(fxDt);
+        case FX_NEBULA:
+            renderNebula(fxDt);
+            break;
+        case FX_RAINBOW:
+            renderRainbow(fxDt);
             break;
         default:
             renderOff();
@@ -2959,16 +2917,16 @@ void loop() {
                       bs26.ac ? 1 : 0, bs26.dc ? 1 : 0, bs26.hundreds,
                       recState == REC_RECORDING ? "REC" :
                       recState == REC_PLAYING   ? "PLAY" : "idle");
-        bool aLive = accelLastMs && (now - accelLastMs) < SENSOR_TIMEOUT_MS;
-        bool gLive = gyroLastMs  && (now - gyroLastMs)  < SENSOR_TIMEOUT_MS;
-        bool auLive = audioLastMs && (now - audioLastMs) < SENSOR_TIMEOUT_MS;
+        bool aLive = accelLastMs && (int32_t)(now - accelLastMs) < (int32_t)SENSOR_TIMEOUT_MS;
+        bool gLive = gyroLastMs  && (int32_t)(now - gyroLastMs)  < (int32_t)SENSOR_TIMEOUT_MS;
+        bool auLive = audioLastMs && (int32_t)(now - audioLastMs) < (int32_t)SENSOR_TIMEOUT_MS;
         Serial.printf("  [sns] accel=%s(%lu) gyro=%s(%lu) audio=%s(%lu) "
-                      "energy=%.3f onset=%.3f tilt=%.2f@%.0f shakeG=%.2f scrollDps=%.0f\n",
+                      "energy=%.3f onset=%.3f tilt=%.2f@%.0f crExcite=%.2f\n",
                       aLive ? "L" : "-", (unsigned long)accelPktCount,
                       gLive ? "L" : "-", (unsigned long)gyroPktCount,
                       auLive ? "L" : "-", (unsigned long)audioPktCount,
                       fxEnergy, fxOnset, fxTiltBlend, fxAngleDeg,
-                      crShakeG_live, crScrollDps_live);
+                      crShakeLevel);
         frameCount = 0;
         renderUsAccum = 0;
         showUsAccum = 0;

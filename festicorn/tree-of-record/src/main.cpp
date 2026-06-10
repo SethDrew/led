@@ -28,7 +28,6 @@
 #include <SPIFFS.h>
 #include <math.h>
 #include <fast_math.h>
-#include <delta_sigma.h>
 #include <oklch_lut.h>
 #include <v1_packet.h>
 #include <gyro_packet_v1.h>
@@ -69,8 +68,10 @@ static bool acOn = true;
 
 // ── Recording system ─────────────────────────────────────────────
 // Up to 5 slots of 30s input recordings stored in SPIFFS.
-// Each slot: a binary file of Bs26State structs at capture framerate (~60fps).
-// Audio placeholder: /audio_N.raw (16kHz mono 8-bit, reserved for future mic).
+// Each slot: a small header (RecFileHeader) followed by a packed array of
+// RecFrame structs at capture framerate (~60fps). Each frame stores the knob/
+// effect params plus the filtered audio drive bytes so silent replay stays
+// faithful. RecFrame is 8 bytes; 1800 frames ≈ 14.4 KB per slot.
 #define REC_MAX_SLOTS     5
 #define REC_MAX_FRAMES    1800   // 30s × 60fps
 #define REC_FPS           60
@@ -83,7 +84,28 @@ static bool     recDcPrev = false;     // edge detect for DC toggle
 
 struct RecFrame {
     uint8_t tens, ones, hundreds, decouter, decmid, decinner;
+    // Filtered audio drive captured with the frame so playback is faithful in
+    // silence: the AudioPacketV1 companded RMS bytes (25 Hz, sqrt-companded).
+    // On playback these are re-derived through the same floor/ceiling/onset
+    // path as live packets (see audioDeriveFeatures). 0/0 = muted or stale.
+    uint8_t rms_mean, rms_max;
 };
+
+// On-disk /rec_N.bin format: a small header then a packed array of RecFrame.
+//   magic   "TRR1" — distinguishes versioned files from legacy headerless ones
+//   version format revision (1 = first with audio bytes)
+//   frameSize sizeof(RecFrame) at write time, so a future field add still loads
+// Legacy files (pre-header, 6-byte frames) lack the magic; they are loaded as
+// v0 with rms bytes = 0 (audio renders silent on replay) rather than rejected.
+struct RecFileHeader {
+    char     magic[4];   // 'T','R','R','1'
+    uint8_t  version;    // current REC_FILE_VERSION
+    uint8_t  frameSize;  // sizeof(RecFrame) at write time
+    uint16_t reserved;   // 0, padding / forward use
+};
+static const char REC_MAGIC[4]      = { 'T', 'R', 'R', '1' };
+#define REC_FILE_VERSION  1
+#define REC_LEGACY_FRAME_SIZE 6   // old headerless format: 6-byte RecFrame
 
 static RecFrame* recBuffer = nullptr;  // heap-allocated on first use
 static uint32_t  recFrameCount = 0;    // frames written/total in buffer
@@ -128,11 +150,74 @@ static void recStopRecording() {
     snprintf(path, sizeof(path), "/rec_%d.bin", recSlot);
     File f = SPIFFS.open(path, "w");
     if (!f) { Serial.println("[REC] write failed"); return; }
+    RecFileHeader hdr;
+    memcpy(hdr.magic, REC_MAGIC, 4);
+    hdr.version   = REC_FILE_VERSION;
+    hdr.frameSize = (uint8_t)sizeof(RecFrame);
+    hdr.reserved  = 0;
+    f.write((uint8_t*)&hdr, sizeof(hdr));
     f.write((uint8_t*)recBuffer, recFrameCount * sizeof(RecFrame));
     f.close();
     recSlotHasData[recSlot] = true;
     Serial.printf("[REC] saved slot %u: %lu frames (%.1fs)\n",
                   recSlot, recFrameCount, recFrameCount / (float)REC_FPS);
+}
+
+// Defined with the audio globals below; reseeds the adaptive floor/ceiling/
+// onset state so playback re-derivation converges from a clean baseline rather
+// than inheriting whatever the live audio left behind.
+static void audioResetAdaptiveState();
+
+// Reads one slot's frames into recBuffer, decoding the on-disk format.
+// Returns the frame count loaded (0 = nothing usable). Legacy headerless
+// 6-byte files load with rms bytes zeroed (silent audio on replay).
+static uint32_t recLoadSlot(uint8_t slot) {
+    char path[20];
+    snprintf(path, sizeof(path), "/rec_%d.bin", slot);
+    File f = SPIFFS.open(path, "r");
+    if (!f) return 0;
+    size_t fileSize = f.size();
+
+    // Peek the header to decide versioned vs. legacy.
+    RecFileHeader hdr;
+    bool versioned = false;
+    uint8_t frameSize = REC_LEGACY_FRAME_SIZE;
+    if (fileSize >= sizeof(hdr)) {
+        f.read((uint8_t*)&hdr, sizeof(hdr));
+        if (memcmp(hdr.magic, REC_MAGIC, 4) == 0 && hdr.frameSize > 0
+            && hdr.frameSize <= (uint8_t)sizeof(RecFrame)) {
+            versioned = true;
+            frameSize = hdr.frameSize;
+        }
+    }
+
+    uint32_t count = 0;
+    if (versioned) {
+        // Frames follow the header; on-disk frameSize may be <= our struct
+        // (older version with fewer fields). Read each frame into a zeroed
+        // RecFrame so any missing trailing fields (e.g. rms bytes) default 0.
+        uint32_t avail = (fileSize - sizeof(hdr)) / frameSize;
+        if (avail > REC_MAX_FRAMES) avail = REC_MAX_FRAMES;
+        for (uint32_t i = 0; i < avail; i++) {
+            RecFrame rf = {};
+            if (f.read((uint8_t*)&rf, frameSize) != frameSize) break;
+            recBuffer[i] = rf;
+            count++;
+        }
+    } else {
+        // Legacy headerless file: tightly-packed 6-byte frames, no audio.
+        f.seek(0);
+        uint32_t avail = fileSize / REC_LEGACY_FRAME_SIZE;
+        if (avail > REC_MAX_FRAMES) avail = REC_MAX_FRAMES;
+        for (uint32_t i = 0; i < avail; i++) {
+            RecFrame rf = {};
+            if (f.read((uint8_t*)&rf, REC_LEGACY_FRAME_SIZE) != REC_LEGACY_FRAME_SIZE) break;
+            recBuffer[i] = rf;   // rms_mean/rms_max remain 0 (silent on replay)
+            count++;
+        }
+    }
+    f.close();
+    return count;
 }
 
 static void recStartPlayback() {
@@ -141,14 +226,15 @@ static void recStartPlayback() {
         return;
     }
     if (!recAllocBuffer()) return;
-    char path[20];
-    snprintf(path, sizeof(path), "/rec_%d.bin", recSlot);
-    File f = SPIFFS.open(path, "r");
-    if (!f) return;
-    size_t bytes = f.read((uint8_t*)recBuffer, REC_MAX_FRAMES * sizeof(RecFrame));
-    f.close();
-    recFrameCount = bytes / sizeof(RecFrame);
+    recFrameCount = recLoadSlot(recSlot);
+    if (recFrameCount == 0) {
+        Serial.printf("[REC] slot %u unreadable\n", recSlot);
+        return;
+    }
     recPlayIdx = 0;
+    // Reseed audio adaptive state so the re-derived energy/onset converges
+    // cleanly from this recording rather than from prior live audio.
+    audioResetAdaptiveState();
     recState = REC_PLAYING;
     Serial.printf("[REC] playing slot %u: %lu frames\n", recSlot, recFrameCount);
 }
@@ -172,7 +258,7 @@ static void recStopPlayback() {
 static float globalBrightness = 1.0f;   // serial-controlled, 0.0–1.0
 static float speedScale       = 1.0f;   // serial-controlled, 0.2–3.0
 static float renderBrightness = 1.0f;   // ceiling: max output scale
-static float renderFloor      = 0.0f;   // floor: min output scale (preserves effect dynamics)
+static float renderFloor      = 0.0f;   // reserved — was proportional floor (removed: killed animation dynamics)
 static float gDt = 1.0f / 60.0f;        // current frame dt, set each loop iteration
 
 // ── BS-26 ESP-NOW config ─────────────────────────────────────────
@@ -213,7 +299,7 @@ static portMUX_TYPE bs26Mux = portMUX_INITIALIZER_UNLOCKED;
 // Companding full-scale (matches v1 packet encoders).
 #define V1_AMAG_FS  57000.0f
 #define V1_GMAG_FS  57000.0f
-#define V1_RMS_FS   8000.0f   // must match sender_v2 RMS_FS
+#define V1_RMS_FS   200000.0f   // must match sender_v2 RMS_FS
 
 // Production sender locks ±4g accel / ±1000 dps gyro.
 #define V1_ACCEL_RANGE_G    4.0f
@@ -352,32 +438,25 @@ static void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
     DeserializationError err = deserializeJson(doc, (const char*)data, len);
     if (err) return;
 
-    if (!doc.containsKey("seq")) return;
+    if (!doc.containsKey("s") && !doc.containsKey("seq")) return;
 
     // Build the full state in a scratch copy, then publish it to bs26 in one
     // critical section so loop never reads a half-updated struct.
     Bs26State next = {};
     next.dc       = doc["dc"] | false;
     next.ac       = doc["ac"] | false;
-    next.hundreds = doc["hundreds"] | 0;
-    next.tens     = doc["tens"] | 0;
-    next.ones     = doc["ones"] | 0;
-    next.decade   = doc["decade"] | 0;
-    next.decouter = doc["decouter"] | 0;
-    next.decmid   = doc["decmid"] | 0;
-    next.decinner = doc["decinner"] | 0;
-
-    JsonObject ua = doc["ua"];
-    if (ua) {
-        next.ua_dac = ua["dac"] | 0;
-        next.ua_max = ua["max"] | 0;
-    }
-    JsonObject v = doc["v"];
-    if (v) {
-        next.v_dac = v["dac"] | 0;
-        next.v_max = v["max"] | 0;
-    }
-    next.seq = doc["seq"] | 0;
+    next.hundreds = doc["h"]  | (doc["hundreds"] | 0);
+    next.tens     = doc["t"]  | (doc["tens"] | 0);
+    next.ones     = doc["o"]  | (doc["ones"] | 0);
+    next.decade   = doc["dec"]| (doc["decade"] | 0);
+    next.decouter = doc["do"] | (doc["decouter"] | 0);
+    next.decmid   = doc["dm"] | (doc["decmid"] | 0);
+    next.decinner = doc["di"] | (doc["decinner"] | 0);
+    next.ua_dac   = doc["ua"] | 0;
+    next.ua_max   = 0;
+    next.v_dac    = doc["v"]  | 0;
+    next.v_max    = 0;
+    next.seq      = doc["s"]  | (doc["seq"] | 0);
 
     portENTER_CRITICAL(&bs26Mux);
     memcpy((void*)&bs26, &next, sizeof(bs26));
@@ -426,13 +505,9 @@ static const Stick STICKS[] = {
 };
 static const uint8_t STICK_COUNT = sizeof(STICKS) / sizeof(STICKS[0]);
 
-// ── Generic delta-sigma output stage (shared by ported effects) ──
+// ── Generic output stage (shared by ported effects) ─────────────
 // Ported bulb-fleet/biolum effects write 0–255-range float color here;
-// this scales by renderBrightness, converts to 16-bit, and dithers.
-// (The bloom effect keeps its own per-pixel accumulators in BloomStrip.)
-static uint16_t fxDitherR[NUM_STRIPS][LEDS_PER_STRIP];
-static uint16_t fxDitherG[NUM_STRIPS][LEDS_PER_STRIP];
-static uint16_t fxDitherB[NUM_STRIPS][LEDS_PER_STRIP];
+// this scales by renderBrightness and truncates to 8-bit. No dithering.
 
 // ── Hysteretic floor: anti-flicker policy for sub-LSB channels ───
 // Each channel per pixel has a timer (seconds, float). Positive = time spent
@@ -446,12 +521,9 @@ static uint16_t fxDitherB[NUM_STRIPS][LEDS_PER_STRIP];
 #define FLOOR_REACTIVATE_S  0.5f
 #define FLOOR_THRESHOLD     256    // target16 below this = sub-LSB danger zone
 
-static float fxFloorTimer[NUM_STRIPS][LEDS_PER_STRIP][3];
+static float fxFloorTimer[NUM_STRIPS][LEDS_PER_STRIP][1];
 
 static void resetFxDither() {
-    memset(fxDitherR, 0, sizeof(fxDitherR));
-    memset(fxDitherG, 0, sizeof(fxDitherG));
-    memset(fxDitherB, 0, sizeof(fxDitherB));
     memset(fxFloorTimer, 0, sizeof(fxFloorTimer));
 }
 
@@ -478,7 +550,7 @@ static inline uint16_t applyFloorPolicy(uint16_t target16, float &timer, float d
 
 // Global palette transform: rotate hue by paletteHueIdx×36° and scale
 // saturation by (1 - paletteSatIdx/9), matching applyPalette()'s rule. This
-// is the shared path for every effect that routes through setPixelDither, so
+// is the shared path for every effect that routes through setPixelScaled, so
 // the decmid/decinner knobs affect all of them. Bloom does NOT come through
 // here (it uses setPixel directly and rotates its own base colors), so there
 // is no double-rotation. No-op fast path when both knobs are at 0.
@@ -492,28 +564,25 @@ static inline void applyGlobalPalette(float &r, float &g, float &b) {
 }
 
 // fr/fg/fb in 0–255 linear range (already gamma-shaped by the effect).
-// Remaps each channel into [renderFloor, renderBrightness] so effect dynamics
-// are visible even at low tens positions.
-static inline void setPixelDither(uint8_t s, uint16_t i, float fr, float fg, float fb) {
+static inline void setPixelScaled(uint8_t s, uint16_t i, float fr, float fg, float fb) {
     applyGlobalPalette(fr, fg, fb);
     if (fr > 0.0f || fg > 0.0f || fb > 0.0f) {
-        float range = renderBrightness - renderFloor;
-        fr = renderFloor * 255.0f + range * fr;
-        fg = renderFloor * 255.0f + range * fg;
-        fb = renderFloor * 255.0f + range * fb;
+        fr *= renderBrightness;
+        fg *= renderBrightness;
+        fb *= renderBrightness;
     }
     uint16_t t16R = (uint16_t)fminf(fr * 256.0f, 65535.0f);
     uint16_t t16G = (uint16_t)fminf(fg * 256.0f, 65535.0f);
     uint16_t t16B = (uint16_t)fminf(fb * 256.0f, 65535.0f);
-    t16R = applyFloorPolicy(t16R, fxFloorTimer[s][i][0], gDt);
-    t16G = applyFloorPolicy(t16G, fxFloorTimer[s][i][1], gDt);
-    t16B = applyFloorPolicy(t16B, fxFloorTimer[s][i][2], gDt);
-    if ((t16R | t16G | t16B) == 0) {
-        fxDitherR[s][i] = fxDitherG[s][i] = fxDitherB[s][i] = 0;
+    uint16_t maxT16 = t16R > t16G ? (t16R > t16B ? t16R : t16B)
+                                   : (t16G > t16B ? t16G : t16B);
+    uint16_t floorResult = applyFloorPolicy(maxT16, fxFloorTimer[s][i][0], gDt);
+    if (floorResult == 0 && maxT16 < FLOOR_THRESHOLD) {
+        t16R = t16G = t16B = 0;
     }
-    uint8_t r8 = deltaSigma(fxDitherR[s][i], t16R);
-    uint8_t g8 = deltaSigma(fxDitherG[s][i], t16G);
-    uint8_t b8 = deltaSigma(fxDitherB[s][i], t16B);
+    uint8_t r8 = t16R >> 8;
+    uint8_t g8 = t16G >> 8;
+    uint8_t b8 = t16B >> 8;
     setPixel(s, i, r8, g8, b8);
 }
 
@@ -524,11 +593,9 @@ static const uint8_t STRIP_HUE_OFFSET[NUM_STRIPS] = { 0, 42, 85, 128, 170, 213 }
 // ── Effect selection (BS-26 ones knob, 0–11) ────────────────────
 enum EffectId : uint8_t {
     FX_AMBIENT_BLOOM = 0,
-    FX_QUIET_BLOOM,
     FX_GRAVITY_PARTICLE,
     FX_SPARKLE_SYLLABLE,
-    FX_FIRE_MELD,
-    FX_FIRE_FLICKER,
+    FX_FIRE,
     FX_RAINBOW,
     FX_NEBULA,
     FX_LEAF_WIND,
@@ -566,7 +633,19 @@ static float crScrollDps_live = 0.0f; // gyro yaw rate in deg/s
 // adaptive floor + log scaling (ported from bulb-fleet computeEnergy/Onset,
 // retuned for the decoded RMS scale). On timeout each layer falls back to its
 // at-rest stub so the effects render their idle/ambient branch unchanged.
-#define SNS_RMS_FLOOR_MIN  50.0f   // quiet-room floor in the 8000-FS domain
+// Hard energy floor: below this, mean RMS reads as ambient/no-intent and
+// fxEnergy is zeroed. Measured @ FS=200000 (this mic): silent room ~2k,
+// room music ~16-37k, distant speech ~13-37k, direct speech peaks 92-133k.
+// 20k sits above music/distant talk so only deliberate close speech drives
+// energy. The adaptive floor floats above this when ambient is louder.
+#define SNS_RMS_FLOOR_MIN  20000.0f
+// Onset presence floor — gates onset on the absolute window MAX (not mean), so a
+// sharp transient over a quiet bed still counts (clap-to-interact). Set just
+// above the measured silent-room noise ceiling (~2.6k max) so mic-noise jitter
+// can't manufacture phantom onsets, but far below any real sound (≥17k) so
+// genuine soft transients still register. Distinct from the 20k energy floor:
+// that's the opt-in/taste knob; this is a noise-derived phantom kill.
+#define SNS_ONSET_FLOOR    6000.0f
 #define SNS_FLOOR_HEADROOM 1.4f
 #define SNS_FLOOR_LEAK     0.005f
 #define SNS_FLOOR_SNAP_EPS 0.05f
@@ -597,6 +676,57 @@ static float snsUpdateFloor(float rms, float dt) {
     }
     snsAdaptiveFloor = fmaxf(snsAdaptiveFloor, SNS_RMS_FLOOR_MIN);
     return snsAdaptiveFloor;
+}
+
+// Reseed the adaptive floor/ceiling/onset state to declaration defaults. Called
+// at playback start so re-derived energy/onset converges cleanly instead of
+// inheriting the prior live-audio state.
+static void audioResetAdaptiveState() {
+    snsAdaptiveFloor = 0.0f;
+    snsRmsCeiling    = SNS_RMS_FLOOR_MIN;
+    snsBelowFloorCnt = 0;
+    snsPrevRms       = 0.0f;
+    snsOnsetPeak     = 1e-6f;
+}
+
+// Stage-2 → stage-3 audio derivation: companded RMS bytes → fxEnergy/fxOnset
+// via the adaptive floor + log scaling against a leaky ceiling, plus onset from
+// the window max/mean gap. Single source of truth for both live packets and
+// recorded-frame playback, so silent replay reproduces the captured drive.
+static void audioDeriveFeatures(uint8_t rmsMeanByte, uint8_t rmsMaxByte, float dt) {
+    float rmsMean = decodeCompand(rmsMeanByte, V1_RMS_FS);
+    float rmsMax  = decodeCompand(rmsMaxByte,  V1_RMS_FS);
+
+    // Energy: adaptive floor + log scaling against a leaky ceiling.
+    snsRmsCeiling = fmaxf(SNS_RMS_FLOOR_MIN, snsRmsCeiling * expf(-0.0025f * dt));
+    if (rmsMean > snsRmsCeiling) snsRmsCeiling = rmsMean;
+    snsUpdateFloor(rmsMean, dt);
+    float effFloor = snsAdaptiveFloor * SNS_FLOOR_HEADROOM;
+    if (rmsMean < effFloor) {
+        fxEnergy = 0.0f;
+    } else {
+        float db = 20.0f * log10f(rmsMean / effFloor);
+        float dbRange = 20.0f * log10f(snsRmsCeiling / effFloor);
+        if (dbRange < 1.0f) dbRange = 1.0f;
+        fxEnergy = clampf(db / dbRange, 0.0f, 1.0f);
+    }
+
+    // Onset: in-window transient is the gap between window max and mean,
+    // normalized against a decaying peak (mirrors computeOnset). The decay runs
+    // EVERY call so the peak stays continuous across gated/quiet windows — we
+    // gate the output below, never this state update. That keeps the dt math
+    // honest: no frozen state to snap when sound returns (dt itself is the
+    // loop-level, 0.1s-clamped delta, so it can't accumulate across windows).
+    float delta = fmaxf(0.0f, rmsMax - rmsMean);
+    snsPrevRms = rmsMean;
+    snsOnsetPeak = fmaxf(delta, snsOnsetPeak * expf(-1.3f * dt));
+    float onset = (snsOnsetPeak > 1e-6f) ? clampf(delta / snsOnsetPeak, 0.0f, 1.0f) : 0.0f;
+    // Presence gate on absolute window max: in a silent room the decaying peak
+    // shrinks to mic-noise level and tiny noise deltas normalize up to phantom
+    // onsets. Requiring the loudest sample to clear SNS_ONSET_FLOOR kills that
+    // without desensitizing real transients. Gated on max (not mean) so a sharp
+    // transient over a quiet bed still fires — preserving clap-to-interact.
+    fxOnset = (rmsMax >= SNS_ONSET_FLOOR) ? onset : 0.0f;
 }
 
 static void processSensors(float dt) {
@@ -646,35 +776,23 @@ static void processSensors(float dt) {
     }
 
     // ── Audio ────────────────────────────────────────────────────
-    if (audioLastMs > 0 && (now - audioLastMs) < SENSOR_TIMEOUT_MS) {
+    // During playback the recorded frame's audio bytes drive fxEnergy/fxOnset
+    // (applied in the playback block below); live audio is bypassed here so the
+    // two sources never both update the adaptive state in one frame.
+    if (recState == REC_PLAYING) {
+        // No-op: see the playback block, which calls audioDeriveFeatures().
+    } else if (audioLastMs > 0 && (now - audioLastMs) < SENSOR_TIMEOUT_MS) {
         AudioPacketV1 au;
         memcpy(&au, (const void*)&audioPkt, sizeof(au));
-        float rmsMean = decodeCompand(au.rms_mean, V1_RMS_FS);
-        float rmsMax  = decodeCompand(au.rms_max,  V1_RMS_FS);
-
-        // Energy: adaptive floor + log scaling against a leaky ceiling.
-        snsRmsCeiling = fmaxf(SNS_RMS_FLOOR_MIN, snsRmsCeiling * expf(-0.0025f * dt));
-        if (rmsMean > snsRmsCeiling) snsRmsCeiling = rmsMean;
-        snsUpdateFloor(rmsMean, dt);
-        float effFloor = snsAdaptiveFloor * SNS_FLOOR_HEADROOM;
-        if (rmsMean < effFloor) {
-            fxEnergy = 0.0f;
-        } else {
-            float db = 20.0f * log10f(rmsMean / effFloor);
-            float dbRange = 20.0f * log10f(snsRmsCeiling / effFloor);
-            if (dbRange < 1.0f) dbRange = 1.0f;
-            fxEnergy = clampf(db / dbRange, 0.0f, 1.0f);
-        }
-
-        // Onset: in-window transient is the gap between window max and mean,
-        // normalized against a decaying peak (mirrors computeOnset).
-        float delta = fmaxf(0.0f, rmsMax - rmsMean);
-        snsPrevRms = rmsMean;
-        snsOnsetPeak = fmaxf(delta, snsOnsetPeak * expf(-1.3f * dt));
-        fxOnset = (snsOnsetPeak > 1e-6f) ? clampf(delta / snsOnsetPeak, 0.0f, 1.0f) : 0.0f;
+        audioDeriveFeatures(au.rms_mean, au.rms_max, dt);
     } else {
+        // Audio packets stopped (sender off / out of range). Zero the outputs and
+        // reset the adaptive floor/ceiling/onset-peak so they don't freeze stale
+        // through the dropout and resume mid-decay — packets returning re-seed
+        // cleanly, same as at playback start.
         fxEnergy = 0.0f;
         fxOnset = 0.0f;
+        audioResetAdaptiveState();
     }
 }
 
@@ -782,10 +900,9 @@ static void renderBloomStrip(uint8_t s, float dt) {
         }
 
         if (oR > 0.0f || oG > 0.0f || oB > 0.0f) {
-            float range = renderBrightness - renderFloor;
-            oR = renderFloor * 255.0f + range * oR;
-            oG = renderFloor * 255.0f + range * oG;
-            oB = renderFloor * 255.0f + range * oB;
+            oR *= renderBrightness;
+            oG *= renderBrightness;
+            oB *= renderBrightness;
         }
 
         uint16_t t16R = (uint16_t)fminf(oR * 256.0f, 65535.0f);
@@ -794,9 +911,9 @@ static void renderBloomStrip(uint8_t s, float dt) {
         if ((t16R | t16G | t16B) == 0) {
             bs.ditherR[i] = bs.ditherG[i] = bs.ditherB[i] = 0;
         }
-        uint8_t r8 = deltaSigma(bs.ditherR[i], t16R);
-        uint8_t g8 = deltaSigma(bs.ditherG[i], t16G);
-        uint8_t b8 = deltaSigma(bs.ditherB[i], t16B);
+        uint8_t r8 = t16R >> 8;
+        uint8_t g8 = t16G >> 8;
+        uint8_t b8 = t16B >> 8;
 
         setPixel(s, i, r8, g8, b8);
     }
@@ -805,7 +922,7 @@ static void renderBloomStrip(uint8_t s, float dt) {
 // ── Gravity particle (ported from bulb-fleet renderGravitySparkle) ─
 // Particles fall under accelerometer tilt and splat as OKLCH glows.
 // Stubbed at rest (ax=0) → no gravity → particles settle, gentle static.
-// No per-effect cap (renderBrightness via setPixelDither).
+// No per-effect cap (renderBrightness via setPixelScaled).
 #define GS_PARTICLE_COUNT 7
 #define GS_GRAVITY_SCALE  40.0f
 #define GS_VELOCITY_DAMP  0.92f
@@ -903,7 +1020,7 @@ static void renderGravity(float dt) {
             float bright = clampf(maxCh / 255.0f, 0.0f, 1.0f);
             float linBright = fastGamma24(bright);
             float norm = (bright > 0.001f) ? (linBright / bright) : 0.0f;
-            setPixelDither(s, i,
+            setPixelScaled(s, i,
                 clampf(r * norm, 0.0f, 255.0f),
                 clampf(g * norm, 0.0f, 255.0f),
                 clampf(b * norm, 0.0f, 255.0f));
@@ -1007,7 +1124,7 @@ static void renderSparkle(float dt) {
             colB = fminf(255.0f, colB + wFold);
 
             float linBright = fastGamma24(bright);
-            setPixelDither(s, i,
+            setPixelScaled(s, i,
                 clampf(colR * linBright, 0.0f, 255.0f),
                 clampf(colG * linBright, 0.0f, 255.0f),
                 clampf(colB * linBright, 0.0f, 255.0f));
@@ -1015,13 +1132,37 @@ static void renderSparkle(float dt) {
     }
 }
 
-// ── Fire (ported from bulb-fleet renderFire) ────────────────────
-// Audio-reactive flame; stubbed silent → calm amber idle flicker.
-// withDropout distinguishes fire_meld (true) from fire_flicker (false).
-// No per-effect cap.
-#define FIRE_FLICKER_SCALE 3.0f
-#define FIRE_DEADBAND      0.08f
-#define FIRE_DROPOUT_DEPTH 0.85f
+// ── Fire — procedural per-LED chaos flame (no audio) ────────────────
+// Each LED is an independent full-swing flicker built from three layered
+// noise octaves (slow bands + medium + fine crackle), contrast-expanded
+// so individual LEDs reach both ~0 and ~1 → full dynamic range with no
+// audio input. Audio will later ride on top (see AUDIO HOOK in renderFire).
+// Constants are explicit so they can be tuned against hardware measurement.
+#define FIRE_MID      0.50f   // field average brightness (pre-gamma)
+#define FIRE_GAIN     0.75f   // swing amplitude; >0.5 saturates the extremes
+// octave: weight, spatial freq (rad/LED), temporal freq (rad/s)
+#define FIRE_O1_W 0.50f
+#define FIRE_O1_SF 0.35f
+#define FIRE_O1_TF 1.70f
+#define FIRE_O2_W 0.30f
+#define FIRE_O2_SF 1.10f
+#define FIRE_O2_TF 2.90f
+#define FIRE_O3_W 0.20f
+#define FIRE_O3_SF 2.40f
+#define FIRE_O3_TF 5.10f
+// Fire palette: mostly red, amber only at the hottest pixels. No white,
+// no blue — real fire is B≈0 below ~2000K (blackbody: 1000K ember = ff3800,
+// 1800K flame = ff7e00). Anchors are WS2811-corrected: G pulled well below
+// the blackbody value because these LEDs are green-dominant (~2× red), so a
+// literal blackbody G reads yellow/pale. Color tracks per-LED brightness via
+// FIRE_AMBER_KNEE — below the knee = red, above = ramps to amber. Tunable.
+#define FIRE_RED_R   255.0f   // ember base (~1000K perceptual), dominant tone
+#define FIRE_RED_G    20.0f
+#define FIRE_RED_B     0.0f
+#define FIRE_AMBER_R 255.0f   // hot-pixel accent (~1800K perceptual)
+#define FIRE_AMBER_G  75.0f
+#define FIRE_AMBER_B   5.0f
+#define FIRE_AMBER_KNEE 0.70f // brightness above which color tips red→amber
 
 static float fireTime[NUM_STRIPS];
 static float fireBaseBrightness = 0.0f;
@@ -1041,75 +1182,10 @@ static void resetFire() {
     fireDropoutAmount = 0.0f;
 }
 
-static void renderFire(float dt, bool withDropout) {
-    float energy = fxEnergy;
-    float onset = fxOnset;
-    bool isSilent = energy < 0.001f;
-    bool isPercussiveOnly = (!isSilent && energy < 0.15f && onset > 0.5f);
-
-    float attackAlpha = fminf(1.0f, dt / 0.050f);
-    float decayAlpha  = fminf(1.0f, dt / 2.0f);
-
-    float targetBrightness = isSilent ? 0.25f : fmaxf(0.25f, energy);
-    if (targetBrightness > fireBaseBrightness)
-        fireBaseBrightness += attackAlpha * (targetBrightness - fireBaseBrightness);
-    else
-        fireBaseBrightness += decayAlpha * (targetBrightness - fireBaseBrightness);
-
-    float flickerAlpha = fminf(1.0f, dt / 0.200f);
-    float deltaTarget = isSilent ? 0.0f : onset;
-    fireFlickerIntensity += flickerAlpha * (deltaTarget - fireFlickerIntensity);
-
-    float dropoutAmount = 0.0f;
-    if (withDropout) {
-        float energyDeriv = (energy - firePrevEnergyForDeriv) / fmaxf(dt, 0.001f);
-        firePrevEnergyForDeriv = energy;
-        float derivAlpha = fminf(1.0f, dt / 0.200f);
-        fireEnergyDerivSmooth += derivAlpha * (energyDeriv - fireEnergyDerivSmooth);
-        bool isSustaining = (!isSilent && energy > 0.05f
-                             && fabsf(fireEnergyDerivSmooth) <= 0.5f);
-        if (isSustaining)
-            fireDropoutAmount = fminf(1.0f, fireDropoutAmount + dt * 0.35f);
-        else
-            fireDropoutAmount = fmaxf(0.0f, fireDropoutAmount - dt * 1.0f);
-        dropoutAmount = fireDropoutAmount;
-    }
-
-    float colorAttack = fminf(1.0f, dt / 0.080f);
-    float colorDecay  = fminf(1.0f, dt / 2.0f);
-    float colorTarget;
-    if (isPercussiveOnly)   colorTarget = 0.0f;
-    else if (isSilent)      colorTarget = 0.3f;
-    else                    colorTarget = fmaxf(0.3f, energy);
-    if (colorTarget > fireColorEnergy)
-        fireColorEnergy += colorAttack * (colorTarget - fireColorEnergy);
-    else
-        fireColorEnergy += colorDecay * (colorTarget - fireColorEnergy);
-
-    float ce = fireColorEnergy;
-    float baseColR, baseColG, baseColB;
-    const float WHITE_BLEND_THRESHOLD = 0.15f;
-    const float RED_FULL = 0.5f;
-    const float amberR = 255.0f, amberG = 140.0f, amberB = 30.0f;
-    const float redR   = 200.0f, redG   =  20.0f, redB   =  0.0f;
-    const float whiteR = 180.0f, whiteG = 170.0f, whiteB = 160.0f;
-
-    if (ce < WHITE_BLEND_THRESHOLD) {
-        float tw = 1.0f - (ce / WHITE_BLEND_THRESHOLD);
-        baseColR = amberR * (1.0f - tw) + whiteR * tw;
-        baseColG = amberG * (1.0f - tw) + whiteG * tw;
-        baseColB = amberB * (1.0f - tw) + whiteB * tw;
-    } else {
-        float tr = (ce - WHITE_BLEND_THRESHOLD) / (RED_FULL - WHITE_BLEND_THRESHOLD);
-        if (tr > 1.0f) tr = 1.0f;
-        baseColR = amberR * (1.0f - tr) + redR * tr;
-        baseColG = amberG * (1.0f - tr) + redG * tr;
-        baseColB = amberB * (1.0f - tr) + redB * tr;
-    }
-
-    float base = fireBaseBrightness;
-    if (base < FIRE_DEADBAND) base = 0.0f;
-    float sScl = FIRE_FLICKER_SCALE;
+static void renderFire(float dt) {
+    // AUDIO HOOK (stubbed): no audio → unity. Later, drive this from
+    // fxEnergy/fxOnset to flare the whole flame brighter on transients.
+    const float audioGain = 1.0f;
 
     for (uint8_t s = 0; s < NUM_STRIPS; s++) {
         fireTime[s] = fmodf(fireTime[s] + dt, 6283.1853f);
@@ -1118,153 +1194,29 @@ static void renderFire(float dt, bool withDropout) {
 
         for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
             float fi = (float)i + sOff;
-            float noise = fastSin(fi * 7.3f + t * 2.5f) *
-                           fastSin(fi * 3.7f + t * 1.4f) * 0.5f + 0.5f;
-            float noiseAmp = fmaxf(0.15f * sScl, 0.10f * sScl / fmaxf(base, 0.1f));
-            float bright = base * (1.0f + noiseAmp * (noise - 0.5f))
-                            + fireFlickerIntensity * (noise - 0.5f) * 0.25f * sScl;
+            // Three layered octaves, weights sum to 1 → n in [-1, 1].
+            float n = FIRE_O1_W * fastSin(fi * FIRE_O1_SF + t * FIRE_O1_TF)
+                    + FIRE_O2_W * fastSin(fi * FIRE_O2_SF - t * FIRE_O2_TF)
+                    + FIRE_O3_W * fastSin(fi * FIRE_O3_SF + t * FIRE_O3_TF);
+            // Contrast-expand around the mid level; saturate the extremes
+            // so each LED reaches both full-dark and full-bright over time.
+            float bright = clampf(FIRE_MID + n * FIRE_GAIN, 0.0f, 1.0f) * audioGain;
 
-            float perLedDim = 0.0f;
-            float colorRedShift = 0.0f;
-            if (withDropout && dropoutAmount > 0.0f) {
-                float resilience = fastSin(fi * 13.7f + t * 0.3f) *
-                                    fastSin(fi * 9.1f + t * 0.2f) * 0.5f + 0.5f;
-                perLedDim = clampf(
-                    (dropoutAmount - resilience * 0.7f) / 0.3f, 0.0f, 1.0f
-                ) * FIRE_DROPOUT_DEPTH;
-                colorRedShift = clampf(perLedDim / 0.3f, 0.0f, 1.0f);
-            }
-
-            bright *= (1.0f - perLedDim);
-            bright = clampf(bright, 0.0f, 1.0f);
-
-            float colR = baseColR * (1.0f - colorRedShift) + redR * colorRedShift;
-            float colG = baseColG * (1.0f - colorRedShift) + redG * colorRedShift;
-            float colB = baseColB * (1.0f - colorRedShift) + redB * colorRedShift;
+            // Color tracks this LED's brightness: pure red below the knee,
+            // ramping to amber at full bright. Most of the field sits below
+            // the knee → mostly-red flame with amber only on the hot peaks.
+            float amberMix = clampf((bright - FIRE_AMBER_KNEE) /
+                                    (1.0f - FIRE_AMBER_KNEE), 0.0f, 1.0f);
+            float colR = FIRE_RED_R + (FIRE_AMBER_R - FIRE_RED_R) * amberMix;
+            float colG = FIRE_RED_G + (FIRE_AMBER_G - FIRE_RED_G) * amberMix;
+            float colB = FIRE_RED_B + (FIRE_AMBER_B - FIRE_RED_B) * amberMix;
 
             float linBright = fastGamma24(bright);
-            setPixelDither(s, i,
+            setPixelScaled(s, i,
                 clampf(colR * linBright, 0.0f, 255.0f),
                 clampf(colG * linBright, 0.0f, 255.0f),
                 clampf(colB * linBright, 0.0f, 255.0f));
         }
-    }
-}
-
-// ── Quiet bloom (ported from bulb-fleet renderQuietBloom) ───────
-// Motion-reactive colony breathing. Stubbed: no motion drain → strips
-// just breathe ambiently. No per-effect cap.
-#define QB_SURPRISE_RATIO     3.0f
-#define QB_ENERGY_MULTIPLIER  1.4f
-#define QB_RECOVERY_RAMP      0.033f
-#define QB_RECOVERY_SPREAD    0.70f
-#define QB_BREATH_MIN_PERIOD  3.0f
-#define QB_BREATH_MAX_PERIOD  8.0f
-#define QB_BREATH_MIN_PEAK    0.65f
-#define QB_BREATH_MAX_PEAK    1.00f
-#define QB_BREATH_FLOOR       0.15f
-#define QB_FLASH_DECAY_LO     0.96f
-#define QB_FLASH_DECAY_HI     0.985f
-#define QB_HUE_A_G   20.0f
-#define QB_HUE_A_B  100.0f
-#define QB_HUE_B_G   70.0f
-#define QB_HUE_B_B  110.0f
-#define QB_FLASH_G  150.0f
-#define QB_FLASH_B  170.0f
-#define QB_W_ONSET    0.5f
-
-static float qbBreathPhase [NUM_STRIPS][LEDS_PER_STRIP];
-static float qbBreathPeriod[NUM_STRIPS][LEDS_PER_STRIP];
-static float qbBreathPeak  [NUM_STRIPS][LEDS_PER_STRIP];
-static float qbHueT        [NUM_STRIPS][LEDS_PER_STRIP];
-static float qbFlashGlow   [NUM_STRIPS][LEDS_PER_STRIP];
-static float qbFlashDecay  [NUM_STRIPS][LEDS_PER_STRIP];
-static float qbColonyEnergy = 1.0f;
-static float qbDrainEnvelope = 0.0f;
-static float qbHitIntensity = 0.0f;
-
-static void resetQuietBloom() {
-    qbColonyEnergy = 1.0f;
-    qbDrainEnvelope = 0.0f;
-    qbHitIntensity = 0.0f;
-    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
-        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
-            qbBreathPhase[s][i] = randFloat();
-            qbBreathPeriod[s][i] = QB_BREATH_MIN_PERIOD
-                + randFloat() * (QB_BREATH_MAX_PERIOD - QB_BREATH_MIN_PERIOD);
-            qbBreathPeak[s][i] = QB_BREATH_MIN_PEAK
-                + randFloat() * (QB_BREATH_MAX_PEAK - QB_BREATH_MIN_PEAK);
-            qbHueT[s][i] = randFloat();
-            qbFlashGlow[s][i] = 0.0f;
-            qbFlashDecay[s][i] = QB_FLASH_DECAY_LO
-                + randFloat() * (QB_FLASH_DECAY_HI - QB_FLASH_DECAY_LO);
-        }
-    }
-}
-
-static void renderQuietBloom(float dt) {
-    bool draining = qbDrainEnvelope > 0.001f;
-    if (!draining) qbHitIntensity = 0.0f;
-
-    // No motion source when stubbed → colony always recovering to full.
-    qbColonyEnergy = fminf(1.0f, qbColonyEnergy + QB_RECOVERY_RAMP * dt);
-
-    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
-        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
-            if (!draining) {
-                qbFlashGlow[s][i] *= fastDecay(qbFlashDecay[s][i], dt * 30.0f);
-                if (qbFlashGlow[s][i] < 0.005f) qbFlashGlow[s][i] = 0.0f;
-            }
-
-            qbBreathPhase[s][i] += dt / qbBreathPeriod[s][i];
-            if (qbBreathPhase[s][i] >= 1.0f) qbBreathPhase[s][i] -= 1.0f;
-
-            float wakeThresh = qbHueT[s][i] * QB_RECOVERY_SPREAD;
-            float ledRecovery = clampf(
-                (qbColonyEnergy - wakeThresh) / 0.30f, 0.0f, 1.0f);
-
-            float breath = (fastSinPhase(qbBreathPhase[s][i]) * 0.5f + 0.5f);
-            float breathGlow = QB_BREATH_FLOOR
-                + breath * (qbBreathPeak[s][i] - QB_BREATH_FLOOR);
-            breathGlow *= ledRecovery;
-
-            if (draining) {
-                float target = breathGlow * qbHitIntensity * QB_ENERGY_MULTIPLIER;
-                if (target > qbFlashGlow[s][i]) {
-                    qbFlashGlow[s][i] = target;
-                    qbFlashDecay[s][i] = QB_FLASH_DECAY_LO
-                        + randFloat() * (QB_FLASH_DECAY_HI - QB_FLASH_DECAY_LO);
-                }
-            }
-
-            float g = fmaxf(breathGlow, qbFlashGlow[s][i]);
-            float flashFrac = (qbFlashGlow[s][i] > breathGlow) ? 1.0f : 0.0f;
-            float h = qbHueT[s][i];
-            float colG = lerpf(lerpf(QB_HUE_A_G, QB_HUE_B_G, h), QB_FLASH_G, flashFrac);
-            float colB = lerpf(lerpf(QB_HUE_A_B, QB_HUE_B_B, h), QB_FLASH_B, flashFrac);
-
-            float linBright = fastGamma24(g);
-            float oG = colG * linBright;
-            float oB = colB * linBright;
-
-            float wFrac = clampf((g - QB_W_ONSET) / (1.0f - QB_W_ONSET), 0.0f, 1.0f);
-            float energyGate = clampf((qbColonyEnergy - 0.7f) / 0.3f, 0.0f, 1.0f);
-            float wGate = fmaxf(energyGate, flashFrac);
-            float wFold = wFrac * wGate * linBright * 200.0f;
-
-            setPixelDither(s, i,
-                clampf(wFold, 0.0f, 255.0f),
-                clampf(oG + wFold, 0.0f, 255.0f),
-                clampf(oB + wFold, 0.0f, 255.0f));
-        }
-    }
-
-    if (draining) {
-        float drain = qbDrainEnvelope * dt;
-        drain = fminf(drain, qbColonyEnergy);
-        qbColonyEnergy -= drain;
-        qbDrainEnvelope *= expf(-4.07f * dt);
-        if (qbDrainEnvelope <= 0.001f) qbDrainEnvelope = 0.0f;
     }
 }
 
@@ -1398,7 +1350,7 @@ static void renderNebula(float dt) {
                 b += orbB * 0.78f;
             }
 
-            setPixelDither(s, i,
+            setPixelScaled(s, i,
                 clampf(r, 0.0f, 1.0f) * 255.0f,
                 clampf(g, 0.0f, 1.0f) * 255.0f,
                 clampf(b, 0.0f, 1.0f) * 255.0f);
@@ -1409,7 +1361,7 @@ static void renderNebula(float dt) {
 // ── Rainbow (OKLCH scroll, ported from bulb-fleet renderIdle) ───
 // No audio dependency. Pure ambient hue scroll. dt is pre-scaled by
 // effSpeed at the call site. No per-effect brightness cap — output
-// scale is renderBrightness via setPixelDither.
+// scale is renderBrightness via setPixelScaled.
 #define RAINBOW_SCROLL_SPEED  0.10f
 
 static float rainbowPhase = 0.0f;
@@ -1426,7 +1378,7 @@ static void renderRainbow(float dt) {
             float pos = (float)i / (float)LEDS_PER_STRIP;
             float hue = fmodf(pos + rainbowPhase + stripOff, 1.0f);
             uint8_t idx = (uint8_t)(hue * 255.0f);
-            setPixelDither(s, i,
+            setPixelScaled(s, i,
                 (float)oklchVarL[idx][0],
                 (float)oklchVarL[idx][1],
                 (float)oklchVarL[idx][2]);
@@ -1437,7 +1389,7 @@ static void renderRainbow(float dt) {
 // ── Stick rainbow + secret pulse (effect slot 11) ───────────────
 // Only mapped sticks light. decouter selects an active subset (0=fewest,
 // 10=all); decouter==11 is the secret center-out pulse mode. dt is pre-scaled
-// by effSpeed at the call site. Output via setPixelDither (renderBrightness).
+// by effSpeed at the call site. Output via setPixelScaled (renderBrightness).
 #define SR_SCROLL_SPEED  0.10f   // hue scroll along a stick (cycles/sec at speed 1)
 #define SR_PULSE_WIDTH   3.0f    // half-width (LEDs) of the bright band
 
@@ -1511,7 +1463,7 @@ static void renderStickRainbow(float dt) {
     // Blank everything first; only sticks light.
     for (uint8_t s = 0; s < NUM_STRIPS; s++)
         for (uint16_t i = 0; i < LEDS_PER_STRIP; i++)
-            setPixelDither(s, i, 0.0f, 0.0f, 0.0f);
+            setPixelScaled(s, i, 0.0f, 0.0f, 0.0f);
 
     if (pulseMode) {
         // Each stick pulses independently and continuously: its own phase,
@@ -1543,7 +1495,7 @@ static void renderStickRainbow(float dt) {
                 float a = expf(-(edge * edge) / (2.0f * SR_PULSE_WIDTH * SR_PULSE_WIDTH));
                 a *= 1.0f - phase;   // fade as the band reaches the edges
                 if (a < 0.004f) continue;
-                setPixelDither(st.strip, i, pr * a, pg * a, pb * a);
+                setPixelScaled(st.strip, i, pr * a, pg * a, pb * a);
             }
         }
         return;
@@ -1559,7 +1511,7 @@ static void renderStickRainbow(float dt) {
             float pos = (len == 0) ? 0.0f : (float)(i - st.start) / (float)len;
             float hue = fmodf(pos + srPhase, 1.0f);
             uint8_t idx = (uint8_t)(hue * 255.0f);
-            setPixelDither(st.strip, i,
+            setPixelScaled(st.strip, i,
                 (float)oklchVarL[idx][0],
                 (float)oklchVarL[idx][1],
                 (float)oklchVarL[idx][2]);
@@ -1572,7 +1524,7 @@ static void renderStickRainbow(float dt) {
 // lights by 1D distance to each leaf. Bulb-fleet's 2D topology.h is a hex map
 // for a different installation, so tree-of-record collapses to a simple linear
 // topology — LED index → position 0..1 (i / (LEDS_PER_STRIP-1)). Each leaf
-// drifts independently per strip. No per-effect cap — output via setPixelDither.
+// drifts independently per strip. No per-effect cap — output via setPixelScaled.
 #define LW_MAX_LEAVES     8     // per strip
 #define LW_GLOW_RADIUS    0.05f
 #define LW_GLOW_SQ2       (2.0f * LW_GLOW_RADIUS * LW_GLOW_RADIUS)
@@ -1581,8 +1533,13 @@ static void renderStickRainbow(float dt) {
 #define LW_FADE_IN        0.4f
 #define LW_VEL_TAU        0.22f   // velocity EMA time constant (sec); = orig 0.85/frame @30fps
 #define LW_TURBULENCE     0.3f
-#define LW_BOOST_SPEED    0.25f
-#define LW_BOOST_TC       2.5f
+// Launch gust. Was 0.25 / TC 2.5s — but flight takes ~2.5s, so the gust used to
+// decay away mid-journey and the leaf braked ~11% toward the tip (measured).
+// TC now 20s (>> flight) makes the gust a near-constant per-leaf speed offset:
+// no tip-braking, leaves still ride different gusts. Magnitude trimmed 0.25→0.157
+// so overall speed is unchanged (sim: 0.455→0.448).
+#define LW_BOOST_SPEED    0.157f
+#define LW_BOOST_TC       20.0f
 
 static const uint8_t LW_PALETTE[][3] = {
     {255, 140, 20}, {240, 100, 10}, {220, 60, 5}, {200, 40, 10},
@@ -1681,23 +1638,24 @@ static void renderLeafWind(float dt) {
                 cr /= totalGlow; cg /= totalGlow; cb /= totalGlow;
                 float bright = fminf(totalGlow, 1.0f);
                 float linBright = fastGamma24(bright);
-                setPixelDither(s, i, cr * linBright, cg * linBright, cb * linBright);
+                setPixelScaled(s, i, cr * linBright, cg * linBright, cb * linBright);
             } else {
-                setPixelDither(s, i, 0.0f, 0.0f, 0.0f);
+                setPixelScaled(s, i, 0.0f, 0.0f, 0.0f);
             }
         }
     }
 }
 
 // ── Creatures (ported from biolum_mixed) ────────────────────────
-// Bloom + crawl creatures drift along a virtual buffer per strip-pair.
+// Bloom + crawl creatures drift along a virtual buffer, one independent
+// simulation per physical strip (no mirroring — every strip is its own world).
 // Shake (accel) and gyro-scroll interaction are driven by crShakeFeedG()/
 // crScrollDps(), which processSensors() feeds from the v1 accel/gyro packets.
 // On sensor timeout they return rest (1g shake, 0 rotation) and the visuals
 // fall back to pure ambient drift. Virtual buffer is 100
 // physical LEDs + a SCROLL_MARGIN each side (was 150/200 on the bullet build).
-// No per-effect cap — output via setPixelDither.
-#define CR_NUM_PAIRS     3
+// No per-effect cap — output via setPixelScaled.
+#define CR_NUM_UNITS     6     // one independent creature world per strip
 #define CR_MAX_CREATURES 7
 #define CR_MAX_ANIMS     6
 #define CR_SCROLL_MARGIN 12
@@ -1725,7 +1683,9 @@ static void renderLeafWind(float dt) {
 #define CR_SCROLL_DECAY 0.3f
 
 #define CR_PULSE_EXPANSION_SPEED 3.3f
-#define CR_PULSE_TO_DRIFT_RATIO  1.9f
+// Ratio doubled (was 1.9) → drift halved → each creature lives ~2x longer on
+// screen. Pulse expansion speed is untouched, so animations look identical.
+#define CR_PULSE_TO_DRIFT_RATIO  3.8f
 #define CR_AVG_DRIFT  (CR_PULSE_EXPANSION_SPEED / CR_PULSE_TO_DRIFT_RATIO)
 #define CR_DRIFT_SPREAD 0.33f
 #define CR_DRIFT_MIN  (CR_AVG_DRIFT * (1.0f - CR_DRIFT_SPREAD))
@@ -1758,11 +1718,11 @@ struct CrCreature {
     CrAnim   anims[CR_MAX_ANIMS];
     float    hueOffset, hueSweep;
 };
-struct CrPair {
+struct CrUnit {
     CrCreature creatures[CR_MAX_CREATURES];
     float bufR[CR_VIRTUAL_LEDS], bufG[CR_VIRTUAL_LEDS], bufB[CR_VIRTUAL_LEDS];
 };
-static CrPair crPairs[CR_NUM_PAIRS];
+static CrUnit crUnits[CR_NUM_UNITS];
 
 // --- Global shake / scroll state (driven by processInteraction) ---
 static float crShakeLevel   = 0.0f;   // smooth 0→1 controlling visual effects
@@ -1838,9 +1798,9 @@ static void crInitCreature(CrCreature &c) {
 }
 
 static void resetCreatures() {
-    for (int p = 0; p < CR_NUM_PAIRS; p++)
+    for (int p = 0; p < CR_NUM_UNITS; p++)
         for (int c = 0; c < CR_MAX_CREATURES; c++)
-            crInitCreature(crPairs[p].creatures[c]);
+            crInitCreature(crUnits[p].creatures[c]);
 }
 
 static void crEmitAnim(CrCreature &c) {
@@ -2007,8 +1967,8 @@ static void renderCreatures(float dt) {
     crProcessInteraction(dt);
     int scrollPixels = (int)roundf(crScrollOffset);
 
-    for (int p = 0; p < CR_NUM_PAIRS; p++) {
-        CrPair &ps = crPairs[p];
+    for (int p = 0; p < CR_NUM_UNITS; p++) {
+        CrUnit &ps = crUnits[p];
         memset(ps.bufR, 0, sizeof(ps.bufR));
         memset(ps.bufG, 0, sizeof(ps.bufG));
         memset(ps.bufB, 0, sizeof(ps.bufB));
@@ -2024,7 +1984,8 @@ static void renderCreatures(float dt) {
         for (int c = 0; c < CR_MAX_CREATURES; c++)
             if (!ps.creatures[c].alive) crInitCreature(ps.creatures[c]);
 
-        uint8_t sA = p * 2, sB = p * 2 + 1;
+        // One unit drives one physical strip — no mirroring.
+        uint8_t s = p;
         for (int i = 0; i < LEDS_PER_STRIP; i++) {
             int src = CR_SCROLL_MARGIN + i + scrollPixels;
             if (src < 0) src = 0;
@@ -2033,12 +1994,11 @@ static void renderCreatures(float dt) {
             float vG = clampf(ps.bufG[src], 0.0f, 1.0f);
             float vB = clampf(ps.bufB[src], 0.0f, 1.0f);
             // Original used vv (gamma 2.0); fastGamma24 matches the rest of
-            // this build's pipeline. Output 0–255 range for setPixelDither.
+            // this build's pipeline. Output 0–255 range for setPixelScaled.
             float oR = fastGamma24(vR) * 255.0f;
             float oG = fastGamma24(vG) * 255.0f;
             float oB = fastGamma24(vB) * 255.0f;
-            setPixelDither(sA, i, oR, oG, oB);
-            setPixelDither(sB, i, oR, oG, oB);
+            setPixelScaled(s, i, oR, oG, oB);
         }
     }
 }
@@ -2048,7 +2008,7 @@ static void renderCreatures(float dt) {
 // open then seal, like sun breaking through cloud. 6 strips are radial spokes
 // from center: r = index/(LEDS-1) (0=trunk, 1=edge), spoke s at angle s×60°.
 // Spawn/churn/growth all scale with fxDt (speed knob folds in upstream).
-// Routes through setPixelDither like every other effect.
+// Routes through setPixelScaled like every other effect.
 #define LT_MAX_PATCHES   6
 #define LT_SPAWN_PERIOD  2.2f   // mean seconds between patches (Poisson)
 #define LT_CHURN_RATE    0.12f
@@ -2184,7 +2144,7 @@ static void renderLightThrough(float dt) {
                 outB = outB * (1.0f - a) + pcB * a;
             }
 
-            setPixelDither(s, i,
+            setPixelScaled(s, i,
                 clampf(outR, 0.0f, 255.0f),
                 clampf(outG, 0.0f, 255.0f),
                 clampf(outB, 0.0f, 255.0f));
@@ -2218,12 +2178,8 @@ static void resetEffect(uint8_t fx) {
         case FX_SPARKLE_SYLLABLE:
             resetSparkle();
             break;
-        case FX_FIRE_MELD:
-        case FX_FIRE_FLICKER:
+        case FX_FIRE:
             resetFire();
-            break;
-        case FX_QUIET_BLOOM:
-            resetQuietBloom();
             break;
         case FX_LEAF_WIND:
             resetLeafWind();
@@ -2405,10 +2361,11 @@ void loop() {
             effBrightness = powf((float)tens / 9.0f, 2.5f);
         }
 
-        // ones (0–11) → speed, log-spaced 0.2–4.0
+        // ones (0–11) → speed. Fine log resolution 0.2→1.0 across positions 0–8
+        // (ratio ≈1.22/step), then compressed octave doublings 2/4/8 at the top.
         static const float ONES_SPEED[12] = {
-            0.20f, 0.30f, 0.45f, 0.60f, 0.80f, 1.00f,
-            1.30f, 1.70f, 2.20f, 2.80f, 3.50f, 4.00f
+            0.20f, 0.24f, 0.30f, 0.37f, 0.45f, 0.55f, 0.67f, 0.82f, 1.00f,
+            2.00f, 4.00f, 8.00f
         };
         uint8_t spd = s.ones > 11 ? 11 : s.ones;
         effSpeed = ONES_SPEED[spd];
@@ -2465,6 +2422,21 @@ void loop() {
         rf.decouter = currentEffect;
         rf.decmid = paletteHueIdx;
         rf.decinner = paletteSatIdx;
+
+        // Capture the filtered audio drive (companded RMS bytes) so silent
+        // replay stays faithful. Mirror the live audio path: zero the bytes
+        // when the packet is stale or the sender flagged the mic muted (bit0).
+        rf.rms_mean = 0;
+        rf.rms_max  = 0;
+        if (audioLastMs > 0 && (now - audioLastMs) < SENSOR_TIMEOUT_MS) {
+            AudioPacketV1 au;
+            memcpy(&au, (const void*)&audioPkt, sizeof(au));
+            if (!(au.flags & 0x01)) {   // bit0 = mic muted
+                rf.rms_mean = au.rms_mean;
+                rf.rms_max  = au.rms_max;
+            }
+        }
+
         recBuffer[recFrameCount++] = rf;
         if (recFrameCount >= REC_MAX_FRAMES) recStopRecording();
     }
@@ -2482,6 +2454,12 @@ void loop() {
             paletteSatIdx = sat;
             applyPalette(paletteHueIdx, paletteSatIdx);
         }
+
+        // Re-derive fxEnergy/fxOnset from the recorded audio bytes through the
+        // same path live packets use (processSensors bypasses live audio while
+        // playing). dt is the real per-frame delta so decay stays correct.
+        audioDeriveFeatures(rf.rms_mean, rf.rms_max, dt);
+
         recPlayIdx++;
         if (recPlayIdx >= recFrameCount) recPlayIdx = 0;  // loop
     }
@@ -2520,11 +2498,9 @@ void loop() {
     // Per-effect speed normalization so the ones knob feels consistent.
     static const float SPEED_SCALE[] = {
         1.4f,   // FX_AMBIENT_BLOOM
-        1.4f,   // FX_QUIET_BLOOM
         0.5f,   // FX_GRAVITY_PARTICLE
         1.0f,   // FX_SPARKLE_SYLLABLE
-        1.0f,   // FX_FIRE_MELD
-        1.0f,   // FX_FIRE_FLICKER
+        1.0f,   // FX_FIRE
         2.0f,   // FX_RAINBOW
         1.5f,   // FX_NEBULA
         0.25f,  // FX_LEAF_WIND
@@ -2549,14 +2525,8 @@ void loop() {
         case FX_SPARKLE_SYLLABLE:
             renderSparkle(fxDt);
             break;
-        case FX_FIRE_MELD:
-            renderFire(fxDt, true);
-            break;
-        case FX_FIRE_FLICKER:
-            renderFire(fxDt, false);
-            break;
-        case FX_QUIET_BLOOM:
-            renderQuietBloom(fxDt);
+        case FX_FIRE:
+            renderFire(fxDt);
             break;
         case FX_LEAF_WIND:
             renderLeafWind(fxDt);
@@ -2595,6 +2565,8 @@ void loop() {
         float avgShowUs   = (float)showUsAccum / frameCount;
         Serial.printf("  FPS=%.1f  render=%.0fus  show=%.0fus  total=%.0fus\n",
                       fps, avgRenderUs, avgShowUs, avgRenderUs + avgShowUs);
+        RgbColor px = strip0.GetPixelColor(50);
+        Serial.printf("  [px50] R=%u G=%u B=%u\n", px.R, px.G, px.B);
         Serial.printf("  [bs26] %s pkts=%lu fx=%u bright=%.3f speed=%.2f hue=%u sat=%u dorm=%.2f\n",
                       bs26Live ? "LIVE" : "----",
                       (unsigned long)bs26PktCount,

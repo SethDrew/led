@@ -97,10 +97,12 @@
 #define GMAG_FS          57000.0f
 
 // Audio RMS companding full-scale. RMS is computed from 24-bit samples
-// (audio >> 8), so the int16-domain rail is ~32767. Loud transients on
-// the INMP441 reach a few thousand counts; FS picked so typical content
-// lands in the mid range and only clipping-loud peaks saturate.
-#define RMS_FS           8000.0f
+// (audio >> 8), so values live in a ~tens-of-thousands to low-hundreds-of-
+// thousands domain — NOT int16. Measured INMP441 RMS (bench, this mic):
+// silent-room floor ~10k, loud music 30k–146k (mean ~85k), close transient
+// spikes toward ~250k. FS=200000 clears loud content with headroom; only
+// the very loudest claps approach saturation. Decoder must match (V1_RMS_FS).
+#define RMS_FS           200000.0f
 
 // Per-sample axis-clip threshold (≈99.2% of int16 rail).
 #define CLIP_THRESH      32500
@@ -741,12 +743,16 @@ static void sampleTick() {
     shakeDetectTick();
     bgCalibrateTick();
     accumulateSample();
-    if (win.filled >= WINDOW_SAMPLES) {
-        // One mic read per 40 ms window — drains the I2S DMA buffer.
-        float rms = readAudioRMS();
+    // Read the mic every tick (8× per 40 ms window) so a transient in one
+    // ~5 ms slice pushes rms_max above rms_mean → real onset signal. Skip
+    // empty reads (no fresh DMA samples) so they don't drag the mean down.
+    float rms = readAudioRMS();
+    if (rms > 0.0f) {
         if (rms > win.rmsMax) win.rmsMax = rms;
         win.rmsSum += rms;
         win.rmsCount++;
+    }
+    if (win.filled >= WINDOW_SAMPLES) {
         finalizeAndEmit();
     }
 }

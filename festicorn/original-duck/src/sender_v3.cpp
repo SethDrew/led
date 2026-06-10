@@ -628,8 +628,9 @@ static void finalizeAndEmit() {
     pkt.gmag_mean = companding_encode(win.gmagSum / WINDOW_SAMPLES, GMAG_FS);
     pkt.flags    = (uint8_t)((win.accelClips << 4) | (win.gyroSats & 0x0F));
 
-    // Gate ALL forwarding on the record switch: the totem drives the tree's
-    // effects (and streams the waveform) only while recording. Idle = silent.
+    // Gate ALL forwarding on the record switch — confirmed design intent
+    // (2026-06-10): the tree only listens while recording; idle = silent,
+    // effects run ambient. Don't "fix" this into always-on telemetry.
     // Packets are still built so the serial debug below stays informative.
     if (wfStreaming && esp_now_send(broadcastAddr, (uint8_t*)&pkt, sizeof(pkt)) != ESP_OK) sendErrs++;
     windowsSent++;

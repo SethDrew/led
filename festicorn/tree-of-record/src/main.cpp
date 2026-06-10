@@ -7,7 +7,11 @@
  *
  *   tens (10-pos knob) → brightness; 0 = fully off
  *   ones (0–11)        → speed (12 steps, log-spaced 0.2–8.0)
- *   decouter (0–11)    → effect select
+ *   decouter (0–11)    → effect select, grouped: 0–3 audio field effects
+ *                        (bloom, fire, heat, worley), 4–6 audio particle
+ *                        effects (gravity, sparkle, creatures), 7–8 ambient
+ *                        particles (polycule, leaf-wind), 9–11 passive
+ *                        (light-through, nebula, rainbow)
  *   hundreds (0–4)     → recording slot select (0–4)
  *   decmid (0–9)       → hue        36° rotation steps (full wheel)
  *   decinner (0–9)     → saturation 5=original, 0=boosted to full, 9=white
@@ -870,22 +874,41 @@ static const uint8_t STRIP_HUE_OFFSET[NUM_STRIPS] = { 0, 42, 85, 128, 170, 213 }
 // sensors entirely (5–8, organic → cosmic → pure color).
 // Positions ≥ FX_COUNT clamp to the last effect.
 enum EffectId : uint8_t {
-    // audio-reactive
+    // audio-reactive: field effects
     FX_AMBIENT_BLOOM = 0,   // slow energy swell (audioEnergy5s contrast)
+    FX_FIRE,                // energy = flame height, onsets = flicker
+    FX_HEAT_DIFFUSION,      // energy injects heat at rotating point; PDE spreads it
+    FX_WORLEY,              // onsets kick Voronoi seeds; boundaries flare
+    // audio-reactive: particle effects
     FX_GRAVITY_PARTICLE,    // speech envelope springs particles outward
     FX_SPARKLE_SYLLABLE,    // discrete onsets spawn sparks (+ tilt hue)
-    FX_FIRE,                // energy = flame height, onsets = flicker
     FX_CREATURES,           // speech-energy excitement (was accel shake)
-    // ambient (no sensor input)
+    // ambient: particle effects
+    FX_POLYCULE,            // rainbow-tailed particles bounce + collide
     FX_LEAF_WIND,
+    // ambient: passive
     FX_LIGHT_THROUGH,
     FX_NEBULA,
     FX_RAINBOW,
-    FX_COUNT
+    FX_COUNT                // = 12: fills the decouter ring exactly
 };
 
 static uint8_t currentEffect = FX_AMBIENT_BLOOM;
 static uint8_t prevEffect    = 0xFF;   // forces reset on first frame
+
+// ── Shared per-effect buffers (DRAM is tight) ────────────────────
+// Effects are mutually exclusive and fully re-initialized on switch
+// (resetEffect), so large per-pixel state can share one allocation.
+// Add a union member per effect that needs a field; never read across
+// effects, and make sure the effect's reset writes every cell it reads.
+static union {
+    float neb[NUM_STRIPS][LEDS_PER_STRIP];   // nebula: orb trail decay
+    float heat[NUM_STRIPS][LEDS_PER_STRIP];  // heat diffusion: temperature
+} fxField;
+
+// Per-strip RGB accumulation scratch, valid within one render call only
+// (gravity, polycule).
+static float fxAccR[LEDS_PER_STRIP], fxAccG[LEDS_PER_STRIP], fxAccB[LEDS_PER_STRIP];
 
 // ── Audio/motion feature globals ────────────────────────────────
 // The bulb-fleet effects (gravity, sparkle, fire, quiet bloom) consume
@@ -1314,13 +1337,12 @@ static void renderGravity(float dt) {
     gsEnergyEma += fminf(1.0f, gDt / 0.15f) * (fxEnergy - gsEnergyEma);
     float damp = fastDecay(GS_VELOCITY_DAMP, dt * 30.0f);
 
-    static float accR[LEDS_PER_STRIP], accG[LEDS_PER_STRIP], accB[LEDS_PER_STRIP];
     const float maxPos = (float)(LEDS_PER_STRIP - 1);
     const float invTwoSigSq = 1.0f / (2.0f * GS_SPLAT_RADIUS * GS_SPLAT_RADIUS);
 
     for (uint8_t s = 0; s < NUM_STRIPS; s++) {
         for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
-            accR[i] = 0; accG[i] = 0; accB[i] = 0;
+            fxAccR[i] = 0; fxAccG[i] = 0; fxAccB[i] = 0;
         }
 
         for (uint16_t i = 0; i < GS_PARTICLE_COUNT; i++) {
@@ -1362,16 +1384,16 @@ static void renderGravity(float dt) {
             for (int j = lo; j <= hi; j++) {
                 float d = (float)j - p.pos;
                 float w = expf(-(d * d) * invTwoSigSq);
-                accR[j] += colR * w;
-                accG[j] += colG * w;
-                accB[j] += colB * w;
+                fxAccR[j] += colR * w;
+                fxAccG[j] += colG * w;
+                fxAccB[j] += colB * w;
             }
         }
 
         for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
-            float r = accR[i];
-            float g = accG[i];
-            float b = accB[i];
+            float r = fxAccR[i];
+            float g = fxAccG[i];
+            float b = fxAccB[i];
             float maxCh = fmaxf(r, fmaxf(g, b));
             float bright = clampf(maxCh / 255.0f, 0.0f, 1.0f);
             float linBright = fastGamma24(bright);
@@ -1673,7 +1695,7 @@ struct NebOrb {
 
 static float nebulaTime = 0.0f;
 static NebOrb nebOrbs[NUM_STRIPS][NEBULA_MAX_ORBS];
-static float nebDecay[NUM_STRIPS][LEDS_PER_STRIP];
+#define nebDecay fxField.neb   // shared per-effect field buffer
 
 static void resetNebula() {
     nebulaTime = 0.0f;
@@ -2441,6 +2463,342 @@ static void renderLightThrough(float dt) {
     }
 }
 
+// ── Worley collision (ported from audio-reactive worley_voronoi.py) ─
+// Voronoi seeds on springs, evenly spaced at rest. Speech onsets kick
+// them outward from strip center; the cell boundaries (F2−F1 proximity)
+// flare bright and drift back as the springs settle. Dark cell
+// interiors, OKLCH rainbow per cell.
+#define WORLEY_SEEDS      5
+#define WORLEY_SPRING_K   12.0f   // spring stiffness (1/s²)
+#define WORLEY_DAMPING    7.0f    // ~critically damped vs SPRING_K
+#define WORLEY_BOUNDARY_W 5.0f    // boundary falloff width (px)
+#define WORLEY_AMBIENT    0.12f   // boundary glow with no audio
+#define WORLEY_CELL_DIM   0.03f   // faint cell-interior floor
+#define WORLEY_ENV_DECAY  0.88f   // flash decay per frame @30fps reference
+
+static float worleyKick = 80.0f;  // px/s impulse per unit onset strength
+static float worleyPos[NUM_STRIPS][WORLEY_SEEDS];
+static float worleyVel[NUM_STRIPS][WORLEY_SEEDS];
+static float worleyRest[NUM_STRIPS][WORLEY_SEEDS];
+static float worleyEnv = 0.0f;
+
+static void resetWorley() {
+    float spacing = (float)LEDS_PER_STRIP / (float)(WORLEY_SEEDS + 1);
+    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        for (uint8_t k = 0; k < WORLEY_SEEDS; k++) {
+            // Per-strip jitter so the 6 strips don't read as copies.
+            worleyRest[s][k] = spacing * (float)(k + 1)
+                             + (randFloat() - 0.5f) * spacing * 0.3f;
+            worleyPos[s][k] = worleyRest[s][k];
+            worleyVel[s][k] = 0.0f;
+        }
+    }
+    worleyEnv = 0.0f;
+}
+
+static void renderWorley(float dt) {
+    // gDt for the flash envelope: the ones knob shapes the spring motion,
+    // never reaction latency.
+    if (fxOnset > 0.1f) {
+        const float center = (float)(LEDS_PER_STRIP - 1) * 0.5f;
+        for (uint8_t s = 0; s < NUM_STRIPS; s++)
+            for (uint8_t k = 0; k < WORLEY_SEEDS; k++) {
+                float dir = (worleyPos[s][k] > center) ? 1.0f : -1.0f;
+                worleyVel[s][k] += dir * fxOnset * worleyKick;
+            }
+        worleyEnv = fmaxf(worleyEnv, fxOnset);
+    }
+    worleyEnv *= fastDecay(WORLEY_ENV_DECAY, gDt * 30.0f);
+
+    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        for (uint8_t k = 0; k < WORLEY_SEEDS; k++) {
+            float disp = worleyPos[s][k] - worleyRest[s][k];
+            float acc = -WORLEY_SPRING_K * disp - WORLEY_DAMPING * worleyVel[s][k];
+            worleyVel[s][k] += acc * dt;
+            worleyPos[s][k] += worleyVel[s][k] * dt;
+            if (worleyPos[s][k] < 0.5f) {
+                worleyPos[s][k] = 0.5f;
+                worleyVel[s][k] *= -0.3f;
+            } else if (worleyPos[s][k] > (float)LEDS_PER_STRIP - 0.5f) {
+                worleyPos[s][k] = (float)LEDS_PER_STRIP - 0.5f;
+                worleyVel[s][k] *= -0.3f;
+            }
+        }
+
+        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
+            float px = (float)i + 0.5f;
+            float f1 = 1e9f, f2 = 1e9f;
+            uint8_t nearest = 0;
+            for (uint8_t k = 0; k < WORLEY_SEEDS; k++) {
+                float d = fabsf(px - worleyPos[s][k]);
+                if (d < f1) { f2 = f1; f1 = d; nearest = k; }
+                else if (d < f2) { f2 = d; }
+            }
+            float boundary = expf(-(f2 - f1) / WORLEY_BOUNDARY_W);
+            float bright = (WORLEY_AMBIENT + (1.0f - WORLEY_AMBIENT) * worleyEnv)
+                         * boundary;
+            bright = fmaxf(bright, WORLEY_CELL_DIM);
+
+            uint8_t hueIdx = (uint8_t)((nearest * 51 + STRIP_HUE_OFFSET[s]) & 0xFF);
+            float linBright = fastGamma24(bright);
+            setPixelScaled(s, i,
+                (float)oklchVarL[hueIdx][0] * linBright,
+                (float)oklchVarL[hueIdx][1] * linBright,
+                (float)oklchVarL[hueIdx][2] * linBright);
+        }
+    }
+}
+
+// ── Heat diffusion (ported from audio-reactive heat_diffusion.py) ──
+// 1D heat equation per strip: speech energy injects heat at a slowly
+// patrolling point, diffusion spreads it, cooling sinks it. Blackbody
+// ramp black→deep red→orange→white; sustained loud speech reaches
+// white-hot at the source (steady-state peak ≈ rate / (2·√(α·c))).
+// A passive sparkle overlay drifts on top: 1–3 px wide, fading in and
+// out over a few seconds at nominal speed, soft warm white.
+#define HEAT_ALPHA       40.0f   // diffusivity (px²/s)
+#define HEAT_COOLING     0.9f    // heat sink rate (1/s)
+#define HEAT_ROT_PERIOD  18.0f   // s per strip traversal at nominal speed
+#define HEAT_MAX_STEP    (0.4f / HEAT_ALPHA)  // explicit-Euler stability bound
+#define HEAT_SPARKS      4       // passive sparkle slots per strip
+
+static float heatInjRate = 14.0f;  // heat/s at fxEnergy = 1
+#define heatT fxField.heat         // shared per-effect field buffer
+static float heatInjPos[NUM_STRIPS];
+static float heatInjDir[NUM_STRIPS];
+
+struct HeatSpark {
+    uint16_t pos;     // left edge
+    uint8_t  width;   // 1–3 px
+    float    phase;   // 0–1 through the fade-in/out cycle
+    float    period;  // seconds for the full in+out
+    float    idle;    // seconds until (re)spawn
+    bool     active;
+};
+static HeatSpark heatSparks[NUM_STRIPS][HEAT_SPARKS];
+
+static void resetHeatDiffusion() {
+    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) heatT[s][i] = 0.0f;
+        heatInjPos[s] = randFloat() * (float)LEDS_PER_STRIP;
+        heatInjDir[s] = (xorshift32() & 1) ? 1.0f : -1.0f;
+        for (uint8_t k = 0; k < HEAT_SPARKS; k++) {
+            heatSparks[s][k].active = false;
+            heatSparks[s][k].idle = randFloat() * 6.0f;
+        }
+    }
+}
+
+// Blackbody-ish ramp; channels saturate in sequence so T>1 reads white.
+static inline void heatRamp(float T, float &r, float &g, float &b) {
+    r = clampf(T * 3.0f, 0.0f, 1.0f);
+    g = clampf((T - 0.30f) * 1.6f, 0.0f, 1.0f);
+    b = clampf((T - 0.80f) * 3.0f, 0.0f, 1.0f);
+}
+
+static void renderHeatDiffusion(float dt) {
+    static float lap[LEDS_PER_STRIP];
+
+    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        float *T = heatT[s];
+
+        // Patrol the injection point (motion → speed-scaled dt).
+        heatInjPos[s] += heatInjDir[s]
+                       * ((float)LEDS_PER_STRIP / HEAT_ROT_PERIOD) * dt;
+        if (heatInjPos[s] < 0.0f) {
+            heatInjPos[s] = 0.0f;
+            heatInjDir[s] = 1.0f;
+        } else if (heatInjPos[s] > (float)(LEDS_PER_STRIP - 1)) {
+            heatInjPos[s] = (float)(LEDS_PER_STRIP - 1);
+            heatInjDir[s] = -1.0f;
+        }
+
+        // Inject heat from speech energy. gDt, not the speed-scaled dt:
+        // how strongly audio is expressed must not change with the ones
+        // knob (same rule as gravity/sparkle).
+        float inject = heatInjRate * fxEnergy * gDt;
+        if (inject > 0.0f) {
+            int c = (int)heatInjPos[s];
+            T[c] += inject * 0.5f;
+            if (c > 0)                  T[c - 1] += inject * 0.25f;
+            if (c < LEDS_PER_STRIP - 1) T[c + 1] += inject * 0.25f;
+        }
+
+        // Diffuse + cool, substepped to stay inside the stability bound
+        // when the speed knob stretches dt.
+        float rem = dt;
+        while (rem > 0.0f) {
+            float step = fminf(rem, HEAT_MAX_STEP);
+            rem -= step;
+            for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
+                float left  = (i > 0) ? T[i - 1] : T[i];
+                float right = (i < LEDS_PER_STRIP - 1) ? T[i + 1] : T[i];
+                lap[i] = left + right - 2.0f * T[i];
+            }
+            for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
+                T[i] += (HEAT_ALPHA * lap[i] - HEAT_COOLING * T[i]) * step;
+                if (T[i] < 0.0f) T[i] = 0.0f;
+            }
+        }
+
+        // Passive sparkle lifecycle (ambient motion → speed-scaled dt).
+        for (uint8_t k = 0; k < HEAT_SPARKS; k++) {
+            HeatSpark &sp = heatSparks[s][k];
+            if (!sp.active) {
+                sp.idle -= dt;
+                if (sp.idle <= 0.0f) {
+                    sp.active = true;
+                    sp.pos = (uint16_t)(xorshift32() % (LEDS_PER_STRIP - 2));
+                    sp.width = 1 + (uint8_t)(xorshift32() % 3);
+                    sp.period = 2.5f + randFloat() * 2.5f;
+                    sp.phase = 0.0f;
+                }
+            } else {
+                sp.phase += dt / sp.period;
+                if (sp.phase >= 1.0f) {
+                    sp.active = false;
+                    sp.idle = 2.0f + randFloat() * 6.0f;
+                }
+            }
+        }
+
+        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
+            float r, g, b;
+            heatRamp(T[i], r, g, b);
+
+            for (uint8_t k = 0; k < HEAT_SPARKS; k++) {
+                HeatSpark &sp = heatSparks[s][k];
+                if (!sp.active) continue;
+                if (i < sp.pos || i >= sp.pos + sp.width) continue;
+                float env = fastSin((float)M_PI * sp.phase);
+                env = env * env * 0.30f;   // modest: sin² in/out, peak 0.30
+                r += env;
+                g += env * 0.92f;          // soft warm white
+                b += env * 0.72f;
+            }
+
+            float bright = fmaxf(r, fmaxf(g, b));
+            if (bright > 1.0f) {
+                float inv = 1.0f / bright;
+                r *= inv; g *= inv; b *= inv;
+                bright = 1.0f;
+            }
+            float norm = (bright > 0.001f) ? fastGamma24(bright) / bright : 0.0f;
+            setPixelScaled(s, i, r * norm * 255.0f, g * norm * 255.0f,
+                           b * norm * 255.0f);
+        }
+    }
+}
+
+// ── Polycule rainbow (ported from audio-reactive polycule_rainbow.py) ─
+// Five soft particles per strip with rainbow-gradient tails: hue cycles
+// across each glow and drifts slowly over time. Particles bounce off
+// strip ends and shove each other apart on collision. Purely ambient —
+// no audio input by design (the Python original's RMS pulse is dropped).
+#define POLY_PARTICLES  5
+#define POLY_TRAVERSE_S 5.0f   // s end-to-end at nominal speed
+#define POLY_SPEED_VAR  0.5f   // ±50% per-particle speed variation
+#define POLY_COLLIDE_R  6.0f   // px
+#define POLY_GLOW_SIGMA 2.5f   // px gaussian glow
+#define POLY_WINDOW     8      // render window ±px (glow < 0.01 beyond)
+
+static float polyPos[NUM_STRIPS][POLY_PARTICLES];
+static float polyVel[NUM_STRIPS][POLY_PARTICLES];
+static float polyTime = 0.0f;
+
+static void resetPolycule() {
+    polyTime = 0.0f;
+    float baseSpeed = (float)(LEDS_PER_STRIP - 1) / POLY_TRAVERSE_S;
+    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        for (uint8_t k = 0; k < POLY_PARTICLES; k++) {
+            polyPos[s][k] = (float)LEDS_PER_STRIP
+                          * ((float)k + 0.5f) / (float)POLY_PARTICLES;
+            float spd = baseSpeed * (1.0f - POLY_SPEED_VAR
+                                     + randFloat() * 2.0f * POLY_SPEED_VAR);
+            polyVel[s][k] = (k & 1) ? -spd : spd;
+        }
+    }
+}
+
+static void renderPolycule(float dt) {
+    polyTime += dt;
+    const float maxPos = (float)(LEDS_PER_STRIP - 1);
+
+    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        for (uint8_t k = 0; k < POLY_PARTICLES; k++) {
+            polyPos[s][k] += polyVel[s][k] * dt;
+            if (polyPos[s][k] > maxPos) {
+                polyPos[s][k] = 2.0f * maxPos - polyPos[s][k];
+                polyVel[s][k] = -polyVel[s][k];
+            } else if (polyPos[s][k] < 0.0f) {
+                polyPos[s][k] = -polyPos[s][k];
+                polyVel[s][k] = -polyVel[s][k];
+            }
+        }
+
+        // Collision: sort the 5 by position, shove overlapping neighbors
+        // apart (matches the Python original — reverse, not momentum swap).
+        uint8_t order[POLY_PARTICLES];
+        for (uint8_t k = 0; k < POLY_PARTICLES; k++) order[k] = k;
+        for (uint8_t a = 1; a < POLY_PARTICLES; a++) {
+            uint8_t o = order[a];
+            int b = (int)a - 1;
+            while (b >= 0 && polyPos[s][order[b]] > polyPos[s][o]) {
+                order[b + 1] = order[b];
+                b--;
+            }
+            order[b + 1] = o;
+        }
+        for (uint8_t a = 0; a + 1 < POLY_PARTICLES; a++) {
+            uint8_t lo = order[a], hi = order[a + 1];
+            float gap = polyPos[s][hi] - polyPos[s][lo];
+            if (gap < POLY_COLLIDE_R) {
+                polyVel[s][lo] = -fabsf(polyVel[s][lo]);
+                polyVel[s][hi] =  fabsf(polyVel[s][hi]);
+                float push = (POLY_COLLIDE_R - gap) * 0.5f + 0.5f;
+                polyPos[s][lo] = fmaxf(0.0f, polyPos[s][lo] - push);
+                polyPos[s][hi] = fminf(maxPos, polyPos[s][hi] + push);
+            }
+        }
+
+        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
+            fxAccR[i] = 0.0f; fxAccG[i] = 0.0f; fxAccB[i] = 0.0f;
+        }
+
+        for (uint8_t k = 0; k < POLY_PARTICLES; k++) {
+            int center = (int)polyPos[s][k];
+            int lo = center - POLY_WINDOW; if (lo < 0) lo = 0;
+            int hi = center + POLY_WINDOW; if (hi > (int)maxPos) hi = (int)maxPos;
+            for (int i = lo; i <= hi; i++) {
+                float dist = fabsf((float)i - polyPos[s][k]);
+                float glow = expf(-(dist * dist)
+                                  / (2.0f * POLY_GLOW_SIGMA * POLY_GLOW_SIGMA));
+                if (glow < 0.01f) continue;
+                uint8_t hueIdx = (uint8_t)(((uint32_t)(k * 51)
+                                  + (uint32_t)(dist * 15.0f)
+                                  + (uint32_t)(polyTime * 25.0f)
+                                  + STRIP_HUE_OFFSET[s]) & 0xFF);
+                fxAccR[i] += (float)oklchVarL[hueIdx][0] * glow;
+                fxAccG[i] += (float)oklchVarL[hueIdx][1] * glow;
+                fxAccB[i] += (float)oklchVarL[hueIdx][2] * glow;
+            }
+        }
+
+        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
+            float r = fxAccR[i], g = fxAccG[i], b = fxAccB[i];
+            float m = fmaxf(r, fmaxf(g, b));
+            if (m > 255.0f) {
+                float inv = 255.0f / m;
+                r *= inv; g *= inv; b *= inv;
+                m = 255.0f;
+            }
+            float bright = m * (1.0f / 255.0f);
+            float norm = (bright > 0.001f) ? fastGamma24(bright) / bright : 0.0f;
+            setPixelScaled(s, i, r * norm, g * norm, b * norm);
+        }
+    }
+}
+
 // ── Black out all strips (reserved/off slots) ───────────────────
 static void renderOff() {
     for (uint8_t s = 0; s < NUM_STRIPS; s++)
@@ -2455,17 +2813,26 @@ static void resetEffect(uint8_t fx) {
         case FX_AMBIENT_BLOOM:
             for (uint8_t s = 0; s < NUM_STRIPS; s++) resetBloomStrip(bloom[s]);
             break;
+        case FX_FIRE:
+            resetFire();
+            break;
+        case FX_HEAT_DIFFUSION:
+            resetHeatDiffusion();
+            break;
+        case FX_WORLEY:
+            resetWorley();
+            break;
         case FX_GRAVITY_PARTICLE:
             resetGravity();
             break;
         case FX_SPARKLE_SYLLABLE:
             resetSparkle();
             break;
-        case FX_FIRE:
-            resetFire();
-            break;
         case FX_CREATURES:
             resetCreatures();
+            break;
+        case FX_POLYCULE:
+            resetPolycule();
             break;
         case FX_LEAF_WIND:
             resetLeafWind();
@@ -2508,6 +2875,8 @@ static const Param PARAMS[] = {
     { "AUDIO_CEIL",       Param::F32, &bloomAudioCeil,     1.0f,  4.0f  },
     { "ENERGY5S_TAU",     Param::F32, &energy5sTau,        0.5f,  20.0f },
     { "ENERGY_FORCE",     Param::F32, &energyForce,       -1.0f,  1.0f  },
+    { "HEAT_INJ_RATE",    Param::F32, &heatInjRate,        1.0f,  60.0f },
+    { "WORLEY_KICK",      Param::F32, &worleyKick,        10.0f, 300.0f },
 };
 static const size_t PARAM_COUNT = sizeof(PARAMS) / sizeof(PARAMS[0]);
 
@@ -2828,10 +3197,13 @@ void loop() {
     // Per-effect speed normalization so the ones knob feels consistent.
     static const float SPEED_SCALE[] = {
         1.4f,   // FX_AMBIENT_BLOOM
+        1.0f,   // FX_FIRE
+        1.0f,   // FX_HEAT_DIFFUSION
+        1.0f,   // FX_WORLEY
         0.5f,   // FX_GRAVITY_PARTICLE
         1.0f,   // FX_SPARKLE_SYLLABLE
-        1.0f,   // FX_FIRE
         1.5f,   // FX_CREATURES
+        1.0f,   // FX_POLYCULE
         0.25f,  // FX_LEAF_WIND
         1.0f,   // FX_LIGHT_THROUGH
         1.5f,   // FX_NEBULA
@@ -2842,17 +3214,26 @@ void loop() {
         case FX_AMBIENT_BLOOM:
             for (uint8_t s = 0; s < NUM_STRIPS; s++) renderBloomStrip(s, fxDt);
             break;
+        case FX_FIRE:
+            renderFire(fxDt);
+            break;
+        case FX_HEAT_DIFFUSION:
+            renderHeatDiffusion(fxDt);
+            break;
+        case FX_WORLEY:
+            renderWorley(fxDt);
+            break;
         case FX_GRAVITY_PARTICLE:
             renderGravity(fxDt);
             break;
         case FX_SPARKLE_SYLLABLE:
             renderSparkle(fxDt);
             break;
-        case FX_FIRE:
-            renderFire(fxDt);
-            break;
         case FX_CREATURES:
             renderCreatures(fxDt);
+            break;
+        case FX_POLYCULE:
+            renderPolycule(fxDt);
             break;
         case FX_LEAF_WIND:
             renderLeafWind(fxDt);

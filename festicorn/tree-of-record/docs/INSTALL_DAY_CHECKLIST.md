@@ -8,7 +8,8 @@ perceptually QA'd on hardware**. Budget ~20 minutes before final placement.
 
 - Identify board by MAC, not port: v2 = `F4:2D:C9:6D:B2:58` (boards
   re-enumerate; scan with esptool `chip_id`, `--after hard_reset`).
-- Board already runs commit `da2b6f8` — no reflash needed unless code moved.
+- **Reflash required**: three effects (heat diffusion, worley, polycule)
+  and a dial reorder landed after the board was last flashed.
 
 ## 1. Wipe / re-record the 5 slots
 
@@ -28,9 +29,12 @@ new curve). Record fresh material once everything below passes.
   Reaction latency must NOT change with speed — sparkle lands on the
   syllable, gravity springs on the word, at any speed. Only motion/fade
   rates should change.
-- **decouter (effect select)**: new order — 0–4 audio-reactive (bloom,
-  gravity, sparkle, fire, creatures), 5+ ambient. Confirm the grouping
-  reads intuitively on the physical knob.
+- **decouter (effect select)**: full 12-position dial, grouped —
+  0–3 audio field effects (bloom, fire, heat diffusion, worley),
+  4–6 audio particle effects (gravity, sparkle, creatures),
+  7–8 ambient particles (polycule, leaf-wind),
+  9–11 passive (light-through, nebula, rainbow).
+  Confirm the grouping reads intuitively on the physical knob.
 
 ## 3. New audio behaviors (first hardware exposure)
 
@@ -43,6 +47,17 @@ new curve). Record fresh material once everything below passes.
 - **Onset detector**: rebuilt (energy-flux). If sparkle over- or
   under-fires in the venue's noise floor, tune live via serial:
   `ONSET_RISEFRAC` (sensitivity) and `ONSET_REFRAC` (max fire rate).
+- **Heat diffusion** (decouter 2, never seen on hardware): sustained loud
+  speech should build a white-hot spot that drifts along each strip and
+  cools to red when you stop. Tune `HEAT_INJ_RATE` via serial if it
+  saturates too easily or never gets past red. Passive 1–3 px warm-white
+  sparkles should fade in/out over a few seconds regardless of speech.
+- **Worley** (decouter 3, never seen on hardware): dim rainbow boundary
+  lines at rest; each syllable kicks them outward and flares bright.
+  Tune `WORLEY_KICK` via serial for how hard syllables shove the cells.
+- **Polycule** (decouter 7, never seen on hardware): five rainbow-tailed
+  particles per strip, bouncing and shoving on collision. Ambient only —
+  confirm it does NOT react to speech (by design).
 
 ## 4. Record/playback end-to-end
 

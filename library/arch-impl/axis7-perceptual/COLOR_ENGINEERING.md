@@ -28,6 +28,8 @@ What we learned from testing on actual strips:
 
 **Chroma just worked.** Desaturation via BT.601 luminance blending (blend toward perceptual gray) gives satisfying results with no extra tuning. Available as both a runtime slider and precomputed sweep palettes (blue, red, green, purple, gold wash).
 
+*Known firmware divergence:* tree-of-record's saturation knob scales HSV S instead of BT.601-blending (its satKnob also boosts above original saturation, which gray-blending can't express). HSV S-scaling lightens desaturated reds more than blues — accepted there as an empirical tradeoff, not validated against this doctrine.
+
 **Low-brightness hue shift.** Colors with unequal RGB ratios shift hue as they fade — smaller channels round to 0 first in 8-bit math (orange goes red, then black). Clamp non-zero channels to min 1 to reduce this.
 
 ## Source files

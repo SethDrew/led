@@ -372,10 +372,13 @@ void loop() {
     int uaVal = uaDac > METER_UA_MAX ? METER_UA_MAX : uaDac;
     int vVal  = vDac  > METER_V_MAX  ? METER_V_MAX  : vDac;
 
-    // digitalWrite gives true 0V; dacWrite(pin, 0) leaks ~80mV
-    if (uaVal == 0) { pinMode(METER_UA_PIN, OUTPUT); digitalWrite(METER_UA_PIN, LOW); }
+    // digitalWrite gives true 0V; dacWrite(pin, 0) leaks ~80mV. Must
+    // dacDisable() first: once attached, the DAC owns the pin via the RTC
+    // mux and digitalWrite alone can't pull it low — the needle sticks at
+    // the last DAC voltage. dacWrite re-attaches on the next nonzero.
+    if (uaVal == 0) { dacDisable(METER_UA_PIN); pinMode(METER_UA_PIN, OUTPUT); digitalWrite(METER_UA_PIN, LOW); }
     else dacWrite(METER_UA_PIN, uaVal);
-    if (vVal == 0) { pinMode(METER_V_PIN, OUTPUT); digitalWrite(METER_V_PIN, LOW); }
+    if (vVal == 0) { dacDisable(METER_V_PIN); pinMode(METER_V_PIN, OUTPUT); digitalWrite(METER_V_PIN, LOW); }
     else dacWrite(METER_V_PIN, vVal);
 
     // Change detection

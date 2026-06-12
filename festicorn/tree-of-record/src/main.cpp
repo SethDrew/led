@@ -299,6 +299,13 @@ static void playbackAudioEnd() {
     dacUninstall();
 }
 
+// Speaker volume, applied ONLY at the DAC fill below — the fxEnergy/fxOnset
+// re-derivation reads the same samples at recorded level, so LED reactivity
+// does not change with speaker volume. Each halving costs one of the DAC's
+// 8 bits (quantization hiss under speech); below ~0.06 use a hardware
+// divider on the jack instead.
+static float audioOutVol = 0.12f;
+
 // Feed one frame of recorded audio to the DAC and re-derive fxEnergy/fxOnset
 // from those same samples. Returns false when the slot has no waveform, so the
 // caller falls back to the legacy companded-envelope bytes.
@@ -325,7 +332,8 @@ static bool playbackAudioTick(float dt) {
             int c = (got - off) > SRC_CHUNK ? SRC_CHUNK : (got - off);
             int w = 0;
             for (int i = 0; i < c; i++) {
-                uint16_t v = (uint16_t)sbuf[off + i] << 8;
+                int32_t ac = (int32_t)sbuf[off + i] - 128;   // center on midline
+                uint16_t v = (uint16_t)(uint8_t)(128 + (int32_t)(ac * audioOutVol)) << 8;
                 for (int u = 0; u < WF_DAC_UPSAMPLE; u++) { dbuf[w++] = v; dbuf[w++] = v; }
             }
             size_t wrote = 0;
@@ -2877,6 +2885,7 @@ static const Param PARAMS[] = {
     { "ENERGY_FORCE",     Param::F32, &energyForce,       -1.0f,  1.0f  },
     { "HEAT_INJ_RATE",    Param::F32, &heatInjRate,        1.0f,  60.0f },
     { "WORLEY_KICK",      Param::F32, &worleyKick,        10.0f, 300.0f },
+    { "AUDIO_VOL",        Param::F32, &audioOutVol,        0.0f,  1.0f  },
 };
 static const size_t PARAM_COUNT = sizeof(PARAMS) / sizeof(PARAMS[0]);
 

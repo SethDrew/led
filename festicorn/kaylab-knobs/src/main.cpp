@@ -173,6 +173,12 @@ static int16_t lastAdsTensRaw = 0, lastAdsOnesRaw = 0, lastAdsVccRef = 0;
 static const float adsVccRefBaseline = 13249.0f;
 
 void broadcastState() {
+    // TEMP (June 2026): the physical AC lever is dead (contact stuck closed —
+    // see tree-of-record's AC_SWITCH_FAILURE_AND_DC_FALLBACK.md). Broadcast
+    // the DC switch in the "ac" field so record-intent consumers keep working:
+    // the duck gates ALL its sensor/mic forwarding on "ac", and the tree now
+    // ignores "ac" entirely (DC moded by the effect dial). Revert to (int)acOn
+    // when the lever is physically replaced.
     char buf[250];
     int n = snprintf(buf, sizeof(buf),
         "{\"dc\":%d,\"ac\":%d,\"h\":%d,\"t\":%d,\"o\":%d,"
@@ -180,7 +186,7 @@ void broadcastState() {
         "\"ua\":%d,\"v\":%d,"
         "\"rh\":%d,\"rt\":%d,\"ro\":%d,\"at\":%d,\"ao\":%d,\"ar\":%d,"
         "\"up\":%lu,\"b\":%u,\"s\":%u}",
-        (int)dcOn, (int)acOn,
+        (int)dcOn, (int)dcOn,
         hundredsPos, tensPos, onesPos, decValue, decOuter, decMid, decInner,
         uaDac, vDac,
         lastHundredsRaw, lastTensRaw, lastOnesRaw,

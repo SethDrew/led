@@ -15,8 +15,16 @@
  *   hundreds (0–4)     → recording slot select (0–4)
  *   decmid (0–9)       → hue        36° rotation steps (full wheel)
  *   decinner (0–9)     → saturation 5=original, 0=boosted to full, 9=white
- *   AC switch          → record (toggle: start/stop recording to selected slot)
- *   DC switch          → playback (toggle: start/stop playback from selected slot)
+ *   DC switch          → record OR playback, moded by the effect dial:
+ *                        decouter 0–10 + DC on = record to the selected slot;
+ *                        decouter 11 (rainbow) + DC on = play the slot back.
+ *                        Idle at 11 previews the selected slot's recorded
+ *                        effect (live form); rainbow if the slot is empty.
+ *                        The action binds at the switch's rising edge and holds
+ *                        until release, so dial moves mid-action can't flip it.
+ *   AC switch          → ignored (lever broke at install, June 2026 — contact
+ *                        stuck closed/chattering; DC took over both jobs.
+ *                        See AC_SWITCH_FAILURE_AND_DC_FALLBACK.md)
  *
  * BS-26 live → knobs control. No signal → serial PARAMS control.
  * BS-26 state arrives as JSON over ESP-NOW broadcast on channel 1.
@@ -70,17 +78,26 @@ static const uint8_t NUM_STRIPS = 6;
 static float bloomBrightnessCap  = 1.0f;
 static float bloomBufferDrain     = 15.0f;
 static float bloomFlashDecayRate  = 3.0f;
-static float bloomBreathFloor     = 0.32f;   // glow trough (pulses, doesn't blink)
+// Glow trough (pulses, doesn't blink). 0.28 is the contrast-vs-gate limit:
+// trough output at knob=0.1 is ~0.85, just above GATE_ON_THRESH 0.7 — lower
+// floors blink at low knob.
+static float bloomBreathFloor     = 0.28f;
 // Audio-energy overdrive: audioEnergy5s drives a per-pixel boost ADDED after the
 // brightness knob/cap, so loud audio punches bright pixels THROUGH the cap toward
 // saturation (up to bloomAudioCeil ≈ 2–3×) even when the brightness knob is low,
 // while below-mean pixels are pushed dark. Knob sets the quiet ambient level.
 static float bloomStretchGain     = 2.5f;   // overdrive level at full energy (× cap)
 static float bloomAudioCeil       = 3.0f;   // max level; ×baseColor saturates at 255
+// Ambient contrast stretch: expand each pixel's glow away from the field mean
+// BEFORE gamma, always on (audio stretch above is separate, energy-driven).
+// Makes breathing variance visible at low knob, where pure ratio compresses
+// into the bottom of the code range. >1 lets troughs cross the noise gate and
+// wink fully off — intentional (reads as dormancy).
+static float bloomAmbientContrast = 1.6f;
 
 #define BLOOM_BREATH_MIN_PERIOD 3.0f
 #define BLOOM_BREATH_MAX_PERIOD 8.0f
-#define BLOOM_BREATH_MIN_PEAK   0.65f
+#define BLOOM_BREATH_MIN_PEAK   0.75f
 #define BLOOM_BREATH_MAX_PEAK   1.00f
 
 #define BLOOM_FLASH_R  200.0f
@@ -94,7 +111,9 @@ static float bloomDormancyMin  = 3.0f;
 static float bloomDormancyMax  = 7.0f;
 static float bloomDormancyFrac = 0.0f;
 
-// AC switch on the BS-26 → record toggle. DC switch → playback toggle.
+// DC switch on the BS-26 → record (dial 0–10) or playback (dial 11). The AC
+// packet field is ignored — the lever died at install (stuck-closed contact;
+// diagnosis + this design in AC_SWITCH_FAILURE_AND_DC_FALLBACK.md).
 // acOn retained for the "tens=0 means off" path but no longer driven by AC.
 static bool acOn = true;
 
@@ -115,8 +134,8 @@ static uint8_t  recSlot = 0;          // selected via hundreds knob (0–4)
 // A "latch" disarms the switch after its action fires so the 30 s record cap
 // can't instantly restart while the switch is still held — you must flip the
 // switch off (re-arm) to record/play again.
-static bool     recAcLatch = false;    // AC (record) switch consumed-while-high
-static bool     recDcLatch = false;    // DC (playback) switch consumed-while-high
+static bool     recAcLatch = false;    // record action consumed-while-high
+static bool     recDcLatch = false;    // playback action consumed-while-high
 
 struct RecFrame {
     uint8_t tens, ones, hundreds, decouter, decmid, decinner;
@@ -143,12 +162,20 @@ static const char REC_MAGIC[4]      = { 'T', 'R', 'R', '1' };
 #define REC_FILE_VERSION  1
 #define REC_LEGACY_FRAME_SIZE 6   // old headerless format: 6-byte RecFrame
 
+// Walk-away cap (REC_CAP_S): a held or forgotten record switch stops the
+// recording after this many seconds, and the latch then requires a full
+// switch cycle before recording again. The 30 s buffer bound still backstops.
+static float     recCapS = 20.0f;
 static RecFrame* recBuffer = nullptr;  // heap-allocated on first use
 static uint32_t  recFrameCount = 0;    // frames written/total in buffer
 static uint32_t  recPlayIdx = 0;       // current playback position
 static float     recFrameAcc = 0.0f;   // record: dt accumulator for fixed-rate capture
 static float     recPlayClock = 0.0f;  // playback: wall-clock fallback when no audio
 static bool      recSlotHasData[REC_MAX_SLOTS] = {};
+// First frame's effect index per slot (0xFF = empty/unreadable) — drives the
+// replay-position preview: parked at dial 11, the tree renders the selected
+// slot's effect live instead of rainbow. Peeked at boot, updated on save.
+static uint8_t   recSlotEffect[REC_MAX_SLOTS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 // ── Audio waveform record/playback (8 kHz/8-bit, /rec_N.audio) ──
 // The duck (sender_v3) streams AudioStreamPacketV1 only while a slot records.
@@ -177,6 +204,36 @@ static File      playAudioFile;
 static bool      playAudioOpen = false;
 static bool      dacInstalled  = false;
 
+// Peek a slot's first frame for its effect index (replay-position preview).
+// Returns 0xFF if missing/unreadable. Mirrors recLoadSlot's header probe
+// without pulling the whole file into the frame buffer.
+static uint8_t recPeekSlotEffect(uint8_t slot) {
+    char path[20];
+    snprintf(path, sizeof(path), "/rec_%d.bin", slot);
+    File f = SPIFFS.open(path, "r");
+    if (!f) return 0xFF;
+    size_t fileSize = f.size();
+    RecFileHeader hdr;
+    size_t off = 0;
+    uint8_t frameSize = REC_LEGACY_FRAME_SIZE;
+    if (fileSize >= sizeof(hdr)) {
+        f.read((uint8_t*)&hdr, sizeof(hdr));
+        if (memcmp(hdr.magic, REC_MAGIC, 4) == 0 && hdr.frameSize > 0
+            && hdr.frameSize <= (uint8_t)sizeof(RecFrame)) {
+            off = sizeof(hdr);
+            frameSize = hdr.frameSize;
+        } else {
+            f.seek(0);
+        }
+    }
+    RecFrame rf = {};
+    uint8_t eff = 0xFF;
+    if (fileSize >= off + frameSize && f.read((uint8_t*)&rf, frameSize) == frameSize)
+        eff = rf.decouter;
+    f.close();
+    return eff;
+}
+
 static void recInit() {
     if (!SPIFFS.begin(true)) {
         Serial.println("[REC] SPIFFS mount failed");
@@ -193,10 +250,12 @@ static void recInit() {
         snprintf(path, sizeof(path), "/rec_%d.audio", i);
         recSlotHasAudio[i] = SPIFFS.exists(path);
         if (recSlotHasAudio[i]) { File f = SPIFFS.open(path, "r"); if (f) { audSz = f.size(); f.close(); } }
+        if (recSlotHasData[i]) recSlotEffect[i] = recPeekSlotEffect(i);
         if (recSlotHasData[i] || recSlotHasAudio[i])
-            Serial.printf("[REC]   slot %d: frames=%lu B (%.1fs)  audio=%lu B (%.1fs)\n",
+            Serial.printf("[REC]   slot %d: frames=%lu B (%.1fs)  audio=%lu B (%.1fs)  fx=%u\n",
                           i, (unsigned long)binSz, binSz / (8.0f * 60.0f),
-                          (unsigned long)audSz, audSz / (float)REC_AUDIO_RATE);
+                          (unsigned long)audSz, audSz / (float)REC_AUDIO_RATE,
+                          recSlotEffect[i]);
     }
 }
 
@@ -392,6 +451,7 @@ static void recStopRecording() {
     f.write((uint8_t*)recBuffer, recFrameCount * sizeof(RecFrame));
     f.close();
     recSlotHasData[recSlot] = true;
+    recSlotEffect[recSlot] = recBuffer[0].decouter;   // replay-position preview
     Serial.printf("[REC] saved slot %u: %lu frames (%.1fs)\n",
                   recSlot, recFrameCount, recFrameCount / (float)REC_FPS);
 }
@@ -951,7 +1011,13 @@ static float energyForce   = -1.0f;  // -1 = use real audio; 0–1 = forced over
 // room music ~16-37k, distant speech ~13-37k, direct speech peaks 92-133k.
 // 20k sits above music/distant talk so only deliberate close speech drives
 // energy. The adaptive floor floats above this when ambient is louder.
-#define SNS_RMS_FLOOR_MIN  20000.0f
+// Serial-tunable (FLOOR_MIN): the 20k default was calibrated for close
+// speech in a quiet room; field analysis of rec_0 (install day) showed
+// venue-distance speech peaks only 33-51k at the mic — and ~0.4x that
+// once wind rumble is excluded — so the venue floor likely wants to sit
+// lower once a windscreen is on the mic.
+static float snsRmsFloorMin = 20000.0f;
+#define SNS_RMS_FLOOR_MIN  snsRmsFloorMin
 // Ceiling seed + leak floor. The ceiling used to boot at the 20k floor min —
 // below the 28k effective floor — which clamped dbRange to its 1 dB minimum
 // and mapped the FIRST sound after boot/playback-start to fxEnergy = 1.0
@@ -960,12 +1026,15 @@ static float energyForce   = -1.0f;  // -1 = use real audio; 0–1 = forced over
 // FS=200000) so the first utterance lands ~0.7-1.0 honestly; louder peaks
 // still raise the ceiling above this.
 #define SNS_RMS_CEIL_MIN   130000.0f
-// Onset presence floor — gates onset on the absolute window MAX (not mean), so a
-// sharp transient over a quiet bed still counts (clap-to-interact). Set just
-// above the measured silent-room noise ceiling (~2.6k max) so mic-noise jitter
-// can't manufacture phantom onsets, but far below any real sound (≥17k) so
-// genuine soft transients still register. Distinct from the 20k energy floor:
-// that's the opt-in/taste knob; this is a noise-derived phantom kill.
+// Onset rise floor — minimum absolute flux (fast − slow envelope) to count
+// as an attack. Set just above silent-room mic jitter (~2.6k max) so noise
+// can't manufacture phantom onsets. The detector ALSO requires the attack
+// envelope to clear the same adaptive presence floor that gates fxEnergy —
+// field finding (install day 2026-06-11): wind gusts are sharp broadband
+// rises over a quiet bed, and flux alone fired sparkle at max strength
+// (rise/baseline ≈ 1 over quiet) while staying entirely below the 20k
+// presence floor. Direct claps/speech spike well above the floor, so
+// clap-to-interact survives the shared gate.
 #define SNS_ONSET_FLOOR    6000.0f
 #define SNS_FLOOR_HEADROOM 1.4f
 #define SNS_FLOOR_LEAK     0.005f
@@ -1060,7 +1129,10 @@ static void audioDeriveFeaturesRms(float rmsMean, float rmsMax, float dt) {
     float rise   = onsetFast - onsetSlow;
     float thresh = fmaxf(SNS_ONSET_FLOOR, onsetRiseFrac * onsetSlow);  // self-scales to the room
     onsetLock = fmaxf(0.0f, onsetLock - dt);
-    if (rise > thresh && onsetLock <= 0.0f) {
+    // Presence gate: the attack envelope must clear the same effective floor
+    // that gates fxEnergy (see SNS_ONSET_FLOOR comment — wind-over-quiet fix).
+    bool present = onsetFast > effFloor;
+    if (present && rise > thresh && onsetLock <= 0.0f) {
         onsetLock = onsetRefrac;
         fxOnset = clampf(rise / fmaxf(onsetSlow, 1.0f), 0.0f, 1.0f);   // strength for sparkle density
     } else {
@@ -1218,8 +1290,11 @@ static void renderBloomStrip(uint8_t s, float dt) {
     for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
         // Signed deviation from the field mean, normalized to ~[-1, +1.2].
         float w = clampf((glow[i] - glowMean) * 4.0f, -1.0f, 1.5f);
-        // Ambient breathing: dim when the brightness knob is low.
-        float ambient = fastGamma24(glow[i]) * bloomBrightnessCap * renderBrightness;
+        // Ambient breathing: dim when the brightness knob is low. Contrast
+        // stretch around the field mean first — see bloomAmbientContrast.
+        float stretched = clampf(glowMean + (glow[i] - glowMean) * bloomAmbientContrast,
+                                 0.0f, 1.0f);
+        float ambient = fastGamma24(stretched) * bloomBrightnessCap * renderBrightness;
         // Audio punch is full-scale linear (NOT knob-scaled) so it blows through.
         float breathLin = clampf(ambient + audioDrive * w, 0.0f, bloomAudioCeil);
 
@@ -1290,6 +1365,13 @@ static void renderBloomStrip(uint8_t s, float dt) {
 // max outward displacement at full energy; stiff is the spring pull strength.
 #define GS_SPREAD         (LEDS_PER_STRIP * 0.40f)
 #define GS_SPRING_STIFF   55.0f
+// Idle sway: with no audio the spring target drifts a few px in a slow
+// per-particle sine, so the field gently breathes instead of freezing.
+// Speech dwarfs it (GS_SPREAD ≈ 60 px vs 3 px sway).
+#define GS_IDLE_AMP       3.0f
+#define GS_IDLE_PERIOD    7.0f
+
+static float gsIdleTime = 0.0f;
 
 struct GsParticle {
     float pos;
@@ -1323,6 +1405,7 @@ static void resetGravity() {
         }
 
         const float center = (float)(LEDS_PER_STRIP - 1) * 0.5f;
+        gsIdleTime = 0.0f;
         for (uint16_t i = 0; i < GS_PARTICLE_COUNT; i++) {
             float home = seedPos[i % nSeed];
             gsParticles[s][i].pos = home;
@@ -1344,6 +1427,7 @@ static void renderGravity(float dt) {
     // latency — sensing stays real-time like the rest of the audio path.
     gsEnergyEma += fminf(1.0f, gDt / 0.15f) * (fxEnergy - gsEnergyEma);
     float damp = fastDecay(GS_VELOCITY_DAMP, dt * 30.0f);
+    gsIdleTime += dt;   // ambient motion → speed-scaled dt
 
     const float maxPos = (float)(LEDS_PER_STRIP - 1);
     const float invTwoSigSq = 1.0f / (2.0f * GS_SPLAT_RADIUS * GS_SPLAT_RADIUS);
@@ -1357,8 +1441,13 @@ static void renderGravity(float dt) {
             GsParticle &p = gsParticles[s][i];
 
             // Target = origin pushed outward in proportion to speech energy.
-            // Silence → target collapses to origin → spring pulls the particle home.
-            float target = p.origin + p.dir * gsEnergyEma * GS_SPREAD;
+            // Silence → target collapses to the idle sway around origin.
+            // Sway is outward-only (0..AMP) so it never fights the one-way
+            // wall below; per-particle/strip phase keeps it desynchronized.
+            float idle = GS_IDLE_AMP
+                * (fastSin(gsIdleTime * (6.2832f / GS_IDLE_PERIOD)
+                           + (float)i * 2.4f + (float)s * 0.7f) * 0.5f + 0.5f);
+            float target = p.origin + p.dir * (gsEnergyEma * GS_SPREAD + idle);
             target = clampf(target, 0.0f, maxPos);
             p.vel += GS_SPRING_STIFF * (target - p.pos) * dt;   // spring toward target
             p.vel *= damp;                                       // damping for settle
@@ -1415,14 +1504,23 @@ static void renderGravity(float dt) {
 }
 
 // ── Sparkle syllable (ported from bulb-fleet) ───────────────────
-// Onset-triggered LED ignition over a dim warm base. Stubbed: no onset,
-// no tilt → renders the quiet warm-amber floor. No per-effect cap.
+// Onset-triggered LED ignition over a dim warm base. Without audio the
+// idle twinkle below keeps it alive: sparse spontaneous single-LED
+// sparks, dimmer and slower-fading than speech sparks — a quiet preview
+// of what talking does. No per-effect cap.
 #define SPARKLE_DEADBAND 0.08f
+// Idle twinkle: starfield. Mean spontaneous sparks/sec across ALL strips,
+// sized so ~25% of LEDs are lit at any moment. Measured on hardware:
+// 95/s → 17% lit; 140/s → 19%; 220/s → ~25% (returns diminish as spawns
+// increasingly land on occupied pixels and are dropped). (History: 5/s
+// read as broken at low knob; 18/s chill but sparse.)
+#define SPARKLE_IDLE_RATE 220.0f
 
 static float syllSparkle[NUM_STRIPS][LEDS_PER_STRIP];
 static float syllDecayArr[NUM_STRIPS][LEDS_PER_STRIP];
 static float syllEnvelope = 0.0f;
 static float syllCooldown = 0.0f;
+static float syllIdleDebt = 0.0f;
 
 static void resetSparkle() {
     for (uint8_t s = 0; s < NUM_STRIPS; s++) {
@@ -1433,6 +1531,7 @@ static void resetSparkle() {
     }
     syllEnvelope = 0.0f;
     syllCooldown = 0.0f;
+    syllIdleDebt = 0.0f;
 }
 
 static void renderSparkle(float dt) {
@@ -1471,6 +1570,22 @@ static void renderSparkle(float dt) {
                 syllDecayArr[s][indices[i]] = 0.92f + randFloat() * 0.05f;
             }
         }
+    }
+
+    // Idle twinkle: warm-white starfield in silence. Val 0.45–0.75 lands
+    // mid-high on the color ramp below → soft warm white stars (speech
+    // sparks run 0.6–1.0 and ignite a third of the strip at once, so the
+    // reaction still reads as a clear step up). Spawns landing on a live
+    // spark are skipped — density self-limits without restart pops.
+    // Ambient motion → speed-scaled dt.
+    syllIdleDebt += SPARKLE_IDLE_RATE * dt;
+    while (syllIdleDebt >= 1.0f) {
+        syllIdleDebt -= 1.0f;
+        uint8_t  s = (uint8_t)(xorshift32() % NUM_STRIPS);
+        uint16_t i = (uint16_t)(xorshift32() % LEDS_PER_STRIP);
+        if (syllSparkle[s][i] > 0.05f) continue;   // don't restart a live spark
+        syllSparkle[s][i]  = 0.45f + randFloat() * 0.30f;
+        syllDecayArr[s][i] = 0.975f + randFloat() * 0.015f;
     }
 
     for (uint8_t s = 0; s < NUM_STRIPS; s++)
@@ -2117,9 +2232,19 @@ static void crInitCreature(CrCreature &c) {
 }
 
 static void resetCreatures() {
-    for (int p = 0; p < CR_NUM_UNITS; p++)
-        for (int c = 0; c < CR_MAX_CREATURES; c++)
-            crInitCreature(crUnits[p].creatures[c]);
+    for (int p = 0; p < CR_NUM_UNITS; p++) {
+        for (int c = 0; c < CR_MAX_CREATURES; c++) {
+            CrCreature &cr = crUnits[p].creatures[c];
+            crInitCreature(cr);
+            // Spawn visible: pre-age one anim partway into its envelope so
+            // the field is alive the instant the mode is entered, instead
+            // of dark through the first emit delay + bloom rise (~4 s).
+            float maxAge = (cr.kind == CR_KIND_BLOOM) ? CR_BLOOM_TOTAL
+                           : (CR_CRAWL_PULSE_LIFETIME + CR_CRAWL_PULSE_FADE);
+            cr.anims[0].active = true;
+            cr.anims[0].age = crRandf(0.0f, maxAge * 0.6f);
+        }
+    }
 }
 
 static void crEmitAnim(CrCreature &c) {
@@ -2472,23 +2597,33 @@ static void renderLightThrough(float dt) {
 }
 
 // ── Worley collision (ported from audio-reactive worley_voronoi.py) ─
-// Voronoi seeds on springs, evenly spaced at rest. Speech onsets kick
-// them outward from strip center; the cell boundaries (F2−F1 proximity)
-// flare bright and drift back as the springs settle. Dark cell
-// interiors, OKLCH rainbow per cell.
+// Voronoi seeds on springs. Speech onsets kick them outward from strip
+// center; the cell boundaries (F2−F1 proximity) flare bright and drift
+// back as the springs settle. Idle look departs from the Python original
+// (dark interiors, boundary-only glow): every cell is solid-filled with
+// its rainbow color, so the partition is always fully visible and the
+// boundaries read as color changes that migrate with the wander.
 #define WORLEY_SEEDS      5
 #define WORLEY_SPRING_K   12.0f   // spring stiffness (1/s²)
 #define WORLEY_DAMPING    7.0f    // ~critically damped vs SPRING_K
 #define WORLEY_BOUNDARY_W 5.0f    // boundary falloff width (px)
-#define WORLEY_AMBIENT    0.12f   // boundary glow with no audio
-#define WORLEY_CELL_DIM   0.03f   // faint cell-interior floor
+// Solid cell fill. Must survive gamma + a low brightness knob: pre-gamma
+// 0.55 → ~10 8-bit codes at knob 0.23 (0.12 was sub-LSB → floor-zeroed).
+#define WORLEY_CELL_FILL  0.55f
 #define WORLEY_ENV_DECAY  0.88f   // flash decay per frame @30fps reference
+
+// Idle wander: each seed's rest point drifts in a slow sine so the cell
+// boundaries migrate gently in silence instead of freezing. Springs track
+// the moving rest, so onsets still kick from wherever the wander is.
+#define WORLEY_WANDER_AMP    6.0f   // px, ~quarter of the seed spacing
+#define WORLEY_WANDER_PERIOD 13.0f  // s per cycle at nominal speed
 
 static float worleyKick = 80.0f;  // px/s impulse per unit onset strength
 static float worleyPos[NUM_STRIPS][WORLEY_SEEDS];
 static float worleyVel[NUM_STRIPS][WORLEY_SEEDS];
 static float worleyRest[NUM_STRIPS][WORLEY_SEEDS];
 static float worleyEnv = 0.0f;
+static float worleyTime = 0.0f;
 
 static void resetWorley() {
     float spacing = (float)LEDS_PER_STRIP / (float)(WORLEY_SEEDS + 1);
@@ -2502,6 +2637,7 @@ static void resetWorley() {
         }
     }
     worleyEnv = 0.0f;
+    worleyTime = 0.0f;
 }
 
 static void renderWorley(float dt) {
@@ -2517,10 +2653,15 @@ static void renderWorley(float dt) {
         worleyEnv = fmaxf(worleyEnv, fxOnset);
     }
     worleyEnv *= fastDecay(WORLEY_ENV_DECAY, gDt * 30.0f);
+    worleyTime += dt;   // ambient motion → speed-scaled dt
 
     for (uint8_t s = 0; s < NUM_STRIPS; s++) {
         for (uint8_t k = 0; k < WORLEY_SEEDS; k++) {
-            float disp = worleyPos[s][k] - worleyRest[s][k];
+            // Spring tracks a slowly wandering rest point (idle drift).
+            float restEff = worleyRest[s][k] + WORLEY_WANDER_AMP
+                * fastSin(worleyTime * (6.2832f / WORLEY_WANDER_PERIOD)
+                          + (float)k * 2.4f + (float)s * 1.1f);
+            float disp = worleyPos[s][k] - restEff;
             float acc = -WORLEY_SPRING_K * disp - WORLEY_DAMPING * worleyVel[s][k];
             worleyVel[s][k] += acc * dt;
             worleyPos[s][k] += worleyVel[s][k] * dt;
@@ -2543,9 +2684,10 @@ static void renderWorley(float dt) {
                 else if (d < f2) { f2 = d; }
             }
             float boundary = expf(-(f2 - f1) / WORLEY_BOUNDARY_W);
-            float bright = (WORLEY_AMBIENT + (1.0f - WORLEY_AMBIENT) * worleyEnv)
-                         * boundary;
-            bright = fmaxf(bright, WORLEY_CELL_DIM);
+            // Solid fill everywhere; onset envelope flares boundary lines
+            // from the fill level up toward full.
+            float bright = WORLEY_CELL_FILL
+                         + (1.0f - WORLEY_CELL_FILL) * worleyEnv * boundary;
 
             uint8_t hueIdx = (uint8_t)((nearest * 51 + STRIP_HUE_OFFSET[s]) & 0xFF);
             float linBright = fastGamma24(bright);
@@ -2569,6 +2711,10 @@ static void renderWorley(float dt) {
 #define HEAT_ROT_PERIOD  18.0f   // s per strip traversal at nominal speed
 #define HEAT_MAX_STEP    (0.4f / HEAT_ALPHA)  // explicit-Euler stability bound
 #define HEAT_SPARKS      4       // passive sparkle slots per strip
+// Idle ember: minimum injection so silence still shows a soft deep-red
+// blob roaming with the patrol point (steady-state peak T ≈ 0.12 — first
+// third of the blackbody ramp, never reaches orange).
+#define HEAT_IDLE_FLOOR  0.10f
 
 static float heatInjRate = 14.0f;  // heat/s at fxEnergy = 1
 #define heatT fxField.heat         // shared per-effect field buffer
@@ -2623,8 +2769,9 @@ static void renderHeatDiffusion(float dt) {
 
         // Inject heat from speech energy. gDt, not the speed-scaled dt:
         // how strongly audio is expressed must not change with the ones
-        // knob (same rule as gravity/sparkle).
-        float inject = heatInjRate * fxEnergy * gDt;
+        // knob (same rule as gravity/sparkle). The idle floor keeps a
+        // faint ember roaming in silence — see HEAT_IDLE_FLOOR.
+        float inject = heatInjRate * fmaxf(fxEnergy, HEAT_IDLE_FLOOR) * gDt;
         if (inject > 0.0f) {
             int c = (int)heatInjPos[s];
             T[c] += inject * 0.5f;
@@ -2704,7 +2851,10 @@ static void renderHeatDiffusion(float dt) {
 // strip ends and shove each other apart on collision. Purely ambient —
 // no audio input by design (the Python original's RMS pulse is dropped).
 #define POLY_PARTICLES  5
-#define POLY_TRAVERSE_S 5.0f   // s end-to-end at nominal speed
+// 25 s end-to-end ≈ 6 px/s base — parity with the other effects' motion
+// (heat patrol ~8 px/s, worley wander ~3). The Python original's 5 s
+// (~30 px/s) read frantic next to them on the tree.
+#define POLY_TRAVERSE_S 25.0f
 #define POLY_SPEED_VAR  0.5f   // ±50% per-particle speed variation
 #define POLY_COLLIDE_R  6.0f   // px
 #define POLY_GLOW_SIGMA 2.5f   // px gaussian glow
@@ -2886,6 +3036,8 @@ static const Param PARAMS[] = {
     { "HEAT_INJ_RATE",    Param::F32, &heatInjRate,        1.0f,  60.0f },
     { "WORLEY_KICK",      Param::F32, &worleyKick,        10.0f, 300.0f },
     { "AUDIO_VOL",        Param::F32, &audioOutVol,        0.0f,  1.0f  },
+    { "FLOOR_MIN",        Param::F32, &snsRmsFloorMin,  2000.0f, 80000.0f },
+    { "REC_CAP_S",        Param::F32, &recCapS,            2.0f,  30.0f  },
 };
 static const size_t PARAM_COUNT = sizeof(PARAMS) / sizeof(PARAMS[0]);
 
@@ -3055,27 +3207,47 @@ void loop() {
         // decouter (0–11) → effect select
         currentEffect = s.decouter >= FX_COUNT ? FX_COUNT - 1 : s.decouter;
 
-        // AC switch = record, DC switch = playback, both LEVEL (on = active).
-        // Record has priority over playback. Releasing a switch re-arms it.
-        bool acOn = s.ac, dcOn = s.dc;
-        if (!acOn) recAcLatch = false;     // released → re-armed
-        if (!dcOn) recDcLatch = false;
+        // Replay-position preview: parked at the replay position with a
+        // recorded slot selected, render that slot's effect (live form)
+        // instead of rainbow — the dial reads as "this slot's home" and the
+        // hundreds knob flips between previews. Empty slot → rainbow. Applies
+        // whenever not recording: during playback the per-frame override
+        // below wins anyway, and crucially this fills the stop-playback tick
+        // (state flips to idle AFTER this line, skipping the override) — with
+        // idle-only gating that tick rendered raw dial 11 = a rainbow flash
+        // until the next BS-26 packet. Recording dialed through 11 still
+        // captures rainbow, as before.
+        if (recState != REC_RECORDING && s.decouter >= FX_COUNT - 1) {
+            uint8_t pe = recSlotEffect[recSlot];
+            if (pe < FX_COUNT) currentEffect = pe;
+        }
+
+        // One switch, two jobs: the AC lever broke at install (contact stuck
+        // closed), so DC alone drives record AND playback, moded by the effect
+        // dial — 0–10 = record the live performance, 11 (rainbow) = play back.
+        // The action binds at the rising edge and holds until release, so dial
+        // moves mid-action can't flip record↔playback. s.ac is ignored (the
+        // dying contact chatters). LEVEL semantics otherwise unchanged: on =
+        // active until release or the 30 s record cap; the latches keep the
+        // cap from instantly restarting while the switch is still held.
+        static bool dcWasOn = false, dcBoundReplay = false;
+        bool dcOn = s.dc;
+        if (dcOn && !dcWasOn) dcBoundReplay = (s.decouter >= FX_COUNT - 1);
+        dcWasOn = dcOn;
+        bool recOn  = dcOn && !dcBoundReplay;   // record request
+        bool playOn = dcOn && dcBoundReplay;    // playback request
+        if (!recOn)  recAcLatch = false;        // released → re-armed
+        if (!playOn) recDcLatch = false;
 
         if (recState == REC_RECORDING) {
-            if (!acOn) recStopRecording();                 // switch off → stop
+            if (!recOn) recStopRecording();                // switch off → stop
         } else if (recState == REC_PLAYING) {
-            if (acOn && !recAcLatch) {                     // record overrides playback
-                recStopPlayback();
-                recStartRecording();
-                recAcLatch = true;
-            } else if (!dcOn) {
-                recStopPlayback();                         // switch off → stop
-            }
+            if (!playOn) recStopPlayback();                // switch off → stop
         } else {  // REC_IDLE
-            if (acOn && !recAcLatch) {
+            if (recOn && !recAcLatch) {
                 recStartRecording();
                 recAcLatch = true;
-            } else if (dcOn && !recDcLatch) {
+            } else if (playOn && !recDcLatch) {
                 recStartPlayback();
                 recDcLatch = true;
             }
@@ -3129,7 +3301,12 @@ void loop() {
             recFrameAcc -= frameDt;
             recBuffer[recFrameCount++] = rf;
         }
-        if (recFrameCount >= REC_MAX_FRAMES) recStopRecording();
+        // Frame count IS the elapsed-time clock (fixed-rate grid), so the
+        // walk-away cap compares frames. Stopping sets REC_IDLE; the live
+        // dial takes back rendering and the latch holds until DC cycles.
+        uint32_t capFrames = (uint32_t)(recCapS * REC_FPS);
+        if (capFrames > REC_MAX_FRAMES) capFrames = REC_MAX_FRAMES;
+        if (recFrameCount >= capFrames) recStopRecording();
     }
 
     // Drain received waveform samples to the slot's /rec_N.audio (8 kHz/8-bit).
@@ -3283,20 +3460,22 @@ void loop() {
                       fps, avgRenderUs, avgShowUs, avgRenderUs + avgShowUs);
         RgbColor px = strip0.GetPixelColor(50);
         Serial.printf("  [px50] R=%u G=%u B=%u\n", px.R, px.G, px.B);
-        if (currentEffect == FX_AMBIENT_BLOOM) {
-            // Field span on strip 0: min/max per-pixel max-channel. Opens/closes
-            // with the audio-energy contrast stretch — objective spread readout.
+        {
+            // Field span + lit count on strip 0 (per-pixel max channel), for
+            // any effect — objective "is anything visible" readout.
             uint8_t bMin = 255, bMax = 0;
+            uint16_t lit = 0;
             for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
                 RgbColor c = strip0.GetPixelColor(i);
                 uint8_t m = c.R; if (c.G > m) m = c.G; if (c.B > m) m = c.B;
                 if (m < bMin) bMin = m;
                 if (m > bMax) bMax = m;
+                if (m > 0) lit++;
             }
             float eDbg = (energyForce >= 0.0f) ? energyForce : audioEnergy5s;
-            Serial.printf("  [bloom] span=%u..%u e5s=%.3f force=%.2f stretch=%.2f\n",
-                          bMin, bMax, audioEnergy5s, energyForce,
-                          1.0f + bloomStretchGain * eDbg);
+            Serial.printf("  [span] %u..%u lit=%u/%u e5s=%.3f force=%.2f\n",
+                          bMin, bMax, lit, (unsigned)LEDS_PER_STRIP,
+                          audioEnergy5s, eDbg);
         }
         Serial.printf("  [bs26] %s pkts=%lu fx=%u bright=%.3f speed=%.2f hue=%u sat=%u dorm=%.2f"
                       " | ac=%d dc=%d slot=%u rec=%s\n",

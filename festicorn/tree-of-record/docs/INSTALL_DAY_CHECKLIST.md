@@ -61,6 +61,11 @@ new curve). Record fresh material once everything below passes.
 
 ## 4. Record/playback end-to-end
 
+**AC lever is dead** (stuck closed; broke install day, June 11 — needs
+physical replacement). The DC-moded fallback is ACTIVE: dial 0–10 + DC
+on = **record** to the selected slot; dial 11 (rainbow) + DC on =
+**playback**. Details in AC_SWITCH_FAILURE_AND_DC_FALLBACK.md.
+
 Record a slot with speech, play it back: LED frames must stay locked to
 the audio out the jack (new audio-clock playback). Let it loop once —
 no drift, clean realign.

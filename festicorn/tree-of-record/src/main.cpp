@@ -194,8 +194,23 @@ static uint8_t   recSlotEffect[REC_MAX_SLOTS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
                                                    // drained every loop (~16 ms), so
                                                    // 0.5 s is ample slack vs 8 kHz in.
 #define WFR_MASK         (WFR_SIZE - 1)
+// Seq-based timeline reconstruction: the duck stamps every packet with a seq
+// counter (gap = dropped packet). We honor it so the .audio file's length
+// equals real elapsed time no matter how many packets drop — without it, lost
+// packets silently shorten the file and playback (which slaves both audio and
+// video to file position) runs fast/chipmunked. Missing packets are backfilled
+// with silence at their true offset; the backfill is bounded per drain so a
+// long dropout can't block the render loop.
+#define WF_MAX_GAP_PKTS  1200                      // > a full 30 s record; larger
+                                                   // = reorder/wrap glitch, skip
+#define WF_PAD_CHUNK     1024                      // max silence bytes/drain
 static uint8_t   wfRing[WFR_SIZE];
+static uint8_t   wfSilence[256];                   // 128-filled at record start
 static volatile uint32_t wfHead = 0, wfTail = 0;  // SPSC: onReceive→loop
+static volatile uint32_t wfPadDebt    = 0;         // silence bytes owed for gaps
+static volatile uint32_t wfPadTotal   = 0;         // total backfilled bytes (loss)
+static volatile uint16_t wfExpectedSeq = 0;        // next in-order packet seq
+static volatile bool     wfSeqValid    = false;    // baseline captured yet?
 static File      recAudioFile;
 static bool      recAudioOpen  = false;
 static uint32_t  recAudioBytes = 0;
@@ -272,7 +287,12 @@ static bool recAllocBuffer() {
 // ── Waveform helpers ─────────────────────────────────────────────
 static void audioDeriveFeaturesRms(float rmsMean, float rmsMax, float dt);  // fwd
 
-static void wfRingReset() { wfHead = wfTail = 0; }
+static void wfRingReset() {
+    wfHead = wfTail = 0;
+    wfPadDebt = 0;
+    wfPadTotal = 0;
+    wfSeqValid = false;
+}
 static void wfRingPush(const uint8_t *s, uint32_t n) {       // onReceive (producer)
     for (uint32_t i = 0; i < n; i++) {
         if ((wfHead - wfTail) >= WFR_SIZE) return;           // full → drop
@@ -316,11 +336,24 @@ static void recAudioBegin(uint8_t slot) {
     recAudioFile  = SPIFFS.open(path, "w");
     recAudioOpen  = (bool)recAudioFile;
     recAudioBytes = 0;
+    memset(wfSilence, 128, sizeof(wfSilence));   // 128 = mid/silence
     wfRingReset();
     if (!recAudioOpen) Serial.println("[REC] audio file open failed");
 }
 static void recAudioDrain() {                                // loop (consumer)
     if (!recAudioOpen) return;
+    // Backfill silence for dropped packets first, so the real samples that
+    // follow land at their true timeline offset. Bounded per call (WF_PAD_CHUNK)
+    // so a multi-second dropout's backfill spreads across drains, never blocking.
+    uint32_t budget = WF_PAD_CHUNK;
+    while (wfPadDebt > 0 && budget > 0 && recAudioBytes < REC_AUDIO_MAX) {
+        uint32_t g = wfPadDebt;
+        if (g > sizeof(wfSilence))            g = sizeof(wfSilence);
+        if (g > budget)                       g = budget;
+        if (g > REC_AUDIO_MAX - recAudioBytes) g = REC_AUDIO_MAX - recAudioBytes;
+        recAudioFile.write(wfSilence, g);
+        recAudioBytes += g; wfPadDebt -= g; budget -= g;
+    }
     uint8_t chunk[256];
     while ((wfHead - wfTail) > 0 && recAudioBytes < REC_AUDIO_MAX) {
         int g = 0;
@@ -334,13 +367,19 @@ static void recAudioDrain() {                                // loop (consumer)
 }
 static void recAudioEnd(uint8_t slot) {
     if (!recAudioOpen) return;
-    recAudioDrain();
+    // Recording stopped — settle all remaining owed silence + buffered samples
+    // (the per-drain bound no longer matters; a brief backfill here is fine).
+    for (int guard = 0; guard < 512 && (wfPadDebt > 0 || (wfHead - wfTail) > 0)
+                        && recAudioBytes < REC_AUDIO_MAX; guard++)
+        recAudioDrain();
     recAudioFile.flush();
     recAudioFile.close();
     recAudioOpen = false;
     recSlotHasAudio[slot] = (recAudioBytes > 0);
-    Serial.printf("[REC] audio slot %u: %lu bytes (%.1fs)\n",
-                  slot, (unsigned long)recAudioBytes, recAudioBytes / (float)REC_AUDIO_RATE);
+    float lossPct = recAudioBytes > 0 ? 100.0f * wfPadTotal / recAudioBytes : 0.0f;
+    Serial.printf("[REC] audio slot %u: %lu bytes (%.1fs)  loss=%.0f%% (%lu B backfilled)\n",
+                  slot, (unsigned long)recAudioBytes, recAudioBytes / (float)REC_AUDIO_RATE,
+                  lossPct, (unsigned long)wfPadTotal);
 }
 
 static void playbackAudioBegin(uint8_t slot) {
@@ -750,6 +789,17 @@ static void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
             const AudioStreamPacketV1 *wp = (const AudioStreamPacketV1 *)data;
             uint8_t n = wp->n;
             if (n > AUDIO_STREAM_SAMPLES) n = AUDIO_STREAM_SAMPLES;
+            // Honor the seq timeline: count packets missing since the last one
+            // and owe that many packets' worth of silence before these samples.
+            // First packet of a record sets the baseline (no gap). A jump larger
+            // than a full recording is a reorder/wrap glitch — append, don't pad.
+            if (!wfSeqValid) { wfExpectedSeq = wp->seq; wfSeqValid = true; }
+            uint16_t gap = (uint16_t)(wp->seq - wfExpectedSeq);
+            if (gap > 0 && gap <= WF_MAX_GAP_PKTS) {
+                wfPadDebt  += (uint32_t)gap * AUDIO_STREAM_SAMPLES;
+                wfPadTotal += (uint32_t)gap * AUDIO_STREAM_SAMPLES;
+            }
+            wfExpectedSeq = wp->seq + 1;
             wfRingPush(wp->samples, n);
         }
         return;
@@ -1365,11 +1415,13 @@ static void renderBloomStrip(uint8_t s, float dt) {
 // max outward displacement at full energy; stiff is the spring pull strength.
 #define GS_SPREAD         (LEDS_PER_STRIP * 0.40f)
 #define GS_SPRING_STIFF   55.0f
-// Idle sway: with no audio the spring target drifts a few px in a slow
-// per-particle sine, so the field gently breathes instead of freezing.
-// Speech dwarfs it (GS_SPREAD ≈ 60 px vs 3 px sway).
-#define GS_IDLE_AMP       3.0f
-#define GS_IDLE_PERIOD    7.0f
+// Idle tide: with no audio the whole field drifts from home out to the
+// strip ends and back in one slow shared cycle. Each particle parks
+// GS_TIDE_GAP px short of its same-direction neighbor at the end (a bead
+// stack), so converging particles never pile onto one pixel and sum to
+// white — at full tide they read as distinct glows lined up at the tips.
+#define GS_TIDE_GAP       6.0f
+static float gsTidePeriod = 28.0f;   // s per full out-and-back (GS_TIDE_S)
 
 static float gsIdleTime = 0.0f;
 
@@ -1380,6 +1432,7 @@ struct GsParticle {
     float hue;
     float origin;   // home position; particle springs out from / back to this
     float dir;      // outward direction (+1/-1), away from strip center
+    float beadDist; // max outward travel: this particle's bead slot at the end
 };
 static float gsEnergyEma = 0.0f;   // smoothed speech energy driving the spread
 static GsParticle gsParticles[NUM_STRIPS][GS_PARTICLE_COUNT];
@@ -1418,6 +1471,24 @@ static void resetGravity() {
             float baseHue = 256.0f * (float)i / (float)GS_PARTICLE_COUNT;
             gsParticles[s][i].hue = fmodf(baseHue + (float)STRIP_HUE_OFFSET[s], 256.0f);
         }
+
+        // Bead slots: rank same-direction particles by closeness to their
+        // strip end (preserving home order, so paths never cross) and park
+        // each GS_TIDE_GAP px behind the one ahead of it. beadDist is the
+        // max outward travel; the tide and speech spread both cap there.
+        for (uint16_t i = 0; i < GS_PARTICLE_COUNT; i++) {
+            GsParticle &p = gsParticles[s][i];
+            uint8_t rank = 0;
+            for (uint16_t j = 0; j < GS_PARTICLE_COUNT; j++) {
+                if (j == i || gsParticles[s][j].dir != p.dir) continue;
+                float dj = gsParticles[s][j].origin * p.dir;
+                float di = p.origin * p.dir;
+                if (dj > di || (dj == di && j < i)) rank++;
+            }
+            float endPos = (p.dir > 0.0f) ? (float)(LEDS_PER_STRIP - 1) : 0.0f;
+            float room = (endPos - p.origin) * p.dir - (float)rank * GS_TIDE_GAP;
+            p.beadDist = fmaxf(room, 0.0f);
+        }
     }
 }
 
@@ -1428,6 +1499,11 @@ static void renderGravity(float dt) {
     gsEnergyEma += fminf(1.0f, gDt / 0.15f) * (fxEnergy - gsEnergyEma);
     float damp = fastDecay(GS_VELOCITY_DAMP, dt * 30.0f);
     gsIdleTime += dt;   // ambient motion → speed-scaled dt
+
+    // Idle tide, shared by all particles: 0 at home, 1 at the bead slot,
+    // cosine-eased out and back over gsTidePeriod (starts at home on reset).
+    float gsTide = 0.5f - 0.5f * fastSin(gsIdleTime * (6.2832f / gsTidePeriod)
+                                         + 1.5708f);
 
     const float maxPos = (float)(LEDS_PER_STRIP - 1);
     const float invTwoSigSq = 1.0f / (2.0f * GS_SPLAT_RADIUS * GS_SPLAT_RADIUS);
@@ -1440,14 +1516,13 @@ static void renderGravity(float dt) {
         for (uint16_t i = 0; i < GS_PARTICLE_COUNT; i++) {
             GsParticle &p = gsParticles[s][i];
 
-            // Target = origin pushed outward in proportion to speech energy.
-            // Silence → target collapses to the idle sway around origin.
-            // Sway is outward-only (0..AMP) so it never fights the one-way
-            // wall below; per-particle/strip phase keeps it desynchronized.
-            float idle = GS_IDLE_AMP
-                * (fastSin(gsIdleTime * (6.2832f / GS_IDLE_PERIOD)
-                           + (float)i * 2.4f + (float)s * 0.7f) * 0.5f + 0.5f);
-            float target = p.origin + p.dir * (gsEnergyEma * GS_SPREAD + idle);
+            // Target = origin pushed outward by the tide plus speech energy,
+            // capped at the bead slot so converging particles stack apart
+            // instead of summing into white. Displacement is outward-only
+            // (0..beadDist) so it never fights the one-way wall below.
+            float disp = gsTide * p.beadDist + gsEnergyEma * GS_SPREAD;
+            if (disp > p.beadDist) disp = p.beadDist;
+            float target = p.origin + p.dir * disp;
             target = clampf(target, 0.0f, maxPos);
             p.vel += GS_SPRING_STIFF * (target - p.pos) * dt;   // spring toward target
             p.vel *= damp;                                       // damping for settle
@@ -2711,10 +2786,11 @@ static void renderWorley(float dt) {
 #define HEAT_ROT_PERIOD  18.0f   // s per strip traversal at nominal speed
 #define HEAT_MAX_STEP    (0.4f / HEAT_ALPHA)  // explicit-Euler stability bound
 #define HEAT_SPARKS      4       // passive sparkle slots per strip
-// Idle ember: minimum injection so silence still shows a soft deep-red
-// blob roaming with the patrol point (steady-state peak T ≈ 0.12 — first
-// third of the blackbody ramp, never reaches orange).
-#define HEAT_IDLE_FLOOR  0.10f
+// Idle ember: minimum injection so silence still shows a red blob roaming
+// with the patrol point. Steady-state peak T ≈ 1.17 × floor: 0.25 → ≈0.29,
+// a fully saturated red right at the edge of orange — clearly alive in
+// silence, but speech still has the whole orange→white range to climb.
+static float heatIdleFloor = 0.25f;  // live-tunable: HEAT_IDLE_FLOOR
 
 static float heatInjRate = 14.0f;  // heat/s at fxEnergy = 1
 #define heatT fxField.heat         // shared per-effect field buffer
@@ -2738,7 +2814,7 @@ static void resetHeatDiffusion() {
         heatInjDir[s] = (xorshift32() & 1) ? 1.0f : -1.0f;
         for (uint8_t k = 0; k < HEAT_SPARKS; k++) {
             heatSparks[s][k].active = false;
-            heatSparks[s][k].idle = randFloat() * 6.0f;
+            heatSparks[s][k].idle = randFloat() * 3.0f;
         }
     }
 }
@@ -2769,9 +2845,9 @@ static void renderHeatDiffusion(float dt) {
 
         // Inject heat from speech energy. gDt, not the speed-scaled dt:
         // how strongly audio is expressed must not change with the ones
-        // knob (same rule as gravity/sparkle). The idle floor keeps a
-        // faint ember roaming in silence — see HEAT_IDLE_FLOOR.
-        float inject = heatInjRate * fmaxf(fxEnergy, HEAT_IDLE_FLOOR) * gDt;
+        // knob (same rule as gravity/sparkle). The idle floor keeps an
+        // ember roaming in silence — see heatIdleFloor.
+        float inject = heatInjRate * fmaxf(fxEnergy, heatIdleFloor) * gDt;
         if (inject > 0.0f) {
             int c = (int)heatInjPos[s];
             T[c] += inject * 0.5f;
@@ -2812,7 +2888,7 @@ static void renderHeatDiffusion(float dt) {
                 sp.phase += dt / sp.period;
                 if (sp.phase >= 1.0f) {
                     sp.active = false;
-                    sp.idle = 2.0f + randFloat() * 6.0f;
+                    sp.idle = 1.0f + randFloat() * 3.0f;
                 }
             }
         }
@@ -2826,7 +2902,7 @@ static void renderHeatDiffusion(float dt) {
                 if (!sp.active) continue;
                 if (i < sp.pos || i >= sp.pos + sp.width) continue;
                 float env = fastSin((float)M_PI * sp.phase);
-                env = env * env * 0.30f;   // modest: sin² in/out, peak 0.30
+                env = env * env * 0.42f;   // sin² in/out, peak 0.42
                 r += env;
                 g += env * 0.92f;          // soft warm white
                 b += env * 0.72f;
@@ -3038,6 +3114,8 @@ static const Param PARAMS[] = {
     { "AUDIO_VOL",        Param::F32, &audioOutVol,        0.0f,  1.0f  },
     { "FLOOR_MIN",        Param::F32, &snsRmsFloorMin,  2000.0f, 80000.0f },
     { "REC_CAP_S",        Param::F32, &recCapS,            2.0f,  30.0f  },
+    { "HEAT_IDLE_FLOOR",  Param::F32, &heatIdleFloor,      0.0f,  0.6f   },
+    { "GS_TIDE_S",        Param::F32, &gsTidePeriod,      10.0f, 180.0f  },
 };
 static const size_t PARAM_COUNT = sizeof(PARAMS) / sizeof(PARAMS[0]);
 

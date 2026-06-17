@@ -356,6 +356,10 @@ boards:
     Second biolum receiver board. Pin 15 instead of 16 (differs from
     board A). 6× WS2812B RGB strips on GPIO 4, 15, 17, 5, 18, 19.
     150 LEDs per strip.
+    Lineage: biolum → tree-of-record stint → swapped out (2026-06-10).
+    Next role: wormhole — entrance piece to the tree of record (rust +
+    soft-white ambient sparkle). Build/flash with festicorn/tree-of-record
+    env:wormhole (firmware prepared, not yet flashed).
 
 # ── bs26 (Kay Lab 508-25 retrofit controller) ───────────────────────
 - mac: E0:8C:FE:57:A1:18

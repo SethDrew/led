@@ -9,9 +9,9 @@
  *   ones (0–11)        → speed (12 steps, log-spaced 0.2–8.0)
  *   decouter (0–11)    → effect select, grouped: 0–3 audio field effects
  *                        (bloom, fire, heat, worley), 4–6 audio particle
- *                        effects (gravity, sparkle, creatures), 7–8 ambient
- *                        particles (polycule, leaf-wind), 9–11 passive
- *                        (light-through, nebula, rainbow)
+ *                        effects (gravity, sparkle, creatures), 7 ambient
+ *                        particles (leaf-wind), 8–10 passive
+ *                        (light-through, nebula, rainbow); 11 repeats rainbow
  *   hundreds (0–4)     → recording slot select (0–4)
  *   decmid (0–9)       → hue        36° rotation steps (full wheel)
  *   decinner (0–9)     → saturation 5=original, 0=boosted to full, 9=white
@@ -75,7 +75,10 @@
 static const uint8_t NUM_STRIPS = 6;
 
 // ── Bloom parameters (runtime-tunable via operator) ─────────────
-static float bloomBrightnessCap  = 1.0f;
+static float bloomBrightnessCap  = 1.64f;   // master ambient level (post-gamma,
+                                            // ×baseColor). Raised 1.0→1.64 to land
+                                            // bloom's per-lit-pixel mean in the
+                                            // 18–35%-of-255 ambient band.
 static float bloomBufferDrain     = 15.0f;
 static float bloomFlashDecayRate  = 3.0f;
 // Glow trough (pulses, doesn't blink). 0.28 is the contrast-vs-gate limit:
@@ -1002,13 +1005,14 @@ enum EffectId : uint8_t {
     FX_SPARKLE_SYLLABLE,    // discrete onsets spawn sparks (+ tilt hue)
     FX_CREATURES,           // speech-energy excitement (was accel shake)
     // ambient: particle effects
-    FX_POLYCULE,            // rainbow-tailed particles bounce + collide
     FX_LEAF_WIND,
     // ambient: passive
     FX_LIGHT_THROUGH,
     FX_NEBULA,
     FX_RAINBOW,
-    FX_COUNT                // = 12: fills the decouter ring exactly
+    FX_COUNT                // = 11: decouter ring has 12 slots, so the top
+                            // slot (11) clamps onto RAINBOW (10) — two adjacent
+                            // rainbow/playback positions. See decouter select.
 };
 
 static uint8_t currentEffect = FX_AMBIENT_BLOOM;
@@ -1025,7 +1029,7 @@ static union {
 } fxField;
 
 // Per-strip RGB accumulation scratch, valid within one render call only
-// (gravity, polycule).
+// (gravity).
 static float fxAccR[LEDS_PER_STRIP], fxAccG[LEDS_PER_STRIP], fxAccB[LEDS_PER_STRIP];
 
 // ── Audio/motion feature globals ────────────────────────────────
@@ -1410,6 +1414,11 @@ static void renderBloomStrip(uint8_t s, float dt) {
 #define GS_VELOCITY_DAMP  0.92f
 #define GS_BOUNCE_REBOUND 0.5f
 #define GS_SPLAT_RADIUS   2.5f
+// Per-particle intrinsic brightness: the value each particle's glow is drawn at
+// (multiplies its OKLCH splat color). 1.55 lifts gravity's per-lit-pixel mean
+// into the ambient band without widening the ±3 px splat (coverage unchanged);
+// cores that exceed 255 still clamp, so the bead-tip glows stay punchy.
+#define GS_SPLAT_VALUE    1.55f
 // Audio-driven breathing: speech (energy) springs each particle OUT from its
 // origin toward the strip ends; silence relaxes it back home. Spread is the
 // max outward displacement at full energy; stiff is the spring pull strength.
@@ -1546,9 +1555,9 @@ static void renderGravity(float dt) {
             }
 
             uint8_t hueIdx = (uint8_t)((uint32_t)p.hue & 0xFF);
-            float colR = (float)oklchVarL[hueIdx][0];
-            float colG = (float)oklchVarL[hueIdx][1];
-            float colB = (float)oklchVarL[hueIdx][2];
+            float colR = (float)oklchVarL[hueIdx][0] * GS_SPLAT_VALUE;
+            float colG = (float)oklchVarL[hueIdx][1] * GS_SPLAT_VALUE;
+            float colB = (float)oklchVarL[hueIdx][2] * GS_SPLAT_VALUE;
 
             int center = (int)(p.pos + 0.5f);
             int lo = center - 3; if (lo < 0) lo = 0;
@@ -1659,7 +1668,12 @@ static void renderSparkle(float dt) {
         uint8_t  s = (uint8_t)(xorshift32() % NUM_STRIPS);
         uint16_t i = (uint16_t)(xorshift32() % LEDS_PER_STRIP);
         if (syllSparkle[s][i] > 0.05f) continue;   // don't restart a live spark
-        syllSparkle[s][i]  = 0.45f + randFloat() * 0.30f;
+        // Idle spark birth value — each star's intrinsic brightness. Raised
+        // 0.45+0.30·r → 0.90+0.20·r so the per-lit-pixel mean (averaged over
+        // fading stars) clears the bottom of the ambient band. Same spawn
+        // rate/count (coverage unchanged); brighter stars ride a touch
+        // warmer-white, as the speech sparks already do.
+        syllSparkle[s][i]  = 0.90f + randFloat() * 0.20f;
         syllDecayArr[s][i] = 0.975f + randFloat() * 0.015f;
     }
 
@@ -1722,6 +1736,12 @@ static void renderSparkle(float dt) {
 // red): G pulled well below the bulb-fleet values so amber doesn't read
 // yellow and white doesn't read green. Eyeball-tune on hardware.
 #define FIRE_FLICKER_SCALE  3.0f
+// Silent ember floor — fire's intrinsic base flame intensity with no audio
+// (the level base brightness rides in silence, and the floor it never drops
+// below when sound is present). Raised 0.25→0.78 so the idle ember genuinely
+// glows in the ambient band instead of reading near-black; speech still climbs
+// from here toward full. This deliberately brightens fire's idle character.
+#define FIRE_EMBER_FLOOR    0.78f
 #define FIRE_DEADBAND       0.08f
 #define FIRE_DROPOUT_DEPTH  0.85f
 // bulb-fleet shipped two slots (FIRE_MELD without dropout, FIRE_FLICKER
@@ -1758,7 +1778,7 @@ static void renderFire(float dt) {
 
     float attackAlpha = fminf(1.0f, gDt / 0.050f);
     float decayAlpha  = fminf(1.0f, gDt / 2.0f);
-    float targetBrightness = isSilent ? 0.25f : fmaxf(0.25f, energy);
+    float targetBrightness = isSilent ? FIRE_EMBER_FLOOR : fmaxf(FIRE_EMBER_FLOOR, energy);
     if (targetBrightness > fireBaseBrightness)
         fireBaseBrightness += attackAlpha * (targetBrightness - fireBaseBrightness);
     else
@@ -1978,10 +1998,13 @@ static void renderNebula(float dt) {
         for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
             float pos = (float)i / (float)LEDS_PER_STRIP;
 
-            float breathing = 51.0f + 38.0f * fastSin((t * 0.0105f));
+            // Background field level scaled ×1.5 (51→76, 38→57, 51→76, cap
+            // 153→230) to lift nebula's per-lit-pixel mean into the ambient
+            // band. Same breathing/spatial shape, just a brighter cloud.
+            float breathing = 76.0f + 57.0f * fastSin((t * 0.0105f));
             float phase = pos + sOff + t * 0.006f;
-            float spatial = 51.0f * (0.5f + 0.5f * fastSin(phase * 6.2832f));
-            float bgBright = clampf(breathing + spatial, 0.0f, 153.0f) / 255.0f;
+            float spatial = 76.0f * (0.5f + 0.5f * fastSin(phase * 6.2832f));
+            float bgBright = clampf(breathing + spatial, 0.0f, 230.0f) / 255.0f;
 
             float colorPhase = pos * 6.2832f + sOff * 6.2832f + t * 0.009f;
             float colorShift = 0.5f + 0.5f * fastSin(colorPhase);
@@ -1996,9 +2019,11 @@ static void renderNebula(float dt) {
 
             float orbB = nebDecay[s][i];
             if (orbB > 0.01f) {
-                r += orbB * 1.0f;
-                g += orbB * 0.94f;
-                b += orbB * 0.78f;
+                // Orb highlight scaled ×1.5 to match the brightened background
+                // (1.0/0.94/0.78 → 1.5/1.41/1.17), holding the orb:cloud ratio.
+                r += orbB * 1.5f;
+                g += orbB * 1.41f;
+                b += orbB * 1.17f;
             }
 
             setPixelScaled(s, i,
@@ -2014,6 +2039,10 @@ static void renderNebula(float dt) {
 // effSpeed at the call site. No per-effect brightness cap — output
 // scale is renderBrightness via setPixelScaled.
 #define RAINBOW_SCROLL_SPEED  0.10f
+// Value (V) level applied to the OKLCH scroll — rainbow's intrinsic brightness.
+// 1.11 lifts the per-lit-pixel mean to the top of the ambient band (it's the
+// brightest effect, mapped to ~89). Brightest hues clip slightly at 255.
+#define RAINBOW_VALUE         1.11f
 
 static float rainbowPhase = 0.0f;
 
@@ -2030,9 +2059,9 @@ static void renderRainbow(float dt) {
             float hue = fmodf(pos + rainbowPhase + stripOff, 1.0f);
             uint8_t idx = (uint8_t)(hue * 255.0f);
             setPixelScaled(s, i,
-                (float)oklchVarL[idx][0],
-                (float)oklchVarL[idx][1],
-                (float)oklchVarL[idx][2]);
+                (float)oklchVarL[idx][0] * RAINBOW_VALUE,
+                (float)oklchVarL[idx][1] * RAINBOW_VALUE,
+                (float)oklchVarL[idx][2] * RAINBOW_VALUE);
         }
     }
 }
@@ -2044,6 +2073,10 @@ static void renderRainbow(float dt) {
 // topology — LED index → position 0..1 (i / (LEDS_PER_STRIP-1)). Each leaf
 // drifts independently per strip. No per-effect cap — output via setPixelScaled.
 #define LW_MAX_LEAVES     8     // per strip
+// Per-leaf intrinsic brightness (value scalar on the leaf's glow, pre-gamma).
+// 1.25 lifts leaf-wind's per-lit-pixel mean into the ambient band. Applied after
+// the totalGlow>0.01 lit gate so coverage (which pixels light) is unchanged.
+#define LW_LEAF_VALUE     1.25f
 #define LW_GLOW_RADIUS    0.05f
 #define LW_GLOW_SQ2       (2.0f * LW_GLOW_RADIUS * LW_GLOW_RADIUS)
 #define LW_WIND_SPEED     0.35f
@@ -2154,7 +2187,7 @@ static void renderLeafWind(float dt) {
 
             if (totalGlow > 0.01f) {
                 cr /= totalGlow; cg /= totalGlow; cb /= totalGlow;
-                float bright = fminf(totalGlow, 1.0f);
+                float bright = fminf(totalGlow * LW_LEAF_VALUE, 1.0f);
                 float linBright = fastGamma24(bright);
                 setPixelScaled(s, i, cr * linBright, cg * linBright, cb * linBright);
             } else {
@@ -2185,6 +2218,11 @@ static void renderLeafWind(float dt) {
 #define CR_COLOR_R   0.0f
 #define CR_COLOR_G 180.0f
 #define CR_COLOR_B 220.0f
+// Creature field brightness (value scalar on the rendered glow, pre-gamma).
+// 1.20 lifts creatures' per-lit-pixel mean into the ambient band. Applied to the
+// already-composited buffer so the bloom/crawl envelope shapes and the teal
+// color are preserved; the >0 pixels are the same (coverage unchanged).
+#define CR_VALUE     1.20f
 
 // --- Excitement params (buffer/drain machinery from biolum_mixed shake) ---
 // Audio feed: smoothed speech energy above CR_AUDIO_THRESH stands in for the
@@ -2506,9 +2544,9 @@ static void renderCreatures(float dt) {
         uint8_t s = p;
         for (int i = 0; i < LEDS_PER_STRIP; i++) {
             int src = CR_SCROLL_MARGIN + i;
-            float vR = clampf(ps.bufR[src], 0.0f, 1.0f);
-            float vG = clampf(ps.bufG[src], 0.0f, 1.0f);
-            float vB = clampf(ps.bufB[src], 0.0f, 1.0f);
+            float vR = clampf(ps.bufR[src] * CR_VALUE, 0.0f, 1.0f);
+            float vG = clampf(ps.bufG[src] * CR_VALUE, 0.0f, 1.0f);
+            float vB = clampf(ps.bufB[src] * CR_VALUE, 0.0f, 1.0f);
             // Gamma the scalar brightness and rescale channels proportionally
             // (gravity's pattern). Per-channel gamma — what the original port
             // did — shifts hue on mixed colors as they dim (doctrine rule:
@@ -2532,22 +2570,26 @@ static void renderCreatures(float dt) {
 #define LT_SPAWN_PERIOD  2.2f   // mean seconds between patches (Poisson)
 #define LT_CHURN_RATE    0.12f
 
-// Palette (0–255 linear).
-#define LT_SLATE_R   50.0f
-#define LT_SLATE_G   55.0f
-#define LT_SLATE_B   80.0f
-#define LT_INDIGO_R  35.0f
-#define LT_INDIGO_G  35.0f
-#define LT_INDIGO_B  60.0f
-#define LT_AMBER_R  240.0f
-#define LT_AMBER_G  180.0f
-#define LT_AMBER_B   90.0f
-#define LT_PEACH_R  220.0f
-#define LT_PEACH_G  160.0f
-#define LT_PEACH_B  110.0f
-#define LT_SALMON_R 200.0f
-#define LT_SALMON_G 140.0f
-#define LT_SALMON_B 100.0f
+// Palette (0–255 linear). All entries scaled ×1.44 from the original storm
+// palette (slate 50/55/80, indigo 35/35/60, amber 240/180/90, peach 220/160/110,
+// salmon 200/140/100) so the field's intrinsic brightness lifts the per-lit-pixel
+// mean into the ambient band; hue ratios are preserved (uniform per-color gain),
+// and the already-bright warm patch cores clip slightly toward white ("sun").
+#define LT_SLATE_R   72.0f
+#define LT_SLATE_G   79.0f
+#define LT_SLATE_B  115.0f
+#define LT_INDIGO_R  50.0f
+#define LT_INDIGO_G  50.0f
+#define LT_INDIGO_B  86.0f
+#define LT_AMBER_R  346.0f
+#define LT_AMBER_G  259.0f
+#define LT_AMBER_B  130.0f
+#define LT_PEACH_R  317.0f
+#define LT_PEACH_G  230.0f
+#define LT_PEACH_B  158.0f
+#define LT_SALMON_R 288.0f
+#define LT_SALMON_G 202.0f
+#define LT_SALMON_B 144.0f
 
 struct LtPatch {
     float rc;        // radial center 0.15–0.85
@@ -2682,16 +2724,21 @@ static void renderLightThrough(float dt) {
 #define WORLEY_SPRING_K   12.0f   // spring stiffness (1/s²)
 #define WORLEY_DAMPING    7.0f    // ~critically damped vs SPRING_K
 #define WORLEY_BOUNDARY_W 5.0f    // boundary falloff width (px)
-// Solid cell fill. Must survive gamma + a low brightness knob: pre-gamma
-// 0.55 → ~10 8-bit codes at knob 0.23 (0.12 was sub-LSB → floor-zeroed).
-#define WORLEY_CELL_FILL  0.55f
+// Solid cell fill — worley's intrinsic per-cell brightness (pre-gamma, the
+// value every lit pixel is drawn at in silence). Raised 0.55→0.86 to land the
+// per-lit-pixel mean in the 18–35%-of-255 ambient band. Still < 1 so onset
+// boundary flares (env·boundary) keep headroom toward full.
+#define WORLEY_CELL_FILL  0.86f
 #define WORLEY_ENV_DECAY  0.88f   // flash decay per frame @30fps reference
 
 // Idle wander: each seed's rest point drifts in a slow sine so the cell
 // boundaries migrate gently in silence instead of freezing. Springs track
 // the moving rest, so onsets still kick from wherever the wander is.
-#define WORLEY_WANDER_AMP    6.0f   // px, ~quarter of the seed spacing
-#define WORLEY_WANDER_PERIOD 13.0f  // s per cycle at nominal speed
+#define WORLEY_WANDER_AMP    10.0f  // px, ~half the seed spacing (was 6 — wider
+                                    // boundary travel so the partition visibly migrates)
+#define WORLEY_WANDER_PERIOD 4.0f   // s per cycle at nominal speed (was 13 — the
+                                    // idle was nearly frozen at 0.2 lum/s; faster
+                                    // wander reads alive but still calm/ambient)
 
 static float worleyKick = 80.0f;  // px/s impulse per unit onset strength
 static float worleyPos[NUM_STRIPS][WORLEY_SEEDS];
@@ -2790,7 +2837,11 @@ static void renderWorley(float dt) {
 // with the patrol point. Steady-state peak T ≈ 1.17 × floor: 0.25 → ≈0.29,
 // a fully saturated red right at the edge of orange — clearly alive in
 // silence, but speech still has the whole orange→white range to climb.
-static float heatIdleFloor = 0.25f;  // live-tunable: HEAT_IDLE_FLOOR
+static float heatIdleFloor = 0.78f;  // live-tunable: HEAT_IDLE_FLOOR.
+// Intrinsic silent-injection level → steady-state ember temperature (T≈1.17×floor
+// through heatRamp). Raised 0.25→0.78 to lift the idle ember's per-lit-pixel mean
+// into the 18–35%-of-255 band; the hotter blob reads brighter (toward orange/white)
+// while speech still has the top of the ramp to climb. Deliberate idle brightening.
 
 static float heatInjRate = 14.0f;  // heat/s at fxEnergy = 1
 #define heatT fxField.heat         // shared per-effect field buffer
@@ -2921,118 +2972,6 @@ static void renderHeatDiffusion(float dt) {
     }
 }
 
-// ── Polycule rainbow (ported from audio-reactive polycule_rainbow.py) ─
-// Five soft particles per strip with rainbow-gradient tails: hue cycles
-// across each glow and drifts slowly over time. Particles bounce off
-// strip ends and shove each other apart on collision. Purely ambient —
-// no audio input by design (the Python original's RMS pulse is dropped).
-#define POLY_PARTICLES  5
-// 25 s end-to-end ≈ 6 px/s base — parity with the other effects' motion
-// (heat patrol ~8 px/s, worley wander ~3). The Python original's 5 s
-// (~30 px/s) read frantic next to them on the tree.
-#define POLY_TRAVERSE_S 25.0f
-#define POLY_SPEED_VAR  0.5f   // ±50% per-particle speed variation
-#define POLY_COLLIDE_R  6.0f   // px
-#define POLY_GLOW_SIGMA 2.5f   // px gaussian glow
-#define POLY_WINDOW     8      // render window ±px (glow < 0.01 beyond)
-
-static float polyPos[NUM_STRIPS][POLY_PARTICLES];
-static float polyVel[NUM_STRIPS][POLY_PARTICLES];
-static float polyTime = 0.0f;
-
-static void resetPolycule() {
-    polyTime = 0.0f;
-    float baseSpeed = (float)(LEDS_PER_STRIP - 1) / POLY_TRAVERSE_S;
-    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
-        for (uint8_t k = 0; k < POLY_PARTICLES; k++) {
-            polyPos[s][k] = (float)LEDS_PER_STRIP
-                          * ((float)k + 0.5f) / (float)POLY_PARTICLES;
-            float spd = baseSpeed * (1.0f - POLY_SPEED_VAR
-                                     + randFloat() * 2.0f * POLY_SPEED_VAR);
-            polyVel[s][k] = (k & 1) ? -spd : spd;
-        }
-    }
-}
-
-static void renderPolycule(float dt) {
-    polyTime += dt;
-    const float maxPos = (float)(LEDS_PER_STRIP - 1);
-
-    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
-        for (uint8_t k = 0; k < POLY_PARTICLES; k++) {
-            polyPos[s][k] += polyVel[s][k] * dt;
-            if (polyPos[s][k] > maxPos) {
-                polyPos[s][k] = 2.0f * maxPos - polyPos[s][k];
-                polyVel[s][k] = -polyVel[s][k];
-            } else if (polyPos[s][k] < 0.0f) {
-                polyPos[s][k] = -polyPos[s][k];
-                polyVel[s][k] = -polyVel[s][k];
-            }
-        }
-
-        // Collision: sort the 5 by position, shove overlapping neighbors
-        // apart (matches the Python original — reverse, not momentum swap).
-        uint8_t order[POLY_PARTICLES];
-        for (uint8_t k = 0; k < POLY_PARTICLES; k++) order[k] = k;
-        for (uint8_t a = 1; a < POLY_PARTICLES; a++) {
-            uint8_t o = order[a];
-            int b = (int)a - 1;
-            while (b >= 0 && polyPos[s][order[b]] > polyPos[s][o]) {
-                order[b + 1] = order[b];
-                b--;
-            }
-            order[b + 1] = o;
-        }
-        for (uint8_t a = 0; a + 1 < POLY_PARTICLES; a++) {
-            uint8_t lo = order[a], hi = order[a + 1];
-            float gap = polyPos[s][hi] - polyPos[s][lo];
-            if (gap < POLY_COLLIDE_R) {
-                polyVel[s][lo] = -fabsf(polyVel[s][lo]);
-                polyVel[s][hi] =  fabsf(polyVel[s][hi]);
-                float push = (POLY_COLLIDE_R - gap) * 0.5f + 0.5f;
-                polyPos[s][lo] = fmaxf(0.0f, polyPos[s][lo] - push);
-                polyPos[s][hi] = fminf(maxPos, polyPos[s][hi] + push);
-            }
-        }
-
-        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
-            fxAccR[i] = 0.0f; fxAccG[i] = 0.0f; fxAccB[i] = 0.0f;
-        }
-
-        for (uint8_t k = 0; k < POLY_PARTICLES; k++) {
-            int center = (int)polyPos[s][k];
-            int lo = center - POLY_WINDOW; if (lo < 0) lo = 0;
-            int hi = center + POLY_WINDOW; if (hi > (int)maxPos) hi = (int)maxPos;
-            for (int i = lo; i <= hi; i++) {
-                float dist = fabsf((float)i - polyPos[s][k]);
-                float glow = expf(-(dist * dist)
-                                  / (2.0f * POLY_GLOW_SIGMA * POLY_GLOW_SIGMA));
-                if (glow < 0.01f) continue;
-                uint8_t hueIdx = (uint8_t)(((uint32_t)(k * 51)
-                                  + (uint32_t)(dist * 15.0f)
-                                  + (uint32_t)(polyTime * 25.0f)
-                                  + STRIP_HUE_OFFSET[s]) & 0xFF);
-                fxAccR[i] += (float)oklchVarL[hueIdx][0] * glow;
-                fxAccG[i] += (float)oklchVarL[hueIdx][1] * glow;
-                fxAccB[i] += (float)oklchVarL[hueIdx][2] * glow;
-            }
-        }
-
-        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
-            float r = fxAccR[i], g = fxAccG[i], b = fxAccB[i];
-            float m = fmaxf(r, fmaxf(g, b));
-            if (m > 255.0f) {
-                float inv = 255.0f / m;
-                r *= inv; g *= inv; b *= inv;
-                m = 255.0f;
-            }
-            float bright = m * (1.0f / 255.0f);
-            float norm = (bright > 0.001f) ? fastGamma24(bright) / bright : 0.0f;
-            setPixelScaled(s, i, r * norm, g * norm, b * norm);
-        }
-    }
-}
-
 // ── Black out all strips (reserved/off slots) ───────────────────
 static void renderOff() {
     for (uint8_t s = 0; s < NUM_STRIPS; s++)
@@ -3065,9 +3004,6 @@ static void resetEffect(uint8_t fx) {
         case FX_CREATURES:
             resetCreatures();
             break;
-        case FX_POLYCULE:
-            resetPolycule();
-            break;
         case FX_LEAF_WIND:
             resetLeafWind();
             break;
@@ -3094,7 +3030,7 @@ struct Param {
 };
 
 static const Param PARAMS[] = {
-    { "BRIGHTNESS_CAP",   Param::F32, &bloomBrightnessCap,  0.05f, 1.0f  },
+    { "BRIGHTNESS_CAP",   Param::F32, &bloomBrightnessCap,  0.05f, 2.0f  },
     { "GLOBAL_BRIGHTNESS",Param::F32, &globalBrightness,    0.0f,  1.0f  },
     { "SPEED_SCALE",      Param::F32, &speedScale,          0.2f,  3.0f  },
     { "BUFFER_DRAIN",     Param::F32, &bloomBufferDrain,    0.5f,  20.0f },
@@ -3114,7 +3050,7 @@ static const Param PARAMS[] = {
     { "AUDIO_VOL",        Param::F32, &audioOutVol,        0.0f,  1.0f  },
     { "FLOOR_MIN",        Param::F32, &snsRmsFloorMin,  2000.0f, 80000.0f },
     { "REC_CAP_S",        Param::F32, &recCapS,            2.0f,  30.0f  },
-    { "HEAT_IDLE_FLOOR",  Param::F32, &heatIdleFloor,      0.0f,  0.6f   },
+    { "HEAT_IDLE_FLOOR",  Param::F32, &heatIdleFloor,      0.0f,  1.0f   },
     { "GS_TIDE_S",        Param::F32, &gsTidePeriod,      10.0f, 180.0f  },
 };
 static const size_t PARAM_COUNT = sizeof(PARAMS) / sizeof(PARAMS[0]);
@@ -3467,7 +3403,6 @@ void loop() {
         0.5f,   // FX_GRAVITY_PARTICLE
         1.0f,   // FX_SPARKLE_SYLLABLE
         1.5f,   // FX_CREATURES
-        1.0f,   // FX_POLYCULE
         0.25f,  // FX_LEAF_WIND
         1.0f,   // FX_LIGHT_THROUGH
         1.5f,   // FX_NEBULA
@@ -3495,9 +3430,6 @@ void loop() {
             break;
         case FX_CREATURES:
             renderCreatures(fxDt);
-            break;
-        case FX_POLYCULE:
-            renderPolycule(fxDt);
             break;
         case FX_LEAF_WIND:
             renderLeafWind(fxDt);

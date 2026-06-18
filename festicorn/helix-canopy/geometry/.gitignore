@@ -1,0 +1,5 @@
+# Scratch render artifacts — regenerate with tools/view_geometry.py / animate.py
+*.png
+*.mp4
+*.gif
+# Scratch sim output lives in tools/sim/

@@ -1,0 +1,69 @@
+{
+  "params": {
+    "helix_strands": 2,
+    "helix_radius_m": 0.3,
+    "helix_height_m": 3.05,
+    "helix_turns": 4.0,
+    "helix_led_pitch_m": 0.0333,
+    "helix_z_start_m": 0.1,
+    "hept_sides": 7,
+    "hept_circumradius_m": 1.5,
+    "canopy_row_pitch_m": 0.15,
+    "canopy_led_pitch_m": 0.05,
+    "canopy_rotation_deg": 0.0
+  },
+  "n_total": 1309,
+  "canopy_z_m": 3.15,
+  "helix_arc_len_m": 8.1334,
+  "helix_leds_per_strand": 244,
+  "heptagon_vertices_xy": [
+    [
+      0.0,
+      1.5
+    ],
+    [
+      -1.17275,
+      0.93523
+    ],
+    [
+      -1.46239,
+      -0.33378
+    ],
+    [
+      -0.65083,
+      -1.35145
+    ],
+    [
+      0.65083,
+      -1.35145
+    ],
+    [
+      1.46239,
+      -0.33378
+    ],
+    [
+      1.17275,
+      0.93523
+    ]
+  ],
+  "strips": [
+    {
+      "name": "helix_A",
+      "kind": "helix",
+      "start": 0,
+      "count": 244
+    },
+    {
+      "name": "helix_B",
+      "kind": "helix",
+      "start": 244,
+      "count": 244
+    },
+    {
+      "name": "canopy",
+      "kind": "canopy",
+      "start": 488,
+      "count": 821
+    }
+  ]
+}

@@ -1189,3 +1189,113 @@ entries:
       lookup, and cost multiple debug sessions before being isolated by a
       standalone polling fixture (no sleep, no GPIO routing — just
       register write + INT_STATUS poll).
+
+  # ── Signal Integrity: LED data over long cable ───────────────────
+
+  - id: ws2812-eth-cable-head-glitch
+    date: 2026-06-17
+    touched: 2026-06-20
+    title: "WS2812 over ethernet-cable data run glitches at strip HEAD on max-transition data"
+    summary: >
+      led-eth-0 (4× WS2812, data carried over ethernet cable as a plain
+      conductor, 74HCT245 level shifter + 33Ω series R). At a ~1–2 m run,
+      observed intermittent single-pixel wrong-color flips at the first few
+      LEDs (~index 2), only on a maximum-transition pattern (0xAA/0x55), on
+      more than one channel; power was ruled out on the bench. At a 100 ft
+      (≈30 m) run, 70°F room temp, the identical TRANS-AA + HEAD-AA stress at
+      204 fps was clean — zero glitches on any strip head over a sustained
+      watch. Confirmed conclusion: with 33Ω series R + 74HCT245, a 100 ft
+      ethernet-cable data run works fine at room temperature (70°F). The 1–2 m
+      glitch did not reproduce at 100 ft; its cause was not isolated.
+    status: resolved
+    severity: medium
+    scope: electrical
+    source: festicorn/tree-of-record/src/si_test.cpp
+    tags: [ws2812, ethernet-cable, signal-integrity, level-shifter, led-eth-0, length-sweep]
+    relates_to: [ws2812-cat5-signal-integrity-research-2026-06-17]
+    notes: >
+      Observed 2026-06-20: Re-ran si_test (env si-test) on led-eth-0
+      (MAC 04:B2:47:82:74:20, ESP32-D0WD-V3) through a 100 ft ethernet cable at
+      ~70°F room temp. TRANS-AA (all 4 lines driving 0xAA/0x55 simultaneously)
+      and HEAD-AA (first 12 LEDs only) both held 204 fps with zero visible
+      glitches on any of the 4 strip heads, over a sustained watch. Direct-
+      wired control biolum-b was also clean earlier.
+
+      What we can state: 33Ω series R + 74HCT245 carries WS2812 data over
+      100 ft of ethernet cable cleanly at 70°F. Not characterized: behavior at
+      other temperatures, and why the 1–2 m run glitched while the 100 ft run
+      did not — the original glitch was not root-caused, only found to not
+      reproduce here. Deep-research leads in the related entry (differential /
+      RS-485, empirical series-R sweep) remain untested.
+
+      Original investigation (2026-06-17), retained for history:
+      Observed on our hardware (not yet explained):
+      - Glitch is transition-driven (0xAA worst), intermittent/probabilistic,
+        at the HEAD of the strip; consistent with each WS2812 buffering the
+        first 24 bits then re-emitting a clean signal downstream.
+      - HEAD-AA discriminator (first ~12 LEDs lit, rest black ⇒ near-zero
+        total current) STILL glitched ⇒ total-strip power draw is not the
+        cause; points at signal integrity. (Local head-voltage sag from a
+        few LEDs not fully excluded.)
+      - Grounds are commoned at both ends (board PSU one end, 5V buck the
+        other, tied through the cable ground). Data crosses two ground
+        domains; the first LED is the only pixel comparing a board-referenced
+        signal against buck ground — a plausible contributor to head-only
+        glitches, unconfirmed.
+
+      Diagnostic rigs built this session (festicorn/tree-of-record, build
+      envs): si_test.cpp (env si-test / si-test-biolum) holds dim/uniform and
+      TRANS-AA/HEAD-AA fields at ~200 fps continuous re-send (Dirty()+CanShow
+      gate) so an intermittent flip shows as a spark; si_xtalk.cpp (env
+      si-xtalk / -biolum) drives DEcorrelated per-line data (SOLO-sK vs
+      VICT-sK) to separate a line's own-path reflection from inter-line
+      crosstalk / shared-ground-return coupling. biolum-b (6-strip, direct
+      wired) runs the identical parameterized source as a non-ethernet
+      control. Open: SOLO-vs-VICTIM result, longer-cable length sweep, and an
+      empirical series-R sweep (do NOT trust a computed target — see research
+      entry).
+
+  - id: ws2812-cat5-signal-integrity-research-2026-06-17
+    date: 2026-06-17
+    touched: 2026-06-17
+    title: "*Deep-research notes: WS2812 data over Cat5 — termination, grounding, differential"
+    summary: >
+      * Result of a 2026-06-17 deep-research session (fan-out web search +
+      adversarial verification), NOT bench-verified for our hardware and not
+      confirmed relevant to ws2812-eth-cable-head-glitch. Treat as leads to
+      test, not facts. Reliability shown is the claim's adversarial vote, not
+      our observation.
+    status: identified
+    severity: low
+    scope: protocol
+    source: []
+    tags: [ws2812, cat5, signal-integrity, termination, differential, rs485, deep-research, unverified]
+    relates_to: [ws2812-eth-cable-head-glitch]
+    notes: >
+      * All below from the 2026-06-17 deep-research run; vote = independent
+      skeptic count (3-0 survived / 0-3 killed). Not verified on our rig.
+
+      Survived (3-0):
+      - No single universally-correct series-resistor value for LED data over
+        cable. (So an earlier in-session claim that "33Ω is too low, match to
+        ~100Ω" is NOT supported — sweep R empirically instead.)
+      - Data and ground should be tightly coupled — twisted together in the
+        same pair. ("Twisting gives no benefit single-ended" was refuted 0-3.)
+      - Differential signaling (RS-485 / RS-422, single-ended→diff→single,
+        120Ω differential termination) is the recommended approach for robust
+        / long Cat5 LED runs.
+      - Head-of-strip damage mechanism: each WS2812 buffers the first 24 bits
+        then regenerates a clean signal, so SI damage appears at the first
+        LEDs and clears downstream.
+
+      Killed (0-3) — do NOT rely on:
+      - "Single-ended impedance = half the differential" (so the 100Ω→50Ω→
+        "33Ω is under" arithmetic does not hold; single-ended Cat5 impedance
+        is not a clean number).
+      - "50Ω single-ended / 50Ω termination recommended."
+      - Specific "500 m over differential" distance (dropped to 1-2; quote no
+        hard distance).
+
+      Sources (survivors): WLED Long Data (kno.wled.ge/advanced/longdata),
+      QuinLED data-signal cable-conditioning, cpldcpu WS2812 timing analysis,
+      TI SLLA302 (RS-485 over Cat5), teknynja WS2812-over-RS422.

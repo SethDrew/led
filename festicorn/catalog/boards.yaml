@@ -122,6 +122,22 @@ firmware_by_role:
     notes: |
       Bring-up + experimentation breadboard. Not pinned to one firmware —
       reflash freely. Per-board `last_flashed` may record current state.
+  wormhole-eth:
+    deployment: static
+    source: festicorn/tree-of-record/src/wormhole_eth.cpp
+    packet_format: standalone
+    hardware:
+      chip: esp32 (classic, dual-core 240MHz, 40MHz crystal, CH340)
+      strips: 4× WS2812 — 150 LEDs each (600 px total)
+      pins: GPIO 13 / 27 / 32 / 33 (data, strip 0..3)
+      wiring: |
+        LED data carried over ethernet CABLE used purely as a physical
+        conductor — NOT networked ethernet, no PHY, no protocol. Plain
+        WS2812 signal on the twisted pairs.
+    notes: |
+      Standalone ambient wormhole (4-strip variant of wormhole.cpp), tuned
+      denser: ~60% of the strip lit vs ~41% on biolum-b. No radio/sensors.
+      Build/flash with env:wormhole-eth in the tree-of-record project.
 
 boards:
 
@@ -417,3 +433,23 @@ boards:
   notes: |
     Classic ESP32 on /dev/cu.usbserial-1120 — failed esptool sync; likely
     running active firmware. Capture MAC manually with BOOT-button reset.
+
+# ── Ethernet LED-data test rig ───────────────────────────────────────
+- mac: 04:B2:47:82:74:20
+  id: 'led-eth-0'
+  chip: esp32
+  role: wormhole-eth
+  first_seen: '2026-06-17T00:00:00Z'
+  last_validated:
+    utc: '2026-06-17T00:00:00Z'
+    port: /dev/cu.usbserial-111430
+    method: esptool read-mac (chip detect ESP32, 240MHz, 40MHz xtal)
+  strips:
+    count: 4
+    leds_each: 150
+    pins: [13, 27, 32, 33]
+  notes: |
+    LED data carried over ethernet CABLE as a physical conductor only — not
+    networked. 4× WS2812, 150 LEDs each, clean output pins 13/27/32/33.
+    Runs the 4-strip wormhole (env:wormhole-eth). Port re-enumerates on
+    replug — identify by MAC.

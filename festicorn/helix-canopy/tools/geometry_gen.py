@@ -55,11 +55,12 @@ P = {
 
     # ── Root system ──────────────────────────────────────────────────────
     "roots_count":        7,
-    "roots_len_min_m":    20.0 * FT,    # arc length; net reach is shorter due to wander
-    "roots_len_max_m":    22.0 * FT,    # tight variance so roots are comparable
+    "roots_len_min_m":    9.0 * FT,     # ~= straight-line reach (endpoint anchored on spoke)
+    "roots_len_max_m":    10.0 * FT,    # tight variance so roots are comparable
     "roots_led_pitch_m":  0.05,
-    "roots_wander_deg":   12.0,         # max heading change per LED step (random walk)
-    "roots_jitter_deg":   18.0,         # +/- jitter on the evenly-spaced base heading
+    "roots_wave_amp_m":   0.22,         # lateral waviness amplitude (0 at base + tip)
+    "roots_wave_freq":    2.0,          # ~wave cycles along a root
+    "roots_jitter_deg":   4.0,          # +/- jitter on the even radial spoke (symmetry)
     "roots_seed":         7,            # deterministic layout (re-run = same roots)
 }
 
@@ -181,31 +182,42 @@ def build_canopy(p):
 
 
 def build_roots(p):
-    """N roots splaying evenly from the trunk base, wandering along the floor.
+    """N roots splaying evenly from the trunk base along the floor.
 
-    Base headings are evenly spaced around the circle (2*pi*k/count) with a
-    small random jitter so the splay is balanced but not robotic. Arc length is
-    set well above the target net reach because the random walk shortens the
-    straight-line distance the root actually travels from the trunk axis.
+    Symmetry and waviness are decoupled. Each root's ENDPOINT is anchored on an
+    evenly-spaced radial spoke (2*pi*k/count + small jitter) at the chosen reach,
+    so the tips fan out evenly. Organic waviness is a LATERAL offset perpendicular
+    to the spoke, modulated by a sin(pi*s) envelope that is zero at both the base
+    and the tip — so the root meanders in the middle but always starts at the
+    trunk and lands exactly on its spoke. Reach ~= length by construction.
     """
     rng = random.Random(p["roots_seed"])
     pitch = p["roots_led_pitch_m"]
-    wander = math.radians(p["roots_wander_deg"])
+    amp = p["roots_wave_amp_m"]
+    basefreq = p["roots_wave_freq"]
     jitter = math.radians(p["roots_jitter_deg"])
     count = p["roots_count"]
     roots = []
     for k in range(count):
-        heading = 2.0 * math.pi * k / count + rng.uniform(-jitter, jitter)
-        length = rng.uniform(p["roots_len_min_m"], p["roots_len_max_m"])
-        n = max(2, int(round(length / pitch)))
-        x, y, z = 0.0, 0.0, 0.01
+        base = 2.0 * math.pi * k / count + rng.uniform(-jitter, jitter)
+        reach = rng.uniform(p["roots_len_min_m"], p["roots_len_max_m"])
+        n = max(2, int(round(reach / pitch)))
+        cb, sb = math.cos(base), math.sin(base)
+        # two random sinusoids per root for non-repeating organic wave
+        f1 = basefreq * rng.uniform(0.8, 1.2); ph1 = rng.uniform(0, 2 * math.pi)
+        f2 = basefreq * rng.uniform(1.8, 2.4); ph2 = rng.uniform(0, 2 * math.pi)
+        a2 = rng.uniform(0.3, 0.6)
         pts = []
         for i in range(n):
+            s = i / (n - 1)                                  # 0..1 along the root
+            rr = s * reach                                   # radial distance out the spoke
+            env = math.sin(math.pi * s)                      # 0 at base + tip, 1 mid
+            lateral = env * amp * (math.sin(2 * math.pi * f1 * s + ph1)
+                                   + a2 * math.sin(2 * math.pi * f2 * s + ph2))
+            x = rr * cb - lateral * sb                       # spoke + perpendicular wiggle
+            y = rr * sb + lateral * cb
+            z = 0.01 + 0.015 * math.sin(i * 0.4)             # gentle ground undulation
             pts.append((x, y, max(0.0, z)))
-            heading += rng.uniform(-wander, wander)        # random walk
-            x += pitch * math.cos(heading)
-            y += pitch * math.sin(heading)
-            z = 0.01 + 0.015 * math.sin(i * 0.4)           # gentle ground undulation
         roots.append(pts)
     return roots
 

@@ -15,14 +15,15 @@
     "canopy_rotation_deg": 0.0,
     "canopy_center_hole_m": 0.35,
     "roots_count": 7,
-    "roots_len_min_m": 6.096,
-    "roots_len_max_m": 6.7056000000000004,
+    "roots_len_min_m": 2.7432000000000003,
+    "roots_len_max_m": 3.048,
     "roots_led_pitch_m": 0.05,
-    "roots_wander_deg": 12.0,
-    "roots_jitter_deg": 18.0,
+    "roots_wave_amp_m": 0.22,
+    "roots_wave_freq": 2.0,
+    "roots_jitter_deg": 4.0,
     "roots_seed": 7
   },
-  "n_total": 1775,
+  "n_total": 1304,
   "canopy_z_m": 3.048,
   "helix_top_z_m": 4.572,
   "helix_arc_len_m": 9.9056,
@@ -80,43 +81,43 @@
       "name": "root_0",
       "kind": "root",
       "start": 901,
-      "count": 124
+      "count": 56
     },
     {
       "name": "root_1",
       "kind": "root",
-      "start": 1025,
-      "count": 124
+      "start": 957,
+      "count": 55
     },
     {
       "name": "root_2",
       "kind": "root",
-      "start": 1149,
-      "count": 122
+      "start": 1012,
+      "count": 56
     },
     {
       "name": "root_3",
       "kind": "root",
-      "start": 1271,
-      "count": 122
+      "start": 1068,
+      "count": 60
     },
     {
       "name": "root_4",
       "kind": "root",
-      "start": 1393,
-      "count": 126
+      "start": 1128,
+      "count": 58
     },
     {
       "name": "root_5",
       "kind": "root",
-      "start": 1519,
-      "count": 130
+      "start": 1186,
+      "count": 59
     },
     {
       "name": "root_6",
       "kind": "root",
-      "start": 1649,
-      "count": 126
+      "start": 1245,
+      "count": 59
     }
   ]
 }

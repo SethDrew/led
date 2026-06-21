@@ -24,7 +24,7 @@
     "roots_jitter_deg": 4.0,
     "roots_seed": 7
   },
-  "n_total": 1221,
+  "n_total": 1347,
   "canopy_z_m": 3.048,
   "helix_top_z_m": 4.572,
   "helix_arc_len_m": 9.9056,
@@ -76,84 +76,84 @@
       "name": "canopy_0",
       "kind": "canopy",
       "start": 594,
-      "count": 32
+      "count": 50
     },
     {
       "name": "canopy_1",
       "kind": "canopy",
-      "start": 626,
-      "count": 32
+      "start": 644,
+      "count": 50
     },
     {
       "name": "canopy_2",
       "kind": "canopy",
-      "start": 658,
-      "count": 32
+      "start": 694,
+      "count": 50
     },
     {
       "name": "canopy_3",
       "kind": "canopy",
-      "start": 690,
-      "count": 32
+      "start": 744,
+      "count": 50
     },
     {
       "name": "canopy_4",
       "kind": "canopy",
-      "start": 722,
-      "count": 32
+      "start": 794,
+      "count": 50
     },
     {
       "name": "canopy_5",
       "kind": "canopy",
-      "start": 754,
-      "count": 32
+      "start": 844,
+      "count": 50
     },
     {
       "name": "canopy_6",
       "kind": "canopy",
-      "start": 786,
-      "count": 32
+      "start": 894,
+      "count": 50
     },
     {
       "name": "root_0",
       "kind": "root",
-      "start": 818,
+      "start": 944,
       "count": 56
     },
     {
       "name": "root_1",
       "kind": "root",
-      "start": 874,
+      "start": 1000,
       "count": 55
     },
     {
       "name": "root_2",
       "kind": "root",
-      "start": 929,
+      "start": 1055,
       "count": 56
     },
     {
       "name": "root_3",
       "kind": "root",
-      "start": 985,
+      "start": 1111,
       "count": 60
     },
     {
       "name": "root_4",
       "kind": "root",
-      "start": 1045,
+      "start": 1171,
       "count": 58
     },
     {
       "name": "root_5",
       "kind": "root",
-      "start": 1103,
+      "start": 1229,
       "count": 59
     },
     {
       "name": "root_6",
       "kind": "root",
-      "start": 1162,
+      "start": 1288,
       "count": 59
     }
   ]

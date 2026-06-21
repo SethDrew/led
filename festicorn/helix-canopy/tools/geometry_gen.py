@@ -135,50 +135,86 @@ def _heptagon_vertices(p):
     return verts, R
 
 
-def _point_in_poly(x, y, verts):
-    """Ray-cast point-in-polygon test (verts: list of (x,y))."""
-    inside = False
+def _ray_poly_hit(theta, verts):
+    """Where a ray from the origin at angle theta exits the (convex) polygon.
+
+    Returns (t, hitpoint, edge_index, u) for the nearest forward boundary
+    crossing; edge_index is the edge verts[k]->verts[k+1] that was hit.
+    """
+    dx, dy = math.cos(theta), math.sin(theta)
     n = len(verts)
-    j = n - 1
-    for i in range(n):
-        xi, yi = verts[i]; xj, yj = verts[j]
-        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
-            inside = not inside
-        j = i
-    return inside
+    best = None
+    for k in range(n):
+        ax, ay = verts[k]; bx, by = verts[(k + 1) % n]
+        ex, ey = bx - ax, by - ay
+        denom = dx * ey - dy * ex
+        if abs(denom) < 1e-12:
+            continue
+        t = (ax * ey - ay * ex) / denom          # origin at (0,0)
+        u = (ax * dy - ay * dx) / denom
+        if t > 1e-9 and -1e-9 <= u <= 1 + 1e-9:
+            if best is None or t < best[0]:
+                best = (t, (dx * t, dy * t), k, u)
+    return best
+
+
+def _march_polyline(waypoints, pitch, cap, z):
+    """Place up to `cap` nodes at `pitch` arc-length spacing along a polyline."""
+    segs = []
+    for a, b in zip(waypoints, waypoints[1:]):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        L = math.hypot(dx, dy)
+        if L < 1e-9:
+            continue
+        segs.append((a, dx / L, dy / L, L))
+    pts = []
+    for k in range(cap):
+        s = k * pitch
+        acc = 0.0
+        for (a, ux, uy, L) in segs:
+            if s <= acc + L:
+                t = s - acc
+                pts.append((a[0] + ux * t, a[1] + uy * t, z))
+                break
+            acc += L
+        else:
+            break                                 # ran off the end of the polyline
+    return pts
 
 
 def build_canopy(p):
-    """Radial spokes from the trunk to the rim — one real bullet strand per spoke.
+    """Radial spokes that bend along the rim — one real bullet strand per spoke.
 
-    Each spoke marches outward from the center-hole edge at the real 100mm node
-    pitch until it leaves the heptagon (or hits the strand's node cap), so spoke
-    length is clipped to the actual canopy rim. Spokes are evenly spaced and, when
-    spoke_count == hept_sides, point straight at the vertices. Returns the strand
-    occupancy so we can report nodes-used vs the 50-node strand length.
+    Each strand is a single continuous run at the real 100mm node pitch: it goes
+    radially from the center-hole edge out to the heptagon rim, then BENDS and
+    continues horizontally along the perimeter (CCW) until the strand's node cap
+    is used up. So a 50-node strand spends ~32 nodes on the spoke and its ~18
+    spare nodes wrapping around the edge, instead of draping down. Spokes are
+    evenly spaced (spoke_count == hept_sides -> one per vertex).
     """
     verts, R = _heptagon_vertices(p)
+    n = len(verts)
     canopy_z = p["canopy_height_m"]
     hole = p["canopy_center_hole_m"]
     pitch = p["canopy_pixel_pitch_m"]
     count = p["canopy_spoke_count"]
     cap = p["canopy_strand_nodes"]
-
-    # align spoke 0 with vertex 0 (same rotation as the heptagon)
     base = math.radians(p["canopy_rotation_deg"]) + math.pi / 2.0
 
     spokes = []
     for s in range(count):
         theta = base + 2.0 * math.pi * s / count
-        ct, st = math.cos(theta), math.sin(theta)
-        spoke = []
-        for i in range(cap):
-            r = hole + i * pitch
-            x, y = r * ct, r * st
-            if not _point_in_poly(x, y, verts):
-                break
-            spoke.append((x, y, canopy_z))
-        spokes.append(spoke)
+        start = (hole * math.cos(theta), hole * math.sin(theta))
+        hit = _ray_poly_hit(theta, verts)
+        if hit is None:                            # degenerate; fall back to straight spoke
+            spokes.append(_march_polyline([start, (R * math.cos(theta), R * math.sin(theta))],
+                                          pitch, cap, canopy_z))
+            continue
+        _, hitpt, edge_idx, _ = hit
+        # waypoints: hole -> rim hit -> CCW around the perimeter (enough vertices
+        # to cover the strand's full length)
+        waypoints = [start, hitpt] + [verts[(edge_idx + 1 + j) % n] for j in range(n)]
+        spokes.append(_march_polyline(waypoints, pitch, cap, canopy_z))
     return spokes, verts, canopy_z
 
 

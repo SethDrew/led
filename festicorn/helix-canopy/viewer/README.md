@@ -23,18 +23,26 @@ src/effects.h ─┬─► wasm/engine.cpp ──emcc──► wasm/engine.mjs +
 geometry/layout.json ──► viewer/build_frames.py ──► viewer/data/  (frames-mode payload)
 ```
 
-## Run it (live WASM mode)
+## Run it — hot-reload dev server (recommended)
 
 ```bash
-# 1. build the engine (once; rebuild when effects.h or geometry changes)
-cd ../wasm && ./build.sh
+cd ..            # helix-canopy root
+node dev.mjs     # then open http://localhost:8777/viewer/
+```
 
-# 2. serve from the helix-canopy ROOT so /viewer/ and /wasm/ both resolve
-cd .. && python3 -m http.server 8777 -d .
+`dev.mjs` serves the tree, watches `src/effects.h` + `tools/geometry_gen.py`
+(+ the wasm sources), rebuilds the WASM engine on save (~0.5s), and live-reloads
+the browser — your camera is preserved across reloads, and build errors show in
+the viewer overlay. Edit an effect, save, see it. A content hash gates rebuilds
+so editor autosave/format touches that don't change bytes are ignored.
 
-# 3. open  http://localhost:8777/viewer/         (live WASM, default)
-#          http://localhost:8777/viewer/?mode=wasm&fx=pour
-#          http://localhost:8777/viewer/?mode=frames    (precomputed fallback)
+URLs: `?mode=wasm&fx=pour`, `?mode=frames` (precomputed fallback).
+
+### Or static (no rebuild-on-save)
+
+```bash
+cd ../wasm && ./build.sh                 # build engine once
+cd .. && python3 -m http.server 8777 -d . # then open /viewer/
 ```
 
 Controls: drag to orbit, scroll to zoom, scrub the timeline, effect dropdown

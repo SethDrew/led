@@ -333,6 +333,25 @@ window.__setGlow = (h, c, r) => {                          // per-section glow d
   applySectionSizes();
 };
 
+// ---- dev hot-reload (served by dev.mjs) -----------------------------------
+// Persist the camera across reloads so authoring edits don't reset your view,
+// and reload (or surface build errors) when the engine rebuilds.
+try {
+  const saved = JSON.parse(sessionStorage.getItem("hc_cam") || "null");
+  if (saved) { camera.position.fromArray(saved.p); controls.target.fromArray(saved.t); controls.update(); }
+} catch {}
+setInterval(() => {
+  try { sessionStorage.setItem("hc_cam", JSON.stringify({ p: camera.position.toArray(), t: controls.target.toArray() })); } catch {}
+}, 500);
+if (location.hostname === "localhost") {
+  const es = new EventSource("/__livereload");
+  es.addEventListener("reload", () => location.reload());
+  es.addEventListener("builderror", (e) => {
+    const el = $("err"); el.style.display = "grid";
+    el.textContent = "build failed — fix and save again:\n\n" + JSON.parse(e.data);
+  });
+}
+
 let racc = 0, rcount = 0;
 function loop(now) {
   const dt = (now - last) / 1000; last = now;

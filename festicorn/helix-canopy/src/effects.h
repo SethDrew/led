@@ -34,29 +34,62 @@ static float NEB_rise_speed   = 0.030f;  // m / 30Hz-frame, rising orbs (native 
 static float NEB_density_nat  = 1.0f;    // x baseline orb count (native nebula)
 
 // ── Effect: "pour" ──────────────────────────────────────────────────────
-// Light ignites across the heptagon canopy, then a wavefront falls straight
-// down the helix to the floor, leaving a fading comet trail above it.
-// REQUIRES real z — this is the cross-form effect index-space can't express.
+// Light ignites at the TOP of the trunk and flows down the helix. When the
+// wavefront reaches the canopy it radiates outward along the canopy strands
+// *while continuing down the trunk*; when it reaches the floor it radiates out
+// along the roots. Driven by a per-LED travel distance from the top source:
+// trunk = vertical descent, canopy/root = (descent to the junction) + along-
+// strand arc length from that junction. So co-planar canopy/root LEDs light in
+// sequence (a spreading wave), not all at once. REQUIRES real (x,y,z) + the
+// strip topology — index space can't express this.
 static inline void fx_pour(RGBf* out, float t) {
-    const float z_top = HC_CANOPY_Z;
-    const float z_bot = HC_BOUND_MIN.z;
-    const float period = POUR_period;    // seconds per fall
-    const float sigma  = 0.18f;          // leading-edge thickness (m)
-    const float tail   = 0.55f;          // trail length above the front (m)
+    const float z_top  = HC_BOUND_MAX.z;   // top of the poking helix = the source
+    const float z_can  = HC_CANOPY_Z;      // canopy plane (trunk->canopy junction)
+    const float z_bot  = HC_BOUND_MIN.z;   // floor (trunk->root junction)
+    const float period = POUR_period;      // seconds per pour
+    const float sigma  = 0.18f;            // leading-edge thickness (m)
+    const float tail   = 0.55f;            // comet trail length behind the front (m)
 
-    float phase = fmodf(t, period) / period;         // 0..1
-    float zf = z_top - phase * (z_top - z_bot);      // front descends
+    // Per-LED travel distance from the source, built once (geometry is static).
+    static bool  init = false;
+    static float dist[HC_NUM_LEDS];
+    static float Dmax = 1.0f;
+    if (!init) {
+        Dmax = 0.0f;
+        for (int s = 0; s < HC_NUM_STRIPS; s++) {
+            int   k   = HC_STRIPS[s].kind;
+            int   st  = HC_STRIPS[s].start;
+            int   cnt = HC_STRIPS[s].count;
+            float arc = 0.0f;                       // along-strand length from the junction
+            for (int j = 0; j < cnt; j++) {
+                int i = st + j;
+                if (j > 0) {
+                    float dx = LED_POS[i].x - LED_POS[i-1].x;
+                    float dy = LED_POS[i].y - LED_POS[i-1].y;
+                    float dz = LED_POS[i].z - LED_POS[i-1].z;
+                    arc += sqrtf(dx*dx + dy*dy + dz*dz);
+                }
+                float d;
+                if (k == 1)      d = (z_top - z_can) + arc;   // canopy: reach canopy, then spread
+                else if (k == 2) d = (z_top - z_bot) + arc;   // roots: reach floor, then spread
+                else             d = (z_top - LED_POS[i].z);  // helix: descend the trunk
+                dist[i] = d;
+                if (d > Dmax) Dmax = d;
+            }
+        }
+        init = true;
+    }
 
+    float front = fmodf(t, period) / period * (Dmax + tail * 3.0f);  // 0 -> past the far end
     for (int i = 0; i < HC_NUM_LEDS; i++) {
-        float dz = LED_POS[i].z - zf;                // >0 = above the front
+        float dd = front - dist[i];                  // >0 front has passed (trail), <0 still ahead
         float b;
-        if (dz >= 0.0f) {
-            // leading gaussian + exponential comet trail above
-            b = expf(-(dz * dz) / (2.0f * sigma * sigma));
-            b = fmaxf(b, expf(-dz / tail) * 0.6f);
+        if (dd >= 0.0f) {
+            b = expf(-(dd * dd) / (2.0f * sigma * sigma));
+            b = fmaxf(b, expf(-dd / tail) * 0.6f);   // comet trail behind the front
         } else {
-            // just below the front: sharp fade (light has passed)
-            b = expf(-(dz * dz) / (2.0f * (sigma * 0.5f) * (sigma * 0.5f)));
+            float a = -dd;
+            b = expf(-(a * a) / (2.0f * (sigma * 0.5f) * (sigma * 0.5f)));
         }
         b = clamp01(b);
         // cool leading edge -> deeper blue in the trail

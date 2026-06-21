@@ -246,8 +246,9 @@ const sizeAttr = new THREE.BufferAttribute(sizeArr, 1);
 geo.setAttribute("aSize", sizeAttr);
 
 // per-section glow diameter (m), indexed by kind 0=helix 1=canopy 2=root.
-// trunk default small (< 33mm pitch) so pixels stay distinct.
-const sectionSize = [0.028, 0.16, 0.06];
+// trunk smallest (< 33mm pitch) so its dense pixels stay distinct; canopy and
+// roots share the same crisp pixel glow.
+const sectionSize = [0.028, 0.06, 0.06];
 function applySectionSizes() {
   for (let i = 0; i < N; i++) sizeArr[i] = sectionSize[source.kinds[i]] ?? 0.05;
   sizeAttr.needsUpdate = true;

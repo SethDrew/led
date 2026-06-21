@@ -50,7 +50,7 @@ P = {
     "canopy_height_m":    10.0 * FT,    # ceiling plane at 10 ft
     # Real hardware: 12mm WS2811 bullet strands, 50 nodes @ 100mm pitch (10/m, 5m).
     # The canopy is radial spokes — one strand per spoke, center hole -> rim.
-    "canopy_spoke_count":  7,           # spokes (default = one per heptagon vertex)
+    "canopy_spoke_count":  14,          # spokes (14 = vertices + edge midpoints; rim arcs meet)
     "canopy_pixel_pitch_m": 0.10,       # 100mm node pitch (the real default)
     "canopy_strand_nodes": 50,          # nodes per real strand (caps a spoke's length)
     "canopy_rotation_deg": 0.0,

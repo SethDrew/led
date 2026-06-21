@@ -10,7 +10,7 @@
     "hept_sides": 7,
     "hept_side_len_m": 3.048,
     "canopy_height_m": 3.048,
-    "canopy_spoke_count": 7,
+    "canopy_spoke_count": 14,
     "canopy_pixel_pitch_m": 0.1,
     "canopy_strand_nodes": 50,
     "canopy_rotation_deg": 0.0,
@@ -24,7 +24,7 @@
     "roots_jitter_deg": 4.0,
     "roots_seed": 7
   },
-  "n_total": 1347,
+  "n_total": 1697,
   "canopy_z_m": 3.048,
   "helix_top_z_m": 4.572,
   "helix_arc_len_m": 9.9056,
@@ -115,45 +115,87 @@
       "count": 50
     },
     {
+      "name": "canopy_7",
+      "kind": "canopy",
+      "start": 944,
+      "count": 50
+    },
+    {
+      "name": "canopy_8",
+      "kind": "canopy",
+      "start": 994,
+      "count": 50
+    },
+    {
+      "name": "canopy_9",
+      "kind": "canopy",
+      "start": 1044,
+      "count": 50
+    },
+    {
+      "name": "canopy_10",
+      "kind": "canopy",
+      "start": 1094,
+      "count": 50
+    },
+    {
+      "name": "canopy_11",
+      "kind": "canopy",
+      "start": 1144,
+      "count": 50
+    },
+    {
+      "name": "canopy_12",
+      "kind": "canopy",
+      "start": 1194,
+      "count": 50
+    },
+    {
+      "name": "canopy_13",
+      "kind": "canopy",
+      "start": 1244,
+      "count": 50
+    },
+    {
       "name": "root_0",
       "kind": "root",
-      "start": 944,
+      "start": 1294,
       "count": 56
     },
     {
       "name": "root_1",
       "kind": "root",
-      "start": 1000,
+      "start": 1350,
       "count": 55
     },
     {
       "name": "root_2",
       "kind": "root",
-      "start": 1055,
+      "start": 1405,
       "count": 56
     },
     {
       "name": "root_3",
       "kind": "root",
-      "start": 1111,
+      "start": 1461,
       "count": 60
     },
     {
       "name": "root_4",
       "kind": "root",
-      "start": 1171,
+      "start": 1521,
       "count": 58
     },
     {
       "name": "root_5",
       "kind": "root",
-      "start": 1229,
+      "start": 1579,
       "count": 59
     },
     {
       "name": "root_6",
       "kind": "root",
-      "start": 1288,
+      "start": 1638,
       "count": 59
     }
   ]

@@ -123,6 +123,35 @@ def descent_velocity(wf, z_top, z_bot):
             "t_window": [round(float(tt[0]), 3), round(float(tt[-1]), 3)]}
 
 
+def spatial_coherence(df, k=6):
+    """How much does a LED's brightness resemble its NEAREST-IN-3D-SPACE
+    neighbors? This is the litmus test for 'topology-native': a coordinate-driven
+    effect varies smoothly through space (high coherence), while an index-driven
+    effect scatters spatially-adjacent LEDs across the wave (low coherence).
+
+    Returns Pearson r between each LED's luminance and its spatial-neighbor mean
+    (over all frames), plus a scale-free roughness. r->1 coherent, r->0 not."""
+    from scipy.spatial import cKDTree
+    pos = df.drop_duplicates("pixel").sort_values("pixel")[["x", "y", "z"]].to_numpy()
+    n = pos.shape[0]
+    tree = cKDTree(pos)
+    _, idx = tree.query(pos, k=k + 1)        # includes self at col 0
+    nbr = idx[:, 1:]                          # (n, k)
+
+    lum_mat = df.pivot_table(index="frame", columns="pixel", values="lum",
+                             fill_value=0.0).to_numpy()  # (F, n)
+    nbr_mean = lum_mat[:, nbr].mean(axis=2)              # (F, n)
+    a = lum_mat.ravel()
+    b = nbr_mean.ravel()
+    if a.std() < 1e-9 or b.std() < 1e-9:
+        r = float("nan")
+    else:
+        r = float(np.corrcoef(a, b)[0, 1])
+    mean_lum = max(1e-9, float(a.mean()))
+    roughness = float(np.abs(a - b).mean() / mean_lum)
+    return {"neighbor_r": round(r, 4), "roughness": round(roughness, 4), "k": k}
+
+
 def cross_form_timing(df):
     """When does the canopy peak vs the helix, in each cycle? Reports the lag
     between canopy energy peak and helix energy peak (first cycle)."""
@@ -160,6 +189,7 @@ def report(csv_path, meta_path=None, as_json=False):
             "descent": descent_velocity(wf, z_top, z_bot),
         },
         "cross_form_timing": cross_form_timing(df),
+        "spatial_coherence": spatial_coherence(df),
     }
     if as_json:
         print(json.dumps(out, indent=2))
@@ -185,6 +215,9 @@ def report(csv_path, meta_path=None, as_json=False):
     if ct:
         print(f"  cross-form: canopy peaks @ {ct['canopy_peak_t']}s, "
               f"helix @ {ct['helix_peak_t']}s, lag {ct['lag_s']}s")
+    sc = out["spatial_coherence"]
+    print(f"  spatial coherence (neighbor r): {sc['neighbor_r']}  "
+          f"roughness {sc['roughness']}  (r->1 topology-native, r->0 index-native)")
     print()
     return out
 

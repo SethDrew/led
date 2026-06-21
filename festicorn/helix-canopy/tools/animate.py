@@ -57,9 +57,9 @@ def main():
     ap.add_argument("--rotate", action="store_true",
                     help="slowly orbit the camera over the clip")
     ap.add_argument("--elev", type=float, default=18.0)
-    ap.add_argument("--elev-start", type=float, default=-40.0,
+    ap.add_argument("--elev-start", type=float, default=-20.0,
                     help="elevation at clip start when --rotate (below = negative)")
-    ap.add_argument("--elev-end", type=float, default=60.0,
+    ap.add_argument("--elev-end", type=float, default=40.0,
                     help="elevation at clip end when --rotate (above = positive)")
     ap.add_argument("--azim", type=float, default=-60.0)
     ap.add_argument("--point-size", type=float, default=10.0)

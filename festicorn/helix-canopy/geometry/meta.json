@@ -1,49 +1,59 @@
 {
   "params": {
     "helix_strands": 2,
-    "helix_radius_m": 0.3,
-    "helix_height_m": 3.05,
-    "helix_turns": 4.0,
+    "helix_base_radius_m": 0.381,
+    "helix_top_radius_m": 0.07619999999999999,
+    "helix_height_m": 4.572,
+    "helix_turns": 6.0,
     "helix_led_pitch_m": 0.0333,
-    "helix_z_start_m": 0.1,
+    "helix_z_start_m": 0.0,
     "hept_sides": 7,
-    "hept_circumradius_m": 1.5,
-    "canopy_row_pitch_m": 0.15,
-    "canopy_led_pitch_m": 0.05,
-    "canopy_rotation_deg": 0.0
+    "hept_side_len_m": 3.048,
+    "canopy_height_m": 3.048,
+    "canopy_row_pitch_m": 0.33,
+    "canopy_led_pitch_m": 0.33,
+    "canopy_rotation_deg": 0.0,
+    "canopy_center_hole_m": 0.35,
+    "roots_count": 7,
+    "roots_len_min_m": 0.9144000000000001,
+    "roots_len_max_m": 2.4384,
+    "roots_led_pitch_m": 0.05,
+    "roots_wander_deg": 22.0,
+    "roots_seed": 7
   },
-  "n_total": 1309,
-  "canopy_z_m": 3.15,
-  "helix_arc_len_m": 8.1334,
-  "helix_leds_per_strand": 244,
+  "n_total": 1140,
+  "canopy_z_m": 3.048,
+  "helix_top_z_m": 4.572,
+  "helix_arc_len_m": 9.9056,
+  "helix_leds_per_strand": 297,
   "heptagon_vertices_xy": [
     [
       0.0,
-      1.5
+      3.51246
     ],
     [
-      -1.17275,
-      0.93523
+      -2.74615,
+      2.18998
     ],
     [
-      -1.46239,
-      -0.33378
+      -3.4244,
+      -0.7816
     ],
     [
-      -0.65083,
-      -1.35145
+      -1.524,
+      -3.16462
     ],
     [
-      0.65083,
-      -1.35145
+      1.524,
+      -3.16462
     ],
     [
-      1.46239,
-      -0.33378
+      3.4244,
+      -0.7816
     ],
     [
-      1.17275,
-      0.93523
+      2.74615,
+      2.18998
     ]
   ],
   "strips": [
@@ -51,19 +61,61 @@
       "name": "helix_A",
       "kind": "helix",
       "start": 0,
-      "count": 244
+      "count": 297
     },
     {
       "name": "helix_B",
       "kind": "helix",
-      "start": 244,
-      "count": 244
+      "start": 297,
+      "count": 297
     },
     {
       "name": "canopy",
       "kind": "canopy",
-      "start": 488,
-      "count": 821
+      "start": 594,
+      "count": 307
+    },
+    {
+      "name": "root_0",
+      "kind": "root",
+      "start": 901,
+      "count": 23
+    },
+    {
+      "name": "root_1",
+      "kind": "root",
+      "start": 924,
+      "count": 28
+    },
+    {
+      "name": "root_2",
+      "kind": "root",
+      "start": 952,
+      "count": 19
+    },
+    {
+      "name": "root_3",
+      "kind": "root",
+      "start": 971,
+      "count": 39
+    },
+    {
+      "name": "root_4",
+      "kind": "root",
+      "start": 1010,
+      "count": 45
+    },
+    {
+      "name": "root_5",
+      "kind": "root",
+      "start": 1055,
+      "count": 42
+    },
+    {
+      "name": "root_6",
+      "kind": "root",
+      "start": 1097,
+      "count": 43
     }
   ]
 }

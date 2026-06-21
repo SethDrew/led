@@ -48,8 +48,11 @@ P = {
     "hept_sides":         7,
     "hept_side_len_m":    10.0 * FT,    # each edge 10 ft -> circumradius ~11.5 ft
     "canopy_height_m":    10.0 * FT,    # ceiling plane at 10 ft
-    "canopy_row_pitch_m": 0.33,         # bulb-string row spacing
-    "canopy_led_pitch_m": 0.33,         # bulb spacing along a string (~300 total)
+    # Real hardware: 12mm WS2811 bullet strands, 50 nodes @ 100mm pitch (10/m, 5m).
+    # The canopy is radial spokes — one strand per spoke, center hole -> rim.
+    "canopy_spoke_count":  7,           # spokes (default = one per heptagon vertex)
+    "canopy_pixel_pitch_m": 0.10,       # 100mm node pitch (the real default)
+    "canopy_strand_nodes": 50,          # nodes per real strand (caps a spoke's length)
     "canopy_rotation_deg": 0.0,
     "canopy_center_hole_m": 0.35,       # radius of the hole the trunk passes through
 
@@ -132,53 +135,51 @@ def _heptagon_vertices(p):
     return verts, R
 
 
-def _row_xspan(verts, y):
-    xs = []
+def _point_in_poly(x, y, verts):
+    """Ray-cast point-in-polygon test (verts: list of (x,y))."""
+    inside = False
     n = len(verts)
-    for k in range(n):
-        x0, y0 = verts[k]
-        x1, y1 = verts[(k+1) % n]
-        if (y0 <= y < y1) or (y1 <= y < y0):
-            frac = (y - y0) / (y1 - y0)
-            xs.append(x0 + frac * (x1 - x0))
-    if len(xs) < 2:
-        return None
-    return min(xs), max(xs)
+    j = n - 1
+    for i in range(n):
+        xi, yi = verts[i]; xj, yj = verts[j]
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
 
 
 def build_canopy(p):
-    """Serpentine fill of the heptagon, with a center hole for the trunk."""
+    """Radial spokes from the trunk to the rim — one real bullet strand per spoke.
+
+    Each spoke marches outward from the center-hole edge at the real 100mm node
+    pitch until it leaves the heptagon (or hits the strand's node cap), so spoke
+    length is clipped to the actual canopy rim. Spokes are evenly spaced and, when
+    spoke_count == hept_sides, point straight at the vertices. Returns the strand
+    occupancy so we can report nodes-used vs the 50-node strand length.
+    """
     verts, R = _heptagon_vertices(p)
     canopy_z = p["canopy_height_m"]
     hole = p["canopy_center_hole_m"]
-    ys = [v[1] for v in verts]
-    y_lo, y_hi = min(ys), max(ys)
-    row_pitch, led_pitch = p["canopy_row_pitch_m"], p["canopy_led_pitch_m"]
+    pitch = p["canopy_pixel_pitch_m"]
+    count = p["canopy_spoke_count"]
+    cap = p["canopy_strand_nodes"]
 
-    span = y_hi - y_lo
-    n_rows = max(1, int(math.floor(span / row_pitch)))
-    y_start = y_lo + (span - (n_rows - 1) * row_pitch) / 2.0
+    # align spoke 0 with vertex 0 (same rotation as the heptagon)
+    base = math.radians(p["canopy_rotation_deg"]) + math.pi / 2.0
 
-    pts = []
-    for r in range(n_rows):
-        y = y_start + r * row_pitch
-        sp = _row_xspan(verts, y)
-        if sp is None:
-            continue
-        xmin, xmax = sp
-        width = xmax - xmin
-        n_in = max(1, int(round(width / led_pitch)))
-        if n_in == 1:
-            row = [((xmin + xmax) / 2.0, y, canopy_z)]
-        else:
-            margin = (width - (n_in - 1) * led_pitch) / 2.0
-            row = [(xmin + margin + i * led_pitch, y, canopy_z) for i in range(n_in)]
-        if r % 2 == 1:
-            row.reverse()
-        # punch the trunk hole
-        row = [pt for pt in row if math.hypot(pt[0], pt[1]) > hole]
-        pts.extend(row)
-    return pts, verts, canopy_z
+    spokes = []
+    for s in range(count):
+        theta = base + 2.0 * math.pi * s / count
+        ct, st = math.cos(theta), math.sin(theta)
+        spoke = []
+        for i in range(cap):
+            r = hole + i * pitch
+            x, y = r * ct, r * st
+            if not _point_in_poly(x, y, verts):
+                break
+            spoke.append((x, y, canopy_z))
+        spokes.append(spoke)
+    return spokes, verts, canopy_z
 
 
 def build_roots(p):
@@ -231,7 +232,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     strands, helix_arc, helix_n = build_helix(P)
-    canopy_pts, hept_verts, canopy_z = build_canopy(P)
+    canopy_spokes, hept_verts, canopy_z = build_canopy(P)
     roots = build_roots(P)
 
     flat, strips = [], []
@@ -243,7 +244,8 @@ def main():
 
     for j, strand in enumerate(strands):
         add_strip(f"helix_{chr(ord('A') + j)}", "helix", strand)
-    add_strip("canopy", "canopy", canopy_pts)
+    for k, spoke in enumerate(canopy_spokes):       # one real strand per spoke
+        add_strip(f"canopy_{k}", "canopy", spoke)
     for k, root in enumerate(roots):
         add_strip(f"root_{k}", "root", root)
 

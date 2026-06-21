@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>helix-canopy · LED viewer (Phase 0)</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #07070b; overflow: hidden;
+    font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cfd2da; }
+  #app { position: fixed; inset: 0; }
+  #hud { position: fixed; left: 12px; top: 12px; z-index: 10;
+    background: rgba(12,12,18,.72); border: 1px solid #ffffff14; border-radius: 8px;
+    padding: 10px 12px; backdrop-filter: blur(6px); min-width: 220px; }
+  #hud h1 { font-size: 12px; margin: 0 0 6px; color: #aab; font-weight: 600; letter-spacing: .04em; }
+  #hud .row { display: flex; justify-content: space-between; gap: 14px; color: #8a8f9c; }
+  #hud .row b { color: #dfe3ea; font-weight: 600; }
+  #controls { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+    z-index: 10; display: flex; align-items: center; gap: 10px; width: min(720px, 92vw);
+    background: rgba(12,12,18,.72); border: 1px solid #ffffff14; border-radius: 10px;
+    padding: 8px 12px; backdrop-filter: blur(6px); }
+  button { background: #1a1c26; color: #dfe3ea; border: 1px solid #ffffff1f;
+    border-radius: 6px; padding: 5px 10px; font: inherit; cursor: pointer; }
+  button:hover { background: #232634; }
+  #scrub { flex: 1; accent-color: #6ea8ff; }
+  #t { color: #8a8f9c; min-width: 92px; text-align: right; }
+  label.tog { color: #8a8f9c; display: flex; align-items: center; gap: 4px; cursor: pointer; }
+  #err { position: fixed; inset: 0; display: none; place-items: center; z-index: 20;
+    background: #07070b; color: #ff9a9a; padding: 24px; text-align: center; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="hud">
+  <h1>HELIX-CANOPY · nebula</h1>
+  <div class="row"><span>LEDs</span><b id="n-leds">–</b></div>
+  <div class="row"><span>frames</span><b id="n-frames">–</b></div>
+  <div class="row"><span>fps (src)</span><b id="src-fps">–</b></div>
+  <div class="row"><span>render</span><b id="rfps">–</b></div>
+</div>
+<div id="controls">
+  <button id="play">⏸</button>
+  <input id="scrub" type="range" min="0" max="0" value="0" step="1">
+  <span id="t">0.00 / 0.00s</span>
+  <label class="tog"><input id="bloom" type="checkbox" checked> bloom</label>
+  <label class="tog"><input id="spin" type="checkbox"> spin</label>
+</div>
+<div id="err"></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+
+const $ = (id) => document.getElementById(id);
+const fail = (m) => { const e = $("err"); e.style.display = "grid"; e.textContent = m; throw new Error(m); };
+
+// ---- load payload ---------------------------------------------------------
+let scene, frames;
+try {
+  const sres = await fetch("data/scene.json");
+  if (!sres.ok) throw new Error("scene.json " + sres.status);
+  scene = await sres.json();
+  const fres = await fetch("data/frames.bin");
+  if (!fres.ok) throw new Error("frames.bin " + fres.status);
+  frames = new Uint8Array(await fres.arrayBuffer());
+} catch (e) {
+  fail("Could not load data/.\n\nRun the converter, then serve over http:\n\n" +
+       "  python3 build_frames.py\n  python3 -m http.server -d . 8000\n\n" +
+       "then open http://localhost:8000/\n\n(" + e.message + ")");
+}
+
+const N = scene.n_leds, NF = scene.n_frames, FPS = scene.fps;
+$("n-leds").textContent = N;
+$("n-frames").textContent = NF;
+$("src-fps").textContent = FPS;
+$("scrub").max = NF - 1;
+
+// ---- scene ----------------------------------------------------------------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+$("app").appendChild(renderer.domElement);
+
+const three = new THREE.Scene();
+three.background = new THREE.Color(0x07070b);
+
+// center + frame the sculpture
+const bmin = new THREE.Vector3(...scene.bounds.min);
+const bmax = new THREE.Vector3(...scene.bounds.max);
+const center = bmin.clone().add(bmax).multiplyScalar(0.5);
+const span = bmax.clone().sub(bmin).length();
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.01, 1000);
+camera.position.set(center.x + span * 0.55, center.y - span * 0.9, center.z + span * 0.25);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.copy(center);
+controls.enableDamping = true;
+controls.update();
+
+// faint ground grid at z=0 (floor), rotated into the XY-up world
+const grid = new THREE.GridHelper(span * 1.4, 24, 0x223044, 0x161b26);
+grid.rotation.x = Math.PI / 2;       // sculpture is Z-up; grid defaults to Y-up
+grid.position.set(center.x, center.y, 0);
+three.add(grid);
+
+// ---- LED point cloud ------------------------------------------------------
+const geo = new THREE.BufferGeometry();
+const pos = new Float32Array(N * 3);
+for (let i = 0; i < N; i++) {
+  pos[i*3] = scene.positions[i][0];
+  pos[i*3+1] = scene.positions[i][1];
+  pos[i*3+2] = scene.positions[i][2];
+}
+geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+const col = new Float32Array(N * 3);
+geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+
+// round, soft point sprite so LEDs read as glowing dots not squares
+const sprite = (() => {
+  const c = document.createElement("canvas"); c.width = c.height = 64;
+  const g = c.getContext("2d");
+  const grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grd.addColorStop(0, "rgba(255,255,255,1)");
+  grd.addColorStop(0.35, "rgba(255,255,255,0.85)");
+  grd.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = grd; g.fillRect(0, 0, 64, 64);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+})();
+
+const mat = new THREE.PointsMaterial({
+  size: span * 0.018, map: sprite, vertexColors: true,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  sizeAttenuation: true,
+});
+const points = new THREE.Points(geo, mat);
+three.add(points);
+
+// ---- bloom ----------------------------------------------------------------
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(three, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.9, 0.6, 0.0);
+composer.addPass(bloom);
+
+// ---- playback -------------------------------------------------------------
+let frame = 0, playing = true, acc = 0, last = performance.now();
+const colAttr = geo.getAttribute("color");
+
+function applyFrame(f) {
+  const base = f * N * 3;
+  for (let i = 0; i < N * 3; i++) col[i] = frames[base + i] / 255;
+  colAttr.needsUpdate = true;
+  $("scrub").value = f;
+  const ts = (f / FPS).toFixed(2), tot = (NF / FPS).toFixed(2);
+  $("t").textContent = `${ts} / ${tot}s`;
+}
+applyFrame(0);
+
+$("play").onclick = () => { playing = !playing; $("play").textContent = playing ? "⏸" : "▶"; };
+$("scrub").oninput = (e) => { playing = false; $("play").textContent = "▶"; frame = +e.target.value; applyFrame(frame); };
+$("bloom").onchange = (e) => { bloom.enabled = e.target.checked; };
+$("spin").onchange = (e) => { controls.autoRotate = e.target.checked; controls.autoRotateSpeed = 0.8; };
+
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight); composer.setSize(innerWidth, innerHeight);
+});
+
+// render-fps meter
+let racc = 0, rcount = 0;
+function loop(now) {
+  const dt = (now - last) / 1000; last = now;
+  if (playing) {
+    acc += dt;
+    const step = 1 / FPS;
+    while (acc >= step) { acc -= step; frame = (frame + 1) % NF; }
+    applyFrame(frame);
+  }
+  controls.update();
+  (bloom.enabled ? composer : renderer).render(three, camera);
+
+  racc += dt; rcount++;
+  if (racc >= 0.5) { $("rfps").textContent = (rcount / racc).toFixed(0); racc = 0; rcount = 0; }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

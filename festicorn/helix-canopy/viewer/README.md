@@ -1,56 +1,70 @@
-# LED viewer — Phase 0 (interactive playback)
+# LED viewer / IDE
 
 Real-time, orbitable, scrubbable 3D playback of helix-canopy effects in the
-browser. This is **Phase 0** of the LED IDE: it does *not* run `effects.h` live
-yet — it plays back frames the existing host sim already produces. It exists to
-replace the slow, non-interactive matplotlib MP4 with something you can orbit
-and scrub today, and to stand up the headless screenshot harness the AI loop
-needs. Phase 1 swaps the precomputed frames for `effects.h` compiled to WASM.
+browser. Two data sources behind one renderer:
 
-## Pipeline
+- **`wasm` (live, default)** — `effects.h` compiled to WebAssembly runs the real
+  effect math per frame, in the browser. Switch effects from the dropdown, no
+  rebuild. This is the live IDE.
+- **`frames` (precomputed)** — plays back a packed sim CSV. The Phase 0 fallback;
+  also what you'd use to view a capture without building the engine.
+
+Anti-drift holds in both: the colors come from the one `effects.h` (via WASM, or
+via the host sim that produced the frames). The viewer only draws. The WASM
+engine's output is byte-identical to the host C++ sim on deterministic effects.
+
+## Layout
 
 ```
-effect_sim (tools/sim)  ──CSV──►  build_frames.py  ──►  data/scene.json + data/frames.bin
-                                                              │
-                                              index.html (Three.js) ◄── browser / Playwright
+src/effects.h ─┬─► wasm/engine.cpp ──emcc──► wasm/engine.mjs + .wasm
+               │                                   │        │
+               │                          browser (live) ─┘        └─► node dump.mjs ─► CSV ─► analyze.py
+               └─► tools/sim/effect_sim (legacy host sim, same CSV) ─────────────────────────────┘
+geometry/layout.json ──► viewer/build_frames.py ──► viewer/data/  (frames-mode payload)
 ```
 
-Anti-drift is preserved: the colors come from the real `effects.h` via the host
-sim. Nothing about the effect math is reimplemented here — the viewer only draws.
-
-## Run it
+## Run it (live WASM mode)
 
 ```bash
-# 1. generate frames from the sim (once per effect / geometry change)
-cd ../tools/sim && make && ./effect_sim nebula 30 20 > nebula_frames.csv
+# 1. build the engine (once; rebuild when effects.h or geometry changes)
+cd ../wasm && ./build.sh
 
-# 2. pack them for the browser
-cd ../../viewer && python3 build_frames.py        # writes data/
+# 2. serve from the helix-canopy ROOT so /viewer/ and /wasm/ both resolve
+cd .. && python3 -m http.server 8777 -d .
 
-# 3. serve + open
-python3 -m http.server 8777 -d .                  # then open http://localhost:8777/
+# 3. open  http://localhost:8777/viewer/         (live WASM, default)
+#          http://localhost:8777/viewer/?mode=wasm&fx=pour
+#          http://localhost:8777/viewer/?mode=frames    (precomputed fallback)
 ```
 
-Use a different effect or framerate:
+Controls: drag to orbit, scroll to zoom, scrub the timeline, effect dropdown
+(WASM only), toggle bloom/spin.
+
+> Note: nebula keeps internal state across frames, so scrubbing backward in WASM
+> mode advances the clock rather than rewinding the simulation. Deterministic
+> effects (pour) are scrub-exact.
+
+## Precomputed-frames mode
 
 ```bash
-cd ../tools/sim && ./effect_sim pour 30 12 > pour_frames.csv
-cd ../../viewer && python3 build_frames.py --csv ../tools/sim/pour_frames.csv --fps 30
+cd ../wasm && node dump.mjs nebula 30 20 > nebula_frames.csv   # WASM dump (or use tools/sim)
+cd ../viewer && python3 build_frames.py --csv ../wasm/nebula_frames.csv --fps 30
+# then open .../viewer/?mode=frames
 ```
-
-Controls: drag to orbit, scroll to zoom, scrub the timeline, toggle bloom/spin.
 
 ## Headless capture (AI loop)
 
 ```bash
 npm i playwright-core@1.49     # one-time; uses system Chrome, no browser download
-node shoot.mjs --frame 300     # writes shots/frame300_*.png at several orbit angles
+node shoot.mjs --frame 300     # writes shots/*.png at several orbit angles
 ```
 
-`shoot.mjs` drives the same viewer a human uses, headless, so an agent can grab
-frames at chosen camera angles + timeline positions and reason about them (or
-diff against the nominal MP4 stills). Render runs well above realtime.
+`shoot.mjs` drives the same viewer headless. The page exposes hooks for agents:
+`window.__ledReady` (first frame composited), `window.__dumpColors()` (current
+display-encoded buffer), `window.__setClock(t)` (pause + jump to time t). For a
+pure data dump with no GPU, run `node ../wasm/dump.mjs` — same engine, CSV out.
 
 ## Generated (gitignored)
 
-`data/`, `shots/`, `node_modules/` are build artifacts — regenerate freely.
+`data/`, `shots/`, `node_modules/` here; `engine.mjs`, `engine.wasm`, `*.csv` in
+`../wasm/`. All regenerable from `build.sh` / `build_frames.py`.

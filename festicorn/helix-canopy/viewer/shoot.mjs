@@ -15,7 +15,7 @@ const arg = (k, d) => {
   const i = process.argv.indexOf(k);
   return i >= 0 ? process.argv[i + 1] : d;
 };
-const URL = arg("--url", "http://localhost:8777/");
+const URL = arg("--url", "http://localhost:8777/viewer/?mode=wasm");
 const FRAME = parseInt(arg("--frame", "300"), 10);
 const OUT = arg("--out", "shots");
 mkdirSync(OUT, { recursive: true });

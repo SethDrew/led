@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>helix-canopy · LED viewer (Phase 0)</title>
+<title>helix-canopy · LED IDE</title>
 <style>
   :root { color-scheme: dark; }
   html, body { margin: 0; height: 100%; background: #07070b; overflow: hidden;
@@ -11,10 +11,16 @@
   #app { position: fixed; inset: 0; }
   #hud { position: fixed; left: 12px; top: 12px; z-index: 10;
     background: rgba(12,12,18,.72); border: 1px solid #ffffff14; border-radius: 8px;
-    padding: 10px 12px; backdrop-filter: blur(6px); min-width: 220px; }
-  #hud h1 { font-size: 12px; margin: 0 0 6px; color: #aab; font-weight: 600; letter-spacing: .04em; }
+    padding: 10px 12px; backdrop-filter: blur(6px); min-width: 230px; }
+  #hud h1 { font-size: 12px; margin: 0 0 6px; color: #aab; font-weight: 600; letter-spacing: .04em;
+    display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  #mode { font-size: 10px; padding: 1px 6px; border-radius: 999px; font-weight: 600; }
+  #mode.wasm { background: #15351f; color: #7fe0a0; border: 1px solid #2f6f47; }
+  #mode.frames { background: #2a2333; color: #c9a8ff; border: 1px solid #5a4a73; }
   #hud .row { display: flex; justify-content: space-between; gap: 14px; color: #8a8f9c; }
   #hud .row b { color: #dfe3ea; font-weight: 600; }
+  #hud select { margin-top: 6px; width: 100%; background: #15171f; color: #dfe3ea;
+    border: 1px solid #ffffff1f; border-radius: 6px; padding: 3px 6px; font: inherit; }
   #controls { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
     z-index: 10; display: flex; align-items: center; gap: 10px; width: min(720px, 92vw);
     background: rgba(12,12,18,.72); border: 1px solid #ffffff14; border-radius: 10px;
@@ -32,15 +38,15 @@
 <body>
 <div id="app"></div>
 <div id="hud">
-  <h1>HELIX-CANOPY · nebula</h1>
+  <h1>HELIX-CANOPY <span id="mode" class="frames">…</span></h1>
+  <div class="row"><span>effect</span><b id="fx">–</b></div>
   <div class="row"><span>LEDs</span><b id="n-leds">–</b></div>
-  <div class="row"><span>frames</span><b id="n-frames">–</b></div>
-  <div class="row"><span>fps (src)</span><b id="src-fps">–</b></div>
   <div class="row"><span>render</span><b id="rfps">–</b></div>
+  <select id="fx-sel" style="display:none"></select>
 </div>
 <div id="controls">
   <button id="play">⏸</button>
-  <input id="scrub" type="range" min="0" max="0" value="0" step="1">
+  <input id="scrub" type="range" min="0" max="1000" value="0" step="1">
   <span id="t">0.00 / 0.00s</span>
   <label class="tog"><input id="bloom" type="checkbox" checked> bloom</label>
   <label class="tog"><input id="spin" type="checkbox"> spin</label>
@@ -63,27 +69,94 @@ import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js"
 
 const $ = (id) => document.getElementById(id);
 const fail = (m) => { const e = $("err"); e.style.display = "grid"; e.textContent = m; throw new Error(m); };
+const params = new URLSearchParams(location.search);
 
-// ---- load payload ---------------------------------------------------------
-let scene, frames;
-try {
-  const sres = await fetch("data/scene.json");
-  if (!sres.ok) throw new Error("scene.json " + sres.status);
-  scene = await sres.json();
-  const fres = await fetch("data/frames.bin");
-  if (!fres.ok) throw new Error("frames.bin " + fres.status);
-  frames = new Uint8Array(await fres.arrayBuffer());
-} catch (e) {
-  fail("Could not load data/.\n\nRun the converter, then serve over http:\n\n" +
-       "  python3 build_frames.py\n  python3 -m http.server -d . 8000\n\n" +
-       "then open http://localhost:8000/\n\n(" + e.message + ")");
+// gamma encode linear 0..1 -> display 0..1 (mirrors the device sink / effect_sim enc()).
+// Both sources feed display-encoded colors into the vertex-color attribute so the
+// live WASM look matches the precomputed-frame look. (A fully linear pipeline with
+// tone-mapping in the post pass is a later calibration step.)
+const G = 1 / 2.2;
+
+// ---- data sources ---------------------------------------------------------
+// Each returns: {mode, nLeds, fps, loopSec, positions:Float32Array(N*3),
+//                effects:[names]|null, setEffect(i)|null, fill(t, outCol)}.
+
+async function wasmSource() {
+  const initEngine = (await import("../wasm/engine.mjs")).default;
+  const M = await initEngine();
+  const render    = M.cwrap("render", "number", ["number"]);
+  const positions = M.cwrap("positions", "number", []);
+  const ledCount  = M.cwrap("led_count", "number", []);
+  const fxCount   = M.cwrap("effect_count", "number", []);
+  const fxName    = M.cwrap("effect_name", "string", ["number"]);
+  const setFx     = M.cwrap("set_effect", null, ["number"]);
+
+  const N = ledCount();
+  const pPtr = positions() >> 2;
+  const pos = new Float32Array(M.HEAPF32.subarray(pPtr, pPtr + N * 3)); // copy out
+  const effects = Array.from({ length: fxCount() }, (_, e) => fxName(e));
+
+  return {
+    mode: "wasm", nLeds: N, fps: 30, loopSec: 20, positions: pos,
+    effects, setEffect: (i) => setFx(i),
+    fill(t, out) {
+      const ptr = render(t) >> 2;                            // re-acquire view each
+      const c = M.HEAPF32.subarray(ptr, ptr + N * 3);        // frame (detach-safe)
+      for (let i = 0; i < N * 3; i++) {
+        let v = c[i]; v = v < 0 ? 0 : v > 1 ? 1 : v;
+        out[i] = Math.pow(v, G);
+      }
+    },
+  };
 }
 
-const N = scene.n_leds, NF = scene.n_frames, FPS = scene.fps;
+async function framesSource() {
+  const s = await (await fetch("data/scene.json")).json();
+  const bin = new Uint8Array(await (await fetch("data/frames.bin")).arrayBuffer());
+  const N = s.n_leds, NF = s.n_frames;
+  const pos = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) { pos[i*3]=s.positions[i][0]; pos[i*3+1]=s.positions[i][1]; pos[i*3+2]=s.positions[i][2]; }
+  return {
+    mode: "frames", nLeds: N, fps: s.fps, loopSec: NF / s.fps, positions: pos,
+    effects: null, setEffect: null, nFrames: NF,
+    fill(t, out) {
+      const f = ((Math.round(t * s.fps) % NF) + NF) % NF;
+      const base = f * N * 3;
+      for (let i = 0; i < N * 3; i++) out[i] = bin[base + i] / 255;
+    },
+  };
+}
+
+let source;
+const want = params.get("mode") || "wasm";
+try {
+  source = want === "frames" ? await framesSource() : await wasmSource();
+} catch (e) {
+  if (want !== "frames") {
+    console.warn("wasm source unavailable, falling back to precomputed frames:", e.message);
+    try { source = await framesSource(); }
+    catch (e2) { fail("No data source.\n\nBuild the engine:  cd ../wasm && ./build.sh\nor pack frames:    python3 build_frames.py\n\nServe from helix-canopy/ and open /viewer/.\n\n(" + e.message + " | " + e2.message + ")"); }
+  } else { fail("frames source failed: " + e.message); }
+}
+
+const N = source.nLeds;
+$("mode").textContent = source.mode;
+$("mode").className = source.mode;
 $("n-leds").textContent = N;
-$("n-frames").textContent = NF;
-$("src-fps").textContent = FPS;
-$("scrub").max = NF - 1;
+
+// effect dropdown (wasm only)
+if (source.effects) {
+  const sel = $("fx-sel");
+  sel.style.display = "block";
+  source.effects.forEach((nm, i) => { const o = document.createElement("option"); o.value = i; o.textContent = nm; sel.appendChild(o); });
+  const initial = params.get("fx");
+  let initialIdx = 0;
+  if (initial != null) { const j = source.effects.indexOf(initial); if (j >= 0) initialIdx = j; }
+  sel.value = initialIdx; source.setEffect(initialIdx); $("fx").textContent = source.effects[initialIdx];
+  sel.onchange = (e) => { const i = +e.target.value; source.setEffect(i); $("fx").textContent = source.effects[i]; };
+} else {
+  $("fx").textContent = "nebula (frames)";
+}
 
 // ---- scene ----------------------------------------------------------------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -95,39 +168,36 @@ $("app").appendChild(renderer.domElement);
 const three = new THREE.Scene();
 three.background = new THREE.Color(0x07070b);
 
-// center + frame the sculpture
-const bmin = new THREE.Vector3(...scene.bounds.min);
-const bmax = new THREE.Vector3(...scene.bounds.max);
-const center = bmin.clone().add(bmax).multiplyScalar(0.5);
-const span = bmax.clone().sub(bmin).length();
+const pos = source.positions;
+const bmin = [Infinity, Infinity, Infinity], bmax = [-Infinity, -Infinity, -Infinity];
+for (let i = 0; i < N; i++) for (let k = 0; k < 3; k++) {
+  bmin[k] = Math.min(bmin[k], pos[i*3+k]); bmax[k] = Math.max(bmax[k], pos[i*3+k]);
+}
+const center = new THREE.Vector3((bmin[0]+bmax[0])/2, (bmin[1]+bmax[1])/2, (bmin[2]+bmax[2])/2);
+const span = Math.hypot(bmax[0]-bmin[0], bmax[1]-bmin[1], bmax[2]-bmin[2]);
 
 const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.01, 1000);
 camera.position.set(center.x + span * 0.55, center.y - span * 0.9, center.z + span * 0.25);
+camera.up.set(0, 0, 1);                                    // sculpture is Z-up
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.copy(center);
 controls.enableDamping = true;
+controls.autoRotateSpeed = 0.8;
 controls.update();
 
-// faint ground grid at z=0 (floor), rotated into the XY-up world
 const grid = new THREE.GridHelper(span * 1.4, 24, 0x223044, 0x161b26);
-grid.rotation.x = Math.PI / 2;       // sculpture is Z-up; grid defaults to Y-up
+grid.rotation.x = Math.PI / 2;
 grid.position.set(center.x, center.y, 0);
 three.add(grid);
 
-// ---- LED point cloud ------------------------------------------------------
+// LED point cloud
 const geo = new THREE.BufferGeometry();
-const pos = new Float32Array(N * 3);
-for (let i = 0; i < N; i++) {
-  pos[i*3] = scene.positions[i][0];
-  pos[i*3+1] = scene.positions[i][1];
-  pos[i*3+2] = scene.positions[i][2];
-}
 geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
 const col = new Float32Array(N * 3);
-geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+const colAttr = new THREE.BufferAttribute(col, 3);
+geo.setAttribute("color", colAttr);
 
-// round, soft point sprite so LEDs read as glowing dots not squares
 const sprite = (() => {
   const c = document.createElement("canvas"); c.width = c.height = 64;
   const g = c.getContext("2d");
@@ -141,57 +211,51 @@ const sprite = (() => {
 
 const mat = new THREE.PointsMaterial({
   size: span * 0.018, map: sprite, vertexColors: true,
-  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-  sizeAttenuation: true,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true,
 });
-const points = new THREE.Points(geo, mat);
-three.add(points);
+three.add(new THREE.Points(geo, mat));
 
-// ---- bloom ----------------------------------------------------------------
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(three, camera));
 const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.9, 0.6, 0.0);
 composer.addPass(bloom);
 
-// ---- playback -------------------------------------------------------------
-let frame = 0, playing = true, acc = 0, last = performance.now();
-const colAttr = geo.getAttribute("color");
+// ---- playback (unified clock in seconds) ----------------------------------
+let clock = 0, playing = true, last = performance.now();
+const SCRUB_MAX = 1000;
 
-function applyFrame(f) {
-  const base = f * N * 3;
-  for (let i = 0; i < N * 3; i++) col[i] = frames[base + i] / 255;
+function apply(t) {
+  source.fill(t, col);
   colAttr.needsUpdate = true;
-  $("scrub").value = f;
-  const ts = (f / FPS).toFixed(2), tot = (NF / FPS).toFixed(2);
-  $("t").textContent = `${ts} / ${tot}s`;
+  const loop = source.loopSec;
+  $("scrub").value = Math.round((((t % loop) + loop) % loop) / loop * SCRUB_MAX);
+  $("t").textContent = `${(((t % loop)+loop)%loop).toFixed(2)} / ${loop.toFixed(2)}s`;
 }
-applyFrame(0);
+apply(0);
 
 $("play").onclick = () => { playing = !playing; $("play").textContent = playing ? "⏸" : "▶"; };
-$("scrub").oninput = (e) => { playing = false; $("play").textContent = "▶"; frame = +e.target.value; applyFrame(frame); };
+$("scrub").oninput = (e) => { playing = false; $("play").textContent = "▶"; clock = (+e.target.value / SCRUB_MAX) * source.loopSec; apply(clock); };
 $("bloom").onchange = (e) => { bloom.enabled = e.target.checked; };
-$("spin").onchange = (e) => { controls.autoRotate = e.target.checked; controls.autoRotateSpeed = 0.8; };
+$("spin").onchange = (e) => { controls.autoRotate = e.target.checked; };
 
 addEventListener("resize", () => {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight); composer.setSize(innerWidth, innerHeight);
 });
 
-// render-fps meter
+// headless hooks for the AI loop
+window.__ledReady = false;
+window.__dumpColors = () => Array.from(col);
+window.__setClock = (t) => { playing = false; clock = t; apply(t); };
+
 let racc = 0, rcount = 0;
 function loop(now) {
   const dt = (now - last) / 1000; last = now;
-  if (playing) {
-    acc += dt;
-    const step = 1 / FPS;
-    while (acc >= step) { acc -= step; frame = (frame + 1) % NF; }
-    applyFrame(frame);
-  }
+  if (playing) { clock += dt; apply(clock); }
   controls.update();
   (bloom.enabled ? composer : renderer).render(three, camera);
-
   racc += dt; rcount++;
-  if (racc >= 0.5) { $("rfps").textContent = (rcount / racc).toFixed(0); racc = 0; rcount = 0; }
+  if (racc >= 0.5) { $("rfps").textContent = (rcount / racc).toFixed(0); racc = 0; rcount = 0; window.__ledReady = true; }
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);

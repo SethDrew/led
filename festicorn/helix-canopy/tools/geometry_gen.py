@@ -55,10 +55,11 @@ P = {
 
     # ── Root system ──────────────────────────────────────────────────────
     "roots_count":        7,
-    "roots_len_min_m":    3.0 * FT,
-    "roots_len_max_m":    8.0 * FT,
+    "roots_len_min_m":    20.0 * FT,    # arc length; net reach is shorter due to wander
+    "roots_len_max_m":    22.0 * FT,    # tight variance so roots are comparable
     "roots_led_pitch_m":  0.05,
-    "roots_wander_deg":   22.0,         # max heading change per LED step (random walk)
+    "roots_wander_deg":   12.0,         # max heading change per LED step (random walk)
+    "roots_jitter_deg":   18.0,         # +/- jitter on the evenly-spaced base heading
     "roots_seed":         7,            # deterministic layout (re-run = same roots)
 }
 
@@ -180,13 +181,21 @@ def build_canopy(p):
 
 
 def build_roots(p):
-    """N roots splaying randomly from the trunk base, wandering along the floor."""
+    """N roots splaying evenly from the trunk base, wandering along the floor.
+
+    Base headings are evenly spaced around the circle (2*pi*k/count) with a
+    small random jitter so the splay is balanced but not robotic. Arc length is
+    set well above the target net reach because the random walk shortens the
+    straight-line distance the root actually travels from the trunk axis.
+    """
     rng = random.Random(p["roots_seed"])
     pitch = p["roots_led_pitch_m"]
     wander = math.radians(p["roots_wander_deg"])
+    jitter = math.radians(p["roots_jitter_deg"])
+    count = p["roots_count"]
     roots = []
-    for k in range(p["roots_count"]):
-        heading = rng.uniform(0, 2 * math.pi)
+    for k in range(count):
+        heading = 2.0 * math.pi * k / count + rng.uniform(-jitter, jitter)
         length = rng.uniform(p["roots_len_min_m"], p["roots_len_max_m"])
         n = max(2, int(round(length / pitch)))
         x, y, z = 0.0, 0.0, 0.01

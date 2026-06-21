@@ -66,6 +66,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import GUI from "https://unpkg.com/lil-gui@0.19/dist/lil-gui.esm.min.js";
 
 const $ = (id) => document.getElementById(id);
 const fail = (m) => { const e = $("err"); e.style.display = "grid"; e.textContent = m; throw new Error(m); };
@@ -96,9 +97,23 @@ async function wasmSource() {
   const pos = new Float32Array(M.HEAPF32.subarray(pPtr, pPtr + N * 3)); // copy out
   const effects = Array.from({ length: fxCount() }, (_, e) => fxName(e));
 
+  // live tunables registry (effects.h HC_PARAMS) + global brightness
+  const pCount  = M.cwrap("param_count", "number", []);
+  const pEffect = M.cwrap("param_effect", "string", ["number"]);
+  const pName   = M.cwrap("param_name", "string", ["number"]);
+  const pLo     = M.cwrap("param_lo", "number", ["number"]);
+  const pHi     = M.cwrap("param_hi", "number", ["number"]);
+  const pGet    = M.cwrap("param_get", "number", ["number"]);
+  const pSet    = M.cwrap("param_set", null, ["number", "number"]);
+  const setBrightness = M.cwrap("set_brightness", null, ["number"]);
+  const params = Array.from({ length: pCount() }, (_, i) => ({
+    effect: pEffect(i), name: pName(i), lo: pLo(i), hi: pHi(i),
+    get: () => pGet(i), set: (v) => pSet(i, v),
+  }));
+
   return {
     mode: "wasm", nLeds: N, fps: 30, loopSec: 20, positions: pos,
-    effects, setEffect: (i) => setFx(i),
+    effects, setEffect: (i) => setFx(i), params, setBrightness,
     fill(t, out) {
       const ptr = render(t) >> 2;                            // re-acquire view each
       const c = M.HEAPF32.subarray(ptr, ptr + N * 3);        // frame (detach-safe)
@@ -144,16 +159,36 @@ $("mode").textContent = source.mode;
 $("mode").className = source.mode;
 $("n-leds").textContent = N;
 
-// effect dropdown (wasm only)
+// effect dropdown + live param sliders (wasm only)
 if (source.effects) {
   const sel = $("fx-sel");
   sel.style.display = "block";
   source.effects.forEach((nm, i) => { const o = document.createElement("option"); o.value = i; o.textContent = nm; sel.appendChild(o); });
-  const initial = params.get("fx");
+
+  const gui = new GUI({ title: "tune" });
+  const globals = { brightness: 1.0 };
+  gui.add(globals, "brightness", 0.0, 2.0, 0.01).onChange((v) => source.setBrightness(v));
+  let fxFolder = null;
+
+  const selectEffect = (i) => {
+    source.setEffect(i);
+    $("fx").textContent = source.effects[i];
+    if (fxFolder) fxFolder.destroy();
+    fxFolder = gui.addFolder(source.effects[i]);
+    const ps = source.params.filter((p) => p.effect === source.effects[i]);
+    if (!ps.length) fxFolder.add({ note: "no params" }, "note").disable();
+    for (const p of ps) {
+      const proxy = { [p.name]: p.get() };
+      const step = (p.hi - p.lo) / 200;
+      fxFolder.add(proxy, p.name, p.lo, p.hi, step).onChange((v) => p.set(v));
+    }
+  };
+
   let initialIdx = 0;
+  const initial = params.get("fx");
   if (initial != null) { const j = source.effects.indexOf(initial); if (j >= 0) initialIdx = j; }
-  sel.value = initialIdx; source.setEffect(initialIdx); $("fx").textContent = source.effects[initialIdx];
-  sel.onchange = (e) => { const i = +e.target.value; source.setEffect(i); $("fx").textContent = source.effects[i]; };
+  sel.value = initialIdx; selectEffect(initialIdx);
+  sel.onchange = (e) => selectEffect(+e.target.value);
 } else {
   $("fx").textContent = "nebula (frames)";
 }

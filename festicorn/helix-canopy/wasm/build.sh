@@ -14,8 +14,8 @@ EMCC="${EMCC:-emcc}"
   -I../src -I../geometry \
   -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=web,node \
   -sALLOW_MEMORY_GROWTH=0 -sINITIAL_MEMORY=16MB \
-  -sEXPORTED_FUNCTIONS=_render,_positions,_led_count,_effect_count,_effect_name,_set_effect,_get_effect,_set_brightness,_get_brightness,_param_count,_param_effect,_param_name,_param_lo,_param_hi,_param_get,_param_set,_malloc,_free \
-  -sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString,HEAPF32 \
+  -sEXPORTED_FUNCTIONS=_render,_positions,_kinds,_led_count,_effect_count,_effect_name,_set_effect,_get_effect,_set_brightness,_get_brightness,_param_count,_param_effect,_param_name,_param_lo,_param_hi,_param_get,_param_set,_malloc,_free \
+  -sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString,HEAPF32,HEAP32 \
   -o engine.mjs
 
 echo "built $(pwd)/engine.mjs (+ engine.wasm)"

@@ -51,6 +51,16 @@ const float* positions() {
     return g_pos;
 }
 
+// Per-LED section kind (0=helix, 1=canopy, 2=root) from the strip table, so the
+// viewer can size/dim each section independently without re-reading meta.json.
+static int g_kind[HC_NUM_LEDS];
+const int* kinds() {
+    for (int s = 0; s < HC_NUM_STRIPS; s++)
+        for (int j = 0; j < HC_STRIPS[s].count; j++)
+            g_kind[HC_STRIPS[s].start + j] = HC_STRIPS[s].kind;
+    return g_kind;
+}
+
 // Render the active effect at time t; returns a pointer to N*3 linear floats.
 const float* render(float t) {
     HC_EFFECTS[g_effect].fn(g_buf, t);

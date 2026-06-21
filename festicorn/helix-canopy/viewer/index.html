@@ -95,6 +95,8 @@ async function wasmSource() {
   const N = ledCount();
   const pPtr = positions() >> 2;
   const pos = new Float32Array(M.HEAPF32.subarray(pPtr, pPtr + N * 3)); // copy out
+  const kPtr = M.cwrap("kinds", "number", [])() >> 2;
+  const kinds = new Int32Array(M.HEAP32.subarray(kPtr, kPtr + N));      // 0=helix 1=canopy 2=root
   const effects = Array.from({ length: fxCount() }, (_, e) => fxName(e));
 
   // live tunables registry (effects.h HC_PARAMS) + global brightness
@@ -112,7 +114,7 @@ async function wasmSource() {
   }));
 
   return {
-    mode: "wasm", nLeds: N, fps: 30, loopSec: 20, positions: pos,
+    mode: "wasm", nLeds: N, fps: 30, loopSec: 20, positions: pos, kinds,
     effects, setEffect: (i) => setFx(i), params, setBrightness,
     fill(t, out) {
       const ptr = render(t) >> 2;                            // re-acquire view each
@@ -131,8 +133,9 @@ async function framesSource() {
   const N = s.n_leds, NF = s.n_frames;
   const pos = new Float32Array(N * 3);
   for (let i = 0; i < N; i++) { pos[i*3]=s.positions[i][0]; pos[i*3+1]=s.positions[i][1]; pos[i*3+2]=s.positions[i][2]; }
+  const kinds = Int32Array.from(s.kinds || new Array(N).fill(0));
   return {
-    mode: "frames", nLeds: N, fps: s.fps, loopSec: NF / s.fps, positions: pos,
+    mode: "frames", nLeds: N, fps: s.fps, loopSec: NF / s.fps, positions: pos, kinds,
     effects: null, setEffect: null, nFrames: NF,
     fill(t, out) {
       const f = ((Math.round(t * s.fps) % NF) + NF) % NF;
@@ -160,12 +163,13 @@ $("mode").className = source.mode;
 $("n-leds").textContent = N;
 
 // effect dropdown + live param sliders (wasm only)
+let gui = null;
 if (source.effects) {
   const sel = $("fx-sel");
   sel.style.display = "block";
   source.effects.forEach((nm, i) => { const o = document.createElement("option"); o.value = i; o.textContent = nm; sel.appendChild(o); });
 
-  const gui = new GUI({ title: "tune" });
+  gui = new GUI({ title: "tune" });
   const globals = { brightness: 1.0 };
   gui.add(globals, "brightness", 0.0, 2.0, 0.01).onChange((v) => source.setBrightness(v));
   let fxFolder = null;
@@ -226,29 +230,69 @@ grid.rotation.x = Math.PI / 2;
 grid.position.set(center.x, center.y, 0);
 three.add(grid);
 
-// LED point cloud
+// LED point cloud. Each LED carries its own world-space glow DIAMETER (aSize),
+// so a dense section (trunk, 33mm pitch) can be drawn small enough to read as
+// individual pixels while a sparse section (canopy bulbs) glows large. A raw
+// ShaderMaterial does perspective-correct world sizing (PointsMaterial can't do
+// per-vertex size).
 const geo = new THREE.BufferGeometry();
 geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
 const col = new Float32Array(N * 3);
 const colAttr = new THREE.BufferAttribute(col, 3);
 geo.setAttribute("color", colAttr);
 
-const sprite = (() => {
-  const c = document.createElement("canvas"); c.width = c.height = 64;
-  const g = c.getContext("2d");
-  const grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
-  grd.addColorStop(0, "rgba(255,255,255,1)");
-  grd.addColorStop(0.35, "rgba(255,255,255,0.85)");
-  grd.addColorStop(1, "rgba(255,255,255,0)");
-  g.fillStyle = grd; g.fillRect(0, 0, 64, 64);
-  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
-})();
+const sizeArr = new Float32Array(N);
+const sizeAttr = new THREE.BufferAttribute(sizeArr, 1);
+geo.setAttribute("aSize", sizeAttr);
 
-const mat = new THREE.PointsMaterial({
-  size: span * 0.018, map: sprite, vertexColors: true,
-  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true,
+// per-section glow diameter (m), indexed by kind 0=helix 1=canopy 2=root.
+// trunk default small (< 33mm pitch) so pixels stay distinct.
+const sectionSize = [0.028, 0.16, 0.06];
+function applySectionSizes() {
+  for (let i = 0; i < N; i++) sizeArr[i] = sectionSize[source.kinds[i]] ?? 0.05;
+  sizeAttr.needsUpdate = true;
+}
+applySectionSizes();
+
+const ptsMat = new THREE.ShaderMaterial({
+  uniforms: { uScale: { value: 1.0 } },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute float aSize;
+    attribute vec3 color;
+    varying vec3 vColor;
+    uniform float uScale;
+    void main() {
+      vColor = color;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = aSize * uScale / max(0.001, -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    varying vec3 vColor;
+    void main() {
+      float r = length(gl_PointCoord - vec2(0.5)) * 2.0;
+      if (r > 1.0) discard;
+      float a = pow(1.0 - r, 1.6);            // soft round falloff
+      gl_FragColor = vec4(vColor * a, a);
+    }`,
 });
-three.add(new THREE.Points(geo, mat));
+three.add(new THREE.Points(geo, ptsMat));
+
+// world diameter -> device pixels: drawingBufferHeight / (2 tan(fov/2))
+function updatePointScale() {
+  const h = renderer.domElement.height;
+  ptsMat.uniforms.uScale.value = h / (2 * Math.tan(camera.fov * Math.PI / 360));
+}
+updatePointScale();
+
+// glow sizing sliders (works in both modes)
+if (!gui) gui = new GUI({ title: "tune" });
+const glow = gui.addFolder("glow size (m)");
+const gp = { helix: sectionSize[0], canopy: sectionSize[1], roots: sectionSize[2] };
+glow.add(gp, "helix", 0.005, 0.2, 0.001).onChange((v) => { sectionSize[0] = v; applySectionSizes(); });
+glow.add(gp, "canopy", 0.01, 0.4, 0.005).onChange((v) => { sectionSize[1] = v; applySectionSizes(); });
+glow.add(gp, "roots", 0.005, 0.2, 0.001).onChange((v) => { sectionSize[2] = v; applySectionSizes(); });
 
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(three, camera));
@@ -276,12 +320,17 @@ $("spin").onchange = (e) => { controls.autoRotate = e.target.checked; };
 addEventListener("resize", () => {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight); composer.setSize(innerWidth, innerHeight);
+  updatePointScale();
 });
 
 // headless hooks for the AI loop
 window.__ledReady = false;
 window.__dumpColors = () => Array.from(col);
 window.__setClock = (t) => { playing = false; clock = t; apply(t); };
+window.__setGlow = (h, c, r) => {                          // per-section glow diameter (m)
+  if (h != null) sectionSize[0] = h; if (c != null) sectionSize[1] = c; if (r != null) sectionSize[2] = r;
+  applySectionSizes();
+};
 
 let racc = 0, rcount = 0;
 function loop(now) {

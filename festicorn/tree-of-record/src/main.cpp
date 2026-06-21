@@ -7,11 +7,11 @@
  *
  *   tens (10-pos knob) → brightness; 0 = fully off
  *   ones (0–11)        → speed (12 steps, log-spaced 0.2–8.0)
- *   decouter (0–11)    → effect select, grouped: 0–3 audio field effects
- *                        (bloom, fire, heat, worley), 4–6 audio particle
- *                        effects (gravity, sparkle, creatures), 7 ambient
- *                        particles (leaf-wind), 8–10 passive
- *                        (light-through, nebula, rainbow); 11 repeats rainbow
+ *   decouter (0–11)    → effect select, grouped: 0–2 audio field effects
+ *                        (bloom, fire, heat), 3–4 audio particle
+ *                        effects (sparkle, creatures), 5 ambient
+ *                        particles (leaf-wind), 6–8 passive
+ *                        (light-through, nebula, rainbow); 9–11 repeat rainbow
  *   hundreds (0–4)     → recording slot select (0–4)
  *   decmid (0–9)       → hue        36° rotation steps (full wheel)
  *   decinner (0–9)     → saturation 5=original, 0=boosted to full, 9=white
@@ -999,9 +999,7 @@ enum EffectId : uint8_t {
     FX_AMBIENT_BLOOM = 0,   // slow energy swell (audioEnergy5s contrast)
     FX_FIRE,                // energy = flame height, onsets = flicker
     FX_HEAT_DIFFUSION,      // energy injects heat at rotating point; PDE spreads it
-    FX_WORLEY,              // onsets kick Voronoi seeds; boundaries flare
     // audio-reactive: particle effects
-    FX_GRAVITY_PARTICLE,    // speech envelope springs particles outward
     FX_SPARKLE_SYLLABLE,    // discrete onsets spawn sparks (+ tilt hue)
     FX_CREATURES,           // speech-energy excitement (was accel shake)
     // ambient: particle effects
@@ -1010,9 +1008,9 @@ enum EffectId : uint8_t {
     FX_LIGHT_THROUGH,
     FX_NEBULA,
     FX_RAINBOW,
-    FX_COUNT                // = 11: decouter ring has 12 slots, so the top
-                            // slot (11) clamps onto RAINBOW (10) — two adjacent
-                            // rainbow/playback positions. See decouter select.
+    FX_COUNT                // = 9: decouter ring has 12 slots, so the top
+                            // three slots (9–11) clamp onto RAINBOW (8) —
+                            // adjacent rainbow/playback positions. See decouter select.
 };
 
 static uint8_t currentEffect = FX_AMBIENT_BLOOM;
@@ -1027,10 +1025,6 @@ static union {
     float neb[NUM_STRIPS][LEDS_PER_STRIP];   // nebula: orb trail decay
     float heat[NUM_STRIPS][LEDS_PER_STRIP];  // heat diffusion: temperature
 } fxField;
-
-// Per-strip RGB accumulation scratch, valid within one render call only
-// (gravity).
-static float fxAccR[LEDS_PER_STRIP], fxAccG[LEDS_PER_STRIP], fxAccB[LEDS_PER_STRIP];
 
 // ── Audio/motion feature globals ────────────────────────────────
 // The bulb-fleet effects (gravity, sparkle, fire, quiet bloom) consume
@@ -1402,188 +1396,6 @@ static void renderBloomStrip(uint8_t s, float dt) {
         uint8_t b8 = t16B >> 8;
 
         setPixel(s, i, r8, g8, b8);
-    }
-}
-
-// ── Gravity particle (ported from bulb-fleet renderGravitySparkle) ─
-// Particles fall under accelerometer tilt and splat as OKLCH glows.
-// Stubbed at rest (ax=0) → no gravity → particles settle, gentle static.
-// No per-effect cap (renderBrightness via setPixelScaled).
-#define GS_PARTICLE_COUNT 7
-#define GS_GRAVITY_SCALE  40.0f
-#define GS_VELOCITY_DAMP  0.92f
-#define GS_BOUNCE_REBOUND 0.5f
-#define GS_SPLAT_RADIUS   2.5f
-// Per-particle intrinsic brightness: the value each particle's glow is drawn at
-// (multiplies its OKLCH splat color). 1.55 lifts gravity's per-lit-pixel mean
-// into the ambient band without widening the ±3 px splat (coverage unchanged);
-// cores that exceed 255 still clamp, so the bead-tip glows stay punchy.
-#define GS_SPLAT_VALUE    1.55f
-// Audio-driven breathing: speech (energy) springs each particle OUT from its
-// origin toward the strip ends; silence relaxes it back home. Spread is the
-// max outward displacement at full energy; stiff is the spring pull strength.
-#define GS_SPREAD         (LEDS_PER_STRIP * 0.40f)
-#define GS_SPRING_STIFF   55.0f
-// Idle tide: with no audio the whole field drifts from home out to the
-// strip ends and back in one slow shared cycle. Each particle parks
-// GS_TIDE_GAP px short of its same-direction neighbor at the end (a bead
-// stack), so converging particles never pile onto one pixel and sum to
-// white — at full tide they read as distinct glows lined up at the tips.
-#define GS_TIDE_GAP       6.0f
-static float gsTidePeriod = 28.0f;   // s per full out-and-back (GS_TIDE_S)
-
-static float gsIdleTime = 0.0f;
-
-struct GsParticle {
-    float pos;
-    float vel;
-    float bright;
-    float hue;
-    float origin;   // home position; particle springs out from / back to this
-    float dir;      // outward direction (+1/-1), away from strip center
-    float beadDist; // max outward travel: this particle's bead slot at the end
-};
-static float gsEnergyEma = 0.0f;   // smoothed speech energy driving the spread
-static GsParticle gsParticles[NUM_STRIPS][GS_PARTICLE_COUNT];
-
-static void resetGravity() {
-    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
-        // Seed positions from this strip's stick boundaries so the topology is
-        // visible the instant gravity starts; particles then fall from there.
-        float seedPos[GS_PARTICLE_COUNT];
-        uint8_t nSeed = 0;
-        for (uint8_t k = 0; k < STICK_COUNT && nSeed < GS_PARTICLE_COUNT; k++) {
-            if (STICKS[k].strip != s) continue;
-            seedPos[nSeed++] = (float)STICKS[k].start;
-            if (nSeed < GS_PARTICLE_COUNT)
-                seedPos[nSeed++] = (float)STICKS[k].end;
-        }
-        // Strips with no sticks (1, 3): fall back to an even spread.
-        if (nSeed == 0) {
-            for (uint8_t k = 0; k < GS_PARTICLE_COUNT; k++)
-                seedPos[k] = (float)(LEDS_PER_STRIP - 1)
-                    * (float)k / (float)(GS_PARTICLE_COUNT - 1);
-            nSeed = GS_PARTICLE_COUNT;
-        }
-
-        const float center = (float)(LEDS_PER_STRIP - 1) * 0.5f;
-        gsIdleTime = 0.0f;
-        for (uint16_t i = 0; i < GS_PARTICLE_COUNT; i++) {
-            float home = seedPos[i % nSeed];
-            gsParticles[s][i].pos = home;
-            gsParticles[s][i].origin = home;
-            // Outward = away from the strip's midpoint, so speech expands the
-            // whole field toward both ends. Particles exactly at center go up.
-            gsParticles[s][i].dir = (home >= center) ? 1.0f : -1.0f;
-            gsParticles[s][i].vel = 0.0f;
-            gsParticles[s][i].bright = 1.0f;
-            float baseHue = 256.0f * (float)i / (float)GS_PARTICLE_COUNT;
-            gsParticles[s][i].hue = fmodf(baseHue + (float)STRIP_HUE_OFFSET[s], 256.0f);
-        }
-
-        // Bead slots: rank same-direction particles by closeness to their
-        // strip end (preserving home order, so paths never cross) and park
-        // each GS_TIDE_GAP px behind the one ahead of it. beadDist is the
-        // max outward travel; the tide and speech spread both cap there.
-        for (uint16_t i = 0; i < GS_PARTICLE_COUNT; i++) {
-            GsParticle &p = gsParticles[s][i];
-            uint8_t rank = 0;
-            for (uint16_t j = 0; j < GS_PARTICLE_COUNT; j++) {
-                if (j == i || gsParticles[s][j].dir != p.dir) continue;
-                float dj = gsParticles[s][j].origin * p.dir;
-                float di = p.origin * p.dir;
-                if (dj > di || (dj == di && j < i)) rank++;
-            }
-            float endPos = (p.dir > 0.0f) ? (float)(LEDS_PER_STRIP - 1) : 0.0f;
-            float room = (endPos - p.origin) * p.dir - (float)rank * GS_TIDE_GAP;
-            p.beadDist = fmaxf(room, 0.0f);
-        }
-    }
-}
-
-static void renderGravity(float dt) {
-    // Speech energy springs particles out from origin; silence relaxes them home.
-    // gDt, not the speed-scaled dt: the ones knob shapes motion, never reaction
-    // latency — sensing stays real-time like the rest of the audio path.
-    gsEnergyEma += fminf(1.0f, gDt / 0.15f) * (fxEnergy - gsEnergyEma);
-    float damp = fastDecay(GS_VELOCITY_DAMP, dt * 30.0f);
-    gsIdleTime += dt;   // ambient motion → speed-scaled dt
-
-    // Idle tide, shared by all particles: 0 at home, 1 at the bead slot,
-    // cosine-eased out and back over gsTidePeriod (starts at home on reset).
-    float gsTide = 0.5f - 0.5f * fastSin(gsIdleTime * (6.2832f / gsTidePeriod)
-                                         + 1.5708f);
-
-    const float maxPos = (float)(LEDS_PER_STRIP - 1);
-    const float invTwoSigSq = 1.0f / (2.0f * GS_SPLAT_RADIUS * GS_SPLAT_RADIUS);
-
-    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
-        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
-            fxAccR[i] = 0; fxAccG[i] = 0; fxAccB[i] = 0;
-        }
-
-        for (uint16_t i = 0; i < GS_PARTICLE_COUNT; i++) {
-            GsParticle &p = gsParticles[s][i];
-
-            // Target = origin pushed outward by the tide plus speech energy,
-            // capped at the bead slot so converging particles stack apart
-            // instead of summing into white. Displacement is outward-only
-            // (0..beadDist) so it never fights the one-way wall below.
-            float disp = gsTide * p.beadDist + gsEnergyEma * GS_SPREAD;
-            if (disp > p.beadDist) disp = p.beadDist;
-            float target = p.origin + p.dir * disp;
-            target = clampf(target, 0.0f, maxPos);
-            p.vel += GS_SPRING_STIFF * (target - p.pos) * dt;   // spring toward target
-            p.vel *= damp;                                       // damping for settle
-            p.pos += p.vel * dt;
-
-            // Home is a one-way wall: the underdamped spring would otherwise
-            // slosh past the origin to the inward side on release. Arrest the
-            // particle at home instead — outward stays bouncy, return settles.
-            float outDisp = (p.pos - p.origin) * p.dir;
-            if (outDisp < 0.0f) {
-                p.pos = p.origin;
-                if (p.vel * p.dir < 0.0f) p.vel = 0.0f;
-            }
-
-            if (p.pos < 0.0f) {
-                p.pos = 0.0f;
-                if (p.vel < 0.0f) p.vel = -p.vel * GS_BOUNCE_REBOUND;
-            } else if (p.pos > maxPos) {
-                p.pos = maxPos;
-                if (p.vel > 0.0f) p.vel = -p.vel * GS_BOUNCE_REBOUND;
-            }
-
-            uint8_t hueIdx = (uint8_t)((uint32_t)p.hue & 0xFF);
-            float colR = (float)oklchVarL[hueIdx][0] * GS_SPLAT_VALUE;
-            float colG = (float)oklchVarL[hueIdx][1] * GS_SPLAT_VALUE;
-            float colB = (float)oklchVarL[hueIdx][2] * GS_SPLAT_VALUE;
-
-            int center = (int)(p.pos + 0.5f);
-            int lo = center - 3; if (lo < 0) lo = 0;
-            int hi = center + 3; if (hi > (int)(LEDS_PER_STRIP - 1)) hi = LEDS_PER_STRIP - 1;
-            for (int j = lo; j <= hi; j++) {
-                float d = (float)j - p.pos;
-                float w = expf(-(d * d) * invTwoSigSq);
-                fxAccR[j] += colR * w;
-                fxAccG[j] += colG * w;
-                fxAccB[j] += colB * w;
-            }
-        }
-
-        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
-            float r = fxAccR[i];
-            float g = fxAccG[i];
-            float b = fxAccB[i];
-            float maxCh = fmaxf(r, fmaxf(g, b));
-            float bright = clampf(maxCh / 255.0f, 0.0f, 1.0f);
-            float linBright = fastGamma24(bright);
-            float norm = (bright > 0.001f) ? (linBright / bright) : 0.0f;
-            setPixelScaled(s, i,
-                clampf(r * norm, 0.0f, 255.0f),
-                clampf(g * norm, 0.0f, 255.0f),
-                clampf(b * norm, 0.0f, 255.0f));
-        }
     }
 }
 
@@ -2713,114 +2525,6 @@ static void renderLightThrough(float dt) {
     }
 }
 
-// ── Worley collision (ported from audio-reactive worley_voronoi.py) ─
-// Voronoi seeds on springs. Speech onsets kick them outward from strip
-// center; the cell boundaries (F2−F1 proximity) flare bright and drift
-// back as the springs settle. Idle look departs from the Python original
-// (dark interiors, boundary-only glow): every cell is solid-filled with
-// its rainbow color, so the partition is always fully visible and the
-// boundaries read as color changes that migrate with the wander.
-#define WORLEY_SEEDS      5
-#define WORLEY_SPRING_K   12.0f   // spring stiffness (1/s²)
-#define WORLEY_DAMPING    7.0f    // ~critically damped vs SPRING_K
-#define WORLEY_BOUNDARY_W 5.0f    // boundary falloff width (px)
-// Solid cell fill — worley's intrinsic per-cell brightness (pre-gamma, the
-// value every lit pixel is drawn at in silence). Raised 0.55→0.86 to land the
-// per-lit-pixel mean in the 18–35%-of-255 ambient band. Still < 1 so onset
-// boundary flares (env·boundary) keep headroom toward full.
-#define WORLEY_CELL_FILL  0.86f
-#define WORLEY_ENV_DECAY  0.88f   // flash decay per frame @30fps reference
-
-// Idle wander: each seed's rest point drifts in a slow sine so the cell
-// boundaries migrate gently in silence instead of freezing. Springs track
-// the moving rest, so onsets still kick from wherever the wander is.
-#define WORLEY_WANDER_AMP    10.0f  // px, ~half the seed spacing (was 6 — wider
-                                    // boundary travel so the partition visibly migrates)
-#define WORLEY_WANDER_PERIOD 4.0f   // s per cycle at nominal speed (was 13 — the
-                                    // idle was nearly frozen at 0.2 lum/s; faster
-                                    // wander reads alive but still calm/ambient)
-
-static float worleyKick = 80.0f;  // px/s impulse per unit onset strength
-static float worleyPos[NUM_STRIPS][WORLEY_SEEDS];
-static float worleyVel[NUM_STRIPS][WORLEY_SEEDS];
-static float worleyRest[NUM_STRIPS][WORLEY_SEEDS];
-static float worleyEnv = 0.0f;
-static float worleyTime = 0.0f;
-
-static void resetWorley() {
-    float spacing = (float)LEDS_PER_STRIP / (float)(WORLEY_SEEDS + 1);
-    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
-        for (uint8_t k = 0; k < WORLEY_SEEDS; k++) {
-            // Per-strip jitter so the 6 strips don't read as copies.
-            worleyRest[s][k] = spacing * (float)(k + 1)
-                             + (randFloat() - 0.5f) * spacing * 0.3f;
-            worleyPos[s][k] = worleyRest[s][k];
-            worleyVel[s][k] = 0.0f;
-        }
-    }
-    worleyEnv = 0.0f;
-    worleyTime = 0.0f;
-}
-
-static void renderWorley(float dt) {
-    // gDt for the flash envelope: the ones knob shapes the spring motion,
-    // never reaction latency.
-    if (fxOnset > 0.1f) {
-        const float center = (float)(LEDS_PER_STRIP - 1) * 0.5f;
-        for (uint8_t s = 0; s < NUM_STRIPS; s++)
-            for (uint8_t k = 0; k < WORLEY_SEEDS; k++) {
-                float dir = (worleyPos[s][k] > center) ? 1.0f : -1.0f;
-                worleyVel[s][k] += dir * fxOnset * worleyKick;
-            }
-        worleyEnv = fmaxf(worleyEnv, fxOnset);
-    }
-    worleyEnv *= fastDecay(WORLEY_ENV_DECAY, gDt * 30.0f);
-    worleyTime += dt;   // ambient motion → speed-scaled dt
-
-    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
-        for (uint8_t k = 0; k < WORLEY_SEEDS; k++) {
-            // Spring tracks a slowly wandering rest point (idle drift).
-            float restEff = worleyRest[s][k] + WORLEY_WANDER_AMP
-                * fastSin(worleyTime * (6.2832f / WORLEY_WANDER_PERIOD)
-                          + (float)k * 2.4f + (float)s * 1.1f);
-            float disp = worleyPos[s][k] - restEff;
-            float acc = -WORLEY_SPRING_K * disp - WORLEY_DAMPING * worleyVel[s][k];
-            worleyVel[s][k] += acc * dt;
-            worleyPos[s][k] += worleyVel[s][k] * dt;
-            if (worleyPos[s][k] < 0.5f) {
-                worleyPos[s][k] = 0.5f;
-                worleyVel[s][k] *= -0.3f;
-            } else if (worleyPos[s][k] > (float)LEDS_PER_STRIP - 0.5f) {
-                worleyPos[s][k] = (float)LEDS_PER_STRIP - 0.5f;
-                worleyVel[s][k] *= -0.3f;
-            }
-        }
-
-        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
-            float px = (float)i + 0.5f;
-            float f1 = 1e9f, f2 = 1e9f;
-            uint8_t nearest = 0;
-            for (uint8_t k = 0; k < WORLEY_SEEDS; k++) {
-                float d = fabsf(px - worleyPos[s][k]);
-                if (d < f1) { f2 = f1; f1 = d; nearest = k; }
-                else if (d < f2) { f2 = d; }
-            }
-            float boundary = expf(-(f2 - f1) / WORLEY_BOUNDARY_W);
-            // Solid fill everywhere; onset envelope flares boundary lines
-            // from the fill level up toward full.
-            float bright = WORLEY_CELL_FILL
-                         + (1.0f - WORLEY_CELL_FILL) * worleyEnv * boundary;
-
-            uint8_t hueIdx = (uint8_t)((nearest * 51 + STRIP_HUE_OFFSET[s]) & 0xFF);
-            float linBright = fastGamma24(bright);
-            setPixelScaled(s, i,
-                (float)oklchVarL[hueIdx][0] * linBright,
-                (float)oklchVarL[hueIdx][1] * linBright,
-                (float)oklchVarL[hueIdx][2] * linBright);
-        }
-    }
-}
-
 // ── Heat diffusion (ported from audio-reactive heat_diffusion.py) ──
 // 1D heat equation per strip: speech energy injects heat at a slowly
 // patrolling point, diffusion spreads it, cooling sinks it. Blackbody
@@ -2992,12 +2696,6 @@ static void resetEffect(uint8_t fx) {
         case FX_HEAT_DIFFUSION:
             resetHeatDiffusion();
             break;
-        case FX_WORLEY:
-            resetWorley();
-            break;
-        case FX_GRAVITY_PARTICLE:
-            resetGravity();
-            break;
         case FX_SPARKLE_SYLLABLE:
             resetSparkle();
             break;
@@ -3046,12 +2744,10 @@ static const Param PARAMS[] = {
     { "ENERGY5S_TAU",     Param::F32, &energy5sTau,        0.5f,  20.0f },
     { "ENERGY_FORCE",     Param::F32, &energyForce,       -1.0f,  1.0f  },
     { "HEAT_INJ_RATE",    Param::F32, &heatInjRate,        1.0f,  60.0f },
-    { "WORLEY_KICK",      Param::F32, &worleyKick,        10.0f, 300.0f },
     { "AUDIO_VOL",        Param::F32, &audioOutVol,        0.0f,  1.0f  },
     { "FLOOR_MIN",        Param::F32, &snsRmsFloorMin,  2000.0f, 80000.0f },
     { "REC_CAP_S",        Param::F32, &recCapS,            2.0f,  30.0f  },
     { "HEAT_IDLE_FLOOR",  Param::F32, &heatIdleFloor,      0.0f,  1.0f   },
-    { "GS_TIDE_S",        Param::F32, &gsTidePeriod,      10.0f, 180.0f  },
 };
 static const size_t PARAM_COUNT = sizeof(PARAMS) / sizeof(PARAMS[0]);
 
@@ -3399,8 +3095,6 @@ void loop() {
         1.4f,   // FX_AMBIENT_BLOOM
         1.0f,   // FX_FIRE
         1.0f,   // FX_HEAT_DIFFUSION
-        1.0f,   // FX_WORLEY
-        0.5f,   // FX_GRAVITY_PARTICLE
         1.0f,   // FX_SPARKLE_SYLLABLE
         1.5f,   // FX_CREATURES
         0.25f,  // FX_LEAF_WIND
@@ -3418,12 +3112,6 @@ void loop() {
             break;
         case FX_HEAT_DIFFUSION:
             renderHeatDiffusion(fxDt);
-            break;
-        case FX_WORLEY:
-            renderWorley(fxDt);
-            break;
-        case FX_GRAVITY_PARTICLE:
-            renderGravity(fxDt);
             break;
         case FX_SPARKLE_SYLLABLE:
             renderSparkle(fxDt);

@@ -152,6 +152,76 @@ def spatial_coherence(df, k=6):
     return {"neighbor_r": round(r, 4), "roughness": round(roughness, 4), "k": k}
 
 
+def _sorted_lum_matrix(df):
+    """(frames x pixel) luminance matrix, columns sorted by wire index."""
+    mat = df.pivot_table(index="frame", columns="pixel", values="lum", fill_value=0.0)
+    return mat.reindex(sorted(mat.columns), axis=1).to_numpy()
+
+
+def instant_section_energy(df):
+    """Per-frame fraction of total luminance in each section, averaged over frames.
+    Unlike coverage() ('ever lit'), this is INSTANTANEOUS — where the light *is* at
+    any moment. An along-the-wire effect pours energy into the trunk (35% of the
+    wire is helix); an across-the-bearing effect can't light the sparse helix and
+    piles into the canopy. This separates effects that coverage() calls identical."""
+    tot = df.groupby("frame")["lum"].sum()
+    perk = df.groupby(["frame", "kind"])["lum"].sum().unstack(fill_value=0.0)
+    frac = perk.div(tot.replace(0, np.nan), axis=0).mean()
+    return {k: round(float(frac[k]), 3) for k in frac.sort_values(ascending=False).index}
+
+
+def index_coherence(df, k=6):
+    """Like spatial_coherence, but neighbors are taken in WIRE-INDEX space (i±k)
+    instead of 3D space. Comparing the two tells you which coordinate the light is
+    organized in: an along-strand (index-native) effect is coherent in BOTH; an
+    across-strand effect is coherent in 3D but NOT in index (it lights one bearing
+    across many strands, scattered through the wire). r->1 contiguous along wire."""
+    mat = _sorted_lum_matrix(df)
+    acc = np.zeros_like(mat)
+    for s in range(1, k + 1):
+        acc += np.roll(mat, s, axis=1) + np.roll(mat, -s, axis=1)
+    nbr = acc / (2 * k)
+    a, b = mat.ravel(), nbr.ravel()
+    r = float(np.corrcoef(a, b)[0, 1]) if a.std() > 1e-9 and b.std() > 1e-9 else float("nan")
+    return {"index_neighbor_r": round(r, 4), "k": k}
+
+
+def index_runs(df, thresh=0.05):
+    """Per frame, group lit pixels into maximal consecutive-wire-index runs (the
+    'segments' the eye reads as one creature). Along-strand light = a few LONG runs;
+    across-strand light = many SHORT runs scattered through the index. Means over
+    frames."""
+    lit = _sorted_lum_matrix(df) > thresh
+    lens, counts = [], []
+    for row in lit:
+        edges = np.flatnonzero(np.diff(np.concatenate(([0], row.astype(np.int8), [0]))))
+        runs = edges[1::2] - edges[0::2]
+        counts.append(len(runs))
+        if len(runs):
+            lens.append(runs.mean())
+    return {"mean_run_len": round(float(np.mean(lens)), 2) if lens else 0.0,
+            "mean_run_count": round(float(np.mean(counts)), 2),
+            "lit_per_frame": round(float(lit.sum(1).mean()), 1)}
+
+
+def compare_structure(df_a, df_b, label_a="A", label_b="B"):
+    """Side-by-side of the structural metrics that distinguish along-strand from
+    across-strand light — the ones coverage()/spatial_coherence() are blind to."""
+    a = {"section": instant_section_energy(df_a), "c3d": spatial_coherence(df_a)["neighbor_r"],
+         "cix": index_coherence(df_a)["index_neighbor_r"], "runs": index_runs(df_a)}
+    b = {"section": instant_section_energy(df_b), "c3d": spatial_coherence(df_b)["neighbor_r"],
+         "cix": index_coherence(df_b)["index_neighbor_r"], "runs": index_runs(df_b)}
+    print("\nWHAT THE DATA SHOWS — structural comparison (what coverage/3D-coherence miss)")
+    print(f"  {'metric':<28}{label_a:>14}{label_b:>14}")
+    for sec in ["helix", "canopy", "root"]:
+        print(f"  instant energy · {sec:<11}{a['section'].get(sec,0):>13.0%}{b['section'].get(sec,0):>14.0%}")
+    print(f"  {'coherence · 3D neighbors':<28}{a['c3d']:>14}{b['c3d']:>14}")
+    print(f"  {'coherence · wire-index nbrs':<28}{a['cix']:>14}{b['cix']:>14}")
+    print(f"  {'mean run length (LEDs)':<28}{a['runs']['mean_run_len']:>14}{b['runs']['mean_run_len']:>14}")
+    print(f"  {'mean run count':<28}{a['runs']['mean_run_count']:>14}{b['runs']['mean_run_count']:>14}")
+    return a, b
+
+
 def cross_form_timing(df):
     """When does the canopy peak vs the helix, in each cycle? Reports the lag
     between canopy energy peak and helix energy peak (first cycle)."""

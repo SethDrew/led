@@ -32,6 +32,56 @@ static float NEB_density      = 1.0f;    // x baseline orb count (index nebula)
 static float NEB_orb_size     = 7.0f;    // trail persistence; decay = 1 - 1/orb_size
 static float NEB_rise_speed   = 0.030f;  // m / 30Hz-frame, rising orbs (native nebula)
 static float NEB_density_nat  = 1.0f;    // x baseline orb count (native nebula)
+static float PULSE_speed      = 2.5f;    // m/s the button pulse climbs root->trunk->tip
+static float PULSE_width      = 0.22f;   // pulse head thickness (m)
+
+// ── Control inputs (bespoke per-installation widget bus) ───────────────────
+// The interaction layer specific to THIS installation. On the real sculpture
+// physical controls write these fields; in the IDE the on-screen widgets write
+// the same. Effects read them. This is where a generic IDE stops and an
+// installation begins. Three control kinds, one per panel:
+//   • 3 momentary buttons -> launch a pulse that climbs roots -> trunk -> tip
+//   • a slider            -> trunk brightness (applied at the output stage)
+//   • an infinite dial    -> scene spin (a view transform; lives in the viewer)
+//
+// Pulses are a small ring buffer of (launch time, source button). A press
+// appends one; fx_pulse renders every still-climbing pulse additively.
+#define HC_MAX_PULSES 24
+struct HcPulse { float t0; int btn; };
+static HcPulse HC_PULSES[HC_MAX_PULSES];
+static int     HC_PULSE_HEAD = 0;
+static bool    HC_PULSES_READY = false;
+static inline void hc_pulses_init() {
+    if (HC_PULSES_READY) return;
+    for (int i = 0; i < HC_MAX_PULSES; i++) { HC_PULSES[i].t0 = -1.0f; HC_PULSES[i].btn = 0; }
+    HC_PULSES_READY = true;
+}
+// Launch a pulse from button `btn` (0..2) at absolute time `t0` (seconds).
+static inline void hc_launch_pulse(int btn, float t0) {
+    hc_pulses_init();
+    HC_PULSES[HC_PULSE_HEAD].t0  = t0;
+    HC_PULSES[HC_PULSE_HEAD].btn = (btn < 0 ? 0 : (btn > 2 ? 2 : btn));
+    HC_PULSE_HEAD = (HC_PULSE_HEAD + 1) % HC_MAX_PULSES;
+}
+
+// Spin (dial): global pattern azimuth in radians. An effect that samples its
+// spatial field at hc_pos(i) instead of LED_POS[i] renders the pattern rotated
+// by +HC_SPIN about the vertical axis — the FIELD-CORRECT spin: the pixels stay
+// bolted in place and the pattern turns over them (what a real installation must
+// do), as opposed to rotating the whole model in the viewer. Because hc_pos only
+// ever lands on real LED positions, the angular quantization is honest: features
+// snap to where LEDs exist (roots ~51.4°, canopy ~25.7°, trunk 2-fold). Rotation
+// about z preserves z, so height-based structure (e.g. the nebula background
+// wave) is correctly unaffected.
+static float HC_SPIN = 0.0f;
+struct HcVec3 { float x, y, z; };
+static inline HcVec3 hc_pos(int i) {
+    float c = cosf(HC_SPIN), s = sinf(HC_SPIN);          // R(-spin): pattern turns +spin
+    HcVec3 p = {  c * LED_POS[i].x + s * LED_POS[i].y,
+                 -s * LED_POS[i].x + c * LED_POS[i].y,
+                  LED_POS[i].z };
+    return p;
+}
 
 // ── Effect: "pour" ──────────────────────────────────────────────────────
 // Light ignites at the TOP of the trunk and flows down the helix. When the
@@ -117,6 +167,130 @@ static inline void fx_axis_radial(RGBf* out, float t) {
         out[i].r = clamp01(b);
         out[i].g = clamp01(b * 0.55f);
         out[i].b = clamp01(b * 0.12f);
+    }
+}
+
+// ── Effect: "pulse" — button-launched wave, roots -> trunk -> tip ───────
+// Interactive: each of the 3 panel buttons appends a pulse (hc_launch_pulse).
+// A pulse ignites at the root TIPS and climbs inward along the roots, converges
+// at the floor junction, then rises up the double-helix trunk to the poking tip
+// — the reverse path of "pour", and event-driven instead of looping. Each
+// button drives a DIFFERENT non-adjacent pair of roots (PULSE_ROOTS); the shared
+// trunk always carries the pulse on up to the tip. Multiple pulses coexist
+// (additive); the source button picks the hue. Canopy LEDs are off this path and
+// stay dark. Built on a per-LED path distance from the tips: roots are
+// normalized per-strand so every root's base lands at the same distance
+// (root_ref) and hands off to the trunk together regardless of its own length;
+// the trunk then continues by height above floor.
+//
+// Button -> root pair. Roots are numbered 0..6 around the heptagon in strip
+// order; each pair sits 3 spokes (~154°) apart so the three buttons read as
+// spatially distinct. Three disjoint pairs cover 6 of 7 roots — root 6 is the
+// odd one out and intentionally idle. Retune freely.
+static const int PULSE_ROOTS[3][2] = { {0, 3}, {1, 4}, {2, 5} };
+
+static inline void fx_pulse(RGBf* out, float t) {
+    hc_pulses_init();
+    const float z_bot = HC_BOUND_MIN.z;
+    const float speed = PULSE_speed;     // m/s the wavefront climbs
+    const float sigma = PULSE_width;     // pulse head thickness (m)
+    const float tail  = 0.40f;           // comet trail behind the head (m)
+
+    // per-LED path distance from the root tips (-1 marks off-path canopy) and
+    // per-LED root index 0..6 (-1 for trunk/canopy), so a pulse can light just
+    // its button's pair of roots while the trunk stays shared.
+    static bool  init = false;
+    static float dist[HC_NUM_LEDS];
+    static int   root_id[HC_NUM_LEDS];
+    static float Dmax = 1.0f;
+    if (!init) {
+        for (int i = 0; i < HC_NUM_LEDS; i++) root_id[i] = -1;
+        int rcount = 0;
+        // representative root length sets where every root hands off to the trunk
+        float root_ref = 0.0f;
+        for (int s = 0; s < HC_NUM_STRIPS; s++) {
+            if (HC_STRIPS[s].kind != 2) continue;
+            int st = HC_STRIPS[s].start, cnt = HC_STRIPS[s].count;
+            float arc = 0.0f;
+            for (int j = 1; j < cnt; j++) {
+                int i = st + j;
+                float dx = LED_POS[i].x - LED_POS[i-1].x, dy = LED_POS[i].y - LED_POS[i-1].y, dz = LED_POS[i].z - LED_POS[i-1].z;
+                arc += sqrtf(dx*dx + dy*dy + dz*dz);
+            }
+            if (arc > root_ref) root_ref = arc;
+        }
+        if (root_ref < 1e-3f) root_ref = 1.0f;
+
+        Dmax = 0.0f;
+        for (int s = 0; s < HC_NUM_STRIPS; s++) {
+            int k = HC_STRIPS[s].kind, st = HC_STRIPS[s].start, cnt = HC_STRIPS[s].count;
+            if (k == 1) { for (int j = 0; j < cnt; j++) dist[st+j] = -1.0f; continue; }  // canopy off-path
+            if (k == 2) {
+                float total = 0.0f;                          // this root's full arc length
+                for (int j = 1; j < cnt; j++) {
+                    int i = st + j;
+                    float dx = LED_POS[i].x - LED_POS[i-1].x, dy = LED_POS[i].y - LED_POS[i-1].y, dz = LED_POS[i].z - LED_POS[i-1].z;
+                    total += sqrtf(dx*dx + dy*dy + dz*dz);
+                }
+                if (total < 1e-3f) total = 1.0f;
+                float arc = 0.0f;
+                for (int j = 0; j < cnt; j++) {
+                    int i = st + j;
+                    if (j > 0) {
+                        float dx = LED_POS[i].x - LED_POS[i-1].x, dy = LED_POS[i].y - LED_POS[i-1].y, dz = LED_POS[i].z - LED_POS[i-1].z;
+                        arc += sqrtf(dx*dx + dy*dy + dz*dz);
+                    }
+                    float d = (1.0f - arc / total) * root_ref;   // tip(arc=total)->0, base(arc=0)->root_ref
+                    dist[i] = d; if (d > Dmax) Dmax = d;
+                    root_id[i] = rcount;                          // this root's index 0..6
+                }
+                rcount++;
+            } else {                                          // helix/trunk: continue above the floor
+                for (int j = 0; j < cnt; j++) {
+                    int i = st + j;
+                    float d = root_ref + (LED_POS[i].z - z_bot);
+                    dist[i] = d; if (d > Dmax) Dmax = d;
+                }
+            }
+        }
+        init = true;
+    }
+
+    static const float BTN_COL[3][3] = {
+        { 1.00f, 0.80f, 0.45f },   // button 0 — warm gold
+        { 0.30f, 0.85f, 1.00f },   // button 1 — cyan
+        { 1.00f, 0.40f, 0.85f },   // button 2 — magenta
+    };
+    const float life_d = Dmax + tail * 4.0f;   // distance a pulse travels before it's spent
+
+    for (int i = 0; i < HC_NUM_LEDS; i++) { out[i].r = 0; out[i].g = 0; out[i].b = 0; }
+    for (int s = 0; s < HC_MAX_PULSES; s++) {
+        if (HC_PULSES[s].t0 < 0.0f) continue;               // empty slot
+        float age = t - HC_PULSES[s].t0;
+        if (age < 0.0f) continue;                           // not launched yet (scrubbed back)
+        float front = age * speed;
+        if (front > life_d) continue;                       // spent
+        int btn = HC_PULSES[s].btn;
+        const float* col = BTN_COL[btn];
+        int ra = PULSE_ROOTS[btn][0], rb = PULSE_ROOTS[btn][1];
+        for (int i = 0; i < HC_NUM_LEDS; i++) {
+            float di = dist[i];
+            if (di < 0.0f) continue;                        // canopy: off-path
+            int rid = root_id[i];
+            if (rid >= 0 && rid != ra && rid != rb) continue;   // root not in this button's pair
+            float dd = front - di;
+            float b;
+            if (dd >= 0.0f) {
+                b = expf(-(dd * dd) / (2.0f * sigma * sigma));
+                b = fmaxf(b, expf(-dd / tail) * 0.5f);      // comet trail
+            } else {
+                float a = -dd;                              // crisp leading edge
+                b = expf(-(a * a) / (2.0f * (sigma * 0.5f) * (sigma * 0.5f)));
+            }
+            out[i].r = clamp01(out[i].r + b * col[0]);
+            out[i].g = clamp01(out[i].g + b * col[1]);
+            out[i].b = clamp01(out[i].b + b * col[2]);
+        }
     }
 }
 
@@ -297,11 +471,22 @@ static inline void fx_nebula_native(RGBf* out, float t) {
     if (!init) { for (int i = 0; i < NEB_MAXSLOTS; i++) orbs[i].active = false;
                  for (int i = 0; i < HC_NUM_LEDS; i++) led[i] = 0; init = true; }
 
-    // background: wave travels vertically through z (identical on both strands)
+    // background: wave travels vertically through z (identical on both strands).
+    // z-based, so the spin (rotation about z) leaves the breathing wave fixed —
+    // correctly, it has no angular structure to turn.
+    const float BG_GAIN = 0.55f;   // dimmed so the spin-visible orb layer reads over it
     for (int i = 0; i < HC_NUM_LEDS; i++) {
         float zn = (LED_POS[i].z - HC_BOUND_MIN.z) / (zspan > 1e-6f ? zspan : 1.0f);
         nebula_bg_pixel(zn, frame, out[i]);
+        out[i].r *= BG_GAIN; out[i].g *= BG_GAIN; out[i].b *= BG_GAIN;
     }
+
+    // Spin-rotated LED positions (field-correct spin): the orbs live in a fixed
+    // frame and we sample each LED's glow at its rotated position, so the orb
+    // constellation appears to turn about the trunk axis. Computed once per
+    // frame (HC_SPIN is constant within a render call).
+    static float rx[HC_NUM_LEDS], ry[HC_NUM_LEDS];
+    for (int i = 0; i < HC_NUM_LEDS; i++) { HcVec3 p = hc_pos(i); rx[i] = p.x; ry[i] = p.y; }
 
     // ── rising 3D orbs: advance the sim in fixed 30Hz steps ──
     float decay = 1.0f - 1.0f / orbSize;
@@ -330,13 +515,20 @@ static inline void fx_nebula_native(RGBf* out, float t) {
             if (!orbs[o].active) continue;
             orbs[o].age += 1.0f;
             if (orbs[o].age >= orbs[o].life || orbs[o].z > HC_BOUND_MAX.z + 0.2f) { orbs[o].active = false; continue; }
+            // fan outward as they rise: orbs spiral from the axis toward the canopy
+            // rim, so by the top they carry real angular structure and the dial
+            // (spin) visibly sweeps the constellation across the rim. Near the axis
+            // rotation barely moves a point — out at the rim it sweeps a wide arc.
+            float orr = hypotf(orbs[o].x, orbs[o].y);
+            if (orr > 1e-3f) { const float oacc = 0.0005f; orbs[o].vx += oacc * orbs[o].x / orr; orbs[o].vy += oacc * orbs[o].y / orr; }
             orbs[o].x += orbs[o].vx; orbs[o].y += orbs[o].vy; orbs[o].z += orbs[o].vz;
             float lc = orbs[o].age / orbs[o].life;
             float lb = (lc < 0.4f) ? smoothstep01(lc / 0.4f)
                      : (lc > 0.6f) ? smoothstep01((1.0f - lc) / 0.4f) : 1.0f;
-            // deposit into every LED near the orb in 3D
+            // deposit into every LED near the orb in 3D, sampling at the LED's
+            // spin-rotated position (rx/ry) so the constellation turns with HC_SPIN
             for (int i = 0; i < HC_NUM_LEDS; i++) {
-                float dx = LED_POS[i].x - orbs[o].x, dy = LED_POS[i].y - orbs[o].y, dz = LED_POS[i].z - orbs[o].z;
+                float dx = rx[i] - orbs[o].x, dy = ry[i] - orbs[o].y, dz = LED_POS[i].z - orbs[o].z;
                 float d2 = dx * dx + dy * dy + dz * dz;
                 if (d2 > (3.0f * sigma) * (3.0f * sigma)) continue;
                 float g = expf(-d2 / (2.0f * sigma * sigma));
@@ -348,14 +540,289 @@ static inline void fx_nebula_native(RGBf* out, float t) {
     for (int i = 0; i < HC_NUM_LEDS; i++) if (led[i] > 2) star_add(out[i], led[i]);
 }
 
+// ── Effect: "line" (dev) — a vertical meridian blade that spins ─────────
+// Development/test pattern. A thin vertical sheet at ONE azimuth, lighting every
+// LED near that bearing — the root at that bearing, up through the trunk, and out
+// the canopy spoke: a line from the bottom up through the canopy. Its azimuth IS
+// the spin angle (HC_SPIN), so the dial (pattern mode) sweeps it around. This is
+// the clean way to SEE the field-correct spin and feel its quantization: as the
+// blade turns, it snaps onto the 7 roots / 14 canopy spokes that actually exist.
+static float LINE_width_deg = 6.0f;     // angular half-width of the blade (degrees)
+static inline void fx_line(RGBf* out, float t) {
+    (void)t;
+    const float sigma = LINE_width_deg * (float)M_PI / 180.0f;
+    for (int i = 0; i < HC_NUM_LEDS; i++) {
+        float az = atan2f(LED_POS[i].y, LED_POS[i].x);
+        float d = az - HC_SPIN;
+        while (d >  (float)M_PI) d -= 2.0f * (float)M_PI;     // wrap to [-pi,pi]
+        while (d < -(float)M_PI) d += 2.0f * (float)M_PI;
+        float b = clamp01(expf(-(d * d) / (2.0f * sigma * sigma)));
+        out[i].r = clamp01(b * 0.55f);                        // cool white-cyan
+        out[i].g = clamp01(b * 0.95f);
+        out[i].b = clamp01(b);
+    }
+}
+
+// ── Effect: "creatures" (dev) — bioluminescent bloom+crawl in 3D space ──
+// Reworked from the wire-order port (audio-reactive/effects/biolum_mixed.py).
+// Creatures no longer crawl the LED INDEX — they live in WORLD space at an
+// (azimuth, height), drifting in azimuth. Each is a soft teal body that either
+// BLOOMs (whole-body fade in/out) or CRAWLs (an expanding ANGULAR ring). Render
+// deposits only onto the strip LEDs near the creature's (azimuth, height), so the
+// light always reads as groups crawling ALONG the strands — a wedge of canopy rim,
+// a root at one bearing, a chunk of helix — never a free-floating ball in space.
+// Position is sampled through hc_pos, so the dial (HC_SPIN) sweeps the whole
+// population around the trunk: spin for real, on the same footing as the line.
+// As a creature drifts past the roots it CLICKS between their 7 discrete bearings;
+// across the canopy rim it glides — the topology's quantization, made visible.
+// Stateful; advanced with the fixed-timestep accumulator at a constant rate.
+#define CR_MAX   16
+#define CR_ANIMS 12
+struct CrAnim   { bool active; float age; };
+struct Creature { bool alive; int kind; float th, z, vth, vz, emit_timer; CrAnim anims[CR_ANIMS]; };
+static float CREAT_count    = 7.0f;     // creatures maintained
+static float CREAT_speed    = 1.0f;     // azimuthal drift-speed multiplier
+static float CREAT_size_deg = 7.0f;     // angular half-size (sigma) of a creature body
+static float CREAT_thick_m  = 0.16f;    // vertical half-size (sigma, m) of a creature body
+
+static inline void cr_spawn(Creature& c, uint32_t& rng) {
+    c.kind = (xsf(rng) < 0.5f) ? 0 : 1;                       // 0 bloom, 1 crawl
+    // spawn ON a strand: take a real LED's (azimuth, height) so the creature sits
+    // on the geometry like the wire-order original, not floating in empty space.
+    // Section coverage then follows LED density — matching the original's spawn.
+    int li = (int)(xsf(rng) * (float)HC_NUM_LEDS); if (li >= HC_NUM_LEDS) li = HC_NUM_LEDS - 1;
+    c.th = atan2f(LED_POS[li].y, LED_POS[li].x);
+    c.z  = LED_POS[li].z;
+    float sp = (0.18f + xsf(rng) * 0.34f) * CREAT_speed;      // rad/s azimuthal drift
+    c.vth  = (xsf(rng) < 0.5f ? -1.0f : 1.0f) * sp;
+    c.vz   = (xsf(rng) - 0.5f) * 0.04f;                       // gentle vertical wander (m/s)
+    c.emit_timer = 0.4f + xsf(rng) * 1.6f;
+    for (int k = 0; k < CR_ANIMS; k++) c.anims[k].active = false;
+    c.alive = true;
+}
+
+static inline void fx_creatures(RGBf* out, float t) {
+    const float FPS = 30.0f;
+    const float dt  = 1.0f / FPS;
+    const float TAU = 6.2831853f;
+    int count = (int)(CREAT_count + 0.5f); if (count < 1) count = 1; if (count > CR_MAX) count = CR_MAX;
+
+    const float zlo = HC_BOUND_MIN.z, zhi = HC_BOUND_MAX.z;
+    const float sig_th = CREAT_size_deg * (float)M_PI / 180.0f;   // angular body sigma
+    const float sig_z  = CREAT_thick_m;                          // vertical body sigma (m)
+    const float BLOOM_RISE = 2.0f, BLOOM_HOLD = 1.5f, BLOOM_FALL = 5.0f, BLOOM_TOTAL = 8.5f;
+    const float crawl_ang  = 55.0f * (float)M_PI / 180.0f;        // max ring half-angle
+    const float crawl_tail = 16.0f * (float)M_PI / 180.0f;        // ring softness (angular)
+    const float crawl_edge = 5.0f  * (float)M_PI / 180.0f;        // leading-edge ramp
+    const float crawl_life = 2.4f, CRAWL_FADE = 1.4f;
+
+    static bool init = false;
+    static Creature cr[CR_MAX];
+    static uint32_t rng = 0x5EED1234u;
+    static float last_t = -1.0f, acc = 0.0f;
+    if (!init) { for (int c = 0; c < CR_MAX; c++) cr_spawn(cr[c], rng); init = true; }
+
+    int nsteps = neb_steps(t, FPS, last_t, acc);
+    for (int s = 0; s < nsteps; s++) {
+        for (int c = 0; c < count; c++) {
+            Creature& cc = cr[c];
+            if (!cc.alive) cr_spawn(cc, rng);
+            cc.th += cc.vth * dt;
+            if (cc.th >= TAU) cc.th -= TAU;
+            if (cc.th <  0.0f) cc.th += TAU;
+            cc.z += cc.vz * dt;
+            if (cc.z < zlo) { cc.z = zlo; cc.vz = -cc.vz; }       // bounce off the floor/ceiling
+            if (cc.z > zhi) { cc.z = zhi; cc.vz = -cc.vz; }
+            cc.emit_timer -= dt;
+            if (cc.emit_timer <= 0.0f) {
+                for (int k = 0; k < CR_ANIMS; k++) if (!cc.anims[k].active) { cc.anims[k].active = true; cc.anims[k].age = 0.0f; break; }
+                if (cc.kind == 0) { float base = BLOOM_TOTAL + (1.2f + xsf(rng) * 1.6f); cc.emit_timer = base * (0.33f + xsf(rng) * 1.0f); }
+                else              { cc.emit_timer = crawl_life + CRAWL_FADE + (1.0f + xsf(rng) * 1.6f); }
+            }
+            float lifelim = (cc.kind == 0) ? BLOOM_TOTAL : (crawl_life + CRAWL_FADE);
+            for (int k = 0; k < CR_ANIMS; k++) { if (!cc.anims[k].active) continue; cc.anims[k].age += dt; if (cc.anims[k].age >= lifelim) cc.anims[k].active = false; }
+        }
+    }
+
+    // Per-LED rotated (azimuth, height) — sampled through hc_pos so HC_SPIN turns
+    // the whole population. Computed once per frame (spin is constant within it).
+    static float Laz[HC_NUM_LEDS], Lz[HC_NUM_LEDS];
+    for (int i = 0; i < HC_NUM_LEDS; i++) { HcVec3 p = hc_pos(i); Laz[i] = atan2f(p.y, p.x); Lz[i] = p.z; }
+
+    static float buf[HC_NUM_LEDS];
+    for (int i = 0; i < HC_NUM_LEDS; i++) buf[i] = 0.0f;
+
+    for (int c = 0; c < count; c++) {
+        Creature& cc = cr[c];
+        if (!cc.alive) continue;
+        for (int k = 0; k < CR_ANIMS; k++) {
+            if (!cc.anims[k].active) continue;
+            float age = cc.anims[k].age;
+            // envelope (bloom) / ring geometry (crawl), computed once per anim
+            float env = 1.0f, radius = 0.0f, fade = 1.0f;
+            if (cc.kind == 0) {
+                if (age < BLOOM_RISE) env = age / BLOOM_RISE;
+                else if (age < BLOOM_RISE + BLOOM_HOLD) env = 1.0f;
+                else { float ft = (age - BLOOM_RISE - BLOOM_HOLD) / BLOOM_FALL; env = fmaxf(0.0f, 1.0f - ft); env *= env; }
+                if (env < 0.003f) continue;
+            } else {
+                float tt = age / crawl_life; if (tt > 1.0f) tt = 1.0f;
+                radius = tt * crawl_ang;
+                if (age > crawl_life) { float ft = (age - crawl_life) / CRAWL_FADE; fade = fmaxf(0.0f, 1.0f - ft); fade *= fade; }
+            }
+            for (int i = 0; i < HC_NUM_LEDS; i++) {
+                float dz = Lz[i] - cc.z;
+                if (fabsf(dz) > 3.0f * sig_z) continue;          // outside the body's height band
+                float dth = Laz[i] - cc.th;
+                while (dth >  (float)M_PI) dth -= TAU;            // shortest angular gap
+                while (dth < -(float)M_PI) dth += TAU;
+                float adth = fabsf(dth);
+                float zg = expf(-(dz * dz) / (2.0f * sig_z * sig_z));
+                float b;
+                if (cc.kind == 0) {                              // bloom: flat-top body, soft edges
+                    // solid core out to sig_th (like the original's bloom_radius),
+                    // then a soft angular falloff — brighter & more "bodied" than a
+                    // bare gaussian, matching the linear reference's solid blooms.
+                    float soft = sig_th * 0.8f;
+                    float spatial = (adth <= sig_th) ? 1.0f
+                                  : expf(-((adth - sig_th) * (adth - sig_th)) / (2.0f * soft * soft));
+                    b = env * spatial * zg;
+                } else {                                         // crawl: expanding angular ring
+                    if (adth > radius) continue;
+                    float behind = radius - adth;
+                    b = expf(-behind / crawl_tail);
+                    if (behind < crawl_edge) b *= behind / crawl_edge;
+                    b *= fade * zg;
+                }
+                if (b > 0.003f) buf[i] = buf[i] + b - buf[i] * b;   // screen blend
+            }
+        }
+    }
+    for (int i = 0; i < HC_NUM_LEDS; i++) {                    // teal, squared response
+        float v = clamp01(buf[i]); v = v * v;
+        out[i].r = 0.0f;
+        out[i].g = clamp01(v * (180.0f / 255.0f));
+        out[i].b = clamp01(v * (220.0f / 255.0f));
+    }
+}
+
+// ── Effect: "creatures_lin" (reference) — the ORIGINAL wire-order creatures ──
+// Kept verbatim from audio-reactive/effects/biolum_mixed.py as the NON-rotation-
+// aware reference: blooms/crawls crawling the LED INDEX (along strands, jumping at
+// wire boundaries). NOT spinnable (index-native). Its only job is to be the target
+// the angular "creatures" is tuned against — render it and the angular version
+// side by side and match density/size/brightness. Fixed tuning (no live params) so
+// it stays a stable yardstick.
+struct CrLin { bool alive; int kind; float pos, vel, emit_timer; CrAnim anims[CR_ANIMS]; };
+static inline void crlin_spawn(CrLin& c, float N, float scale, uint32_t& rng) {
+    c.kind = (xsf(rng) < 0.5f) ? 0 : 1;
+    const float avg = 3.3f / 1.9f, spread = 0.33f;
+    float speed = (avg * (1.0f - spread) + xsf(rng) * (avg * 2.0f * spread)) * scale;
+    c.pos = 5.0f * scale + xsf(rng) * (N - 10.0f * scale);
+    c.vel = (xsf(rng) < 0.5f ? -1.0f : 1.0f) * speed;
+    c.emit_timer = 1.2f + xsf(rng) * 1.6f;
+    for (int k = 0; k < CR_ANIMS; k++) c.anims[k].active = false;
+    c.alive = true;
+}
+static inline void fx_creatures_lin(RGBf* out, float t) {
+    const float FPS = 30.0f;
+    const float N = (float)HC_NUM_LEDS;
+    const float scale = N / 150.0f;
+    const float dt = 1.0f / FPS;
+    const int count = 7;
+    const float bloom_radius = 3.0f * scale, bloom_soft = 0.8f * scale;
+    const float BLOOM_RISE = 2.0f, BLOOM_HOLD = 1.5f, BLOOM_FALL = 5.0f, BLOOM_TOTAL = 8.5f;
+    const float crawl_radius = 8.0f * scale, crawl_tail = 4.0f * scale;
+    const float crawl_life = 8.0f / 3.3f, CRAWL_FADE = 1.4f, DESPAWN = 5.0f * scale;
+
+    static bool init = false;
+    static CrLin cr[CR_MAX];
+    static uint32_t rng = 0x5EED1234u;
+    static float last_t = -1.0f, acc = 0.0f;
+    if (!init) { for (int c = 0; c < CR_MAX; c++) crlin_spawn(cr[c], N, scale, rng); init = true; }
+
+    int nsteps = neb_steps(t, FPS, last_t, acc);
+    for (int s = 0; s < nsteps; s++) {
+        for (int c = 0; c < count; c++) {
+            CrLin& cc = cr[c];
+            if (!cc.alive) crlin_spawn(cc, N, scale, rng);
+            cc.pos += cc.vel * dt;
+            if (cc.pos < -DESPAWN || cc.pos > N + DESPAWN) { crlin_spawn(cc, N, scale, rng); continue; }
+            cc.emit_timer -= dt;
+            if (cc.emit_timer <= 0.0f) {
+                for (int k = 0; k < CR_ANIMS; k++) if (!cc.anims[k].active) { cc.anims[k].active = true; cc.anims[k].age = 0.0f; break; }
+                if (cc.kind == 0) { float base = BLOOM_TOTAL + (1.2f + xsf(rng) * 1.6f); cc.emit_timer = base * (0.33f + xsf(rng) * 1.67f); }
+                else              { cc.emit_timer = crawl_life + CRAWL_FADE + (1.2f + xsf(rng) * 1.6f); }
+            }
+            float lifelim = (cc.kind == 0) ? BLOOM_TOTAL : (crawl_life + CRAWL_FADE);
+            for (int k = 0; k < CR_ANIMS; k++) { if (!cc.anims[k].active) continue; cc.anims[k].age += dt; if (cc.anims[k].age >= lifelim) cc.anims[k].active = false; }
+        }
+    }
+
+    static float buf[HC_NUM_LEDS];
+    for (int i = 0; i < HC_NUM_LEDS; i++) buf[i] = 0.0f;
+    for (int c = 0; c < count; c++) {
+        CrLin& cc = cr[c];
+        if (!cc.alive) continue;
+        float center = cc.pos;
+        if (cc.kind == 0) {
+            int lo = (int)(center - bloom_radius - bloom_soft - 1); if (lo < 0) lo = 0;
+            int hi = (int)(center + bloom_radius + bloom_soft + 1); if (hi > HC_NUM_LEDS - 1) hi = HC_NUM_LEDS - 1;
+            for (int k = 0; k < CR_ANIMS; k++) {
+                if (!cc.anims[k].active) continue;
+                float age = cc.anims[k].age, env;
+                if (age < BLOOM_RISE) env = age / BLOOM_RISE;
+                else if (age < BLOOM_RISE + BLOOM_HOLD) env = 1.0f;
+                else { float ft = (age - BLOOM_RISE - BLOOM_HOLD) / BLOOM_FALL; env = fmaxf(0.0f, 1.0f - ft); env *= env; }
+                if (env < 0.003f) continue;
+                for (int i = lo; i <= hi; i++) {
+                    float dist = fabsf((float)i - center);
+                    float spatial = (dist <= bloom_radius) ? 1.0f : expf(-(dist - bloom_radius) / bloom_soft);
+                    float b = env * spatial;
+                    if (b > 0.003f) buf[i] = buf[i] + b - buf[i] * b;
+                }
+            }
+        } else {
+            int lo = (int)(center - crawl_radius - crawl_tail - 2); if (lo < 0) lo = 0;
+            int hi = (int)(center + crawl_radius + crawl_tail + 2); if (hi > HC_NUM_LEDS - 1) hi = HC_NUM_LEDS - 1;
+            for (int k = 0; k < CR_ANIMS; k++) {
+                if (!cc.anims[k].active) continue;
+                float tt = cc.anims[k].age / crawl_life; if (tt > 1.0f) tt = 1.0f;
+                float radius = tt * crawl_radius;
+                float fade = 1.0f;
+                if (cc.anims[k].age > crawl_life) { float ft = (cc.anims[k].age - crawl_life) / CRAWL_FADE; fade = fmaxf(0.0f, 1.0f - ft); fade *= fade; }
+                for (int i = lo; i <= hi; i++) {
+                    float dc = fabsf((float)i - center);
+                    if (dc > radius) continue;
+                    float behind = radius - dc;
+                    float b = expf(-behind / crawl_tail);
+                    if (behind < 1.0f) b *= behind;
+                    b *= fade;
+                    if (b > 0.003f) buf[i] = buf[i] + b - buf[i] * b;
+                }
+            }
+        }
+    }
+    for (int i = 0; i < HC_NUM_LEDS; i++) {
+        float v = clamp01(buf[i]); v = v * v;
+        out[i].r = 0.0f;
+        out[i].g = clamp01(v * (180.0f / 255.0f));
+        out[i].b = clamp01(v * (220.0f / 255.0f));
+    }
+}
+
 // ── Registry (add effects here; the sim exposes them by name) ────────────
 typedef void (*HcEffectFn)(RGBf*, float);
 struct HcEffect { const char* name; HcEffectFn fn; };
 static const HcEffect HC_EFFECTS[] = {
     { "pour",        fx_pour },
+    { "pulse",       fx_pulse },
     { "axis_radial", fx_axis_radial },
-    { "nebula",        fx_nebula },
-    { "nebula_native", fx_nebula_native },
+    { "nebula",        fx_nebula },          // original look · spins via B (output resample)
+    { "nebula_az",     fx_nebula_native },   // azimuthal port · spins via A (field-correct)
+    { "line",          fx_line },
+    { "creatures",     fx_creatures_lin },   // original look · spins via B (output resample)
+    { "creatures_az",  fx_creatures },       // azimuthal port · spins via A (field-correct)
 };
 static const int HC_NUM_EFFECTS = sizeof(HC_EFFECTS) / sizeof(HC_EFFECTS[0]);
 
@@ -366,12 +833,19 @@ static const int HC_NUM_EFFECTS = sizeof(HC_EFFECTS) / sizeof(HC_EFFECTS[0]);
 struct HcParamDef { const char* effect; const char* name; float* ptr; float lo, hi; };
 static HcParamDef HC_PARAMS[] = {
     { "pour",          "fall_secs",  &POUR_period,     1.0f,  8.0f  },
+    { "pulse",         "climb_mps",  &PULSE_speed,     0.5f,  8.0f  },
+    { "pulse",         "width_m",    &PULSE_width,     0.05f, 0.6f  },
     { "axis_radial",   "speed",      &AXIS_speed,      0.1f,  3.0f  },
     { "nebula",        "orb_speed",  &NEB_orb_speed,   0.02f, 1.0f  },
     { "nebula",        "density",    &NEB_density,     0.1f,  2.0f  },
     { "nebula",        "orb_size",   &NEB_orb_size,    2.0f,  20.0f },
-    { "nebula_native", "rise_speed", &NEB_rise_speed,  0.005f, 0.08f },
-    { "nebula_native", "density",    &NEB_density_nat, 0.1f,  3.0f  },
-    { "nebula_native", "orb_size",   &NEB_orb_size,    2.0f,  20.0f },
+    { "nebula_az",     "rise_speed", &NEB_rise_speed,  0.005f, 0.08f },
+    { "nebula_az",     "density",    &NEB_density_nat, 0.1f,  3.0f  },
+    { "nebula_az",     "orb_size",   &NEB_orb_size,    2.0f,  20.0f },
+    { "line",          "width_deg",  &LINE_width_deg,  1.0f,  30.0f },
+    { "creatures_az",  "count",      &CREAT_count,     1.0f,  16.0f },
+    { "creatures_az",  "speed",      &CREAT_speed,     0.2f,  3.0f  },
+    { "creatures_az",  "size_deg",   &CREAT_size_deg,  1.0f,  20.0f },
+    { "creatures_az",  "thick_m",    &CREAT_thick_m,   0.05f, 0.6f  },
 };
 static const int HC_NUM_PARAMS = sizeof(HC_PARAMS) / sizeof(HC_PARAMS[0]);

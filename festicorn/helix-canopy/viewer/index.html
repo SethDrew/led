@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>helix-canopy · LED IDE</title>
+<link rel="icon" href="data:,">
+
 <style>
   :root { color-scheme: dark; }
   html, body { margin: 0; height: 100%; background: #07070b; overflow: hidden;
@@ -33,6 +35,33 @@
   label.tog { color: #8a8f9c; display: flex; align-items: center; gap: 4px; cursor: pointer; }
   #err { position: fixed; inset: 0; display: none; place-items: center; z-index: 20;
     background: #07070b; color: #ff9a9a; padding: 24px; text-align: center; white-space: pre-wrap; }
+  /* bespoke per-installation control panels (left edge, under the title HUD;
+     the dev tune-GUI keeps the right edge) */
+  #panels { position: fixed; left: 12px; top: 156px; z-index: 10;
+    display: flex; flex-direction: column; gap: 10px; width: 168px; }
+  .panel { background: rgba(12,12,18,.72); border: 1px solid #ffffff14; border-radius: 8px;
+    padding: 10px; backdrop-filter: blur(6px); }
+  .panel h2 { font-size: 10px; margin: 0 0 8px; color: #aab; font-weight: 600;
+    letter-spacing: .06em; text-transform: uppercase; }
+  .panel.off { opacity: .4; pointer-events: none; }
+  .pbtns { display: flex; gap: 6px; }
+  .pbtn { flex: 1; height: 40px; border-radius: 6px; border: 1px solid #ffffff2e;
+    cursor: pointer; font-weight: 700; color: #07070b; transition: transform .05s, filter .12s; }
+  .pbtn:active { transform: translateY(1px); filter: brightness(1.5); }
+  .vslider { width: 100%; accent-color: #ffcf7a; }
+  .knob { width: 84px; height: 84px; margin: 4px auto 2px; border-radius: 50%; position: relative;
+    cursor: grab; touch-action: none; border: 1px solid #ffffff2e;
+    background: radial-gradient(circle at 50% 36%, #2b2f3e, #13151e 72%);
+    box-shadow: inset 0 1px 2px #ffffff14, 0 2px 6px #0007; }
+  .knob:active { cursor: grabbing; }
+  .knob .tick { position: absolute; left: 50%; top: 8px; width: 3px; height: 26px; margin-left: -1.5px;
+    border-radius: 2px; background: #7fe0ff; transform-origin: 50% 34px; box-shadow: 0 0 6px #7fe0ff; }
+  .pval { color: #8a8f9c; text-align: center; margin-top: 4px; }
+  .seg { display: flex; margin-top: 8px; border: 1px solid #ffffff1f; border-radius: 6px; overflow: hidden; }
+  .seg button { flex: 1; border: 0; border-radius: 0; background: #15171f; color: #8a8f9c;
+    padding: 4px 0; font-size: 10px; letter-spacing: .04em; }
+  .seg button.on { background: #2a3550; color: #bcd2ff; }
+  .seg button + button { border-left: 1px solid #ffffff1f; }
 </style>
 </head>
 <body>
@@ -50,6 +79,29 @@
   <span id="t">0.00 / 0.00s</span>
   <label class="tog"><input id="bloom" type="checkbox" checked> bloom</label>
   <label class="tog"><input id="spin" type="checkbox"> spin</label>
+</div>
+<div id="panels">
+  <div class="panel" id="panel-roots">
+    <h2>Roots · pulse</h2>
+    <div class="pbtns">
+      <button class="pbtn" data-btn="0" style="background:#ffcb72">1</button>
+      <button class="pbtn" data-btn="1" style="background:#5fd8ff">2</button>
+      <button class="pbtn" data-btn="2" style="background:#ff73d9">3</button>
+    </div>
+  </div>
+  <div class="panel" id="panel-trunk">
+    <h2>Trunk · brightness</h2>
+    <input id="trunk-bright" class="vslider" type="range" min="0" max="1.5" step="0.01" value="1">
+    <div class="pval" id="trunk-val">100%</div>
+  </div>
+  <div class="panel" id="panel-spin">
+    <h2>Spin · all strips</h2>
+    <div class="knob" id="spin-knob"><div class="tick"></div></div>
+    <div class="pval" id="spin-val">0°</div>
+    <div class="seg" id="spin-mode">
+      <button data-mode="pattern" class="on">pattern</button><button data-mode="geometry">geometry</button>
+    </div>
+  </div>
 </div>
 <div id="err"></div>
 
@@ -108,6 +160,9 @@ async function wasmSource() {
   const pGet    = M.cwrap("param_get", "number", ["number"]);
   const pSet    = M.cwrap("param_set", null, ["number", "number"]);
   const setBrightness = M.cwrap("set_brightness", null, ["number"]);
+  const _pulse        = M.cwrap("pulse", null, ["number", "number"]);
+  const setTrunkBright = M.cwrap("set_trunk_bright", null, ["number"]);
+  const setSpin        = M.cwrap("set_spin", null, ["number"]);
   const params = Array.from({ length: pCount() }, (_, i) => ({
     effect: pEffect(i), name: pName(i), lo: pLo(i), hi: pHi(i),
     get: () => pGet(i), set: (v) => pSet(i, v),
@@ -116,6 +171,7 @@ async function wasmSource() {
   return {
     mode: "wasm", nLeds: N, fps: 30, loopSec: 20, positions: pos, kinds,
     effects, setEffect: (i) => setFx(i), params, setBrightness,
+    pulse: (btn, t) => _pulse(btn, t), setTrunkBright, setSpin,
     fill(t, out) {
       const ptr = render(t) >> 2;                            // re-acquire view each
       const c = M.HEAPF32.subarray(ptr, ptr + N * 3);        // frame (detach-safe)
@@ -278,7 +334,11 @@ const ptsMat = new THREE.ShaderMaterial({
       gl_FragColor = vec4(vColor * a, a);
     }`,
 });
-three.add(new THREE.Points(geo, ptsMat));
+// The LED cloud lives in its own object so the "spin" dial can rotate the whole
+// lit form about the trunk's vertical axis (z through origin — the helix is
+// centered on it). The grid floor stays fixed as a ground reference.
+const ledPoints = new THREE.Points(geo, ptsMat);
+three.add(ledPoints);
 
 // world diameter -> device pixels: drawingBufferHeight / (2 tan(fov/2))
 function updatePointScale() {
@@ -318,6 +378,62 @@ $("scrub").oninput = (e) => { playing = false; $("play").textContent = "▶"; cl
 $("bloom").onchange = (e) => { bloom.enabled = e.target.checked; };
 $("spin").onchange = (e) => { controls.autoRotate = e.target.checked; };
 
+// ---- bespoke control panels ------------------------------------------------
+// Three interaction bindings, deliberately of three different kinds:
+//   buttons -> effect event (real),  slider -> output stage (real),
+//   dial    -> view transform (sim-only; the hard part on real hardware).
+const hasCtrl = !!source.pulse;
+if (!hasCtrl) { $("panel-roots").classList.add("off"); $("panel-trunk").classList.add("off"); }
+
+// Panel 1 — three buttons, each launches a pulse up the roots at the live clock.
+for (const b of document.querySelectorAll(".pbtn")) {
+  b.onclick = () => { if (source.pulse) source.pulse(+b.dataset.btn, clock); };
+}
+
+// Panel 2 — trunk-only brightness (output-stage dimmer in the engine).
+$("trunk-bright").oninput = (e) => {
+  const v = +e.target.value;
+  $("trunk-val").textContent = Math.round(v * 100) + "%";
+  if (source.setTrunkBright) source.setTrunkBright(v);
+};
+
+// Panel 3 — infinite spin dial. Rotates the lit form about the trunk's vertical
+// axis. Drag to turn; a flick keeps spinning (momentum), so you can leave it
+// rotating. spinVel is rad/s; spinAngle is integrated in the render loop.
+let spinAngle = 0, spinVel = 0, dialDrag = false, dialPrevAng = 0, dialPrevT = 0;
+const knob = $("spin-knob"), tick = knob.querySelector(".tick");
+const angTo = (e) => {
+  const r = knob.getBoundingClientRect();
+  return Math.atan2(e.clientY - (r.top + r.height / 2), e.clientX - (r.left + r.width / 2));
+};
+const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));   // shortest signed delta
+knob.addEventListener("pointerdown", (e) => {
+  dialDrag = true; spinVel = 0; dialPrevAng = angTo(e); dialPrevT = performance.now();
+  knob.setPointerCapture(e.pointerId);
+});
+knob.addEventListener("pointermove", (e) => {
+  if (!dialDrag) return;
+  const a = angTo(e), d = wrap(a - dialPrevAng);
+  const now = performance.now(), dt = Math.max(1, now - dialPrevT) / 1000;
+  spinAngle += d; spinVel = d / dt;                 // track velocity for release momentum
+  dialPrevAng = a; dialPrevT = now;
+});
+const endDrag = (e) => { if (dialDrag) { dialDrag = false; try { knob.releasePointerCapture(e.pointerId); } catch {} } };
+knob.addEventListener("pointerup", endDrag);
+knob.addEventListener("pointercancel", endDrag);
+
+// spin mode: "pattern" = field-correct (rotate the pattern via HC_SPIN, pixels
+// fixed, quantized); "geometry" = rotate the whole model (smooth, sim-only).
+let spinMode = "pattern";
+for (const b of document.querySelectorAll("#spin-mode button")) {
+  b.onclick = () => {
+    spinMode = b.dataset.mode;
+    document.querySelectorAll("#spin-mode button").forEach((x) => x.classList.toggle("on", x === b));
+    ledPoints.rotation.z = 0;                  // reset the inactive channel so they don't both apply
+    if (source.setSpin) source.setSpin(0);
+  };
+}
+
 addEventListener("resize", () => {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight); composer.setSize(innerWidth, innerHeight);
@@ -332,6 +448,9 @@ window.__setGlow = (h, c, r) => {                          // per-section glow d
   if (h != null) sectionSize[0] = h; if (c != null) sectionSize[1] = c; if (r != null) sectionSize[2] = r;
   applySectionSizes();
 };
+window.__pulse = (btn = 0) => { if (source.pulse) source.pulse(btn, clock); };   // headless: fire a root pulse
+window.__spin = (rad) => { spinAngle = rad; spinVel = 0; };                       // headless: set spin angle
+window.__spinMode = (m) => { spinMode = m; ledPoints.rotation.z = 0; if (source.setSpin) source.setSpin(0); };
 
 // ---- dev hot-reload (served by dev.mjs) -----------------------------------
 // Persist the camera across reloads so authoring edits don't reset your view,
@@ -356,6 +475,12 @@ let racc = 0, rcount = 0;
 function loop(now) {
   const dt = (now - last) / 1000; last = now;
   if (playing) { clock += dt; apply(clock); }
+  // spin dial: integrate momentum when not dragging, route to the active mode
+  if (!dialDrag) { spinAngle += spinVel * dt; spinVel *= Math.pow(0.5, dt / 1.1); if (Math.abs(spinVel) < 1e-3) spinVel = 0; }
+  if (spinMode === "geometry") ledPoints.rotation.z = spinAngle;     // rotate the model
+  else if (source.setSpin) source.setSpin(spinAngle);               // rotate the pattern (HC_SPIN)
+  tick.style.transform = `rotate(${spinAngle}rad)`;
+  $("spin-val").textContent = (((spinAngle * 180 / Math.PI) % 360 + 360) % 360).toFixed(0) + "°";
   controls.update();
   (bloom.enabled ? composer : renderer).render(three, camera);
   racc += dt; rcount++;

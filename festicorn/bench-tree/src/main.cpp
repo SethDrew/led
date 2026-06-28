@@ -13,61 +13,19 @@
 #ifndef STREAMING_MODE
 
 #include "TreeEffect.h"
-#include "foregrounds/DepthWaveForeground.h"
 #include "foregrounds/SapFlowForeground.h"
 
 // Global tree instance
 Tree tree;
 
-// ===== TREE ANIMATIONS =====
+// ===== TREE ANIMATION =====
 
-// Animation 1: Classic green wave
-void classicWaveAnimation() {
-  static DepthWaveForeground wave(&tree, 34, 139, 34, 5.0);  // Forest green
-  wave.update();
-  wave.render();
-}
-
-// Animation 2: Forest green sap flow
+// Forest green sap flow
 void sapFlowAnimation() {
   // Time-based defaults captured from prior frame-based version (delay(40), ~21fps).
   static SapFlowForeground sap(&tree, 34, 139, 34);
   sap.update();
   sap.render();
-}
-
-// Animation 3: Blue wave
-void blueWaveAnimation() {
-  static DepthWaveForeground wave(&tree, 0, 100, 255, 6.0);  // Blue
-  wave.update();
-  wave.render();
-}
-
-// Animation 4: Orange wave
-void orangeWaveAnimation() {
-  static DepthWaveForeground wave(&tree, 255, 140, 0, 5.0);  // Orange
-  wave.update();
-  wave.render();
-}
-
-// Animation 5: White sap
-void whiteSapAnimation() {
-  // ~75% of forest sap rate (old spawnChance=6 vs 8).
-  static SapFlowForeground sap(&tree, 255, 255, 255, 7.25f, 1.91f, 12.73f, 1.26f);
-  sap.update();
-  sap.render();
-}
-
-// Animation 6: Solid white - all LEDs on
-void solidWhiteAnimation() {
-  static bool initialized = false;
-  if (!initialized) {
-    for (uint8_t i = 0; i < tree.getNumLEDs(); i++) {
-      tree.setNodeColor(i, 255, 255, 255);
-    }
-    tree.show();
-    initialized = true;
-  }
 }
 
 // ===== MAIN =====

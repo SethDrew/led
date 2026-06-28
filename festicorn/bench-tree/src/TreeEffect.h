@@ -1,7 +1,7 @@
 #ifndef TREE_EFFECT_H
 #define TREE_EFFECT_H
 
-#include "../TreeTopology.h"
+#include "TreeTopology.h"
 
 // Blend modes for compositing layers
 enum BlendMode {

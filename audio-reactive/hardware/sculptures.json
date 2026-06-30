@@ -58,15 +58,5 @@
     "branches": [
       {"start": 0, "count": 150, "reverse": false}
     ]
-  },
-  {
-    "id": "tree_eth",
-    "name": "Eth Tree (4×150 mirrored)",
-    "controller": "tree_eth",
-    "physical_leds": 150,
-    "branches": [
-      {"start": 0, "count": 150, "reverse": false}
-    ],
-    "notes": "led-eth board (MAC A4:F0:0F:61:40:18) running streaming_receiver_eth. Host streams 150 logical LEDs; firmware mirrors them across all 4 physical strips (GPIO 13/27/32/33). For 600 independent LEDs, bump count + firmware NUM_LEDS to 600 and split per strip."
   }
 ]

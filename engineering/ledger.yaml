@@ -1299,3 +1299,109 @@ entries:
       Sources (survivors): WLED Long Data (kno.wled.ge/advanced/longdata),
       QuinLED data-signal cable-conditioning, cpldcpu WS2812 timing analysis,
       TI SLLA302 (RS-485 over Cat5), teknynja WS2812-over-RS422.
+
+  # ── ESP32 Render-Cost Measurements ──────────────────────────────
+
+  - id: esp32-d0wd-helix-render-fps-2026-06-28
+    date: 2026-06-28
+    touched: 2026-06-28
+    title: "ESP32-D0WD-V3 single-core render fps for the 1697-px helix-canopy effects"
+    summary: >
+      Measured on real hardware (ESP32-D0WD-V3, 240MHz, MAC 04:b2:47:82:74:20)
+      via a throwaway Arduino bench that #includes the real effects.h + topology.h
+      and times each effect rendering the full HC_NUM_LEDS=1697 buffer, single-
+      threaded (one core), -O2, no LED output. Per-frame render cost only —
+      excludes WS2812 output, dithering, and any comms.
+    status: resolved
+    severity: medium
+    scope: hardware
+    source:
+      - festicorn/helix-canopy/bench/
+    tags: [esp32, esp32-d0wd-v3, capability, measurement, render, fps, helix-canopy]
+    relates_to: [esp32-hardware-selection-rationale, ws2812b-timing-architecture]
+    notes: >
+      Full-buffer render, full palette (us/frame, fps):
+        creatures (index-native)   1053   949.6
+        pour                       4064   246.1
+        axis_radial                4910   203.7
+        pulse                      5226   191.3
+        line                       5414   184.7
+        nebula                     8042   124.3
+        creatures_az (field)      14203    70.4
+        nebula_az (field)         26733    37.4
+
+      Observed split: the index-native and pure-field effects are cheap (124-950
+      fps); the two "field-correct" (_az) variants that deposit particles in real
+      3D space are the bottleneck. nebula_az at 37 fps does NOT clear 60.
+      creatures_az is 13x its index twin, nebula_az 3.3x — the _az variants do
+      per-LED trig and real-space neighbour search every frame.
+
+      Voxel-grid variant of nebula_az (spatial bin of LEDs at cell=cutoff radius,
+      orbs rotated into the LED frame instead of rotating 1697 LEDs/frame):
+      measured 36.3 -> 71.5 fps (~2x), output BIT-IDENTICAL to brute force
+      (max abs pixel diff 0.0000 over a 60-orb self-test). The ~2x (not larger)
+      is because deposition was ~half the frame; the residual O(N) work
+      (background gradient + decay + star compositing) is the new floor.
+
+      Hardware caveats: D0WD-V3 has a hardware FPU + two cores; this used one
+      core. A no-FPU chip (e.g. ESP32-C3) or a core also doing audio DSP would
+      be slower. 60fps budget = 16.7ms; nebula_az-grid at 14ms leaves ~2.7ms
+      for output+comms on a single all-1697 chain (tight). The render-pipeline
+      reasoning (slice-render, sim/render split, multi-node coordination) lives
+      in library/ideas/DISTRIBUTED_CONTROLLER_ARCHITECTURE.md — reasoning, not
+      validated; only the fps numbers above were measured.
+
+  - id: esp32-rmt-simultaneous-show-glitch-frames
+    date: 2026-06-29
+    touched: 2026-06-29
+    title: "Simultaneous multi-channel RMT Show() causes corrupt glitch frames; staggered Show() fixes it"
+    summary: >
+      Firing every strip's NeoPixelBus Show() at once (all RMT channels
+      refilling concurrently) produces sporadic one-frame corruption: random
+      wrong-color pixels, biased to the back of the strip, downstream of a
+      single bit-slip. NOT the slow-frame throughput cliff — these are
+      bit-corrupt frames. Root cause is RMT block-refill ISR deadline misses
+      when a WiFi/ESP-NOW interrupt lands mid-frame; the underrun slips a bit
+      and every downstream pixel decodes garbage. Fix: stagger Show() into
+      batches with a CanShow() spin-wait between, so the channels never all
+      refill (or all switch output current) at the same instant.
+    status: resolved
+    severity: high
+    scope: firmware
+    source:
+      - festicorn/bulb-fleet/src/bulb_fleet.cpp   # stripsShow() stagger, commit 963a899
+      - festicorn/tree-of-record/src/tree_of_record_eth.cpp
+    tags: [esp32, rmt, isr, ws2812b, glitch, neopixelbus, wifi, reliability]
+    relates_to: [esp32-rmt-isr-cpu-overhead, esp32-rmt-6-channel-concurrency-cliff, esp32-dual-core-rmt-render-overlap, ws2812-eth-cable-head-glitch]
+    notes: >
+      Observed: on the tree-of-record eth board, fire at full brightness threw
+      green sparks on the red field, random count proportional to lit-pixel
+      coverage, concentrated in the last 2/3 of each strip, one frame long.
+      Effect-dependent (fire worst, bioluminescent nearly clean) and
+      brightness-dependent (truly ~10% brightness made it disappear). The
+      render framebuffer was proven 100% clean over a 60s dump, so the
+      corruption is in the transmission stage, not the pixel math. It followed
+      the firmware across boards and persisted through every wiring/electrical
+      config — the eth cable was a red herring for THIS glitch (distinct from
+      the resolved head-glitch, see ws2812-eth-cable-head-glitch).
+
+      Why it's a margin, not a pin property: bulb-fleet glitched on 6 strong
+      pads (GPIO 4/16/17/5/18/19, 100 LEDs) and was fixed by the same staggered
+      Show(); the near-identical tree-of-record original (GPIO 4/15/17/5/18/19)
+      ran clean. So it is not "too many channels" (5 eth channels glitched
+      where 6 tree channels were clean) and not a specific pin — it is
+      proximity to an ISR-deadline threshold set by: simultaneous channel
+      count, LEDs/strip, WiFi/ESP-NOW interrupt timing, and brightness/current
+      (the electrical ground-bounce component stacks here, and the RTC-domain
+      pads 32/33 plausibly lowered the margin further). The original simply had
+      margin and was never stress-tested with worst-case full-bright fire.
+
+      Fix (ported from bulb-fleet stripsShow):
+        strip0.Show(); strip1.Show(); strip2.Show();
+        while (!strip0.CanShow() || !strip1.CanShow() || !strip2.CanShow()) {}
+        strip3.Show(); strip4.Show();
+      Lowering the brightness cap (bulb-fleet did both in the same fix) attacks
+      the same threshold from the current side. Staggering de-correlates the
+      channels, relieving both the ISR pile-up and the simultaneous-switching
+      ground bounce at once — which is why one change fixed a glitch that
+      resisted every wiring fix.

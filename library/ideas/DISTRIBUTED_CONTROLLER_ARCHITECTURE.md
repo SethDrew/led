@@ -321,6 +321,130 @@ their map format and sync handshake before building.
 
 ---
 
+## Part 5 — helix-canopy case study: render cost, the sim/render split, and master-on-a-node
+
+**Status:** Reasoning from a June 2026 working session against the helix-canopy
+sculpture (1697 px: 2× helix 594, 14× canopy 700, 7× root 403). **Everything in
+this section is reasoning and design argument, NOT validated** — *except* the
+render-fps measurements, which were taken on real hardware and are recorded in
+the engineering ledger (`esp32-d0wd-helix-render-fps-2026-06-28`). Don't treat
+the architecture conclusions below as confirmed until built.
+
+### 5.1 The one measured input
+
+A bench (ESP32-D0WD-V3, 240MHz, one core) rendering the full 1697-px buffer
+clears 60 fps on 7 of 8 effects (124–950 fps); the two real-space particle-
+deposition effects are the bottleneck (`creatures_az` 70, `nebula_az` 37 — the
+latter fails 60). A voxel-grid rewrite of `nebula_az` measured 36→71 fps,
+bit-identical output. Those numbers are the only validated facts here; the rest
+is what we *infer* from them.
+
+### 5.2 Why the heavy effects are slow (reasoning)
+
+Not topology-awareness — `pour`/`pulse`/`axis_radial` use full 3D topology and
+run 190–246 fps. The split is algorithmic:
+
+- **Field (gather) effects:** `color[i] = f(position[i], t)`. Each LED
+  independent, O(N), one pass. Cheap, and the ideal for distribution.
+- **Scatter/deposition effects:** particles deposit onto nearby LEDs. In *index*
+  space a particle touches a contiguous window (O(1) to find, cheap). In *real
+  3D* space the nearby LEDs are an unstructured subset of the flat array, so with
+  no spatial index every particle is tested against all N LEDs → O(particles×N).
+  That nested loop is the cost (~100k distance evals/frame for `nebula_az`).
+
+So it's fundamental (algorithmic), not sloppy code — but addressable: a voxel
+grid (bin LEDs at cell = cutoff radius; each particle visits only its 3×3×3
+neighbourhood) collapses O(P×N) → O(P×k). Rotating the ~56 orbs into the LEDs'
+fixed frame (rotations preserve distance) also removes a per-frame 1697-LED trig
+loop and lets the grid be built once on static `LED_POS`. Measured ~2× because
+the residual O(N) work (background gradient, decay, compositing) becomes the
+floor; slice-render (5.4) attacks that residual too.
+
+### 5.3 Don't replicate the whole sim — broadcast the scene, render locally
+
+The replicated-full-render model in Parts 3–4 (every node renders all 1697 px,
+emits its slice) was a minimize-code-change expedient. It costs 3× redundant
+render, the float-determinism fragility (needs bit-identical arithmetic on
+identical chips), and a tight per-frame budget. The cleaner decomposition, for a
+particle effect:
+
+| stage | cost | shared/local |
+|---|---|---|
+| **simulate** (advance ~56 orbs: pos, size, brightness, life) | tiny, O(particles) | global — one scene |
+| **render/deposit** (scene → per-LED colour) | expensive, O(LEDs) | per-LED, embarrassingly parallel |
+
+The render splits because **each LED's colour depends only on (its position, t,
+the particle list) — never on another LED.** So: master runs the sim once and
+broadcasts the *scene* (t + params + particle list, ~1 KB/frame — state, not
+pixels); each board renders only its own LED slice. This is the CPU→GPU split /
+a render-farm tiling the image.
+
+Payoffs (reasoned): kills the determinism gotcha (one authoritative sim, no
+need for identical chips); divides render cost ~3× (worst `nebula_az` ~9 ms/board
+even without the grid); and **reduces the sync burden** — orb positions are
+*shipped*, not re-derived per board, so they stay consistent across boundaries
+regardless of sub-ms clock skew. The clock still matters for the *field* parts
+each board computes locally from t, and for interpolating between scene snapshots
+if rendering above the broadcast rate.
+
+Cost: a clean `effects.h` refactor — every effect becomes either a pure field
+`f(position, t, params)` (loop over my slice) or `sim(t, params) → particles`
+(master) + `deposit(particles) over my LED range` (node). Preserves the no-drift
+doctrine: one source file, sim half on master, deposit half on nodes, host
+sim/WASM runs both halves in one process.
+
+### 5.4 What separates and what doesn't (reasoning)
+
+The reframe works whenever the field is a **bounded superposition of localized
+kernels with low-dimensional parameters** — linearity or point/local structure
+gives a per-point evaluation that needs no neighbour state:
+
+- particles = sum of blobs; **heat diffusion = sum of growing Gaussians** (linear
+  + known heat-kernel Green's function: a source at `x₀,t₀` spreads as a Gaussian
+  with `σ = √(2α·age)` and decaying peak — *architecturally identical to the orb
+  effect*, just with age-varying σ/amplitude; a touch = a new source = a
+  broadcast EVENT); **Worley = min distance to feature points** (point-native, no
+  PDE, no neighbour history — broadcast the points, evaluate per LED); waves/
+  plasma = sum of a few Fourier modes.
+
+What genuinely resists is **nonlinear or globally-coupled dynamics**, where no
+fixed-size superposition exists:
+
+- **reaction-diffusion (Gray–Scott / Turing patterns)** — nonlinear local
+  coupling; patterns emerge from interaction; needs the grid + neighbour stencil
+  + halo exchange. (The aesthetically tempting one for a nature piece — this is
+  the real exception, not heat/Worley.)
+- **fluids (Navier–Stokes)** — pressure projection is a globally-coupled Poisson
+  solve; particle methods (SPH, vortex particles) exist but reintroduce pairwise
+  O(P²) coupling rather than removing it.
+- **cellular automata** — discrete neighbour rules.
+
+Dividing line: *does a point's value depend only on (shared scene + its own
+coordinates)* → particle-able, broadcasts and slices for free; *or on the
+evolving state of its neighbours* → stuck with grid + halo exchange. The current
+helix palette is entirely on the easy side.
+
+### 5.5 Master-on-a-node (revises the Part-4 Pi recommendation)
+
+Given 5.1–5.3, an earlier "the ESP32 isn't strong enough to be master, use a Pi"
+premise looks too conservative for this scale (reasoning, not built):
+
+- The master's *extra* duties (broadcast SYNC/EVENT, hold params, run the cheap
+  orb sim, queue scene broadcasts) are < 1 ms/frame. The expensive per-LED
+  deposition is not a master duty — every node does its own slice.
+- The D0WD is **dual-core**; the bench used one core. Layout: render on core 1,
+  master duties on core 0. No need to render across two cores — single-core
+  already clears 60 (and slice-render leaves large margin).
+
+So: designate one render board as master, drop the Pi — **unless** audio lands
+(≈50 Hz FFT/mel/onset could saturate the master's spare core → revisit a Pi) or
+you want true pixel-mapped media (the one job that forces central pixel
+streaming; bandwidth is a non-issue at 1697 px ≈ 2.4 Mbps, so streaming is also
+*viable* here, just unnecessary for parametric/field content). SPOF is unchanged
+either way; a silent-master failover on another node is possible if wanted.
+
+---
+
 ## Open next artifacts (when there is a real system)
 
 - Persistent reset-reason capture + the packet-flood / fault-injection repro rig

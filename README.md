@@ -23,10 +23,13 @@ Commits are welcome across any of these.
 ```bash
 git clone https://github.com/SethDrew/led.git
 cd led
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+This single `.venv` at the repo root is the one environment for everything —
+the viewer, effect streaming, and PlatformIO (`pio` lives at `.venv/bin/pio`).
 
 Run the viewer:
 ```bash
@@ -34,9 +37,10 @@ cd audio-reactive/viewer
 python explore.py
 ```
 
-Optionally install Demucs for 4-stem source separation:
+Optional extras (not needed for the viewer):
 ```bash
-pip install demucs
+pip install -r requirements-research.txt   # MIR beat-validation tools
+pip install demucs                          # 4-stem source separation
 ```
 
 ## License

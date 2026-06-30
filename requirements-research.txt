@@ -1,0 +1,12 @@
+# Research / MIR beat-validation tools. NOT needed for the Audio Viewer or for
+# streaming effects to a board — only for offline analysis scripts.
+#   pip install -r requirements-research.txt
+-r requirements.txt
+
+mir_eval>=0.7        # Standard MIR evaluation metrics
+jams>=0.3.4          # JAMS annotation format (Harmonix Set)
+
+# madmom (beat/tempo detection). On Python 3.10+ it must be built from GitHub
+# (the released wheel breaks on collections.MutableSequence):
+#   pip install git+https://github.com/CPJKU/madmom.git
+# See audio-reactive/research/analysis/MADMOM_SUMMARY.md

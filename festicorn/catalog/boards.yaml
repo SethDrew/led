@@ -453,3 +453,41 @@ boards:
     networked. 4× WS2812, 150 LEDs each, clean output pins 13/27/32/33.
     Runs the 4-strip wormhole (env:wormhole-eth). Port re-enumerates on
     replug — identify by MAC.
+
+- mac: A4:F0:0F:61:40:18
+  id: 'led-eth-1'
+  chip: esp32
+  role: wormhole-eth
+  first_seen: '2026-06-28T00:00:00Z'
+  last_validated:
+    utc: '2026-06-28T00:00:00Z'
+    port: /dev/cu.usbserial-0001
+    method: esptool read-mac (chip detect ESP32-D0WD-V3 rev3.1, 240MHz, 40MHz xtal)
+  strips:
+    count: 4
+    leds_each: 150
+    pins: [13, 27, 32, 33]
+  notes: |
+    Replica of led-eth-0. LED data over ethernet CABLE as physical conductor
+    only — not networked. 4× WS2812, 150 LEDs each, output pins 13/27/32/33.
+    Runs the 4-strip wormhole (env:wormhole-eth). Identify by MAC; port
+    re-enumerates on replug.
+
+- mac: B4:BF:E9:33:63:C0
+  id: 'led-eth-2'
+  chip: esp32
+  role: tree-of-record-eth
+  first_seen: '2026-06-29T00:00:00Z'
+  last_validated:
+    utc: '2026-06-29T00:00:00Z'
+    port: /dev/cu.usbserial-11220
+    method: esptool read-mac (chip detect ESP32, 240MHz, 40MHz xtal)
+  strips:
+    count: 4
+    leds_each: 150
+    pins: [13, 27, 32, 33]
+  notes: |
+    Third eth-board clone (after led-eth-0/1), same pinout. 4× WS2812, 150 LEDs
+    each, output pins 13/27/32/33. Flashed with the tree-of-record receiver
+    (env:tree-of-record-eth): ESP-NOW BS-26 + duck audio, effect catalog scanned
+    by the decouter ring. Identify by MAC; port re-enumerates on replug.

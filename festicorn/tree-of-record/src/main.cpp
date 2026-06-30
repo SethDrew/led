@@ -886,7 +886,14 @@ static inline void setPixel(uint8_t s, uint16_t i, uint8_t r, uint8_t g, uint8_t
 }
 
 static void showAll() {
+    // Stagger in two batches of 3 to avoid RMT ISR contention: many channels
+    // refilling simultaneously can miss ISR deadlines when a WiFi/ESP-NOW
+    // interrupt lands mid-frame, underrunning a channel into corrupt (wrong-
+    // color, back-of-strip) glitch frames. The CanShow() wait spreads the
+    // refills (and the switching current). See engineering ledger
+    // esp32-rmt-simultaneous-show-glitch-frames; fix proven on bulb-fleet.
     strip0.Show(); strip1.Show(); strip2.Show();
+    while (!strip0.CanShow() || !strip1.CanShow() || !strip2.CanShow()) {}
     strip3.Show(); strip4.Show(); strip5.Show();
 }
 

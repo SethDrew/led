@@ -10,15 +10,15 @@
  *   decouter (0–11)    → effect select, grouped: 0–2 audio field effects
  *                        (bloom, fire, heat), 3–4 audio particle effects
  *                        (sparkle, creatures), 5 ambient particles (leaf-wind),
- *                        6–8 passive (light-through, nebula, rainbow); 9–11
- *                        repeat rainbow
+ *                        6–9 passive (light-through, nebula, galaxy, rainbow);
+ *                        10–11 repeat rainbow
  *   hundreds (0–4)     → recording slot select (0–4)
  *   decmid (0–9)       → hue        36° rotation steps (full wheel)
  *   decinner (0–9)     → saturation 5=original, 0=boosted to full, 9=white
  *   DC switch          → record OR playback, moded by the effect dial:
- *                        decouter 0–7 + DC on = record to the selected slot;
- *                        decouter 8–11 (rainbow) + DC on = play the slot back.
- *                        Idle at 8–11 previews the selected slot's recorded
+ *                        decouter 0–8 + DC on = record to the selected slot;
+ *                        decouter 9–11 (rainbow) + DC on = play the slot back.
+ *                        Idle at 9–11 previews the selected slot's recorded
  *                        effect (live form); rainbow if the slot is empty.
  *                        The action binds at the switch's rising edge and holds
  *                        until release, so dial moves mid-action can't flip it.
@@ -876,7 +876,15 @@ static inline void setPixel(uint8_t s, uint16_t i, uint8_t r, uint8_t g, uint8_t
 }
 
 static void showAll() {
-    strip0.Show(); strip1.Show(); strip2.Show(); strip3.Show();
+    // Stagger the Show()s to avoid RMT ISR contention: many channels refilling
+    // simultaneously can miss ISR deadlines when a WiFi/ESP-NOW interrupt lands
+    // mid-frame, underrunning a channel into corrupt (wrong-color, back-of-
+    // strip) glitch frames. The CanShow() wait spreads the refills (and the
+    // switching current). See engineering ledger
+    // esp32-rmt-simultaneous-show-glitch-frames; fix proven on bulb-fleet.
+    strip0.Show(); strip1.Show(); strip2.Show();
+    while (!strip0.CanShow() || !strip1.CanShow() || !strip2.CanShow()) {}
+    strip3.Show();
 }
 
 // ── Stick topology ──────────────────────────────────────────────
@@ -999,9 +1007,10 @@ enum EffectId : uint8_t {
     // ambient: passive
     FX_LIGHT_THROUGH,
     FX_NEBULA,
+    FX_GALAXY,              // dark-purple slow breath + drifting desaturated galaxies
     FX_RAINBOW,
-    FX_COUNT                // = 9: decouter ring has 12 slots, so the top
-                            // slots (9–11) clamp onto RAINBOW (8) — adjacent
+    FX_COUNT                // = 10: decouter ring has 12 slots, so the top
+                            // slots (10–11) clamp onto RAINBOW (9) — adjacent
                             // rainbow/playback positions. See decouter select.
 };
 
@@ -1552,6 +1561,14 @@ static void renderSparkle(float dt) {
 // with); we have one slot, so dropout is a compile-time toggle to compare.
 static const bool FIRE_WITH_DROPOUT = true;
 
+// Audio-free simplification (no audio input wired right now): when set, fire
+// drops all fxEnergy/fxOnset/dropout/color-energy machinery and runs as a
+// deterministic flame — fixed height + color with the autonomous product-of-
+// sines flicker only. Matches the steady-state look the audio form settles to
+// in silence. Set to 0 to restore the full audio-reactive fire.
+#define FIRE_NO_AUDIO     1
+#define FIRE_FLAME_HEIGHT FIRE_EMBER_FLOOR   // fixed base brightness, audio-free
+
 static float fireTime[NUM_STRIPS];
 static float fireBaseBrightness = 0.0f;
 static float fireFlickerIntensity = 0.0f;
@@ -1572,6 +1589,16 @@ static void resetFire() {
 }
 
 static void renderFire(float dt) {
+#if FIRE_NO_AUDIO
+    // Audio removed — deterministic flame: fixed height + idle amber-red color
+    // (the steady state the audio form settles to in silence), no onset pump,
+    // no dropout. The product-of-sines flicker further down is autonomous.
+    float base = FIRE_FLAME_HEIGHT;
+    float dropoutAmount = 0.0f;
+    fireFlickerIntensity = 0.0f;
+    float baseColR = 231.4f, baseColG = 49.3f, baseColB = 2.9f;
+    const float redR = 200.0f, redG = 15.0f, redB = 0.0f;  // red-shift target (unused: dropout off)
+#else
     // Audio-feature EMAs use gDt (real time), not the speed-scaled dt: the
     // ones knob shapes flame motion, never reaction latency — same convention
     // as gravity's gsEnergyEma.
@@ -1646,6 +1673,7 @@ static void renderFire(float dt) {
 
     float base = fireBaseBrightness;
     if (base < FIRE_DEADBAND) base = 0.0f;
+#endif  // FIRE_NO_AUDIO
     float sScl = FIRE_FLICKER_SCALE;
 
     for (uint8_t s = 0; s < NUM_STRIPS; s++) {
@@ -2011,7 +2039,9 @@ static void renderLeafWind(float dt) {
 // 100 physical LEDs + a SCROLL_MARGIN each side (margin kept for the buffer
 // layout even though gyro scroll is gone).
 // No per-effect cap — output via setPixelScaled.
-#define CR_NUM_UNITS     6     // one independent creature world per strip
+#define CR_NUM_UNITS     NUM_STRIPS  // one independent creature world per strip
+                                      // (was hardcoded 6 from the 6-strip fork →
+                                      // OOB fxFloorTimer[4/5] write → reboot)
 #define CR_MAX_CREATURES 7
 #define CR_MAX_ANIMS     6
 #define CR_SCROLL_MARGIN 12
@@ -2669,6 +2699,184 @@ static void renderHeatDiffusion(float dt) {
 }
 
 // ── Black out all strips (reserved/off slots) ───────────────────
+// ── Galaxy (slot 8) ─────────────────────────────────────────────
+// A dark-purple background that breathes very slowly — a full fade in and out
+// over ~GAL_BG_PERIOD seconds — with soft "galaxies" drifting into view and
+// fading out in front of it. Ambient: no audio/sensor dependency. Each strip
+// runs its own population. Color is a deliberate desaturated-random palette
+// (an INVARIANT 3 exception, like fire/nebula/light-through): galaxies want
+// pale tints, not the saturated oklchVarL hues. Routed through setPixelScaled
+// like every other effect, so the hue/sat knobs and floor policy apply.
+//
+// Population math: spawn and death both scale with fxDt, so steady-state count
+// ≈ GAL_BIRTH_RATE × lifetime ≈ 1.5 per strip and is INVARIANT to the speed
+// knob — the ones knob changes the pace, not how many galaxies are present.
+#define GAL_MAX_PER_STRIP  7       // headroom above the ~2.5 mean (Poisson tail)
+#define GAL_BG_PERIOD      20.0f   // s — full fade in+out at nominal speed (ones=8)
+#define GAL_BG_PEAK        0.20f   // background scalar ceiling (kept dim → "dark")
+#define GAL_BG_R           0.50f   // dark-purple background color (0..1 linear)
+#define GAL_BG_G           0.00f
+#define GAL_BG_B           0.72f
+#define GAL_LIFE_MIN       1.0f    // galaxy lifetime range (s); nominal ~3 (±2)
+#define GAL_LIFE_MAX       5.0f
+#define GAL_DRIFT_MIN      5.0f    // LEDs traversed over a whole lifetime
+#define GAL_DRIFT_MAX      10.0f
+#define GAL_SIGMA_MIN      2.5f    // glow half-width (LEDs)
+#define GAL_SIGMA_MAX      4.5f
+#define GAL_PEAK           0.60f   // per-galaxy brightness ceiling (0..1)
+#define GAL_SAT_MIN        0.18f   // desaturated colors
+#define GAL_SAT_MAX        0.40f
+#define GAL_BIRTH_RATE     0.83f   // spawns/s/strip → ~2.5 present (rate×life, ~3s)
+#define GAL_FADE_FRAC      0.30f   // fraction of life spent fading in / out
+// Per-pixel sparkle ("sparkler") inside each galaxy: individual LEDs pop bright
+// and multiplicatively decay, scattered around the galaxy center — replaces the
+// old smooth traveling-wave shimmer. Same decay model as the basic sparkle fx.
+#define GAL_BED_LEVEL      0.22f   // faint smooth glow bed; sparks ride on top
+#define GAL_SPARK_RATE     22.0f   // spark births/s per galaxy (× its envelope)
+#define GAL_SPARK_DECAY    0.86f   // per-(1/30s) multiplicative decay (snappy pop)
+#define GAL_SPARK_SPREAD   1.5f    // spark scatter, in units of σ, around center
+
+struct Galaxy {
+    float pos;        // LED position
+    float vel;        // LEDs/s drift (signed)
+    float age;        // s
+    float lifetime;   // s
+    float sigma;      // glow half-width (LEDs)
+    float cutoff;     // 3.2σ render bound (LEDs)
+    float r, g, b;    // base color 0..1 (desaturated)
+    float sparkDebt;  // fractional spark-birth accumulator
+    bool  active;
+};
+static Galaxy galaxies[NUM_STRIPS][GAL_MAX_PER_STRIP];
+static float  galBgPhase = 0.0f;   // seconds into the background breath
+// Per-pixel sparkle field (decaying brightness, 0..~1) for the "sparkler" twinkle.
+static float  galSpark[NUM_STRIPS][LEDS_PER_STRIP];
+
+static void galSpawn(Galaxy &gx, float startAge) {
+    gx.pos      = randFloat() * (float)LEDS_PER_STRIP;
+    gx.lifetime = GAL_LIFE_MIN + randFloat() * (GAL_LIFE_MAX - GAL_LIFE_MIN);
+    float drift = GAL_DRIFT_MIN + randFloat() * (GAL_DRIFT_MAX - GAL_DRIFT_MIN);
+    float dir   = (xorshift32() & 1) ? 1.0f : -1.0f;
+    gx.vel      = dir * drift / gx.lifetime;
+    gx.sigma    = GAL_SIGMA_MIN + randFloat() * (GAL_SIGMA_MAX - GAL_SIGMA_MIN);
+    gx.cutoff   = gx.sigma * 3.2f;
+    float hue   = randFloat() * 360.0f;
+    float sat   = GAL_SAT_MIN + randFloat() * (GAL_SAT_MAX - GAL_SAT_MIN);
+    float cr, cg, cb;
+    hsvToRgb(hue, sat, 1.0f, cr, cg, cb);
+    gx.r = cr / 255.0f; gx.g = cg / 255.0f; gx.b = cb / 255.0f;
+    gx.sparkDebt = 0.0f;
+    gx.age    = startAge;
+    gx.active = true;
+}
+
+// Smoothstep fade in (first GAL_FADE_FRAC of life), hold, fade out (last).
+static inline float galEnvelope(const Galaxy &gx) {
+    float lc = gx.age / gx.lifetime;
+    if (lc < GAL_FADE_FRAC) {
+        float tf = lc / GAL_FADE_FRAC;
+        return tf * tf * (3.0f - 2.0f * tf);
+    } else if (lc > 1.0f - GAL_FADE_FRAC) {
+        float tf = (1.0f - lc) / GAL_FADE_FRAC;
+        return tf * tf * (3.0f - 2.0f * tf);
+    }
+    return 1.0f;
+}
+
+static void resetGalaxy() {
+    galBgPhase = GAL_BG_PERIOD * 0.25f;   // start mid-rise so entry isn't black
+    for (uint8_t s = 0; s < NUM_STRIPS; s++)
+        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) galSpark[s][i] = 0.0f;
+    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        for (uint8_t g = 0; g < GAL_MAX_PER_STRIP; g++)
+            galaxies[s][g].active = false;
+        // Pre-spawn 1–2 at random points in their lives so the field is alive
+        // the instant the mode is entered (mirrors creatures' spawn-visible).
+        uint8_t pre = 1 + (uint8_t)(xorshift32() & 1);
+        for (uint8_t k = 0; k < pre; k++) {
+            galSpawn(galaxies[s][k], 0.0f);
+            galaxies[s][k].age = randFloat() * galaxies[s][k].lifetime;
+        }
+    }
+}
+
+static void renderGalaxy(float dt) {
+    // Background breath: full fade in+out over GAL_BG_PERIOD. 0.5−0.5cos →
+    // dark at phase 0, dim-purple peak at the half-period.
+    galBgPhase += dt;
+    if (galBgPhase >= GAL_BG_PERIOD) galBgPhase -= GAL_BG_PERIOD;
+    float bgLevel = GAL_BG_PEAK *
+        (0.5f - 0.5f * cosf(6.2831853f * (galBgPhase / GAL_BG_PERIOD)));
+    float bgR = GAL_BG_R * bgLevel;
+    float bgG = GAL_BG_G * bgLevel;
+    float bgB = GAL_BG_B * bgLevel;
+
+    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        // Advance / retire galaxies on this strip.
+        for (uint8_t g = 0; g < GAL_MAX_PER_STRIP; g++) {
+            Galaxy &gx = galaxies[s][g];
+            if (!gx.active) continue;
+            gx.age += dt;
+            gx.pos += gx.vel * dt;
+            if (gx.age >= gx.lifetime) gx.active = false;
+        }
+        // Poisson birth into a free slot.
+        if (randFloat() < GAL_BIRTH_RATE * dt) {
+            for (uint8_t g = 0; g < GAL_MAX_PER_STRIP; g++)
+                if (!galaxies[s][g].active) { galSpawn(galaxies[s][g], 0.0f); break; }
+        }
+        // Per-frame envelope (0..1) and brightness amplitude for each galaxy.
+        float env[GAL_MAX_PER_STRIP];
+        float amp[GAL_MAX_PER_STRIP];
+        for (uint8_t g = 0; g < GAL_MAX_PER_STRIP; g++) {
+            env[g] = galaxies[s][g].active ? galEnvelope(galaxies[s][g]) : 0.0f;
+            amp[g] = env[g] * GAL_PEAK;
+        }
+
+        // Decay the per-pixel sparkle field (snappy "sparkler" pops). Same
+        // multiplicative-decay model as the basic sparkle effect.
+        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++)
+            galSpark[s][i] *= fastDecay(GAL_SPARK_DECAY, dt * 30.0f);
+
+        // Birth new sparks scattered around each galaxy's center, at a rate that
+        // scales with the galaxy's envelope (brighter galaxies sparkle harder).
+        // Spread is < cutoff, so every spark lands inside the rendered footprint.
+        for (uint8_t k = 0; k < GAL_MAX_PER_STRIP; k++) {
+            if (env[k] <= 0.0f) continue;
+            Galaxy &gx = galaxies[s][k];
+            gx.sparkDebt += GAL_SPARK_RATE * dt * env[k];
+            while (gx.sparkDebt >= 1.0f) {
+                gx.sparkDebt -= 1.0f;
+                float off = (randFloat() * 2.0f - 1.0f) * gx.sigma * GAL_SPARK_SPREAD;
+                int li = (int)(gx.pos + off + 0.5f);
+                if (li >= 0 && li < LEDS_PER_STRIP && galSpark[s][li] < 0.05f)
+                    galSpark[s][li] = 0.85f + randFloat() * 0.30f;
+            }
+        }
+
+        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
+            float r = bgR, g = bgG, b = bgB;
+            float spark = galSpark[s][i];
+            for (uint8_t k = 0; k < GAL_MAX_PER_STRIP; k++) {
+                if (amp[k] <= 0.0f) continue;
+                Galaxy &gx = galaxies[s][k];
+                float d = (float)i - gx.pos;
+                if (d < -gx.cutoff || d > gx.cutoff) continue;
+                float spatial = expf(-(d * d) / (2.0f * gx.sigma * gx.sigma));
+                // Faint smooth bed + bright per-pixel sparkle riding on top.
+                float bri = amp[k] * spatial *
+                            (GAL_BED_LEVEL + (1.0f - GAL_BED_LEVEL) * spark);
+                float cr = gx.r * bri, cg = gx.g * bri, cb = gx.b * bri;
+                // Screen-blend galaxies over the background and each other.
+                r = r + cr - r * cr;
+                g = g + cg - g * cg;
+                b = b + cb - b * cb;
+            }
+            setPixelScaled(s, i, r * 255.0f, g * 255.0f, b * 255.0f);
+        }
+    }
+}
+
 static void renderOff() {
     for (uint8_t s = 0; s < NUM_STRIPS; s++)
         for (uint16_t i = 0; i < LEDS_PER_STRIP; i++)
@@ -2702,6 +2910,9 @@ static void resetEffect(uint8_t fx) {
             break;
         case FX_NEBULA:
             resetNebula();
+            break;
+        case FX_GALAXY:
+            resetGalaxy();
             break;
         case FX_RAINBOW:
             resetRainbow();
@@ -3091,6 +3302,7 @@ void loop() {
         0.25f,  // FX_LEAF_WIND
         1.0f,   // FX_LIGHT_THROUGH
         1.5f,   // FX_NEBULA
+        1.0f,   // FX_GALAXY
         2.0f,   // FX_RAINBOW
     };
     float fxDt = dt * effSpeed * SPEED_SCALE[currentEffect];
@@ -3118,6 +3330,9 @@ void loop() {
             break;
         case FX_NEBULA:
             renderNebula(fxDt);
+            break;
+        case FX_GALAXY:
+            renderGalaxy(fxDt);
             break;
         case FX_RAINBOW:
             renderRainbow(fxDt);

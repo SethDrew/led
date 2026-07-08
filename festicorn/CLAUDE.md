@@ -6,6 +6,8 @@ Festicorn is an umbrella for standalone LED installation firmware. Each subdirec
 
 Projects share low-level math primitives (via `festicorn/lib/`) but intentionally duplicate effect algorithms. Each installation is tuned for its physical context: a 6-LED bioluminescence piece and a 50-bulb portable rig want different sparkle decay rates, different brightness caps, different sensor processing. **Prefer specificity over abstraction.** A concrete, tuned effect in one project is better than a generic configurable effect that tries to serve all of them.
 
+What this rules out is standardized *magnitudes* — thresholds, gains, time constants are always per-installation. The input role taxonomy (ARCHITECTURE.md, Axis 6) is still a helpful frame at the *semantic* level: thinking of an effect as consuming "an EVENT" or "an INTENSITY" clarifies its design and what sensors could drive it, even though the numeric contract between sensor and effect must be tuned per-pairing.
+
 When code is genuinely hardware-independent and stable (LUTs, dithering, trig), share it in `lib/`. When code involves artistic or perceptual tuning, keep it local to the installation.
 
 ## Time-Based Math (critical)

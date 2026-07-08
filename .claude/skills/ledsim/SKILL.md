@@ -54,6 +54,17 @@ Always the C++ host-compiled sim in the install's `tools/sim/` (e.g.
 - **No sim for the target install yet?** Scaffold an ephemeral stub from the current render
   fn (same rules). Don't commit it as authoritative.
 
+## Phase 1.5 — Agree on the metric before measuring
+
+The metric is the experiment; agree on it before spending a run.
+
+- **Propose the specific metric(s)** that answer the goal and check in with the user before
+  measuring — the user knows which differences actually matter.
+- **Check the layer.** ledsim sees only frame-level RGB per pixel over time. If the goal lives
+  at a layer it can't see — sub-frame current/timing, or a perceptual quality judged by eye —
+  say so; don't trust a frame-level proxy for it.
+- **Show the metric discriminates** against a known-different pair before trusting it to judge.
+
 ## Phase 2 — Emit CSV (pixels over time)
 
 The sim writes one CSV per run. **Duration is the agent's call** — pick enough time to

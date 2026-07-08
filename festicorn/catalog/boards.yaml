@@ -46,14 +46,6 @@ firmware_by_role:
     packet_format: tx_test_recv
     notes: |
       Classic-ESP32 fixture used during bulb-sender RX validation.
-  bench-tree:
-    deployment: static
-    source: festicorn/bench-tree/src/main.cpp
-    packet_format: standalone
-    notes: |
-      Standalone sap-flow animation on a 3-strip 197-LED tree topology
-      (pins 27/13/14 via build flags). No network. Sap-flow particle
-      effect lives at festicorn/bench-tree/src/foregrounds/SapFlowForeground.h.
   bench-bulbs:
     deployment: static
     source: festicorn/bench-bulbs/src/bench.cpp
@@ -320,20 +312,6 @@ boards:
     Listed in gyro-sense/platformio.ini header as "C3-New" with working
     WiFi TX/RX. Not currently assigned a deployment role.
 
-# ── bench-tree (sap flow standalone) ─────────────────────────────────
-- mac: A4:F0:0F:61:40:18
-  id: 'bench-tree'
-  chip: esp32
-  role: bench-tree
-  first_seen: '2026-04-29T05:56:00Z'
-  last_validated:
-    utc: '2026-04-29T05:56:00Z'
-    port: /dev/cu.usbserial-0001
-    notes: MAC confirmed via esptool chip_id scan.
-  notes: |
-    Classic ESP32-D0WD-V3 driving the standalone bench-tree sap-flow
-    animation. 3 strips: pins 27/13/14 (build flags), 197 LEDs total.
-
 # ── take-root (hardware bring-up breadboard) ─────────────────────────
 - mac: B0:CB:D8:8A:85:F4
   id: 'take-root'
@@ -472,6 +450,8 @@ boards:
     only — not networked. 4× WS2812, 150 LEDs each, output pins 13/27/32/33.
     Runs the 4-strip wormhole (env:wormhole-eth). Identify by MAC; port
     re-enumerates on replug.
+    Lineage: bench-tree sap-flow board (2026-04-29) → led-eth-1, permanent
+    (2026-07-07). The bench-tree role/entry is retired.
 
 - mac: B4:BF:E9:33:63:C0
   id: 'led-eth-2'

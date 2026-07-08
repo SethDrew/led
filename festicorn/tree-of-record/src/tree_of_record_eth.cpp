@@ -10,20 +10,15 @@
  *   decouter (0–11)    → effect select, grouped: 0–2 audio field effects
  *                        (bloom, fire, heat), 3–4 audio particle effects
  *                        (sparkle, creatures), 5 ambient particles (leaf-wind),
- *                        6–9 passive (light-through, nebula, galaxy, rainbow);
- *                        10–11 repeat rainbow
- *   hundreds (0–4)     → recording slot select (0–4)
+ *                        6–9 passive (light-through, nebula, galaxy, rainbow),
+ *                        10 bouquet, 11 rain shimmer
+ *   hundreds (0–4)     → unused (was record-slot select; record/playback
+ *                        ripped out 2026-07 — restore from git history)
  *   decmid (0–9)       → hue        36° rotation steps (full wheel)
  *   decinner (0–9)     → saturation 5=original, 0=boosted to full, 9=white
- *   DC switch          → record OR playback, moded by the effect dial:
- *                        decouter 0–8 + DC on = record to the selected slot;
- *                        decouter 9–11 (rainbow) + DC on = play the slot back.
- *                        Idle at 9–11 previews the selected slot's recorded
- *                        effect (live form); rainbow if the slot is empty.
- *                        The action binds at the switch's rising edge and holds
- *                        until release, so dial moves mid-action can't flip it.
+ *   DC switch          → unused (was record/playback trigger)
  *   AC switch          → ignored (lever broke at install, June 2026 — contact
- *                        stuck closed/chattering; DC took over both jobs.
+ *                        stuck closed/chattering.
  *                        See AC_SWITCH_FAILURE_AND_DC_FALLBACK.md)
  *
  * BS-26 live → knobs control. No signal → serial PARAMS control.
@@ -57,11 +52,9 @@
 #include <esp_random.h>
 #include <NeoPixelBus.h>
 #include <ArduinoJson.h>
-#include <SPIFFS.h>
 #include <math.h>
 #include <fast_math.h>
 #include <oklch_lut.h>
-#include <driver/i2s.h>
 #include <v1_packet.h>
 #include <gyro_packet_v1.h>
 #include <audio_packet_v1.h>
@@ -114,473 +107,6 @@ static float bloomDormancyMin  = 3.0f;
 static float bloomDormancyMax  = 7.0f;
 static float bloomDormancyFrac = 0.0f;
 
-// DC switch on the BS-26 → record (dial 0–7) or playback (dial 8–11). The AC
-// packet field is ignored — the lever died at install (stuck-closed contact;
-// diagnosis + this design in AC_SWITCH_FAILURE_AND_DC_FALLBACK.md).
-// acOn retained for the "tens=0 means off" path but no longer driven by AC.
-static bool acOn = true;
-
-// ── Recording system ─────────────────────────────────────────────
-// Up to 5 slots of 30s input recordings stored in SPIFFS.
-// Each slot: a small header (RecFileHeader) followed by a packed array of
-// RecFrame structs at capture framerate (~60fps). Each frame stores the knob/
-// effect params plus the filtered audio drive bytes so silent replay stays
-// faithful. RecFrame is 8 bytes; 1800 frames ≈ 14.4 KB per slot.
-#define REC_MAX_SLOTS     5
-#define REC_MAX_FRAMES    1800   // 30s × 60fps
-#define REC_FPS           60
-
-enum RecState { REC_IDLE, REC_RECORDING, REC_PLAYING };
-static RecState recState = REC_IDLE;
-static uint8_t  recSlot = 0;          // selected via hundreds knob (0–4)
-// Maintained on/off switches (level semantics): switch position = state.
-// A "latch" disarms the switch after its action fires so the 30 s record cap
-// can't instantly restart while the switch is still held — you must flip the
-// switch off (re-arm) to record/play again.
-static bool     recAcLatch = false;    // record action consumed-while-high
-static bool     recDcLatch = false;    // playback action consumed-while-high
-
-struct RecFrame {
-    uint8_t tens, ones, hundreds, decouter, decmid, decinner;
-    // Filtered audio drive captured with the frame so playback is faithful in
-    // silence: the AudioPacketV1 companded RMS bytes (25 Hz, sqrt-companded).
-    // On playback these are re-derived through the same floor/ceiling/onset
-    // path as live packets (see audioDeriveFeatures). 0/0 = muted or stale.
-    uint8_t rms_mean, rms_max;
-};
-
-// On-disk /rec_N.bin format: a small header then a packed array of RecFrame.
-//   magic   "TRR1" — distinguishes versioned files from legacy headerless ones
-//   version format revision (1 = first with audio bytes)
-//   frameSize sizeof(RecFrame) at write time, so a future field add still loads
-// Legacy files (pre-header, 6-byte frames) lack the magic; they are loaded as
-// v0 with rms bytes = 0 (audio renders silent on replay) rather than rejected.
-struct RecFileHeader {
-    char     magic[4];   // 'T','R','R','1'
-    uint8_t  version;    // current REC_FILE_VERSION
-    uint8_t  frameSize;  // sizeof(RecFrame) at write time
-    uint16_t reserved;   // 0, padding / forward use
-};
-static const char REC_MAGIC[4]      = { 'T', 'R', 'R', '1' };
-#define REC_FILE_VERSION  1
-#define REC_LEGACY_FRAME_SIZE 6   // old headerless format: 6-byte RecFrame
-
-// Walk-away cap (REC_CAP_S): a held or forgotten record switch stops the
-// recording after this many seconds, and the latch then requires a full
-// switch cycle before recording again. The 30 s buffer bound still backstops.
-static float     recCapS = 20.0f;
-static RecFrame* recBuffer = nullptr;  // heap-allocated on first use
-static uint32_t  recFrameCount = 0;    // frames written/total in buffer
-static uint32_t  recPlayIdx = 0;       // current playback position
-static float     recFrameAcc = 0.0f;   // record: dt accumulator for fixed-rate capture
-static float     recPlayClock = 0.0f;  // playback: wall-clock fallback when no audio
-static bool      recSlotHasData[REC_MAX_SLOTS] = {};
-// First frame's effect index per slot (0xFF = empty/unreadable) — drives the
-// replay-position preview: parked at dial 11, the tree renders the selected
-// slot's effect live instead of rainbow. Peeked at boot, updated on save.
-static uint8_t   recSlotEffect[REC_MAX_SLOTS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-
-// ── Audio waveform record/playback (8 kHz/8-bit, /rec_N.audio) ──
-// The duck (sender_v3) streams AudioStreamPacketV1 only while a slot records.
-// We capture it to a parallel file, then on playback feed it to the DAC
-// (GPIO25 via I2S-DMA) and re-derive fxEnergy/fxOnset from the same samples.
-#define REC_AUDIO_RATE   8000
-#define REC_AUDIO_MAX    (REC_AUDIO_RATE * 30)   // 30 s cap = 240000 bytes
-#define WF_QUANT_SHIFT   11                       // must match sender_v3 AUDIO_QUANT_SHIFT
-// Legacy arduino-esp32 I2S→built-in-DAC has an 8-bit mclk_div overflow bug
-// (arduino-esp32 #5938, fixed in core 2.0.3): configuring sub-~22 kHz rates
-// truncates the divisor and plays chipmunked. Rates ≳22 kHz are honored ~1:1,
-// so we clock the DAC at REC_AUDIO_RATE×WF_DAC_UPSAMPLE and repeat each source
-// sample that many times (zero-order hold). 24 kHz measured = 8001 Hz content.
-#define WF_DAC_UPSAMPLE  3                        // 8 kHz × 3 = 24 kHz DAC clock
-#define WFR_SIZE         4096                      // RX ring (power of two), ~0.5 s
-                                                   // drained every loop (~16 ms), so
-                                                   // 0.5 s is ample slack vs 8 kHz in.
-#define WFR_MASK         (WFR_SIZE - 1)
-// Seq-based timeline reconstruction: the duck stamps every packet with a seq
-// counter (gap = dropped packet). We honor it so the .audio file's length
-// equals real elapsed time no matter how many packets drop — without it, lost
-// packets silently shorten the file and playback (which slaves both audio and
-// video to file position) runs fast/chipmunked. Missing packets are backfilled
-// with silence at their true offset; the backfill is bounded per drain so a
-// long dropout can't block the render loop.
-#define WF_MAX_GAP_PKTS  1200                      // > a full 30 s record; larger
-                                                   // = reorder/wrap glitch, skip
-#define WF_PAD_CHUNK     1024                      // max silence bytes/drain
-static uint8_t   wfRing[WFR_SIZE];
-static uint8_t   wfSilence[256];                   // 128-filled at record start
-static volatile uint32_t wfHead = 0, wfTail = 0;  // SPSC: onReceive→loop
-static volatile uint32_t wfPadDebt    = 0;         // silence bytes owed for gaps
-static volatile uint32_t wfPadTotal   = 0;         // total backfilled bytes (loss)
-static volatile uint16_t wfExpectedSeq = 0;        // next in-order packet seq
-static volatile bool     wfSeqValid    = false;    // baseline captured yet?
-static File      recAudioFile;
-static bool      recAudioOpen  = false;
-static uint32_t  recAudioBytes = 0;
-static bool      recSlotHasAudio[REC_MAX_SLOTS] = {};
-static File      playAudioFile;
-static bool      playAudioOpen = false;
-static bool      dacInstalled  = false;
-
-// Peek a slot's first frame for its effect index (replay-position preview).
-// Returns 0xFF if missing/unreadable. Mirrors recLoadSlot's header probe
-// without pulling the whole file into the frame buffer.
-static uint8_t recPeekSlotEffect(uint8_t slot) {
-    char path[20];
-    snprintf(path, sizeof(path), "/rec_%d.bin", slot);
-    File f = SPIFFS.open(path, "r");
-    if (!f) return 0xFF;
-    size_t fileSize = f.size();
-    RecFileHeader hdr;
-    size_t off = 0;
-    uint8_t frameSize = REC_LEGACY_FRAME_SIZE;
-    if (fileSize >= sizeof(hdr)) {
-        f.read((uint8_t*)&hdr, sizeof(hdr));
-        if (memcmp(hdr.magic, REC_MAGIC, 4) == 0 && hdr.frameSize > 0
-            && hdr.frameSize <= (uint8_t)sizeof(RecFrame)) {
-            off = sizeof(hdr);
-            frameSize = hdr.frameSize;
-        } else {
-            f.seek(0);
-        }
-    }
-    RecFrame rf = {};
-    uint8_t eff = 0xFF;
-    if (fileSize >= off + frameSize && f.read((uint8_t*)&rf, frameSize) == frameSize)
-        eff = rf.decouter;
-    f.close();
-    return eff;
-}
-
-static void recInit() {
-    if (!SPIFFS.begin(true)) {
-        Serial.println("[REC] SPIFFS mount failed");
-        return;
-    }
-    Serial.printf("[REC] SPIFFS ready, %lu bytes free\n",
-                  (unsigned long)SPIFFS.totalBytes() - SPIFFS.usedBytes());
-    for (int i = 0; i < REC_MAX_SLOTS; i++) {
-        char path[24];
-        uint32_t binSz = 0, audSz = 0;
-        snprintf(path, sizeof(path), "/rec_%d.bin", i);
-        recSlotHasData[i] = SPIFFS.exists(path);
-        if (recSlotHasData[i]) { File f = SPIFFS.open(path, "r"); if (f) { binSz = f.size(); f.close(); } }
-        snprintf(path, sizeof(path), "/rec_%d.audio", i);
-        recSlotHasAudio[i] = SPIFFS.exists(path);
-        if (recSlotHasAudio[i]) { File f = SPIFFS.open(path, "r"); if (f) { audSz = f.size(); f.close(); } }
-        if (recSlotHasData[i]) recSlotEffect[i] = recPeekSlotEffect(i);
-        if (recSlotHasData[i] || recSlotHasAudio[i])
-            Serial.printf("[REC]   slot %d: frames=%lu B (%.1fs)  audio=%lu B (%.1fs)  fx=%u\n",
-                          i, (unsigned long)binSz, binSz / (8.0f * 60.0f),
-                          (unsigned long)audSz, audSz / (float)REC_AUDIO_RATE,
-                          recSlotEffect[i]);
-    }
-}
-
-static bool recAllocBuffer() {
-    if (recBuffer) return true;
-    recBuffer = (RecFrame*)malloc(REC_MAX_FRAMES * sizeof(RecFrame));
-    if (!recBuffer) {
-        Serial.println("[REC] buffer alloc failed");
-        return false;
-    }
-    return true;
-}
-
-// ── Waveform helpers ─────────────────────────────────────────────
-static void audioDeriveFeaturesRms(float rmsMean, float rmsMax, float dt);  // fwd
-
-static void wfRingReset() {
-    wfHead = wfTail = 0;
-    wfPadDebt = 0;
-    wfPadTotal = 0;
-    wfSeqValid = false;
-}
-static void wfRingPush(const uint8_t *s, uint32_t n) {       // onReceive (producer)
-    for (uint32_t i = 0; i < n; i++) {
-        if ((wfHead - wfTail) >= WFR_SIZE) return;           // full → drop
-        wfRing[wfHead & WFR_MASK] = s[i];
-        wfHead++;
-    }
-}
-
-// Internal DAC via I2S-DMA. Both DAC channels enabled (GPIO25 + GPIO26) fed the
-// same mono sample, so the jack works wired to either — we spec GPIO25 (Tip).
-static void dacInstall() {
-    if (dacInstalled) return;
-    i2s_config_t cfg = {};
-    cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_DAC_BUILT_IN);
-    cfg.sample_rate = REC_AUDIO_RATE * WF_DAC_UPSAMPLE;   // honored rate (see #5938)
-    cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
-    cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
-    cfg.communication_format = I2S_COMM_FORMAT_STAND_MSB;
-    cfg.intr_alloc_flags = 0;
-    cfg.dma_buf_count = 8;
-    cfg.dma_buf_len = 256;
-    cfg.use_apll = false;
-    if (i2s_driver_install(I2S_NUM_0, &cfg, 0, NULL) != ESP_OK) {
-        Serial.println("[REC] DAC i2s install failed");
-        return;
-    }
-    i2s_set_dac_mode(I2S_DAC_CHANNEL_BOTH_EN);
-    i2s_zero_dma_buffer(I2S_NUM_0);
-    dacInstalled = true;
-}
-static void dacUninstall() {
-    if (!dacInstalled) return;
-    i2s_zero_dma_buffer(I2S_NUM_0);
-    i2s_driver_uninstall(I2S_NUM_0);
-    dacInstalled = false;
-}
-
-static void recAudioBegin(uint8_t slot) {
-    char path[24];
-    snprintf(path, sizeof(path), "/rec_%d.audio", slot);
-    recAudioFile  = SPIFFS.open(path, "w");
-    recAudioOpen  = (bool)recAudioFile;
-    recAudioBytes = 0;
-    memset(wfSilence, 128, sizeof(wfSilence));   // 128 = mid/silence
-    wfRingReset();
-    if (!recAudioOpen) Serial.println("[REC] audio file open failed");
-}
-static void recAudioDrain() {                                // loop (consumer)
-    if (!recAudioOpen) return;
-    // Backfill silence for dropped packets first, so the real samples that
-    // follow land at their true timeline offset. Bounded per call (WF_PAD_CHUNK)
-    // so a multi-second dropout's backfill spreads across drains, never blocking.
-    uint32_t budget = WF_PAD_CHUNK;
-    while (wfPadDebt > 0 && budget > 0 && recAudioBytes < REC_AUDIO_MAX) {
-        uint32_t g = wfPadDebt;
-        if (g > sizeof(wfSilence))            g = sizeof(wfSilence);
-        if (g > budget)                       g = budget;
-        if (g > REC_AUDIO_MAX - recAudioBytes) g = REC_AUDIO_MAX - recAudioBytes;
-        recAudioFile.write(wfSilence, g);
-        recAudioBytes += g; wfPadDebt -= g; budget -= g;
-    }
-    uint8_t chunk[256];
-    while ((wfHead - wfTail) > 0 && recAudioBytes < REC_AUDIO_MAX) {
-        int g = 0;
-        while ((wfHead - wfTail) > 0 && g < (int)sizeof(chunk)
-               && recAudioBytes + g < REC_AUDIO_MAX) {
-            chunk[g++] = wfRing[wfTail & WFR_MASK];
-            wfTail++;
-        }
-        if (g > 0) { recAudioFile.write(chunk, g); recAudioBytes += g; }
-    }
-}
-static void recAudioEnd(uint8_t slot) {
-    if (!recAudioOpen) return;
-    // Recording stopped — settle all remaining owed silence + buffered samples
-    // (the per-drain bound no longer matters; a brief backfill here is fine).
-    for (int guard = 0; guard < 512 && (wfPadDebt > 0 || (wfHead - wfTail) > 0)
-                        && recAudioBytes < REC_AUDIO_MAX; guard++)
-        recAudioDrain();
-    recAudioFile.flush();
-    recAudioFile.close();
-    recAudioOpen = false;
-    recSlotHasAudio[slot] = (recAudioBytes > 0);
-    float lossPct = recAudioBytes > 0 ? 100.0f * wfPadTotal / recAudioBytes : 0.0f;
-    Serial.printf("[REC] audio slot %u: %lu bytes (%.1fs)  loss=%.0f%% (%lu B backfilled)\n",
-                  slot, (unsigned long)recAudioBytes, recAudioBytes / (float)REC_AUDIO_RATE,
-                  lossPct, (unsigned long)wfPadTotal);
-}
-
-static void playbackAudioBegin(uint8_t slot) {
-    char path[24];
-    snprintf(path, sizeof(path), "/rec_%d.audio", slot);
-    playAudioOpen = false;
-    if (!SPIFFS.exists(path)) return;                        // legacy slot → envelope
-    playAudioFile = SPIFFS.open(path, "r");
-    if (!playAudioFile || playAudioFile.size() == 0) return;
-    playAudioOpen = true;
-    dacInstall();
-}
-static void playbackAudioEnd() {
-    if (playAudioOpen) { playAudioFile.close(); playAudioOpen = false; }
-    dacUninstall();
-}
-
-// Speaker volume, applied ONLY at the DAC fill below — the fxEnergy/fxOnset
-// re-derivation reads the same samples at recorded level, so LED reactivity
-// does not change with speaker volume. Each halving costs one of the DAC's
-// 8 bits (quantization hiss under speech); below ~0.06 use a hardware
-// divider on the jack instead.
-static float audioOutVol = 0.12f;
-
-// Feed one frame of recorded audio to the DAC and re-derive fxEnergy/fxOnset
-// from those same samples. Returns false when the slot has no waveform, so the
-// caller falls back to the legacy companded-envelope bytes.
-static bool playbackAudioTick(float dt) {
-    if (!playAudioOpen) return false;
-    int n = (int)(REC_AUDIO_RATE * dt + 0.5f);
-    if (n < 1)   n = 1;
-    if (n > 512) n = 512;
-
-    static uint8_t sbuf[512];
-    int got = playAudioFile.read(sbuf, n);
-    if (got <= 0) { playAudioFile.seek(0); got = playAudioFile.read(sbuf, n); }  // loop
-    if (got <= 0) return false;
-
-    // → DAC: 8-bit sample in the high byte of a 16-bit word, duplicated L/R,
-    // each source sample repeated WF_DAC_UPSAMPLE× (zero-order hold) so the
-    // 24 kHz DAC clock reproduces 8 kHz content at correct pitch. Chunked so
-    // dbuf stays 1024 words regardless of upsample (no extra static DRAM).
-    if (dacInstalled) {
-        static uint16_t dbuf[1024];
-        const int SRC_CHUNK = 1024 / (2 * WF_DAC_UPSAMPLE);   // source samples/chunk
-        int off = 0;
-        while (off < got) {
-            int c = (got - off) > SRC_CHUNK ? SRC_CHUNK : (got - off);
-            int w = 0;
-            for (int i = 0; i < c; i++) {
-                int32_t ac = (int32_t)sbuf[off + i] - 128;   // center on midline
-                uint16_t v = (uint16_t)(uint8_t)(128 + (int32_t)(ac * audioOutVol)) << 8;
-                for (int u = 0; u < WF_DAC_UPSAMPLE; u++) { dbuf[w++] = v; dbuf[w++] = v; }
-            }
-            size_t wrote = 0;
-            i2s_write(I2S_NUM_0, dbuf, (size_t)w * sizeof(uint16_t), &wrote, portMAX_DELAY);
-            off += c;
-        }
-    }
-
-    // → re-derive RMS in the 24-bit domain: ac ≈ (byte-128)<<QUANT_SHIFT.
-    // Sub-window the chunk so rms_max captures the loudest slice (mirrors the
-    // sender's per-window max), rms_mean is the whole-chunk RMS.
-    const int SUB = 4;
-    double total = 0.0;
-    float  subMax = 0.0f;
-    int per = got / SUB; if (per < 1) per = got;
-    int idx = 0;
-    for (int w = 0; w < SUB && idx < got; w++) {
-        double ss = 0.0; int cnt = 0;
-        int end = (w == SUB - 1) ? got : (idx + per);
-        if (end > got) end = got;
-        for (; idx < end; idx++) {
-            double a = (double)(((int32_t)sbuf[idx] - 128) << WF_QUANT_SHIFT);
-            ss += a * a; total += a * a; cnt++;
-        }
-        if (cnt > 0) { float r = sqrtf((float)(ss / cnt)); if (r > subMax) subMax = r; }
-    }
-    float rmsMean = sqrtf((float)(total / got));
-    float rmsMax  = fmaxf(subMax, rmsMean);
-    audioDeriveFeaturesRms(rmsMean, rmsMax, dt);
-    return true;
-}
-
-static void recStartRecording() {
-    if (!recAllocBuffer()) return;
-    recFrameCount = 0;
-    recFrameAcc   = 0.0f;
-    recAudioBegin(recSlot);
-    recState = REC_RECORDING;
-    Serial.printf("[REC] recording to slot %u...\n", recSlot);
-}
-
-static void recStopRecording() {
-    recState = REC_IDLE;
-    recAudioEnd(recSlot);          // close /rec_N.audio (even if no frames)
-    if (recFrameCount == 0) return;
-    char path[20];
-    snprintf(path, sizeof(path), "/rec_%d.bin", recSlot);
-    File f = SPIFFS.open(path, "w");
-    if (!f) { Serial.println("[REC] write failed"); return; }
-    RecFileHeader hdr;
-    memcpy(hdr.magic, REC_MAGIC, 4);
-    hdr.version   = REC_FILE_VERSION;
-    hdr.frameSize = (uint8_t)sizeof(RecFrame);
-    hdr.reserved  = 0;
-    f.write((uint8_t*)&hdr, sizeof(hdr));
-    f.write((uint8_t*)recBuffer, recFrameCount * sizeof(RecFrame));
-    f.close();
-    recSlotHasData[recSlot] = true;
-    recSlotEffect[recSlot] = recBuffer[0].decouter;   // replay-position preview
-    Serial.printf("[REC] saved slot %u: %lu frames (%.1fs)\n",
-                  recSlot, recFrameCount, recFrameCount / (float)REC_FPS);
-}
-
-// Defined with the audio globals below; reseeds the adaptive floor/ceiling/
-// onset state so playback re-derivation converges from a clean baseline rather
-// than inheriting whatever the live audio left behind.
-static void audioResetAdaptiveState();
-
-// Reads one slot's frames into recBuffer, decoding the on-disk format.
-// Returns the frame count loaded (0 = nothing usable). Legacy headerless
-// 6-byte files load with rms bytes zeroed (silent audio on replay).
-static uint32_t recLoadSlot(uint8_t slot) {
-    char path[20];
-    snprintf(path, sizeof(path), "/rec_%d.bin", slot);
-    File f = SPIFFS.open(path, "r");
-    if (!f) return 0;
-    size_t fileSize = f.size();
-
-    // Peek the header to decide versioned vs. legacy.
-    RecFileHeader hdr;
-    bool versioned = false;
-    uint8_t frameSize = REC_LEGACY_FRAME_SIZE;
-    if (fileSize >= sizeof(hdr)) {
-        f.read((uint8_t*)&hdr, sizeof(hdr));
-        if (memcmp(hdr.magic, REC_MAGIC, 4) == 0 && hdr.frameSize > 0
-            && hdr.frameSize <= (uint8_t)sizeof(RecFrame)) {
-            versioned = true;
-            frameSize = hdr.frameSize;
-        }
-    }
-
-    uint32_t count = 0;
-    if (versioned) {
-        // Frames follow the header; on-disk frameSize may be <= our struct
-        // (older version with fewer fields). Read each frame into a zeroed
-        // RecFrame so any missing trailing fields (e.g. rms bytes) default 0.
-        uint32_t avail = (fileSize - sizeof(hdr)) / frameSize;
-        if (avail > REC_MAX_FRAMES) avail = REC_MAX_FRAMES;
-        for (uint32_t i = 0; i < avail; i++) {
-            RecFrame rf = {};
-            if (f.read((uint8_t*)&rf, frameSize) != frameSize) break;
-            recBuffer[i] = rf;
-            count++;
-        }
-    } else {
-        // Legacy headerless file: tightly-packed 6-byte frames, no audio.
-        f.seek(0);
-        uint32_t avail = fileSize / REC_LEGACY_FRAME_SIZE;
-        if (avail > REC_MAX_FRAMES) avail = REC_MAX_FRAMES;
-        for (uint32_t i = 0; i < avail; i++) {
-            RecFrame rf = {};
-            if (f.read((uint8_t*)&rf, REC_LEGACY_FRAME_SIZE) != REC_LEGACY_FRAME_SIZE) break;
-            recBuffer[i] = rf;   // rms_mean/rms_max remain 0 (silent on replay)
-            count++;
-        }
-    }
-    f.close();
-    return count;
-}
-
-static void recStartPlayback() {
-    if (!recSlotHasData[recSlot]) {
-        Serial.printf("[REC] slot %u empty\n", recSlot);
-        return;
-    }
-    if (!recAllocBuffer()) return;
-    recFrameCount = recLoadSlot(recSlot);
-    if (recFrameCount == 0) {
-        Serial.printf("[REC] slot %u unreadable\n", recSlot);
-        return;
-    }
-    recPlayIdx = 0;
-    recPlayClock = 0.0f;
-    // Reseed audio adaptive state so the re-derived energy/onset converges
-    // cleanly from this recording rather than from prior live audio.
-    audioResetAdaptiveState();
-    playbackAudioBegin(recSlot);   // open /rec_N.audio + DAC if this slot has one
-    recState = REC_PLAYING;
-    Serial.printf("[REC] playing slot %u: %lu frames\n", recSlot, recFrameCount);
-}
-
-static void recStopPlayback() {
-    recState = REC_IDLE;
-    playbackAudioEnd();            // close audio + free the DAC/I2S peripheral
-    Serial.println("[REC] playback stopped");
-}
 
 #define GATE_ON_THRESH  0.7f
 #define GATE_OFF_THRESH 1.2f
@@ -787,25 +313,7 @@ static void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
         return;
     }
     if (len == (int)sizeof(AudioStreamPacketV1)) {
-        // Lo-fi waveform from sender_v3 — only flowing while a slot records.
-        if (recState == REC_RECORDING) {
-            const AudioStreamPacketV1 *wp = (const AudioStreamPacketV1 *)data;
-            uint8_t n = wp->n;
-            if (n > AUDIO_STREAM_SAMPLES) n = AUDIO_STREAM_SAMPLES;
-            // Honor the seq timeline: count packets missing since the last one
-            // and owe that many packets' worth of silence before these samples.
-            // First packet of a record sets the baseline (no gap). A jump larger
-            // than a full recording is a reorder/wrap glitch — append, don't pad.
-            if (!wfSeqValid) { wfExpectedSeq = wp->seq; wfSeqValid = true; }
-            uint16_t gap = (uint16_t)(wp->seq - wfExpectedSeq);
-            if (gap > 0 && gap <= WF_MAX_GAP_PKTS) {
-                wfPadDebt  += (uint32_t)gap * AUDIO_STREAM_SAMPLES;
-                wfPadTotal += (uint32_t)gap * AUDIO_STREAM_SAMPLES;
-            }
-            wfExpectedSeq = wp->seq + 1;
-            wfRingPush(wp->samples, n);
-        }
-        return;
+        return;   // sender_v3 waveform stream — unused since playback rip-out
     }
 
     StaticJsonDocument<768> doc;
@@ -1009,9 +517,9 @@ enum EffectId : uint8_t {
     FX_NEBULA,
     FX_GALAXY,              // dark-purple slow breath + drifting desaturated galaxies
     FX_RAINBOW,
-    FX_COUNT                // = 10: decouter ring has 12 slots, so the top
-                            // slots (10–11) clamp onto RAINBOW (9) — adjacent
-                            // rainbow/playback positions. See decouter select.
+    FX_BOUQUET,
+    FX_RAIN_SHIMMER,        // per-strip rain squalls: sweeping band of white shimmer
+    FX_COUNT
 };
 
 static uint8_t currentEffect = FX_AMBIENT_BLOOM;
@@ -1233,12 +741,7 @@ static void processSensors(float dt) {
     }
 
     // ── Audio ────────────────────────────────────────────────────
-    // During playback the recorded frame's audio bytes drive fxEnergy/fxOnset
-    // (applied in the playback block below); live audio is bypassed here so the
-    // two sources never both update the adaptive state in one frame.
-    if (recState == REC_PLAYING) {
-        // No-op: see the playback block, which calls audioDeriveFeatures().
-    } else if (audioLastMs > 0 && (int32_t)(now - audioLastMs) < (int32_t)SENSOR_TIMEOUT_MS) {
+    if (audioLastMs > 0 && (int32_t)(now - audioLastMs) < (int32_t)SENSOR_TIMEOUT_MS) {
         AudioPacketV1 au;
         memcpy(&au, (const void*)&audioPkt, sizeof(au));
         audioDeriveFeatures(au.rms_mean, au.rms_max, dt);
@@ -2877,6 +2380,256 @@ static void renderGalaxy(float dt) {
     }
 }
 
+// ── Bouquet (anchored wildflowers, gusts roll root→tip) ─────────
+#define BQ_FLOWERS        10
+#define BQ_CLUSTERS       4
+#define BQ_SIGMA          0.010f
+#define BQ_SIGMA_SQ2      (2.0f * BQ_SIGMA * BQ_SIGMA)
+#define BQ_LEAN_MAX       0.018f
+#define BQ_SPRING_W       6.0f
+#define BQ_SPRING_ZETA    0.35f
+#define BQ_IDLE_FLUTTER   0.06f
+#define BQ_WIND_FLUTTER   0.55f
+#define BQ_FLOWER_VALUE   0.9f
+#define BQ_CALM_MEAN      0.5f
+#define BQ_CALM_MAX       2.0f
+#define BQ_GUST_POOL      2
+#define BQ_GUST_SPEED_MIN 0.15f
+#define BQ_GUST_SPEED_MAX 0.35f
+#define BQ_GUST_SIGMA     0.11f
+#define BQ_GUST_DIE_FRAC  0.33f
+#define BQ_GUST_DIE_TC    0.8f
+// wind-phase gain: ruffle flicker freq ≈ GAIN·|dwx/dt|, peaks at gust edges
+#define BQ_RUFFLE_GAIN    180.0f
+#define BQ_FLOWER_RUFFLE  0.43f
+
+static const uint8_t BQ_PALETTE[][3] = {
+    {255, 45, 85},   {220, 25, 130}, {255, 105, 15}, {255, 185, 40},
+    {235, 205, 150}, {150, 55, 230}, {255, 60, 35},
+};
+#define BQ_PALETTE_SIZE (sizeof(BQ_PALETTE) / sizeof(BQ_PALETTE[0]))
+
+struct BqFlower {
+    float pos, freq, phase, lean, leanVel;
+    uint8_t r, g, b;
+};
+static BqFlower bqFlowers[NUM_STRIPS][BQ_FLOWERS];
+
+struct BqWind {
+    bool gusting;
+    float front, speed, strength, life, calmLeft;
+};
+static BqWind bqWind[NUM_STRIPS][BQ_GUST_POOL];
+static float bqTime = 0.0f;
+
+static inline float bqCalmDraw() {
+    return fminf(BQ_CALM_MAX,
+                 -BQ_CALM_MEAN * logf(fmaxf(randFloat(), 1e-6f)));
+}
+
+static inline float bqWindAt(const BqWind *pool, float x) {
+    float wx = 0.0f;
+    for (int g = 0; g < BQ_GUST_POOL; g++) {
+        const BqWind &w = pool[g];
+        if (!w.gusting) continue;
+        float d = x - w.front;
+        float v = w.strength
+                * expf(-(d * d) / (2.0f * BQ_GUST_SIGMA * BQ_GUST_SIGMA));
+        if (v > wx) wx = v;
+    }
+    return wx;
+}
+
+static void resetBouquet() {
+    bqTime = 0.0f;
+    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        int f = 0;
+        for (int c = 0; c < BQ_CLUSTERS; c++) {
+            float center = (c + 0.5f) / (float)BQ_CLUSTERS
+                         + (randFloat() - 0.5f) * 0.10f;
+            int count = (c & 1) ? 2 : 3;
+            for (int k = 0; k < count && f < BQ_FLOWERS; k++, f++) {
+                BqFlower &fl = bqFlowers[s][f];
+                fl.pos = fminf(0.97f, fmaxf(0.03f,
+                    center + (randFloat() - 0.5f) * 0.06f));
+                fl.freq = 1.5f + randFloat() * 2.0f;
+                fl.phase = randFloat() * 2.0f * (float)M_PI;
+                fl.lean = 0.0f;
+                fl.leanVel = 0.0f;
+                const uint8_t *col = BQ_PALETTE[xorshift32() % BQ_PALETTE_SIZE];
+                fl.r = col[0]; fl.g = col[1]; fl.b = col[2];
+            }
+        }
+        for (int g = 0; g < BQ_GUST_POOL; g++) {
+            bqWind[s][g].gusting = false;
+            bqWind[s][g].calmLeft = randFloat() * BQ_CALM_MAX
+                                  + g * BQ_CALM_MAX;
+        }
+    }
+}
+
+static void renderBouquet(float dt) {
+    bqTime += dt;
+    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        BqWind *pool = bqWind[s];
+        for (int g = 0; g < BQ_GUST_POOL; g++) {
+            BqWind &w = pool[g];
+            if (!w.gusting) {
+                w.calmLeft -= dt;
+                if (w.calmLeft <= 0.0f) {
+                    bool entryClear = true;
+                    float aheadSpeed = BQ_GUST_SPEED_MAX;
+                    for (int o = 0; o < BQ_GUST_POOL; o++) {
+                        if (o == g || !pool[o].gusting) continue;
+                        if (pool[o].front < 3.0f * BQ_GUST_SIGMA)
+                            entryClear = false;
+                        aheadSpeed = fminf(aheadSpeed, pool[o].speed);
+                    }
+                    if (entryClear) {
+                        w.gusting = true;
+                        w.front = -3.0f * BQ_GUST_SIGMA;
+                        w.speed = fminf(aheadSpeed, BQ_GUST_SPEED_MIN
+                                + randFloat()
+                                * (BQ_GUST_SPEED_MAX - BQ_GUST_SPEED_MIN));
+                        w.strength = 0.4f + randFloat() * 0.6f;
+                        w.life = (randFloat() < BQ_GUST_DIE_FRAC)
+                               ? (0.3f + randFloat() * 0.4f) / w.speed
+                               : 1e9f;
+                    }
+                }
+            } else {
+                w.front += w.speed * dt;
+                w.life -= dt;
+                if (w.life < 0.0f) w.strength *= expf(-dt / BQ_GUST_DIE_TC);
+                if (w.front > 1.0f + 3.0f * BQ_GUST_SIGMA
+                    || w.strength < 0.03f) {
+                    w.gusting = false;
+                    w.calmLeft = bqCalmDraw();
+                }
+            }
+        }
+
+        float fcen[BQ_FLOWERS], fbri[BQ_FLOWERS];
+        for (int f = 0; f < BQ_FLOWERS; f++) {
+            BqFlower &fl = bqFlowers[s][f];
+            float wx = bqWindAt(pool, fl.pos);
+            float acc = BQ_SPRING_W * BQ_SPRING_W * (wx - fl.lean)
+                      - 2.0f * BQ_SPRING_ZETA * BQ_SPRING_W * fl.leanVel;
+            fl.leanVel += acc * dt;
+            fl.lean += fl.leanVel * dt;
+            fcen[f] = fl.pos + fl.lean * BQ_LEAN_MAX;
+            float amp = BQ_IDLE_FLUTTER
+                      + BQ_WIND_FLUTTER * fminf(1.0f, fabsf(fl.lean));
+            fbri[f] = BQ_FLOWER_VALUE * fmaxf(0.0f,
+                1.0f + amp * fastSin(2.0f * (float)M_PI * fl.freq * bqTime
+                                     + fl.phase));
+        }
+
+        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
+            float x = (float)i / (float)(LEDS_PER_STRIP - 1);
+            float wx = bqWindAt(pool, x);
+            float ruffleSin = fastSin(x * 23.0f + s * 5.1f
+                                + bqTime * 0.4f + BQ_RUFFLE_GAIN * wx);
+            float shimmer = 0.7f + 0.3f * ruffleSin;
+            float base = shimmer * (1.0f + 0.8f * wx);
+            float cr = base * 3.0f, cg = base * 14.0f, cb = base * 2.0f;
+            float flowerRuffle = 1.0f + BQ_FLOWER_RUFFLE * wx * ruffleSin;
+
+            float fr = 0.0f, fg = 0.0f, fb = 0.0f, wsum = 0.0f, imax = 0.0f;
+            for (int f = 0; f < BQ_FLOWERS; f++) {
+                float d = x - fcen[f];
+                if (fabsf(d) > 4.0f * BQ_SIGMA) continue;
+                float intensity = expf(-(d * d) / BQ_SIGMA_SQ2) * fbri[f]
+                                * flowerRuffle;
+                BqFlower &fl = bqFlowers[s][f];
+                float wgt = intensity * intensity * intensity;
+                fr += wgt * fl.r;
+                fg += wgt * fl.g;
+                fb += wgt * fl.b;
+                wsum += wgt;
+                if (intensity > imax) imax = intensity;
+            }
+            if (wsum > 0.0f) {
+                cr += imax * fr / wsum;
+                cg += imax * fg / wsum;
+                cb += imax * fb / wsum;
+            }
+            setPixelScaled(s, i, cr, cg, cb);
+        }
+    }
+}
+
+
+// ── Rain shimmer ─────────────────────────────────────────────────
+// Per-strip rain squalls: each strip independently sits dark 2–4 s,
+// then for 1–3 s a soft band sweeps end-to-end (random direction) and
+// everything under it shimmers — per-frame random glints over a faint
+// band glow — with the whole pass riding a hann envelope (onset →
+// peak → offset). Ambient, no sensor input; pacing rides fxDt so the
+// ones knob stretches the weather.
+#define DS_GAP_MIN    2.0f
+#define DS_GAP_MAX    4.0f
+#define DS_PULSE_MIN  1.0f
+#define DS_PULSE_MAX  3.0f
+static float dsRainWidth = 45.0f;
+struct DsPulse { bool active; float t; float dur; int8_t dir; };
+static DsPulse dsPulse[NUM_STRIPS];
+
+static void resetRainShimmer() {
+    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        dsPulse[s].active = false;
+        dsPulse[s].t = 0.0f;
+        dsPulse[s].dur = randFloat() * DS_GAP_MAX;   // stagger first arrivals
+        dsPulse[s].dir = 1;
+    }
+}
+
+static void renderRainShimmer(float dt) {
+    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        DsPulse &p = dsPulse[s];
+        p.t += dt;
+        if (p.t >= p.dur) {
+            p.active = !p.active;
+            p.t = 0.0f;
+            if (p.active) {
+                p.dur = DS_PULSE_MIN + randFloat() * (DS_PULSE_MAX - DS_PULSE_MIN);
+                p.dir = (xorshift32() & 1) ? 1 : -1;
+                // Fresh floor timers per squall: raw-zero writes during the
+                // gap freeze them, so sub-LSB onset frames would otherwise
+                // accumulate across squalls toward dormancy.
+                memset(fxFloorTimer[s], 0, sizeof(fxFloorTimer[s]));
+            } else {
+                p.dur = DS_GAP_MIN + randFloat() * (DS_GAP_MAX - DS_GAP_MIN);
+            }
+        }
+        if (!p.active) {
+            for (uint16_t i = 0; i < LEDS_PER_STRIP; i++)
+                setPixel(s, i, 0, 0, 0);
+            continue;
+        }
+        float u = p.t / p.dur;
+        float env = fastSinPhase(0.5f * u);
+        env *= env;
+        float half = dsRainWidth * 0.5f;
+        float travel = (float)LEDS_PER_STRIP + dsRainWidth;
+        float center = (p.dir > 0 ? u : 1.0f - u) * travel - half;
+        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
+            float d = ((float)i - center) / half;
+            float window = 1.0f - d * d;
+            if (window <= 0.0f) { setPixel(s, i, 0, 0, 0); continue; }
+            float flick = randFloat();
+            flick *= flick;
+            float v = 255.0f * env * window * (0.10f + 0.90f * flick);
+            // Raw-zero dark/near-dark pixels, bypassing setPixelScaled
+            // (sanctioned exception, like bloom): frame-random glints never
+            // hold the floor's 1.5s reactivation, so letting timers run
+            // through the dark gaps would latch the strip dormant.
+            if (v < 2.0f) setPixel(s, i, 0, 0, 0);
+            else          setPixelScaled(s, i, v, v, v);
+        }
+    }
+}
+
 static void renderOff() {
     for (uint8_t s = 0; s < NUM_STRIPS; s++)
         for (uint16_t i = 0; i < LEDS_PER_STRIP; i++)
@@ -2917,6 +2670,12 @@ static void resetEffect(uint8_t fx) {
         case FX_RAINBOW:
             resetRainbow();
             break;
+        case FX_BOUQUET:
+            resetBouquet();
+            break;
+        case FX_RAIN_SHIMMER:
+            resetRainShimmer();
+            break;
         default:
             break;
     }
@@ -2947,10 +2706,9 @@ static const Param PARAMS[] = {
     { "ENERGY5S_TAU",     Param::F32, &energy5sTau,        0.5f,  20.0f },
     { "ENERGY_FORCE",     Param::F32, &energyForce,       -1.0f,  1.0f  },
     { "HEAT_INJ_RATE",    Param::F32, &heatInjRate,        1.0f,  60.0f },
-    { "AUDIO_VOL",        Param::F32, &audioOutVol,        0.0f,  1.0f  },
     { "FLOOR_MIN",        Param::F32, &snsRmsFloorMin,  2000.0f, 80000.0f },
-    { "REC_CAP_S",        Param::F32, &recCapS,            2.0f,  30.0f  },
     { "HEAT_IDLE_FLOOR",  Param::F32, &heatIdleFloor,      0.0f,  1.0f   },
+    { "RAIN_WIDTH",       Param::F32, &dsRainWidth,        8.0f,  120.0f },
 };
 static const size_t PARAM_COUNT = sizeof(PARAMS) / sizeof(PARAMS[0]);
 
@@ -3050,7 +2808,6 @@ void setup() {
     peer.encrypt = false;
     esp_now_add_peer(&peer);
 
-    recInit();
 
     Serial.printf("Tree-of-record (led-eth-0, 4-strip) ready — ch=%u\n", FIXED_CHANNEL);
     Serial.printf("  4 strips × %u LEDs on GPIO 13/27/32/33 (BS-26 driven)\n", LEDS_PER_STRIP);
@@ -3074,7 +2831,7 @@ void loop() {
     bool bs26EverSeen = (bs26LastMs > 0);
     // Last knob-derived brightness/speed, held across brief packet gaps so a
     // dropout doesn't snap brightness to the serial-param default. The other
-    // knob params (hue/sat/decouter/effect/acOn) are persistent globals and
+    // knob params (hue/sat/decouter/effect) are persistent globals and
     // simply retain their last value when a frame is skipped.
     static float bs26LastBrightness = 1.0f;
     static float bs26LastSpeed      = 1.0f;
@@ -3104,9 +2861,6 @@ void loop() {
         uint8_t spd = s.ones > 11 ? 11 : s.ones;
         effSpeed = ONES_SPEED[spd];
 
-        // hundreds (0–4) → recording slot select
-        recSlot = s.hundreds > 4 ? 4 : s.hundreds;
-
         // decmid (0–9) → hue rotation, decinner (0–9) → saturation
         uint8_t hue = s.decmid > 9 ? 9 : s.decmid;
         uint8_t sat = s.decinner > 9 ? 9 : s.decinner;
@@ -3119,52 +2873,6 @@ void loop() {
         // decouter (0–11) → effect select
         currentEffect = s.decouter >= FX_COUNT ? FX_COUNT - 1 : s.decouter;
 
-        // Replay-position preview: parked at the replay position with a
-        // recorded slot selected, render that slot's effect (live form)
-        // instead of rainbow — the dial reads as "this slot's home" and the
-        // hundreds knob flips between previews. Empty slot → rainbow. Applies
-        // whenever not recording: during playback the per-frame override
-        // below wins anyway, and crucially this fills the stop-playback tick
-        // (state flips to idle AFTER this line, skipping the override) — with
-        // idle-only gating that tick rendered raw dial 11 = a rainbow flash
-        // until the next BS-26 packet. Recording dialed through 11 still
-        // captures rainbow, as before.
-        if (recState != REC_RECORDING && s.decouter >= FX_COUNT - 1) {
-            uint8_t pe = recSlotEffect[recSlot];
-            if (pe < FX_COUNT) currentEffect = pe;
-        }
-
-        // One switch, two jobs: the AC lever broke at install (contact stuck
-        // closed), so DC alone drives record AND playback, moded by the effect
-        // dial — 0–7 = record the live performance, 8–11 (rainbow) = play back.
-        // The action binds at the rising edge and holds until release, so dial
-        // moves mid-action can't flip record↔playback. s.ac is ignored (the
-        // dying contact chatters). LEVEL semantics otherwise unchanged: on =
-        // active until release or the 30 s record cap; the latches keep the
-        // cap from instantly restarting while the switch is still held.
-        static bool dcWasOn = false, dcBoundReplay = false;
-        bool dcOn = s.dc;
-        if (dcOn && !dcWasOn) dcBoundReplay = (s.decouter >= FX_COUNT - 1);
-        dcWasOn = dcOn;
-        bool recOn  = dcOn && !dcBoundReplay;   // record request
-        bool playOn = dcOn && dcBoundReplay;    // playback request
-        if (!recOn)  recAcLatch = false;        // released → re-armed
-        if (!playOn) recDcLatch = false;
-
-        if (recState == REC_RECORDING) {
-            if (!recOn) recStopRecording();                // switch off → stop
-        } else if (recState == REC_PLAYING) {
-            if (!playOn) recStopPlayback();                // switch off → stop
-        } else {  // REC_IDLE
-            if (recOn && !recAcLatch) {
-                recStartRecording();
-                recAcLatch = true;
-            } else if (playOn && !recDcLatch) {
-                recStartPlayback();
-                recDcLatch = true;
-            }
-        }
-
         bs26LastBrightness = effBrightness;
         bs26LastSpeed      = effSpeed;
     } else if (bs26EverSeen) {
@@ -3175,91 +2883,6 @@ void loop() {
     }
 
     bloomDormancyFrac = 0.0f;
-
-    // ── Recording: sample frames onto a fixed REC_FPS wall-clock grid ──
-    // A RecFrame is a *param snapshot* (effect/brightness/palette + companded
-    // audio bytes), not pixels — playback re-renders the effect live. Sampling
-    // at a fixed rate instead of one-per-loop decouples the recording from the
-    // render rate, so frame index == elapsed time. That's what lets playback
-    // lock the frame to the audio clock no matter how heavy the effect is.
-    if (recState == REC_RECORDING && recBuffer) {
-        RecFrame rf;
-        rf.tens = (uint8_t)(effBrightness * 255);
-        rf.ones = (uint8_t)(effSpeed * 64);
-        rf.hundreds = recSlot;
-        rf.decouter = currentEffect;
-        rf.decmid = paletteHueIdx;
-        rf.decinner = paletteSatIdx;
-
-        // Capture the filtered audio drive (companded RMS bytes) so silent
-        // replay stays faithful. Mirror the live audio path: zero the bytes
-        // when the packet is stale or the sender flagged the mic muted (bit0).
-        rf.rms_mean = 0;
-        rf.rms_max  = 0;
-        if (audioLastMs > 0 && (int32_t)(now - audioLastMs) < (int32_t)SENSOR_TIMEOUT_MS) {
-            AudioPacketV1 au;
-            memcpy(&au, (const void*)&audioPkt, sizeof(au));
-            if (!(au.flags & 0x01)) {   // bit0 = mic muted
-                rf.rms_mean = au.rms_mean;
-                rf.rms_max  = au.rms_max;
-            }
-        }
-
-        // Emit zero, one, or several copies to keep the grid filled: loop faster
-        // than REC_FPS → skip until the next tick; slower → backfill duplicates.
-        recFrameAcc += dt;
-        const float frameDt = 1.0f / REC_FPS;
-        while (recFrameAcc >= frameDt && recFrameCount < REC_MAX_FRAMES) {
-            recFrameAcc -= frameDt;
-            recBuffer[recFrameCount++] = rf;
-        }
-        // Frame count IS the elapsed-time clock (fixed-rate grid), so the
-        // walk-away cap compares frames. Stopping sets REC_IDLE; the live
-        // dial takes back rendering and the latch holds until DC cycles.
-        uint32_t capFrames = (uint32_t)(recCapS * REC_FPS);
-        if (capFrames > REC_MAX_FRAMES) capFrames = REC_MAX_FRAMES;
-        if (recFrameCount >= capFrames) recStopRecording();
-    }
-
-    // Drain received waveform samples to the slot's /rec_N.audio (8 kHz/8-bit).
-    // Runs every loop while recording, independent of the 60 fps frame capture.
-    if (recState == REC_RECORDING) recAudioDrain();
-
-    // ── Playback: drive effect params from recorded frames ──
-    if (recState == REC_PLAYING && recBuffer && recFrameCount > 0) {
-        // Advance + output audio first: it's the master clock. For waveform slots
-        // playbackAudioTick also re-derives fxEnergy/fxOnset and returns true; it
-        // loops the file itself at EOF. Silent slots return false → we fall back
-        // to the envelope bytes and a wall-clock frame counter.
-        bool haveAudio = playbackAudioTick(dt);
-
-        if (haveAudio) {
-            // Lock the frame index to audio position: frame == time × REC_FPS.
-            // Both were captured for the same wall-clock span (fixed-rate frames,
-            // 8 kHz audio), so this can't drift regardless of render load.
-            uint32_t pos = playAudioFile.position();
-            recPlayIdx = (uint32_t)((float)pos / REC_AUDIO_RATE * REC_FPS);
-            if (recPlayIdx >= recFrameCount) recPlayIdx = recFrameCount - 1;
-        } else {
-            recPlayClock += dt * REC_FPS;                 // frames at fixed REC_FPS
-            recPlayIdx = (uint32_t)recPlayClock;
-            if (recPlayIdx >= recFrameCount) { recPlayClock = 0.0f; recPlayIdx = 0; }
-        }
-
-        RecFrame &rf = recBuffer[recPlayIdx];
-        effBrightness = (float)rf.tens / 255.0f;
-        effSpeed = (float)rf.ones / 64.0f;
-        currentEffect = rf.decouter >= FX_COUNT ? FX_COUNT - 1 : rf.decouter;
-        uint8_t hue = rf.decmid;
-        uint8_t sat = rf.decinner;
-        if (hue != paletteHueIdx || sat != paletteSatIdx) {
-            paletteHueIdx = hue;
-            paletteSatIdx = sat;
-            applyPalette(paletteHueIdx, paletteSatIdx);
-        }
-        if (!haveAudio)
-            audioDeriveFeatures(rf.rms_mean, rf.rms_max, dt);
-    }
 
     renderBrightness = effBrightness;
     renderFloor = effBrightness * 0.2f;
@@ -3304,6 +2927,8 @@ void loop() {
         1.5f,   // FX_NEBULA
         1.0f,   // FX_GALAXY
         2.0f,   // FX_RAINBOW
+        1.0f,   // FX_BOUQUET
+        1.0f,   // FX_RAIN_SHIMMER
     };
     float fxDt = dt * effSpeed * SPEED_SCALE[currentEffect];
     switch (currentEffect) {
@@ -3336,6 +2961,12 @@ void loop() {
             break;
         case FX_RAINBOW:
             renderRainbow(fxDt);
+            break;
+        case FX_BOUQUET:
+            renderBouquet(fxDt);
+            break;
+        case FX_RAIN_SHIMMER:
+            renderRainShimmer(fxDt);
             break;
         default:
             renderOff();
@@ -3381,15 +3012,11 @@ void loop() {
                           bMin, bMax, lit, (unsigned)LEDS_PER_STRIP,
                           audioEnergy5s, eDbg);
         }
-        Serial.printf("  [bs26] %s pkts=%lu fx=%u bright=%.3f speed=%.2f hue=%u sat=%u dorm=%.2f"
-                      " | ac=%d dc=%d slot=%u rec=%s\n",
+        Serial.printf("  [bs26] %s pkts=%lu fx=%u bright=%.3f speed=%.2f hue=%u sat=%u dorm=%.2f\n",
                       bs26Live ? "LIVE" : "----",
                       (unsigned long)bs26PktCount,
                       currentEffect, renderBrightness, effSpeed,
-                      paletteHueIdx, paletteSatIdx, bloomDormancyFrac,
-                      bs26.ac ? 1 : 0, bs26.dc ? 1 : 0, bs26.hundreds,
-                      recState == REC_RECORDING ? "REC" :
-                      recState == REC_PLAYING   ? "PLAY" : "idle");
+                      paletteHueIdx, paletteSatIdx, bloomDormancyFrac);
         bool aLive = accelLastMs && (int32_t)(now - accelLastMs) < (int32_t)SENSOR_TIMEOUT_MS;
         bool gLive = gyroLastMs  && (int32_t)(now - gyroLastMs)  < (int32_t)SENSOR_TIMEOUT_MS;
         bool auLive = audioLastMs && (int32_t)(now - audioLastMs) < (int32_t)SENSOR_TIMEOUT_MS;

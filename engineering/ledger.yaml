@@ -1425,10 +1425,10 @@ entries:
     relates_to: []
     notes: >
       Rig: 3× ESP32-D0WD-V3 eth-board clones (led-eth-0/1/2 in boards.yaml),
-      each with a CAN transceiver, on a short terminated bench bus. TX=GPIO2,
-      RX=GPIO15 (D15 idles recessive/high, matching its boot strapping
-      requirement — no boot or bus issue observed). 8-byte standard (11-bit ID)
-      frames, one node flooding, the others counting delivered frames.
+      each with a CAN transceiver, on a short terminated bench bus. CAN pins
+      differ per board — see the can: blocks in festicorn/catalog/boards.yaml.
+      8-byte standard (11-bit ID) frames, one node flooding, the others
+      counting delivered frames.
 
       Measured usable payload (best-case, low-stuffing data):
         125k → 71.5 kbit/s (1117 fps, 99% of theoretical)

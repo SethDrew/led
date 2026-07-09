@@ -346,10 +346,15 @@ boards:
   last_validated:
     utc: '2026-05-29T00:00:00Z'
     port: /dev/cu.usbserial-11130
+  can:
+    tx: 2
+    rx: 16
   notes: |
     Second biolum receiver board. Pin 15 instead of 16 (differs from
     board A). 6× WS2812B RGB strips on GPIO 4, 15, 17, 5, 18, 19.
-    150 LEDs per strip.
+    150 LEDs per strip. CAN TX on strapping GPIO2: boot spews brief
+    bus noise (same tradeoff as led-eth-0); GPIO2 must never be the
+    RX or the transceiver blocks the serial bootloader.
     Lineage: biolum → tree-of-record stint → swapped out (2026-06-10).
     Next role: wormhole — entrance piece to the tree of record (rust +
     soft-white ambient sparkle). Build/flash with festicorn/tree-of-record
@@ -426,11 +431,18 @@ boards:
     count: 4
     leds_each: 150
     pins: [13, 27, 32, 33]
+  can:
+    tx: 2
+    rx: 4
   notes: |
     LED data carried over ethernet CABLE as a physical conductor only — not
     networked. 4× WS2812, 150 LEDs each, clean output pins 13/27/32/33.
     Runs the 4-strip wormhole (env:wormhole-eth). Port re-enumerates on
     replug — identify by MAC.
+    CAN transceiver soldered TX=GPIO2 RX=GPIO4 (verified 2026-07-08, 3-node
+    mesh). GPIO2 is a strapping pin: boot/flash wiggles TXD and spews error
+    frames onto the bus — other nodes recover, but expect counter noise after
+    every reflash. Had a ground short (fixed 2026-07-08).
 
 - mac: A4:F0:0F:61:40:18
   id: 'led-eth-1'
@@ -445,6 +457,9 @@ boards:
     count: 4
     leds_each: 150
     pins: [13, 27, 32, 33]
+  can:
+    tx: 4
+    rx: 16
   notes: |
     Replica of led-eth-0. LED data over ethernet CABLE as physical conductor
     only — not networked. 4× WS2812, 150 LEDs each, output pins 13/27/32/33.
@@ -452,6 +467,9 @@ boards:
     re-enumerates on replug.
     Lineage: bench-tree sap-flow board (2026-04-29) → led-eth-1, permanent
     (2026-07-07). The bench-tree role/entry is retired.
+    CAN transceiver soldered TX=GPIO4 RX=GPIO16 (verified 2026-07-08, 3-node
+    mesh). Wiring shifted one pin from the planned 16/17 — each eth board has
+    a DIFFERENT CAN pinout; check this catalog before flashing CAN firmware.
 
 - mac: B4:BF:E9:33:63:C0
   id: 'led-eth-2'
@@ -466,8 +484,13 @@ boards:
     count: 4
     leds_each: 150
     pins: [13, 27, 32, 33]
+  can:
+    tx: 16
+    rx: 17
   notes: |
     Third eth-board clone (after led-eth-0/1), same pinout. 4× WS2812, 150 LEDs
     each, output pins 13/27/32/33. Flashed with the tree-of-record receiver
     (env:tree-of-record-eth): ESP-NOW BS-26 + duck audio, effect catalog scanned
     by the decouter ring. Identify by MAC; port re-enumerates on replug.
+    CAN transceiver soldered TX=GPIO16 RX=GPIO17 (verified 2026-07-08, 3-node
+    mesh) — the only board on the originally-planned UART2 pinout.

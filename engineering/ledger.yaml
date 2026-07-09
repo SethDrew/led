@@ -1405,3 +1405,56 @@ entries:
       channels, relieving both the ISR pile-up and the simultaneous-switching
       ground bounce at once — which is why one change fixed a glitch that
       resisted every wiring fix.
+
+  # ── Protocol: CAN / TWAI ─────────────────────────────────────────
+
+  - id: esp32-twai-can-throughput
+    date: 2026-07-08
+    touched: 2026-07-08
+    title: "ESP32 TWAI (classic CAN) usable payload is ~half the nominal bitrate"
+    summary: >
+      Classic ESP32 (ESP32-D0WD-V3) speaks CAN 2.0 only — no CAN-FD — with a
+      1 Mbit/s ceiling. Framing overhead means an 8-byte standard frame is 111
+      bits on the wire (~58% payload efficiency), so usable payload tops out at
+      ~500 kbit/s at 1 Mbit/s, scaling linearly down with bitrate.
+    status: resolved
+    severity: medium
+    scope: protocol
+    source: []
+    tags: [esp32, can, twai, canbus, protocol, throughput, measurement, constraint]
+    relates_to: []
+    notes: >
+      Rig: 3× ESP32-D0WD-V3 eth-board clones (led-eth-0/1/2 in boards.yaml),
+      each with a CAN transceiver, on a short terminated bench bus. TX=GPIO2,
+      RX=GPIO15 (D15 idles recessive/high, matching its boot strapping
+      requirement — no boot or bus issue observed). 8-byte standard (11-bit ID)
+      frames, one node flooding, the others counting delivered frames.
+
+      Measured usable payload (best-case, low-stuffing data):
+        125k → 71.5 kbit/s (1117 fps, 99% of theoretical)
+        250k → 140  kbit/s (2189 fps, 97%)
+        500k → 272  kbit/s (4260 fps, 95%)
+        1M   → 499  kbit/s (7800 fps, 87%)
+
+      Findings:
+      - Throughput is linear in bitrate. At ≤500k the bus is the limit and you
+        get 95–99% of theoretical. At 1 Mbit/s only ~87% is reached: the
+        ESP32's single-threaded transmit path caps near ~7800–8000 frames/s,
+        below the ~9000 fps the bus could carry. The bus-limited → sender-limited
+        crossover sits right around 1 Mbit/s.
+      - CAN is a broadcast bus: every node receives every frame, so adding
+        RECEIVERS costs zero throughput. Verified — a 2-node and a 3-node bus
+        delivered identical rate, all sinks receiving every frame. Throughput
+        only drops when multiple nodes transmit and contend for arbitration.
+      - Bit stuffing is a real data-dependent factor: ~11% throughput swing at
+        1M between best-case (alternating 0x55/0xAA) and worst-case (all-0x00)
+        payloads, because a stuff bit follows any 5 identical consecutive bits.
+      - Extended (29-bit) IDs REDUCE efficiency — they add ~20 bits/frame of
+        overhead. Standard 11-bit IDs + full 8-byte DLC is the efficient config;
+        fixed per-frame overhead means small frames waste most of the wire.
+      - Physical layer is solid: 75s sustained flood at 1M across 3 nodes,
+        ~585k frames/node, zero missed frames, zero rx errors, zero new bus
+        errors. Receiver side (frame counting) never bottlenecked.
+      - For real headroom, 500k gives ~272 kbit/s at full bus efficiency; 1M
+        gives ~500 kbit/s but leaves ~13% on the table to the sender unless the
+        transmit path is optimized (batch queue-fill / dedicated TX task).

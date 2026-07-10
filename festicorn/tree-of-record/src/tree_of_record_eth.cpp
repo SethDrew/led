@@ -11,7 +11,7 @@
  *                        (bloom, fire, heat), 3–4 audio particle effects
  *                        (sparkle, creatures), 5 ambient particles (leaf-wind),
  *                        6–9 passive (light-through, nebula, galaxy, rainbow),
- *                        10 bouquet, 11 rain shimmer
+ *                        10 bouquet, 11 collision
  *   hundreds (0–4)     → unused (was record-slot select; record/playback
  *                        ripped out 2026-07 — restore from git history)
  *   decmid (0–9)       → hue        36° rotation steps (full wheel)
@@ -518,7 +518,7 @@ enum EffectId : uint8_t {
     FX_GALAXY,              // dark-purple slow breath + drifting desaturated galaxies
     FX_RAINBOW,
     FX_BOUQUET,
-    FX_RAIN_SHIMMER,        // per-strip rain squalls: sweeping band of white shimmer
+    FX_COLLISION,           // crawlers annihilate into ignition burst
     FX_COUNT
 };
 
@@ -2381,8 +2381,8 @@ static void renderGalaxy(float dt) {
 }
 
 // ── Bouquet (anchored wildflowers, gusts roll root→tip) ─────────
-#define BQ_FLOWERS        10
-#define BQ_CLUSTERS       4
+#define BQ_FLOWERS        20
+#define BQ_CLUSTERS       8
 #define BQ_SIGMA          0.010f
 #define BQ_SIGMA_SQ2      (2.0f * BQ_SIGMA * BQ_SIGMA)
 #define BQ_LEAN_MAX       0.018f
@@ -2560,72 +2560,208 @@ static void renderBouquet(float dt) {
 }
 
 
-// ── Rain shimmer ─────────────────────────────────────────────────
-// Per-strip rain squalls: each strip independently sits dark 2–4 s,
-// then for 1–3 s a soft band sweeps end-to-end (random direction) and
-// everything under it shimmers — per-frame random glints over a faint
-// band glow — with the whole pass riding a hann envelope (onset →
-// peak → offset). Ambient, no sensor input; pacing rides fxDt so the
-// ones knob stretches the weather.
-#define DS_GAP_MIN    2.0f
-#define DS_GAP_MAX    4.0f
-#define DS_PULSE_MIN  1.0f
-#define DS_PULSE_MAX  3.0f
-static float dsRainWidth = 45.0f;
-struct DsPulse { bool active; float t; float dur; int8_t dir; };
-static DsPulse dsPulse[NUM_STRIPS];
+// ── Collision (crawlers annihilate into an ignition burst) ──────
+#define CO_CALM_MEAN     5.0f
+#define CO_CALM_MIN      1.5f
+#define CO_CRAWL_W       6.0f
+#define CO_SPEED_MIN     30.0f
+#define CO_SPEED_MAX     60.0f
+#define CO_MASS_MIN      0.7f
+#define CO_MASS_MAX      1.6f
+#define CO_FRAGS         16
+#define CO_FRAG_DRAG_TC  0.6f
+#define CO_FRAG_LIFE_MIN 0.4f
+#define CO_FRAG_LIFE_MAX 1.1f
+#define CO_TRAIL         0.30f
+#define CO_SPARKLES      24
+#define CO_SPKL_KICK     120.0f
+#define CO_SPKL_DRAG_TC  0.12f
+#define CO_SPKL_LIFE_MIN 0.5f
+#define CO_SPKL_LIFE_MAX 1.3f
+#define CO_SPKL_DUTY     0.45f
+#define CO_IDLE_RATE     8.0f
+#define CO_DEADBAND      0.05f
+static float coShatterK = 1.0f;
 
-static void resetRainShimmer() {
+enum CoPhase : uint8_t { CO_CALM, CO_APPROACH };
+struct CoStrip {
+    uint8_t phase;
+    bool collided;
+    float p1, p2, v1, v2, m1, m2, w1, w2, impact, timer;
+};
+struct CoFrag { float pos, vel, life, maxLife, bright; };
+struct CoSparkle { float pos, vel, life, maxLife; };
+static CoStrip co[NUM_STRIPS];
+static CoFrag coFrag[NUM_STRIPS][CO_FRAGS];
+static CoSparkle coSpkl[NUM_STRIPS][CO_SPARKLES];
+static float coSpark[NUM_STRIPS][LEDS_PER_STRIP];
+static float coDecayArr[NUM_STRIPS][LEDS_PER_STRIP];
+static float coIdleDebt = 0.0f;
+
+static void resetCollision() {
     for (uint8_t s = 0; s < NUM_STRIPS; s++) {
-        dsPulse[s].active = false;
-        dsPulse[s].t = 0.0f;
-        dsPulse[s].dur = randFloat() * DS_GAP_MAX;   // stagger first arrivals
-        dsPulse[s].dir = 1;
+        co[s].phase = CO_CALM;
+        co[s].collided = false;
+        co[s].timer = randFloat() * CO_CALM_MEAN;
+        for (int k = 0; k < CO_FRAGS; k++) coFrag[s][k].life = 0.0f;
+        for (int k = 0; k < CO_SPARKLES; k++) coSpkl[s][k].life = 0.0f;
+        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
+            coSpark[s][i] = 0.0f;
+            coDecayArr[s][i] = 0.94f;
+        }
     }
+    coIdleDebt = 0.0f;
 }
 
-static void renderRainShimmer(float dt) {
+static inline float coBlobBright(float d, float w) {
+    float a = fabsf(d) / w;
+    if (a >= 1.0f) return 0.0f;
+    return fastSinPhase(0.25f * (1.0f - a));
+}
+
+static void renderCollision(float dt) {
+    coIdleDebt += CO_IDLE_RATE * dt;
+    while (coIdleDebt >= 1.0f) {
+        coIdleDebt -= 1.0f;
+        uint8_t  s = (uint8_t)(xorshift32() % NUM_STRIPS);
+        uint16_t i = (uint16_t)(xorshift32() % LEDS_PER_STRIP);
+        if (coSpark[s][i] > 0.05f) continue;
+        coSpark[s][i]    = 0.35f + randFloat() * 0.25f;
+        coDecayArr[s][i] = 0.975f + randFloat() * 0.015f;
+    }
+
     for (uint8_t s = 0; s < NUM_STRIPS; s++) {
-        DsPulse &p = dsPulse[s];
-        p.t += dt;
-        if (p.t >= p.dur) {
-            p.active = !p.active;
-            p.t = 0.0f;
-            if (p.active) {
-                p.dur = DS_PULSE_MIN + randFloat() * (DS_PULSE_MAX - DS_PULSE_MIN);
-                p.dir = (xorshift32() & 1) ? 1 : -1;
-                // Fresh floor timers per squall: raw-zero writes during the
-                // gap freeze them, so sub-LSB onset frames would otherwise
-                // accumulate across squalls toward dormancy.
-                memset(fxFloorTimer[s], 0, sizeof(fxFloorTimer[s]));
-            } else {
-                p.dur = DS_GAP_MIN + randFloat() * (DS_GAP_MAX - DS_GAP_MIN);
+        CoStrip &c = co[s];
+        switch (c.phase) {
+        case CO_CALM:
+            c.timer -= dt;
+            if (c.timer <= 0.0f) {
+                c.phase = CO_APPROACH;
+                c.collided = false;
+                c.v1 = CO_SPEED_MIN
+                     + randFloat() * (CO_SPEED_MAX - CO_SPEED_MIN);
+                c.v2 = CO_SPEED_MIN
+                     + randFloat() * (CO_SPEED_MAX - CO_SPEED_MIN);
+                c.m1 = CO_MASS_MIN
+                     + randFloat() * (CO_MASS_MAX - CO_MASS_MIN);
+                c.m2 = CO_MASS_MIN
+                     + randFloat() * (CO_MASS_MAX - CO_MASS_MIN);
+                c.w1 = CO_CRAWL_W * c.m1;
+                c.w2 = CO_CRAWL_W * c.m2;
+                c.p1 = -c.w1;
+                c.p2 = (float)(LEDS_PER_STRIP - 1) + c.w2;
+            }
+            break;
+        case CO_APPROACH:
+            c.p1 += c.v1 * dt;
+            c.p2 -= c.v2 * dt;
+            if (!c.collided && c.p1 + c.w1 >= c.p2 - c.w2) {
+                c.collided = true;
+                c.impact = 0.5f * (c.p1 + c.p2);
+                // Shatter: fragment velocities drawn in the COM frame and
+                // de-meaned so total momentum m1·v1 - m2·v2 is conserved.
+                float vCom = (c.m1 * c.v1 - c.m2 * c.v2) / (c.m1 + c.m2);
+                float vRel = c.v1 + c.v2;
+                float sv[CO_FRAGS];
+                float mean = 0.0f;
+                for (int k = 0; k < CO_FRAGS; k++) {
+                    float r = randFloat() * 2.0f - 1.0f;
+                    sv[k] = coShatterK * vRel * r * fabsf(r);
+                    mean += sv[k];
+                }
+                mean /= (float)CO_FRAGS;
+                for (int k = 0; k < CO_FRAGS; k++) {
+                    CoFrag &fr = coFrag[s][k];
+                    fr.pos = c.impact;
+                    fr.vel = vCom + (sv[k] - mean);
+                    fr.maxLife = CO_FRAG_LIFE_MIN + randFloat()
+                               * (CO_FRAG_LIFE_MAX - CO_FRAG_LIFE_MIN);
+                    fr.life = fr.maxLife;
+                    fr.bright = 0.80f + randFloat() * 0.20f;
+                }
+                for (int k = 0; k < CO_SPARKLES; k++) {
+                    CoSparkle &sk = coSpkl[s][k];
+                    float r = randFloat() * 2.0f - 1.0f;
+                    sk.pos = c.impact;
+                    sk.vel = vCom + CO_SPKL_KICK * r * fabsf(r);
+                    sk.maxLife = CO_SPKL_LIFE_MIN + randFloat()
+                               * (CO_SPKL_LIFE_MAX - CO_SPKL_LIFE_MIN);
+                    sk.life = sk.maxLife;
+                }
+            }
+            if (c.collided && c.p1 >= c.impact + c.w1
+                && c.p2 <= c.impact - c.w2) {
+                c.phase = CO_CALM;
+                c.timer = CO_CALM_MIN
+                        - CO_CALM_MEAN * logf(fmaxf(randFloat(), 1e-6f));
+            }
+            break;
+        }
+
+        float fragGlow[LEDS_PER_STRIP];
+        memset(fragGlow, 0, sizeof(fragGlow));
+        for (int k = 0; k < CO_FRAGS; k++) {
+            CoFrag &fr = coFrag[s][k];
+            if (fr.life <= 0.0f) continue;
+            fr.life -= dt;
+            fr.vel *= expf(-dt / CO_FRAG_DRAG_TC);
+            fr.pos += fr.vel * dt;
+            if (fr.pos < 0.0f || fr.pos > (float)(LEDS_PER_STRIP - 1)) {
+                fr.life = 0.0f;
+                continue;
+            }
+            float u = fr.life / fr.maxLife;
+            float b = fr.bright * u * u;
+            int i0 = (int)fr.pos;
+            float frac = fr.pos - (float)i0;
+            fragGlow[i0] += b * (1.0f - frac);
+            if (i0 + 1 < LEDS_PER_STRIP) fragGlow[i0 + 1] += b * frac;
+            if (coSpark[s][i0] < CO_TRAIL * b) {
+                coSpark[s][i0]    = CO_TRAIL * b;
+                coDecayArr[s][i0] = 0.88f + randFloat() * 0.04f;
             }
         }
-        if (!p.active) {
-            for (uint16_t i = 0; i < LEDS_PER_STRIP; i++)
-                setPixel(s, i, 0, 0, 0);
-            continue;
+        for (int k = 0; k < CO_SPARKLES; k++) {
+            CoSparkle &sk = coSpkl[s][k];
+            if (sk.life <= 0.0f) continue;
+            sk.life -= dt;
+            sk.vel *= expf(-dt / CO_SPKL_DRAG_TC);
+            sk.pos += sk.vel * dt;
+            if (sk.pos < 0.0f || sk.pos > (float)(LEDS_PER_STRIP - 1)) {
+                sk.life = 0.0f;
+                continue;
+            }
+            if (randFloat() >= CO_SPKL_DUTY) continue;
+            float u = sk.life / sk.maxLife;
+            fragGlow[(int)(sk.pos + 0.5f)] += u * u
+                                            * (0.7f + 0.3f * randFloat());
         }
-        float u = p.t / p.dur;
-        float env = fastSinPhase(0.5f * u);
-        env *= env;
-        float half = dsRainWidth * 0.5f;
-        float travel = (float)LEDS_PER_STRIP + dsRainWidth;
-        float center = (p.dir > 0 ? u : 1.0f - u) * travel - half;
+
+        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++)
+            coSpark[s][i] *= fastDecay(coDecayArr[s][i], dt * 30.0f);
+
+        bool crawling = (c.phase == CO_APPROACH);
         for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
-            float d = ((float)i - center) / half;
-            float window = 1.0f - d * d;
-            if (window <= 0.0f) { setPixel(s, i, 0, 0, 0); continue; }
-            float flick = randFloat();
-            flick *= flick;
-            float v = 255.0f * env * window * (0.10f + 0.90f * flick);
-            // Raw-zero dark/near-dark pixels, bypassing setPixelScaled
-            // (sanctioned exception, like bloom): frame-random glints never
-            // hold the floor's 1.5s reactivation, so letting timers run
-            // through the dark gaps would latch the strip dormant.
-            if (v < 2.0f) setPixel(s, i, 0, 0, 0);
-            else          setPixelScaled(s, i, v, v, v);
+            float sp = coSpark[s][i];
+            if (sp < CO_DEADBAND) sp = 0.0f;
+            sp = fminf(1.0f, sp + fragGlow[i]);
+            float linSp = fastGamma24(sp);
+            float r = 255.0f * linSp;
+            float g = (180.0f + 60.0f * sp) * linSp;
+            float b = (80.0f + 120.0f * sp) * linSp;
+            if (crawling) {
+                float x = (float)i;
+                float b1 = (!c.collided || x <= c.impact)
+                         ? coBlobBright(x - c.p1, c.w1) : 0.0f;
+                float b2 = (!c.collided || x >= c.impact)
+                         ? coBlobBright(x - c.p2, c.w2) : 0.0f;
+                float linB = fastGamma24(fminf(1.0f, b1 + b2));
+                r += 255.0f * linB;
+                g += 240.0f * linB;
+                b += 200.0f * linB;
+            }
+            setPixelScaled(s, i, fminf(255.0f, r), fminf(255.0f, g),
+                           fminf(255.0f, b));
         }
     }
 }
@@ -2673,8 +2809,8 @@ static void resetEffect(uint8_t fx) {
         case FX_BOUQUET:
             resetBouquet();
             break;
-        case FX_RAIN_SHIMMER:
-            resetRainShimmer();
+        case FX_COLLISION:
+            resetCollision();
             break;
         default:
             break;
@@ -2708,7 +2844,7 @@ static const Param PARAMS[] = {
     { "HEAT_INJ_RATE",    Param::F32, &heatInjRate,        1.0f,  60.0f },
     { "FLOOR_MIN",        Param::F32, &snsRmsFloorMin,  2000.0f, 80000.0f },
     { "HEAT_IDLE_FLOOR",  Param::F32, &heatIdleFloor,      0.0f,  1.0f   },
-    { "RAIN_WIDTH",       Param::F32, &dsRainWidth,        8.0f,  120.0f },
+    { "CO_SHATTER_K",     Param::F32, &coShatterK,         0.2f,  4.0f  },
 };
 static const size_t PARAM_COUNT = sizeof(PARAMS) / sizeof(PARAMS[0]);
 
@@ -2928,7 +3064,7 @@ void loop() {
         1.0f,   // FX_GALAXY
         2.0f,   // FX_RAINBOW
         1.0f,   // FX_BOUQUET
-        1.0f,   // FX_RAIN_SHIMMER
+        1.0f,   // FX_COLLISION
     };
     float fxDt = dt * effSpeed * SPEED_SCALE[currentEffect];
     switch (currentEffect) {
@@ -2965,8 +3101,8 @@ void loop() {
         case FX_BOUQUET:
             renderBouquet(fxDt);
             break;
-        case FX_RAIN_SHIMMER:
-            renderRainShimmer(fxDt);
+        case FX_COLLISION:
+            renderCollision(fxDt);
             break;
         default:
             renderOff();

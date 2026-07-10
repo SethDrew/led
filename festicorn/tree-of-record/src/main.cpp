@@ -813,6 +813,10 @@ static void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
     if (err) return;
 
     if (!doc.containsKey("s") && !doc.containsKey("seq")) return;
+    // Seq alone doesn't prove BS-26: the faroudja panel broadcasts {"p":[...],
+    // "s":N} on the same channel, and its missing knob fields parse as zeros
+    // (brightness 0 → 1 Hz blank strobe). Require a real knob field.
+    if (!doc.containsKey("do") && !doc.containsKey("decouter")) return;
 
     // Build the full state in a scratch copy, then publish it to bs26 in one
     // critical section so loop never reads a half-updated struct.

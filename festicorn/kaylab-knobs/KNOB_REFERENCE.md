@@ -257,6 +257,33 @@ Swept positions 0→11→0 over 90 seconds. All positions decoded correctly.
 
 ---
 
+## Edge Dynamics — high-rate transition capture (2026-07-10)
+
+Raw wiper behavior during knob turns, captured with the `raw-scan` diagnostic
+env (native ADC ~2.8 kHz, ADS1115 A0 at 860 SPS): two tens sweeps (4→9→0) and
+two full decouter circles. Raw data: `captures/raw_scan_20260710.csv.gz`
+(t_µs, tens, ones, hundreds, ads0).
+
+| Finding | Value |
+|---|---|
+| Decouter detent plateau noise | ±3–5 counts (bins 700–2000 apart) |
+| Decouter edge settle | ≤2 ADS conversions (≤2.6 ms) |
+| Decouter make-before-break transient | wrong-level excursion ~10–20 ms, on ~1/3 of turns |
+| Tens between detents | continuous glide (cap-filtered), no bounce, clean crossings |
+| ADS1115 measured conversion cadence | 1.33 ms (860 SPS nominal) |
+| kHz-rate sampling vs 6 Hz readings | identical values — no high-Z droop from fast sampling |
+
+Consequences applied to firmware (same date):
+- Loop repaced 100 ms → 1 ms tick; ADS reads non-blocking round-robin at
+  860 SPS (each channel refreshes ~4 ms).
+- Debounce changed from N-consecutive-loop-reads (~510–680 ms commit) to
+  stable-for-40 ms (native) / 50 ms (decade) — rides out the 20 ms transients,
+  commits in ~40–50 ms.
+- Commit broadcasts repeat ×2 at 40 ms spacing so a dropped packet costs
+  ~40 ms instead of a full 1 s heartbeat wait.
+- `cdt` field (last commit's pending-to-commit ms) added to the serial JSON
+  and ESP-NOW packet, logging commit latency alongside the knob state.
+
 ## Calibration Data Files
 
 Located in `/Users/sethdrew/Documents/projects/bs26/retrofit/tools/`:
@@ -265,6 +292,9 @@ Located in `/Users/sethdrew/Documents/projects/bs26/retrofit/tools/`:
 - `tens_data.csv` — tens knob full sweep
 - `ones_data.csv` — ones knob full sweep (ultra-stable)
 - `knobA_data.csv` — native ESP32 ADC validation
+
+Transition capture: `festicorn/kaylab-knobs/captures/raw_scan_20260710.csv.gz`
+(see Edge Dynamics above).
 
 ## Source Code
 

@@ -58,8 +58,7 @@ float adsTensV = 0;
 // Decade position decoding
 int decOuter = 0, decMid = 0, decInner = 0;
 int decValue = 0;
-int decCandValue = -1;
-int decConfirm = 0;
+int decTHCand = 0;
 
 const float PULLUP_ONES = 510.0;
 const float VCC = 3.394;
@@ -88,11 +87,20 @@ unsigned long lastBroadcast = 0;
 const unsigned long HEARTBEAT_MS = 1000;
 
 // Native-ADC knob noise rejection: hysteresis margin (counts a reading must
-// cross a neighboring threshold by before switching bins) and consecutive-read
-// confirm count. Both filter the high-impedance ADC jitter that worsens when
-// the controller loses a clean USB ground reference.
+// cross a neighboring threshold by before switching bins) plus a stable-for-Nms
+// commit window. 40/50ms rides out the 10-20ms make-before-break wrong-bin
+// transients measured on the decade wipers (raw_scan capture, 2026-07-10).
 const int KNOB_HYST = 40;
-const int KNOB_CONFIRM = 3;
+const unsigned long KNOB_CONFIRM_MS = 40;
+const unsigned long DEC_CONFIRM_MS = 50;
+int lastCommitDtMs = -1;
+
+// Commit broadcasts are repeated so a dropped packet costs ~40ms, not a full
+// HEARTBEAT_MS wait.
+const int COMMIT_RESENDS = 2;
+const unsigned long RESEND_SPACING_MS = 40;
+int resendsLeft = 0;
+unsigned long lastResend = 0;
 bool stateChanged = false;
 
 // Previous state for change detection
@@ -103,21 +111,24 @@ int prevUaMax = 0, prevVMax = 0;
 
 String serialBuf = "";
 
-// N-sample debounce for a quantized knob position. A candidate must be read
-// `need` times in a row before it commits to `out`, so brief ADC jitter never
-// propagates. Each knob owns its own pending/count state. Returns true on change.
-bool debouncePos(int cand, int &out, int &pending, int &pendingCount, int need) {
-    if (cand == out) { pending = -1; pendingCount = 0; return false; }
+// Time-based debounce for a quantized knob position. A candidate must hold
+// steadily for `needMs` before it commits to `out`, so ADC jitter and wiper
+// transit transients never propagate. Any candidate change restarts the clock.
+// On commit, lastCommitDtMs records how long the candidate was pending.
+bool debouncePos(int cand, int &out, int &pending, unsigned long &pendingSince,
+                 unsigned long needMs) {
+    if (cand == out) { pending = -1; return false; }
+    unsigned long now = millis();
     if (cand == pending) {
-        if (++pendingCount >= need) {
+        if (now - pendingSince >= needMs) {
             out = cand;
             pending = -1;
-            pendingCount = 0;
+            lastCommitDtMs = (int)(now - pendingSince);
             return true;
         }
     } else {
         pending = cand;
-        pendingCount = 1;
+        pendingSince = now;
     }
     return false;
 }
@@ -185,13 +196,13 @@ void broadcastState() {
         "\"dec\":%d,\"do\":%d,\"dm\":%d,\"di\":%d,"
         "\"ua\":%d,\"v\":%d,"
         "\"rh\":%d,\"rt\":%d,\"ro\":%d,\"at\":%d,\"ao\":%d,\"ar\":%d,"
-        "\"up\":%lu,\"b\":%u,\"s\":%u}",
+        "\"cdt\":%d,\"up\":%lu,\"b\":%u,\"s\":%u}",
         (int)dcOn, (int)dcOn,
         hundredsPos, tensPos, onesPos, decValue, decOuter, decMid, decInner,
         uaDac, vDac,
         lastHundredsRaw, lastTensRaw, lastOnesRaw,
         (int)lastAdsTensRaw, (int)lastAdsOnesRaw, (int)lastAdsVccRef,
-        millis(), bootCount, espnowSeq++);
+        lastCommitDtMs, millis(), bootCount, espnowSeq++);
     if (n > 250) n = 250;
     esp_now_send(broadcastAddr, (uint8_t *)buf, n);
 }
@@ -213,7 +224,9 @@ void setup() {
     adc1_config_channel_atten(ADC1_CHANNEL_3, ADC_ATTEN_DB_11);  // GPIO 39 VN
 
     Wire.begin(23, 22);  // SDA=GPIO23, SCL=GPIO22
+    Wire.setClock(400000);
     ads.setGain(GAIN_ONE); // ±4.096V (0.125 mV/bit)
+    ads.setDataRate(RATE_ADS1115_860SPS);
     adsOk = ads.begin(0x48, &Wire);
     if (adsOk) Serial.println("ADS1115 OK");
     else Serial.println("ADS1115 FAIL");
@@ -269,8 +282,9 @@ void loop() {
     static const int TENS_THRESH[9] =
         { 3133, 2095, 1942, 1767, 1565, 1304, 995, 602, 197 };
     int tensCand = decodeBinHyst(tensRaw, tensPos, TENS_THRESH, 9, KNOB_HYST);
-    static int tensPending = -1, tensPendingCount = 0;
-    debouncePos(tensCand, tensPos, tensPending, tensPendingCount, KNOB_CONFIRM);
+    static int tensPending = -1;
+    static unsigned long tensPendingSince = 0;
+    debouncePos(tensCand, tensPos, tensPending, tensPendingSince, KNOB_CONFIRM_MS);
 
     // Ones: 11-pos (labeled 1.02, 2–11), 1MΩ pullup to 3.3V, GPIO 34.
     // Tighter spacing than tens — reduced hysteresis (15) keeps all 11
@@ -279,8 +293,9 @@ void loop() {
         { 1950, 1846, 1736, 1624, 1478, 1330, 1161, 971, 743, 408, 93 };
     static const int ONES_HYST = 15;
     int onesCand = decodeBinHyst(onesRaw, onesPos, ONES_THRESH, 11, ONES_HYST);
-    static int onesPending = -1, onesPendingCount = 0;
-    debouncePos(onesCand, onesPos, onesPending, onesPendingCount, KNOB_CONFIRM);
+    static int onesPending = -1;
+    static unsigned long onesPendingSince = 0;
+    debouncePos(onesCand, onesPos, onesPending, onesPendingSince, KNOB_CONFIRM_MS);
 
     // Hundreds: 5-pos rotary switch, 10kΩ pullup to 3.3V, GPIO 35
     // Measured ADC readings (±20 variance):
@@ -292,68 +307,74 @@ void loop() {
     static const int HUNDREDS_THRESH[4] = { 1630, 1290, 835, 285 };
     int hundredsCand =
         decodeBinHyst(hundredsRaw, hundredsPos, HUNDREDS_THRESH, 4, KNOB_HYST);
-    static int hundredsPending = -1, hundredsPendingCount = 0;
-    debouncePos(hundredsCand, hundredsPos, hundredsPending,
-                hundredsPendingCount, KNOB_CONFIRM);
+    static int hundredsPending = -1;
+    static unsigned long hundredsPendingSince = 0;
+    debouncePos(hundredsCand, hundredsPos, hundredsPending, hundredsPendingSince,
+                KNOB_CONFIRM_MS);
 
+    // Non-blocking ADS1115 round-robin at 860 SPS: ch0 = decade tens+hundreds
+    // (GAIN_ONE), ch1 = decade ones (GAIN_TWO), ch2 = Vcc ref (GAIN_ONE).
+    // Each channel refreshes every ~4ms; decode runs when its channel lands.
     if (adsOk) {
-        adsTensRaw = ads.readADC_SingleEnded(0);
-        adsTensV = ads.computeVolts(adsTensRaw);
-        lastAdsTensRaw = adsTensRaw;
+        static const uint8_t ADS_CH[3] = {0, 1, 2};
+        static const adsGain_t ADS_GAIN[3] = {GAIN_ONE, GAIN_TWO, GAIN_ONE};
+        static int adsPhase = -1;
+        if (adsPhase < 0) {
+            adsPhase = 0;
+            ads.setGain(ADS_GAIN[0]);
+            ads.startADCReading(MUX_BY_CHANNEL[ADS_CH[0]], false);
+        } else if (ads.conversionComplete()) {
+            int16_t v = ads.getLastConversionResults();
+            uint8_t done = adsPhase;
+            adsPhase = (adsPhase + 1) % 3;
+            ads.setGain(ADS_GAIN[adsPhase]);
+            ads.startADCReading(MUX_BY_CHANNEL[ADS_CH[adsPhase]], false);
 
-        ads.setGain(GAIN_TWO);
-        delay(5);
-        int32_t onesSum = 0;
-        for (int i = 0; i < 4; i++) onesSum += ads.readADC_SingleEnded(1);
-        adsOnesRaw = onesSum / 4;
-        adsOnesV = adsOnesRaw * ADS_LSB_GAIN2;
-        lastAdsOnesRaw = adsOnesRaw;
-        ads.setGain(GAIN_ONE);
-
-        lastAdsVccRef = ads.readADC_SingleEnded(2);
-
-        // Ratiometric correction: scale ADS readings to match calibration-time Vcc.
-        float vccScale = (lastAdsVccRef > 1000)
-            ? adsVccRefBaseline / (float)lastAdsVccRef : 1.0f;
-        int16_t adsTensCorrected = (int16_t)(adsTensRaw * vccScale);
-        int16_t adsOnesCorrected = (int16_t)(adsOnesRaw * vccScale);
-
-        float onesR = onesRawToR(adsOnesCorrected);
-        int decInnerCand = (int)(onesR + 0.5);
-        if (decInnerCand > 9) decInnerCand = 9;
-        if (decInnerCand < 0) decInnerCand = 0;
-        static int decInnerPending = -1, decInnerPendingCount = 0;
-        debouncePos(decInnerCand, decInner, decInnerPending, decInnerPendingCount, 2);
-
-        int newH = 0;
-        for (int i = 10; i >= 0; i--) {
-            if (adsTensCorrected >= hundredsThresh[i]) { newH = i + 1; break; }
-        }
-        int bracketLow = hundredsLUT[newH];
-        int bracketHigh = hundredsLUT[newH + 1];
-        float countsPerTen = (bracketHigh - bracketLow) / 10.0;
-        int newT = (int)((adsTensCorrected - bracketLow) / countsPerTen + 0.5);
-        if (newT > 9) newT = 9;
-        if (newT < 0) newT = 0;
-
-        int newVal = newH * 100 + newT * 10 + decInner;
-        if (newVal != decValue) {
-            if (newVal == decCandValue) {
-                decConfirm++;
-                if (decConfirm >= 2) {
-                    decOuter = newH;
-                    decMid = newT;
-                    decValue = newVal;
-                    decCandValue = -1;
-                    decConfirm = 0;
-                }
+            if (done == 2) {
+                lastAdsVccRef = v;
             } else {
-                decCandValue = newVal;
-                decConfirm = 1;
+                float vccScale = (lastAdsVccRef > 1000)
+                    ? adsVccRefBaseline / (float)lastAdsVccRef : 1.0f;
+                if (done == 0) {
+                    adsTensRaw = v;
+                    adsTensV = v * 0.000125f;
+                    lastAdsTensRaw = v;
+                    int16_t corrected = (int16_t)(v * vccScale);
+                    int newH = 0;
+                    for (int i = 10; i >= 0; i--) {
+                        if (corrected >= hundredsThresh[i]) { newH = i + 1; break; }
+                    }
+                    int bracketLow = hundredsLUT[newH];
+                    int bracketHigh = hundredsLUT[newH + 1];
+                    float countsPerTen = (bracketHigh - bracketLow) / 10.0;
+                    int newT = (int)((corrected - bracketLow) / countsPerTen + 0.5);
+                    if (newT > 9) newT = 9;
+                    if (newT < 0) newT = 0;
+                    decTHCand = newH * 10 + newT;
+                } else {
+                    adsOnesRaw = v;
+                    adsOnesV = v * ADS_LSB_GAIN2;
+                    lastAdsOnesRaw = v;
+                    int16_t corrected = (int16_t)(v * vccScale);
+                    float onesR = onesRawToR(corrected);
+                    int decInnerCand = (int)(onesR + 0.5);
+                    if (decInnerCand > 9) decInnerCand = 9;
+                    if (decInnerCand < 0) decInnerCand = 0;
+                    static int decInnerPending = -1;
+                    static unsigned long decInnerPendingSince = 0;
+                    debouncePos(decInnerCand, decInner, decInnerPending,
+                                decInnerPendingSince, DEC_CONFIRM_MS);
+                }
             }
-        } else {
-            decCandValue = -1;
-            decConfirm = 0;
+        }
+
+        int newVal = (decTHCand / 10) * 100 + (decTHCand % 10) * 10 + decInner;
+        static int decValPending = -1;
+        static unsigned long decValPendingSince = 0;
+        if (debouncePos(newVal, decValue, decValPending, decValPendingSince,
+                        DEC_CONFIRM_MS)) {
+            decOuter = decValue / 100;
+            decMid = (decValue / 10) % 10;
         }
     }
 
@@ -397,23 +418,33 @@ void loop() {
     if (stateChanged || millis() - lastBroadcast >= HEARTBEAT_MS) {
         broadcastState();
         lastBroadcast = millis();
+        if (stateChanged) { resendsLeft = COMMIT_RESENDS; lastResend = lastBroadcast; }
         prevDcOn = dcOn; prevAcOn = acOn;
         prevHundredsPos = hundredsPos; prevTensPos = tensPos;
         prevOnesPos = onesPos; prevDecValue = decValue;
         prevUaDac = uaDac; prevVDac = vDac;
         prevUaMax = METER_UA_MAX; prevVMax = METER_V_MAX;
+    } else if (resendsLeft > 0 && millis() - lastResend >= RESEND_SPACING_MS) {
+        broadcastState();
+        resendsLeft--;
+        lastResend = millis();
+        lastBroadcast = lastResend;
     }
 
-    // Serial debug output
-    Serial.printf("{\"dc\":%s,\"ac\":%s,\"hundreds\":%d,\"tens\":%d,\"ones\":%d,"
-                  "\"decade\":%d,\"decouter\":%d,\"decmid\":%d,\"decinner\":%d,"
-                  "\"ua\":{\"dac\":%d,\"max\":%d},\"v\":{\"dac\":%d,\"max\":%d},"
-                  "\"raw\":{\"hundreds\":%d,\"tens\":%d,\"ones\":%d},\"seq\":%u}\n",
-                  dcOn ? "true" : "false", acOn ? "true" : "false",
-                  hundredsPos, tensPos, onesPos,
-                  decValue, decOuter, decMid, decInner,
-                  uaDac, METER_UA_MAX, vDac, METER_V_MAX,
-                  hundredsRaw, tensRaw, onesRaw, espnowSeq);
+    static unsigned long lastPrint = 0;
+    if (millis() - lastPrint >= 100) {
+        lastPrint = millis();
+        Serial.printf("{\"dc\":%s,\"ac\":%s,\"hundreds\":%d,\"tens\":%d,\"ones\":%d,"
+                      "\"decade\":%d,\"decouter\":%d,\"decmid\":%d,\"decinner\":%d,"
+                      "\"ua\":{\"dac\":%d,\"max\":%d},\"v\":{\"dac\":%d,\"max\":%d},"
+                      "\"raw\":{\"hundreds\":%d,\"tens\":%d,\"ones\":%d},"
+                      "\"cdt\":%d,\"seq\":%u}\n",
+                      dcOn ? "true" : "false", acOn ? "true" : "false",
+                      hundredsPos, tensPos, onesPos,
+                      decValue, decOuter, decMid, decInner,
+                      uaDac, METER_UA_MAX, vDac, METER_V_MAX,
+                      hundredsRaw, tensRaw, onesRaw, lastCommitDtMs, espnowSeq);
+    }
 
-    delay(100);
+    delay(1);
 }

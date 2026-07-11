@@ -51,7 +51,6 @@
 #include <esp_wifi.h>
 #include <esp_random.h>
 #include <NeoPixelBus.h>
-#include <ArduinoJson.h>
 #include <math.h>
 #include <fast_math.h>
 #include <oklch_lut.h>
@@ -59,6 +58,8 @@
 #include <gyro_packet_v1.h>
 #include <audio_packet_v1.h>
 #include <audio_stream_packet_v1.h>
+#include <bs26_packet_v1.h>
+#include <clicky_packet_v1.h>
 
 // ── Strip layout ─────────────────────────────────────────────────
 #ifndef LEDS_PER_STRIP
@@ -156,7 +157,8 @@ static volatile bool      bs26Updated = false;
 static portMUX_TYPE bs26Mux = portMUX_INITIALIZER_UNLOCKED;
 
 // ── Sensor layer (v1 accel / gyro / audio packets over ESP-NOW) ──
-// Coexists with BS-26 JSON; disambiguated by packet length in onReceive.
+// Coexists with Bs26PacketV1; disambiguated by packet length in onReceive
+// (bs26 additionally magic-checked — see bs26_packet_v1.h).
 // Raw packet fields are latched in the callback; loop() decodes + normalizes.
 #define SENSOR_TIMEOUT_MS 3000
 
@@ -182,6 +184,12 @@ static volatile uint32_t gyroPktCount = 0;
 static volatile AudioPacketV1 audioPkt = {};
 static volatile uint32_t audioLastMs = 0;
 static volatile uint32_t audioPktCount = 0;
+
+// clicky-pots panel (6 push-pull pots). Once a packet is seen, the clicky
+// particle effect takes over for good — no connectivity-loss fallback (yet).
+static volatile ClickyPacketV1 clickyPkt = {};
+static volatile uint32_t clickyLastMs = 0;
+static volatile uint32_t clickyPktCount = 0;
 
 // sqrt-companded uint8 → linear value: val = (byte/255)² * FS
 static inline float decodeCompand(uint8_t b, float fs) {
@@ -292,8 +300,8 @@ static void applyPalette(uint8_t hueIdx, uint8_t satIdx) {
 static void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
     if (len < 2 || len > 250) return;
 
-    // Fixed-size binary sensor packets take priority over JSON (disambiguated
-    // by exact length). Latch raw bytes; loop() decodes and normalizes.
+    // All packets are fixed-size binary, disambiguated by exact length.
+    // Latch raw bytes; loop() decodes and normalizes.
     if (len == (int)sizeof(TelemetryPacketV1)) {
         memcpy((void*)&accelPkt, data, sizeof(TelemetryPacketV1));
         accelLastMs = millis();
@@ -315,38 +323,38 @@ static void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
     if (len == (int)sizeof(AudioStreamPacketV1)) {
         return;   // sender_v3 waveform stream — unused since playback rip-out
     }
+    if (len == (int)sizeof(ClickyPacketV1)) {
+        ClickyPacketV1 cp;
+        memcpy(&cp, data, sizeof(cp));
+        if (cp.magic != CLICKY_MAGIC || cp.ver != CLICKY_VER) return;
+        memcpy((void*)&clickyPkt, &cp, sizeof(cp));
+        clickyLastMs = millis();
+        clickyPktCount++;
+        return;
+    }
 
-    StaticJsonDocument<768> doc;
-    DeserializationError err = deserializeJson(doc, (const char*)data, len);
-    if (err) return;
-
-    if (!doc.containsKey("s") && !doc.containsKey("seq")) return;
-    // Seq alone doesn't prove BS-26: the faroudja panel broadcasts {"p":[...],
-    // "s":N} on the same channel, and its missing knob fields parse as zeros
-    // (brightness 0 → 1 Hz blank strobe). Require a real knob field.
-    if (!doc.containsKey("do") && !doc.containsKey("decouter")) return;
+    if (len != (int)sizeof(Bs26PacketV1)) return;
+    Bs26PacketV1 pkt;
+    memcpy(&pkt, data, sizeof(pkt));
+    if (pkt.magic != BS26_MAGIC || pkt.ver != BS26_VER) return;
 
     // Build the full state in a scratch copy, then publish it to bs26 in one
     // critical section so loop never reads a half-updated struct.
     Bs26State next = {};
-    // ac/dc arrive as integers ("ac":1) over ESP-NOW, not JSON booleans. The
-    // `| false` default-operator gates on is<bool>(), which is FALSE for an
-    // integer, so it always returned the default — switches never registered.
-    // as<bool>() converts the integer (1→true) instead of type-gating it.
-    next.dc       = doc["dc"].as<bool>();
-    next.ac       = doc["ac"].as<bool>();
-    next.hundreds = doc["h"]  | (doc["hundreds"] | 0);
-    next.tens     = doc["t"]  | (doc["tens"] | 0);
-    next.ones     = doc["o"]  | (doc["ones"] | 0);
-    next.decade   = doc["dec"]| (doc["decade"] | 0);
-    next.decouter = doc["do"] | (doc["decouter"] | 0);
-    next.decmid   = doc["dm"] | (doc["decmid"] | 0);
-    next.decinner = doc["di"] | (doc["decinner"] | 0);
-    next.ua_dac   = doc["ua"] | 0;
+    next.dc       = pkt.flags & BS26_FLAG_DC;
+    next.ac       = pkt.flags & BS26_FLAG_AC;
+    next.hundreds = pkt.hundreds;
+    next.tens     = pkt.tens;
+    next.ones     = pkt.ones;
+    next.decade   = pkt.dec;
+    next.decouter = pkt.decouter;
+    next.decmid   = pkt.decmid;
+    next.decinner = pkt.decinner;
+    next.ua_dac   = pkt.ua_dac;
     next.ua_max   = 0;
-    next.v_dac    = doc["v"]  | 0;
+    next.v_dac    = pkt.v_dac;
     next.v_max    = 0;
-    next.seq      = doc["s"]  | (doc["seq"] | 0);
+    next.seq      = pkt.seq;
 
     portENTER_CRITICAL(&bs26Mux);
     memcpy((void*)&bs26, &next, sizeof(bs26));
@@ -2776,6 +2784,250 @@ static void renderOff() {
             setPixel(s, i, 0, 0, 0);
 }
 
+// ── Clicky particles (pot-driven, overrides effect select while live) ──
+// One particle per pot, identical on all strips. Pot position = particle
+// position along the strip, fixed per-pot hue. Pulling the knob out splits
+// the blob apart: same lit pixels, stretched to a 3-dark-pixel gap between
+// each (spacing ×4).
+#define CLICKY_SIGMA_LEDS    2.5f
+#define CLICKY_PULL_SPACING  4
+#define CLICKY_POS_TAU       0.05f
+// Ruffle (borrowed from bouquet): spatial sine rippling through each blob.
+#define CLICKY_RUFFLE_AMP    0.45f
+#define CLICKY_RUFFLE_FREQ   1.4f    // rad per LED
+#define CLICKY_RUFFLE_SPEED  7.0f    // rad per second
+
+static const float CLICKY_HUES[CLICKY_NUM_POTS] = {0, 60, 120, 180, 240, 300};
+static float clickyPos[CLICKY_NUM_POTS];
+static bool  clickyPosInit = false;
+static float clickyTime = 0.0f;
+
+// Buttons (bit = panel position, left to right). Bit 5 (rightmost) held =
+// particles paint a trail; released = trail fades over 5 s. Bit 4 (pink)
+// held = all particles desaturate+fade to black; reaching full black fires
+// a 0.5 s "crackle" (per-frame random white pixels where each particle was).
+// Left cluster (bits 0-3): 0 = shard burst, 1 = size pump, 2 = +30° hue
+// rotate on recently-moved particles, 3 = hold-to-gather (all particles pull
+// to the field mean, spring back on release).
+#define CLICKY_BTN_SHARDS  0
+#define CLICKY_BTN_PUMP    1
+#define CLICKY_BTN_HUEROT  2
+#define CLICKY_BTN_GATHER  3
+#define CLICKY_BTN_TRAIL   5
+#define CLICKY_BTN_FADE    4
+#define CLICKY_TRAIL_K     1.4f    // exp fade: ~0.1% left after 5 s
+#define CLICKY_PAINT_S     0.6f    // dwell time to saturate paint to its cap
+#define CLICKY_PAINT_CAP   160.0f  // max paint level (vs 255-scale particle)
+#define CLICKY_FADE_S      1.5f
+#define CLICKY_RECOVER_S   0.7f
+#define CLICKY_CRACKLE_S   0.5f
+#define CLICKY_PUMP_KICK   0.9f    // sigma multiplier added per press
+#define CLICKY_PUMP_MAX    3.0f
+#define CLICKY_PUMP_TAU    0.6f
+#define CLICKY_MOVE_EPS    0.0015f // per-frame smoothed-pos delta = "moving"
+#define CLICKY_GATHER_S    0.25f   // ramp time to fully gathered
+
+#define CLICKY_NUM_SHARDS  48
+struct ClickyShard {
+    float pos, vel, hue, life, maxLife;
+};
+static ClickyShard clickyShards[CLICKY_NUM_SHARDS];
+
+static float clickyTrail[LEDS_PER_STRIP][3];
+static float clickyFade = 1.0f;
+static float clickyCrackleT = 0.0f;
+static float clickyPump[CLICKY_NUM_POTS];
+static int   clickyShardNext = 0;
+static float clickyGather = 0.0f;
+static float clickyHueRot[CLICKY_NUM_POTS];
+static float clickyMovedAgo[CLICKY_NUM_POTS];
+static uint8_t clickyPrevBtn = 0;
+
+static void resetClickyParticles() {
+    resetFxDither();
+    clickyPosInit = false;
+    memset(clickyTrail, 0, sizeof(clickyTrail));
+    memset(clickyShards, 0, sizeof(clickyShards));
+    memset(clickyHueRot, 0, sizeof(clickyHueRot));
+    for (int k = 0; k < CLICKY_NUM_POTS; k++) {
+        clickyMovedAgo[k] = 1e9f;
+        clickyPump[k] = 1.0f;
+    }
+    clickyFade = 1.0f;
+    clickyCrackleT = 0.0f;
+    clickyGather = 0.0f;
+    clickyPrevBtn = 0;
+    clickyShardNext = 0;
+}
+
+static void renderClickyParticles(float dt) {
+    ClickyPacketV1 pkt;
+    memcpy(&pkt, (const void*)&clickyPkt, sizeof(pkt));
+
+    clickyTime += dt;
+    float alpha = fminf(1.0f, dt / CLICKY_POS_TAU);
+
+    bool trailHeld  = pkt.btnBits & (1 << CLICKY_BTN_TRAIL);
+    bool fadeHeld   = pkt.btnBits & (1 << CLICKY_BTN_FADE);
+    bool gatherHeld = pkt.btnBits & (1 << CLICKY_BTN_GATHER);
+    uint8_t pressed = pkt.btnBits & ~clickyPrevBtn;
+    clickyPrevBtn = pkt.btnBits;
+
+    float prevFade = clickyFade;
+    if (fadeHeld) clickyFade = fmaxf(0.0f, clickyFade - dt / CLICKY_FADE_S);
+    else          clickyFade = fminf(1.0f, clickyFade + dt / CLICKY_RECOVER_S);
+    if (prevFade > 0.0f && clickyFade <= 0.0f) clickyCrackleT = CLICKY_CRACKLE_S;
+
+    if (gatherHeld) clickyGather = fminf(1.0f, clickyGather + dt / CLICKY_GATHER_S);
+    else            clickyGather = fmaxf(0.0f, clickyGather - dt / CLICKY_GATHER_S);
+    // Smoothstep so the ramp has no velocity discontinuity at either end.
+    float gatherT = clickyGather * clickyGather * (3.0f - 2.0f * clickyGather);
+
+    static float buf[LEDS_PER_STRIP][3];
+    memset(buf, 0, sizeof(buf));
+
+    // Track pot motion + live field mean (gather target follows moving pots).
+    float meanPos = 0.0f;
+    for (int k = 0; k < CLICKY_NUM_POTS; k++) {
+        float target = (float)pkt.pos[k] / 10000.0f;
+        if (!clickyPosInit) clickyPos[k] = target;
+        float before = clickyPos[k];
+        clickyPos[k] += alpha * (target - clickyPos[k]);
+        if (fabsf(clickyPos[k] - before) > CLICKY_MOVE_EPS) clickyMovedAgo[k] = 0.0f;
+        else clickyMovedAgo[k] += dt;
+        meanPos += clickyPos[k];
+    }
+    meanPos /= (float)CLICKY_NUM_POTS;
+    clickyPosInit = true;
+
+    // Recently-moved gating (clickyMovedAgo[k] < 1.0f) disabled for now —
+    // may return, possibly with different arming semantics.
+    if (pressed & (1 << CLICKY_BTN_HUEROT))
+        for (int k = 0; k < CLICKY_NUM_POTS; k++)
+            // if (clickyMovedAgo[k] < 1.0f)
+                clickyHueRot[k] = fmodf(clickyHueRot[k] + 30.0f, 360.0f);
+
+    if (pressed & (1 << CLICKY_BTN_PUMP))
+        for (int k = 0; k < CLICKY_NUM_POTS; k++)
+            // if (clickyMovedAgo[k] < 1.0f)
+                clickyPump[k] = fminf(CLICKY_PUMP_MAX,
+                                      clickyPump[k] + CLICKY_PUMP_KICK);
+    for (int k = 0; k < CLICKY_NUM_POTS; k++)
+        clickyPump[k] = 1.0f + (clickyPump[k] - 1.0f) * expf(-dt / CLICKY_PUMP_TAU);
+
+    if (pressed & (1 << CLICKY_BTN_SHARDS)) {
+        for (int k = 0; k < CLICKY_NUM_POTS; k++) {
+            // if (clickyMovedAgo[k] >= 1.0f) continue;
+            float center = clickyPos[k] * (float)(LEDS_PER_STRIP - 1);
+            float edge = 2.0f * CLICKY_SIGMA_LEDS * clickyPump[k];
+            int burst = 3 + (int)(randFloat() * 4.0f);
+            for (int m = 0; m < burst; m++) {
+                ClickyShard &sh = clickyShards[clickyShardNext];
+                clickyShardNext = (clickyShardNext + 1) % CLICKY_NUM_SHARDS;
+                float dir = (randFloat() < 0.5f) ? -1.0f : 1.0f;
+                sh.pos = center + dir * edge;
+                sh.vel = dir * (25.0f + randFloat() * 20.0f);
+                sh.hue = fmodf(CLICKY_HUES[k] + clickyHueRot[k]
+                               + (randFloat() - 0.5f) * 50.0f + 360.0f, 360.0f);
+                sh.maxLife = 0.20f + randFloat() * 0.15f;   // × vel ≈ 5-10 LEDs
+                sh.life = sh.maxLife;
+            }
+        }
+    }
+
+    for (int k = 0; k < CLICKY_NUM_POTS; k++) {
+        float own = clickyPos[k] * (float)(LEDS_PER_STRIP - 1);
+        float center = lerpf(own, meanPos * (float)(LEDS_PER_STRIP - 1), gatherT);
+        float sigma = CLICKY_SIGMA_LEDS * clickyPump[k];
+
+        if (clickyCrackleT > 0.0f) {
+            // Crackling out of existence: dim single-frame white sparks in
+            // the particle's footprint, density and brightness both riding
+            // the remaining-time envelope (busy start → sputtering end).
+            float env = clickyCrackleT / CLICKY_CRACKLE_S;
+            for (int n = 0; n < 4; n++) {
+                if (randFloat() > env) continue;
+                int i = (int)lroundf(center + (randFloat() - 0.5f) * 4.0f * sigma);
+                if (i < 0 || i >= LEDS_PER_STRIP) continue;
+                float v = (8.0f + randFloat() * 30.0f) * env;
+                buf[i][0] = buf[i][1] = buf[i][2] = v;
+            }
+            continue;
+        }
+        if (clickyFade <= 0.0f) continue;
+
+        // Dim and desaturate together: brightness falls linearly, saturation
+        // on a sqrt curve — perceptually simultaneous instead of white-first.
+        float r, g, b;
+        hsvToRgb(fmodf(CLICKY_HUES[k] + clickyHueRot[k], 360.0f),
+                 sqrtf(clickyFade), 1.0f, r, g, b);
+
+        int spacing = (pkt.pullBits & (1 << k)) ? CLICKY_PULL_SPACING : 1;
+        int reach = (int)(4.0f * sigma);
+        for (int j = -reach; j <= reach; j++) {
+            int i = (int)lroundf(center) + j * spacing;
+            if (i < 0 || i >= LEDS_PER_STRIP) continue;
+            float d = (float)j / sigma;
+            float ruffle = 1.0f + CLICKY_RUFFLE_AMP
+                * fastSin((float)i * CLICKY_RUFFLE_FREQ
+                          + clickyTime * CLICKY_RUFFLE_SPEED
+                          + (float)k * 2.1f);
+            float w = expf(-d * d) * ruffle * clickyFade;
+            buf[i][0] += r * w;
+            buf[i][1] += g * w;
+            buf[i][2] += b * w;
+        }
+    }
+    if (clickyCrackleT > 0.0f) clickyCrackleT -= dt;
+
+    // Shards: free-flying, fade over life. Max-blended, never additive —
+    // a shard crossing a particle (or another shard) doesn't stack brightness.
+    for (int n = 0; n < CLICKY_NUM_SHARDS; n++) {
+        ClickyShard &sh = clickyShards[n];
+        if (sh.life <= 0.0f) continue;
+        sh.life -= dt;
+        sh.pos += sh.vel * dt;
+        float fadeF = fmaxf(0.0f, sh.life / sh.maxLife);
+        float r, g, b;
+        hsvToRgb(sh.hue, 1.0f, 1.0f, r, g, b);
+        int i = (int)lroundf(sh.pos);
+        for (int o = -1; o <= 1; o++) {
+            int ii = i + o;
+            if (ii < 0 || ii >= LEDS_PER_STRIP) continue;
+            float w = fadeF * (o == 0 ? 0.4f : 0.125f);
+            buf[ii][0] = fmaxf(buf[ii][0], r * w);
+            buf[ii][1] = fmaxf(buf[ii][1], g * w);
+            buf[ii][2] = fmaxf(buf[ii][2], b * w);
+        }
+    }
+
+    // Paintbrush trail: while held, each frame deposits a fraction of the
+    // particle color into the paint layer (repeat passes build it up), capped
+    // well below particle brightness. Rendered additively UNDER the live
+    // particles, so the ruffle keeps its full contrast on top.
+    if (trailHeld) {
+        float rate = dt * (CLICKY_PAINT_CAP / 255.0f) / CLICKY_PAINT_S;
+        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++)
+            for (int c = 0; c < 3; c++)
+                clickyTrail[i][c] = fminf(CLICKY_PAINT_CAP,
+                                          clickyTrail[i][c] + buf[i][c] * rate);
+    } else {
+        float decay = expf(-CLICKY_TRAIL_K * dt);
+        for (uint16_t i = 0; i < LEDS_PER_STRIP; i++)
+            for (int c = 0; c < 3; c++)
+                clickyTrail[i][c] *= decay;
+    }
+
+    for (uint16_t i = 0; i < LEDS_PER_STRIP; i++) {
+        float r = buf[i][0] + clickyTrail[i][0];
+        float g = buf[i][1] + clickyTrail[i][1];
+        float b = buf[i][2] + clickyTrail[i][2];
+        for (uint8_t s = 0; s < NUM_STRIPS; s++)
+            setPixelScaled(s, i, fminf(r, 255.0f), fminf(g, 255.0f),
+                           fminf(b, 255.0f));
+    }
+}
+
 // ── Effect reset dispatch (called on effect change) ─────────────
 static void resetEffect(uint8_t fx) {
     resetFxDither();
@@ -3071,6 +3323,18 @@ void loop() {
         1.0f,   // FX_COLLISION
     };
     float fxDt = dt * effSpeed * SPEED_SCALE[currentEffect];
+
+    // clicky-pots seen → particle effect overrides the selected effect.
+    // Real dt, not fxDt: the pots drive it directly.
+    bool clickyLive = clickyLastMs > 0;
+    static bool wasClicky = false;
+    if (clickyLive && !wasClicky) {
+        wasClicky = true;
+        resetClickyParticles();
+    }
+    if (clickyLive) {
+        renderClickyParticles(dt);
+    } else
     switch (currentEffect) {
         case FX_AMBIENT_BLOOM:
             for (uint8_t s = 0; s < NUM_STRIPS; s++) renderBloomStrip(s, fxDt);
@@ -3152,6 +3416,10 @@ void loop() {
                           bMin, bMax, lit, (unsigned)LEDS_PER_STRIP,
                           audioEnergy5s, eDbg);
         }
+        Serial.printf("  [clicky] %s pkts=%lu pull=%02X pos0=%u\n",
+                      clickyLive ? "LIVE" : "----",
+                      (unsigned long)clickyPktCount,
+                      clickyPkt.pullBits, clickyPkt.pos[0]);
         Serial.printf("  [bs26] %s pkts=%lu fx=%u bright=%.3f speed=%.2f hue=%u sat=%u dorm=%.2f\n",
                       bs26Live ? "LIVE" : "----",
                       (unsigned long)bs26PktCount,

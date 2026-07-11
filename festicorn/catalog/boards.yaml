@@ -86,6 +86,34 @@ firmware_by_role:
       (broadcast, channel 1, on-change + 1 s heartbeat). ADS1115 (I2C
       SDA=23/SCL=22) reads the decade box; dual onboard DAC (GPIO 25 µA,
       GPIO 26 V) drives the moving-coil meters. No mic/audio.
+  clicky-pots:
+    deployment: static
+    source: festicorn/clicky-pots/src/main.cpp
+    packet_format: ClickyPacketV1 18B (lib/v1_telemetry/clicky_packet_v1.h)
+    hardware:
+      pots: |
+        6× push-pull pots from Faroudja LD100 front panel (element
+        120-750Ω, isolated from original board). Per pot: red wire →
+        330Ω pullup to 3.3V → ADS1115 channel (position, two-wire
+        rheostat measurement); white wire → 330Ω pullup to 3.3V → ESP32
+        ADC1 pin (push/pull detect); wiper → GND.
+        White pins by pot idx: 36(VP), 39(VN), 34, 35, 32, 33.
+        ADS channels by pot idx: A3, A2, A1 (module 0x48), A1, A2, A3
+        (module 0x49) — pots 0/2 are cross-wired vs silkscreen order.
+        Pot idx 3 is mirror-assembled: taper reversed, pull-detect
+        line ("black") open when pressed / follows element when pulled
+        — thresholds inverted in firmware.
+      adc: 2× ADS1115 on I2C SDA=21/SCL=22; ADDR→GND (0x48, pots 0-2)
+        and ADDR→VDD (0x49, pots 3-5). Channels A1-A3 (A0 unused). GAIN_ONE.
+      buttons: 6× momentary panel buttons → GPIO 25, 26, 14, 27, 16, 13
+        (panel order, left to right) + 1× toggle switch → GPIO 17
+        (btnBits bit 6). All INPUT_PULLUP; other terminal → wiper GND rail.
+        Firmware treats the toggle as a level like the buttons; receivers
+        wanting on/off semantics read bit 6 as state, not edge.
+    notes: |
+      LED instrument input controller. Broadcasts pot positions
+      (0-1 float), pull states, and button states over ESP-NOW
+      (broadcast, channel 1, on-change + 1 s heartbeat).
   noodles:
     deployment: dynamic
     source: null
@@ -416,6 +444,27 @@ boards:
   notes: |
     Classic ESP32 on /dev/cu.usbserial-1120 — failed esptool sync; likely
     running active firmware. Capture MAC manually with BOOT-button reset.
+
+# ── clicky-pots (LED instrument input controller) ────────────────
+- mac: 04:B2:47:82:FA:9C
+  id: 'clicky-pots'
+  chip: esp32-d0wd-v3
+  role: clicky-pots
+  first_seen: '2026-07-09T00:00:00Z'
+  last_validated:
+    utc: '2026-07-09T00:00:00Z'
+    port: /dev/cu.usbserial-210
+    method: esptool read-mac (chip detect ESP32-D0WD-V3 rev3.1, 240MHz, 40MHz xtal)
+  can:
+    tx: 4
+    rx: 15
+  notes: |
+    Reads 6 push-pull pots + 6 buttons salvaged from a Faroudja LD100
+    front panel. See firmware_by_role.clicky-pots for wiring.
+    Identify by MAC; port re-enumerates on replug.
+    CAN transceiver TX=GPIO4 RX=GPIO15 (verified 2026-07-10, 2-node exchange
+    with led-eth-1 @500kbps, zero errors both directions). GPIO15 straps
+    MTDO — safe as RX (idles recessive/high).
 
 # ── Ethernet LED-data test rig ───────────────────────────────────────
 - mac: 04:B2:47:82:74:20

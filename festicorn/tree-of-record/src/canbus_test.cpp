@@ -62,13 +62,17 @@ void loop() {
   static uint32_t lastTx = 0;
   if (now - lastTx >= 500) {
     lastTx = now;
+    // Political discourse, 8 bytes per hot take. Node ID staggers the
+    // rotation so the two boards argue instead of agreeing.
+    static const char* TAKES[] = {
+      "TAX RGB!", "NO TAXES", "VOTE LED", "VOTE CAN", "FREE HUE",
+      "GAMMA 4A", "PWM 4EVA", "DIM LEFT", "BRT RGHT", "ACK ME!!",
+    };
+    static const int NTAKES = sizeof(TAKES) / sizeof(TAKES[0]);
     twai_message_t msg = {};
     msg.identifier       = 0x100 | nodeId;   // 11-bit standard, unique per node
-    msg.data_length_code = 4;
-    msg.data[0] = nodeId;
-    msg.data[1] = (uint8_t)(txCount >> 16);
-    msg.data[2] = (uint8_t)(txCount >> 8);
-    msg.data[3] = (uint8_t)(txCount);
+    msg.data_length_code = 8;
+    memcpy(msg.data, TAKES[(txCount + nodeId) % NTAKES], 8);
 #ifdef CAN_SELFTEST
     msg.self = 1;   // hear our own frame back through the transceiver
 #endif
@@ -81,10 +85,10 @@ void loop() {
 
   twai_message_t rx;
   while (twai_receive(&rx, 0) == ESP_OK) {
-    Serial.printf("[RX] id=0x%03X from-node=0x%02X dlc=%u data=",
-                  (unsigned)rx.identifier, rx.data[0], rx.data_length_code);
+    Serial.printf("[RX] id=0x%03X dlc=%u data=", (unsigned)rx.identifier,
+                  rx.data_length_code);
     for (int i = 0; i < rx.data_length_code; i++) Serial.printf("%02X ", rx.data[i]);
-    Serial.println();
+    Serial.printf(" \"%.8s\"\n", (const char*)rx.data);
   }
 
   static uint32_t lastStat = 0;

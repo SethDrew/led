@@ -56,7 +56,6 @@
 #include <esp_wifi.h>
 #include <esp_random.h>
 #include <NeoPixelBus.h>
-#include <ArduinoJson.h>
 #include <SPIFFS.h>
 #include <math.h>
 #include <fast_math.h>
@@ -66,6 +65,7 @@
 #include <gyro_packet_v1.h>
 #include <audio_packet_v1.h>
 #include <audio_stream_packet_v1.h>
+#include <bs26_packet_v1.h>
 
 // ── Strip layout ─────────────────────────────────────────────────
 #ifndef LEDS_PER_STRIP
@@ -762,12 +762,12 @@ static void applyPalette(uint8_t hueIdx, uint8_t satIdx) {
     bloomHueB_R = r; bloomHueB_G = g; bloomHueB_B = b;
 }
 
-// ── ESP-NOW receive (BS-26 JSON state packets) ──────────────────
+// ── ESP-NOW receive (BS-26 state + sensor packets) ──────────────
 static void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
     if (len < 2 || len > 250) return;
 
-    // Fixed-size binary sensor packets take priority over JSON (disambiguated
-    // by exact length). Latch raw bytes; loop() decodes and normalizes.
+    // All packets are fixed-size binary, disambiguated by exact length.
+    // Latch raw bytes; loop() decodes and normalizes.
     if (len == (int)sizeof(TelemetryPacketV1)) {
         memcpy((void*)&accelPkt, data, sizeof(TelemetryPacketV1));
         accelLastMs = millis();
@@ -808,37 +808,28 @@ static void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
         return;
     }
 
-    StaticJsonDocument<768> doc;
-    DeserializationError err = deserializeJson(doc, (const char*)data, len);
-    if (err) return;
-
-    if (!doc.containsKey("s") && !doc.containsKey("seq")) return;
-    // Seq alone doesn't prove BS-26: the faroudja panel broadcasts {"p":[...],
-    // "s":N} on the same channel, and its missing knob fields parse as zeros
-    // (brightness 0 → 1 Hz blank strobe). Require a real knob field.
-    if (!doc.containsKey("do") && !doc.containsKey("decouter")) return;
+    if (len != (int)sizeof(Bs26PacketV1)) return;
+    Bs26PacketV1 pkt;
+    memcpy(&pkt, data, sizeof(pkt));
+    if (pkt.magic != BS26_MAGIC || pkt.ver != BS26_VER) return;
 
     // Build the full state in a scratch copy, then publish it to bs26 in one
     // critical section so loop never reads a half-updated struct.
     Bs26State next = {};
-    // ac/dc arrive as integers ("ac":1) over ESP-NOW, not JSON booleans. The
-    // `| false` default-operator gates on is<bool>(), which is FALSE for an
-    // integer, so it always returned the default — switches never registered.
-    // as<bool>() converts the integer (1→true) instead of type-gating it.
-    next.dc       = doc["dc"].as<bool>();
-    next.ac       = doc["ac"].as<bool>();
-    next.hundreds = doc["h"]  | (doc["hundreds"] | 0);
-    next.tens     = doc["t"]  | (doc["tens"] | 0);
-    next.ones     = doc["o"]  | (doc["ones"] | 0);
-    next.decade   = doc["dec"]| (doc["decade"] | 0);
-    next.decouter = doc["do"] | (doc["decouter"] | 0);
-    next.decmid   = doc["dm"] | (doc["decmid"] | 0);
-    next.decinner = doc["di"] | (doc["decinner"] | 0);
-    next.ua_dac   = doc["ua"] | 0;
+    next.dc       = pkt.flags & BS26_FLAG_DC;
+    next.ac       = pkt.flags & BS26_FLAG_AC;
+    next.hundreds = pkt.hundreds;
+    next.tens     = pkt.tens;
+    next.ones     = pkt.ones;
+    next.decade   = pkt.dec;
+    next.decouter = pkt.decouter;
+    next.decmid   = pkt.decmid;
+    next.decinner = pkt.decinner;
+    next.ua_dac   = pkt.ua_dac;
     next.ua_max   = 0;
-    next.v_dac    = doc["v"]  | 0;
+    next.v_dac    = pkt.v_dac;
     next.v_max    = 0;
-    next.seq      = doc["s"]  | (doc["seq"] | 0);
+    next.seq      = pkt.seq;
 
     portENTER_CRITICAL(&bs26Mux);
     memcpy((void*)&bs26, &next, sizeof(bs26));

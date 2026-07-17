@@ -283,6 +283,10 @@ Consequences applied to firmware (same date):
   ~40 ms instead of a full 1 s heartbeat wait.
 - `cdt` field (last commit's pending-to-commit ms) added to the serial JSON
   and ESP-NOW packet, logging commit latency alongside the knob state.
+- ESP-NOW wire format switched from JSON to binary Bs26PacketV1 (38 B,
+  2026-07-10) — see `festicorn/lib/v1_telemetry/bs26_packet_v1.h`. Sends
+  broadcast + ACK-tracked unicast to cataloged consumers. Serial output
+  stays JSON for host tooling.
 
 ## Calibration Data Files
 

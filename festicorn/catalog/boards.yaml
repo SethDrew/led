@@ -66,7 +66,7 @@ firmware_by_role:
   tree-of-record:
     deployment: static
     source: festicorn/tree-of-record/src/main.cpp
-    packet_format: json-espnow (BS-26) + v1 telemetry/audio + AudioStreamV1 (204B)
+    packet_format: Bs26PacketV1 (38B) + v1 telemetry/audio + AudioStreamV1 (204B)
     notes: |
       Audio record/playback installation. ESP32-D0WD-V3, 6× WS2812B RGB strips
       on RMT 0..5. BS-26 switches drive record/playback; hundreds knob selects
@@ -79,11 +79,12 @@ firmware_by_role:
   bs26:
     deployment: static
     source: festicorn/kaylab-knobs/src/main.cpp
-    packet_format: json-espnow (knobs/switches/meters)
+    packet_format: Bs26PacketV1 38B (lib/v1_telemetry/bs26_packet_v1.h)
     notes: |
       Kay Lab 508-25 retrofit. ESP32 reads vintage panel switches/knobs and
-      drives two analog meters, broadcasting full panel state over ESP-NOW
-      (broadcast, channel 1, on-change + 1 s heartbeat). ADS1115 (I2C
+      drives two analog meters, sending full panel state over ESP-NOW
+      (channel 1, broadcast + ACK-tracked unicast to cataloged consumers,
+      on-change ×3 burst + 1 s heartbeat). ADS1115 (I2C
       SDA=23/SCL=22) reads the decade box; dual onboard DAC (GPIO 25 µA,
       GPIO 26 V) drives the moving-coil meters. No mic/audio.
   clicky-pots:
@@ -496,12 +497,12 @@ boards:
 - mac: A4:F0:0F:61:40:18
   id: 'led-eth-1'
   chip: esp32
-  role: wormhole-eth
+  role: tree-of-record-eth
   first_seen: '2026-06-28T00:00:00Z'
   last_validated:
-    utc: '2026-06-28T00:00:00Z'
+    utc: '2026-07-10T00:00:00Z'
     port: /dev/cu.usbserial-0001
-    method: esptool read-mac (chip detect ESP32-D0WD-V3 rev3.1, 240MHz, 40MHz xtal)
+    method: esptool read-mac + live serial (tree_of_record_eth debug output confirmed)
   strips:
     count: 4
     leds_each: 150
@@ -512,7 +513,9 @@ boards:
   notes: |
     Replica of led-eth-0. LED data over ethernet CABLE as physical conductor
     only — not networked. 4× WS2812, 150 LEDs each, output pins 13/27/32/33.
-    Runs the 4-strip wormhole (env:wormhole-eth). Identify by MAC; port
+    Flashed with the 4-strip tree-of-record receiver (env:tree-of-record-eth)
+    as the bench BS-26 effects unit since 2026-07 (12-effect catalog, faroudja
+    packet guard 275f221) — previously ran wormhole-eth. Identify by MAC; port
     re-enumerates on replug.
     Lineage: bench-tree sap-flow board (2026-04-29) → led-eth-1, permanent
     (2026-07-07). The bench-tree role/entry is retired.

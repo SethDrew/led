@@ -47,6 +47,7 @@
 #include <math.h>
 #include "v1_packet.h"
 #include "gyro_packet_v1.h"
+#include "bs26_packet_v1.h"
 #include "audio_packet_v1.h"
 #include "audio_stream_packet_v1.h"
 
@@ -270,21 +271,17 @@ static void emitAudioStream() {
     audioFill = 0;
 }
 
-// BS-26 (kaylab) JSON broadcast listener. We only need the record switch ("ac"),
+// BS-26 (kaylab) listener. We only need the record switch (AC flag),
 // a maintained on/off switch read as a LEVEL — the same semantics the tree runs.
 // While the switch is high the totem streams effects+waveform; while it's low it
 // goes silent. A latch keeps the 30 s cap from restarting until the switch is
 // released, so both ends start/stop together.
 static void onBsRecv(const uint8_t * /*mac*/, const uint8_t *data, int len) {
-    if (len < 6 || data[0] != '{') return;            // JSON only
-    char buf[160];
-    int n = (len < (int)sizeof(buf) - 1) ? len : (int)sizeof(buf) - 1;
-    memcpy(buf, data, n); buf[n] = '\0';
-    const char *p = strstr(buf, "\"ac\":");
-    if (!p) return;
-    p += 5;
-    while (*p == ' ') p++;
-    bool ac = (*p == '1');
+    if (len != (int)sizeof(Bs26PacketV1)) return;
+    Bs26PacketV1 pkt;
+    memcpy(&pkt, data, sizeof(pkt));
+    if (pkt.magic != BS26_MAGIC || pkt.ver != BS26_VER) return;
+    bool ac = pkt.flags & BS26_FLAG_AC;
     if (!ac) {                                        // released → re-armed, stop
         wfAcLatch = false;
         wfStreaming = false;

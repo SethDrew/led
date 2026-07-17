@@ -6,6 +6,7 @@
 #include <esp_wifi.h>
 #include <esp_now.h>
 #include <Preferences.h>
+#include "bs26_packet_v1.h"
 
 Preferences prefs;
 uint32_t bootCount = 0;
@@ -85,6 +86,27 @@ uint32_t espnowSeq = 0;
 uint8_t broadcastAddr[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 unsigned long lastBroadcast = 0;
 const unsigned long HEARTBEAT_MS = 1000;
+
+// Broadcast frames get no MAC-layer ACK/retry, so congested-band drops are
+// silent; unicast copies to known consumers do get hardware retries.
+// MAC ↔ board mapping owned by festicorn/catalog/boards.yaml:
+// tree-of-record-v2, led-eth-2, led-eth-1, led-eth-0, duck.
+struct UnicastPeer { uint8_t mac[6]; bool alive; };
+UnicastPeer unicastPeers[] = {
+    {{0xF4, 0x2D, 0xC9, 0x6D, 0xB2, 0x58}, false},
+    {{0xB4, 0xBF, 0xE9, 0x33, 0x63, 0xC0}, false},
+    {{0xA4, 0xF0, 0x0F, 0x61, 0x40, 0x18}, false},
+    {{0x04, 0xB2, 0x47, 0x82, 0x74, 0x20}, false},
+    {{0x38, 0x44, 0xBE, 0x45, 0xD9, 0xCC}, false},
+};
+const int N_PEERS = sizeof(unicastPeers) / sizeof(unicastPeers[0]);
+unsigned long lastDeadProbe = 0;
+
+void onEspNowSend(const uint8_t *mac, esp_now_send_status_t status) {
+    for (int i = 0; i < N_PEERS; i++)
+        if (memcmp(mac, unicastPeers[i].mac, 6) == 0)
+            unicastPeers[i].alive = (status == ESP_NOW_SEND_SUCCESS);
+}
 
 // Native-ADC knob noise rejection: hysteresis margin (counts a reading must
 // cross a neighboring threshold by before switching bins) plus a stable-for-Nms
@@ -183,28 +205,51 @@ static int16_t lastAdsTensRaw = 0, lastAdsOnesRaw = 0, lastAdsVccRef = 0;
 // ADS Vcc ref reading when thresholds were calibrated (USB-grounded, 7.5k/7.5k divider)
 static const float adsVccRefBaseline = 13249.0f;
 
-void broadcastState() {
+void broadcastState(bool allowProbe) {
     // TEMP (June 2026): the physical AC lever is dead (contact stuck closed —
     // see tree-of-record's AC_SWITCH_FAILURE_AND_DC_FALLBACK.md). Broadcast
-    // the DC switch in the "ac" field so record-intent consumers keep working:
-    // the duck gates ALL its sensor/mic forwarding on "ac", and the tree now
-    // ignores "ac" entirely (DC moded by the effect dial). Revert to (int)acOn
-    // when the lever is physically replaced.
-    char buf[250];
-    int n = snprintf(buf, sizeof(buf),
-        "{\"dc\":%d,\"ac\":%d,\"h\":%d,\"t\":%d,\"o\":%d,"
-        "\"dec\":%d,\"do\":%d,\"dm\":%d,\"di\":%d,"
-        "\"ua\":%d,\"v\":%d,"
-        "\"rh\":%d,\"rt\":%d,\"ro\":%d,\"at\":%d,\"ao\":%d,\"ar\":%d,"
-        "\"cdt\":%d,\"up\":%lu,\"b\":%u,\"s\":%u}",
-        (int)dcOn, (int)dcOn,
-        hundredsPos, tensPos, onesPos, decValue, decOuter, decMid, decInner,
-        uaDac, vDac,
-        lastHundredsRaw, lastTensRaw, lastOnesRaw,
-        (int)lastAdsTensRaw, (int)lastAdsOnesRaw, (int)lastAdsVccRef,
-        lastCommitDtMs, millis(), bootCount, espnowSeq++);
-    if (n > 250) n = 250;
-    esp_now_send(broadcastAddr, (uint8_t *)buf, n);
+    // the DC switch in the AC flag so record-intent consumers keep working:
+    // the duck gates ALL its sensor/mic forwarding on it, and the tree now
+    // ignores AC entirely (DC moded by the effect dial). Revert to acOn when
+    // the lever is physically replaced.
+    Bs26PacketV1 pkt = {};
+    pkt.magic    = BS26_MAGIC;
+    pkt.ver      = BS26_VER;
+    pkt.flags    = (dcOn ? BS26_FLAG_DC : 0) | (dcOn ? BS26_FLAG_AC : 0);
+    pkt.hundreds = hundredsPos;
+    pkt.tens     = tensPos;
+    pkt.ones     = onesPos;
+    pkt.decouter = decOuter;
+    pkt.decmid   = decMid;
+    pkt.decinner = decInner;
+    pkt.ua_dac   = uaDac;
+    pkt.v_dac    = vDac;
+    pkt.dec      = decValue;
+    pkt.raw_h    = lastHundredsRaw;
+    pkt.raw_t    = lastTensRaw;
+    pkt.raw_o    = lastOnesRaw;
+    pkt.ads_t    = lastAdsTensRaw;
+    pkt.ads_o    = lastAdsOnesRaw;
+    pkt.ads_vcc  = lastAdsVccRef;
+    pkt.cdt      = lastCommitDtMs;
+    pkt.up       = millis();
+    pkt.seq      = espnowSeq++;
+    pkt.boots    = bootCount;
+    esp_now_send(broadcastAddr, (uint8_t *)&pkt, sizeof(pkt));
+
+    for (int i = 0; i < N_PEERS; i++)
+        if (unicastPeers[i].alive)
+            esp_now_send(unicastPeers[i].mac, (uint8_t *)&pkt, sizeof(pkt));
+
+    // Dead-peer probes burn the full MAC retry sequence (~15-20ms radio-busy
+    // each), so they only ride idle heartbeats — never commits or resends —
+    // to keep doomed retries out of the knob-to-light path.
+    if (allowProbe && millis() - lastDeadProbe >= HEARTBEAT_MS) {
+        lastDeadProbe = millis();
+        for (int i = 0; i < N_PEERS; i++)
+            if (!unicastPeers[i].alive)
+                esp_now_send(unicastPeers[i].mac, (uint8_t *)&pkt, sizeof(pkt));
+    }
 }
 
 void setup() {
@@ -239,11 +284,19 @@ void setup() {
     if (esp_now_init() == ESP_OK) {
         Serial.println("ESP-NOW OK ch1");
         esp_now_register_recv_cb(onEspNowRecv);
+        esp_now_register_send_cb(onEspNowSend);
         esp_now_peer_info_t peer = {};
         memcpy(peer.peer_addr, broadcastAddr, 6);
         peer.channel = 0;
         peer.encrypt = false;
         esp_now_add_peer(&peer);
+        for (int i = 0; i < N_PEERS; i++) {
+            esp_now_peer_info_t up = {};
+            memcpy(up.peer_addr, unicastPeers[i].mac, 6);
+            up.channel = 0;
+            up.encrypt = false;
+            esp_now_add_peer(&up);
+        }
     } else {
         Serial.println("ESP-NOW FAIL");
     }
@@ -416,7 +469,7 @@ void loop() {
                     METER_UA_MAX != prevUaMax || METER_V_MAX != prevVMax);
 
     if (stateChanged || millis() - lastBroadcast >= HEARTBEAT_MS) {
-        broadcastState();
+        broadcastState(!stateChanged);
         lastBroadcast = millis();
         if (stateChanged) { resendsLeft = COMMIT_RESENDS; lastResend = lastBroadcast; }
         prevDcOn = dcOn; prevAcOn = acOn;
@@ -425,7 +478,7 @@ void loop() {
         prevUaDac = uaDac; prevVDac = vDac;
         prevUaMax = METER_UA_MAX; prevVMax = METER_V_MAX;
     } else if (resendsLeft > 0 && millis() - lastResend >= RESEND_SPACING_MS) {
-        broadcastState();
+        broadcastState(false);
         resendsLeft--;
         lastResend = millis();
         lastBroadcast = lastResend;

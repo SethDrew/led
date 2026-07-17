@@ -1353,7 +1353,7 @@ entries:
 
   - id: esp32-rmt-simultaneous-show-glitch-frames
     date: 2026-06-29
-    touched: 2026-06-29
+    touched: 2026-07-08
     title: "Simultaneous multi-channel RMT Show() causes corrupt glitch frames; staggered Show() fixes it"
     summary: >
       Firing every strip's NeoPixelBus Show() at once (all RMT channels
@@ -1371,6 +1371,7 @@ entries:
     source:
       - festicorn/bulb-fleet/src/bulb_fleet.cpp   # stripsShow() stagger, commit 963a899
       - festicorn/tree-of-record/src/tree_of_record_eth.cpp
+      - festicorn/bench-bulbs/src/bench.cpp   # 2+2 stagger, 2026-07-08
     tags: [esp32, rmt, isr, ws2812b, glitch, neopixelbus, wifi, reliability]
     relates_to: [esp32-rmt-isr-cpu-overhead, esp32-rmt-6-channel-concurrency-cliff, esp32-dual-core-rmt-render-overlap, ws2812-eth-cable-head-glitch]
     notes: >

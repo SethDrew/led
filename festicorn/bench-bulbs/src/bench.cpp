@@ -1612,8 +1612,10 @@ void loop() {
         }
     }
 
+    // Staggered Show(): see ledger esp32-rmt-simultaneous-show-glitch-frames
     stripA.Show();
     stripB.Show();
+    while (!stripA.CanShow() || !stripB.CanShow()) {}
     stripStkA.Show();
     stripStkB.Show();
 

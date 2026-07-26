@@ -463,6 +463,10 @@ boards:
     Reads 6 push-pull pots + 6 buttons salvaged from a Faroudja LD100
     front panel. See firmware_by_role.clicky-pots for wiring.
     Identify by MAC; port re-enumerates on replug.
+    Pot 4 push-pull switch contact failed and was repaired 2026-07-26.
+    Failure signature (for recurrence): white line reads constant 4095
+    (open) and element network sticks in the pulled curve, so position
+    caps at ~0.67 under the pressed cal row and pullBits never fires.
     CAN transceiver TX=GPIO4 RX=GPIO15 (verified 2026-07-10, 2-node exchange
     with led-eth-1 @500kbps, zero errors both directions). GPIO15 straps
     MTDO — safe as RX (idles recessive/high).
@@ -497,12 +501,12 @@ boards:
 - mac: A4:F0:0F:61:40:18
   id: 'led-eth-1'
   chip: esp32
-  role: tree-of-record-eth
+  role: axismundi
   first_seen: '2026-06-28T00:00:00Z'
   last_validated:
-    utc: '2026-07-10T00:00:00Z'
+    utc: '2026-07-26T00:00:00Z'
     port: /dev/cu.usbserial-0001
-    method: esptool read-mac + live serial (tree_of_record_eth debug output confirmed)
+    method: esptool read-mac (both connected boards scanned)
   strips:
     count: 4
     leds_each: 150
@@ -513,10 +517,10 @@ boards:
   notes: |
     Replica of led-eth-0. LED data over ethernet CABLE as physical conductor
     only — not networked. 4× WS2812, 150 LEDs each, output pins 13/27/32/33.
-    Flashed with the 4-strip tree-of-record receiver (env:tree-of-record-eth)
-    as the bench BS-26 effects unit since 2026-07 (12-effect catalog, faroudja
-    packet guard 275f221) — previously ran wormhole-eth. Identify by MAC; port
-    re-enumerates on replug.
+    Runs axismundi (festicorn/axismundi, env:axismundi, clicky-pots
+    ESP-NOW receiver) since 2026-07-26. Previously the tree-of-record-eth
+    bench BS-26 effects unit, before that wormhole-eth. Identify by MAC;
+    port re-enumerates on replug.
     Lineage: bench-tree sap-flow board (2026-04-29) → led-eth-1, permanent
     (2026-07-07). The bench-tree role/entry is retired.
     CAN transceiver soldered TX=GPIO4 RX=GPIO16 (verified 2026-07-08, 3-node

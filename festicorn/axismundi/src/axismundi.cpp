@@ -1,16 +1,13 @@
 /*
  * AXISMUNDI — pot-driven particle field on strips of arbitrary length.
  *
- * ESP32-D0WD-V3 (biolum-b, MAC B4:BF:E9:C9:01:38). 6 × WS2812B strips, GRB.
- *   slot 0  GPIO 4   150 LEDs
- *   slot 1  GPIO 15   50 LEDs   (GPIO15 is a strapping pin — post-boot data
- *   slot 2  GPIO 17   50 LEDs    out is fine, but suspect it first if a strip
- *   slot 3  GPIO 5    50 LEDs    attached at boot ever wedges startup)
- *   slot 4  GPIO 18   50 LEDs
- *   slot 5  GPIO 19  150 LEDs
+ * ESP32 (led-eth-1, MAC A4:F0:0F:61:40:18). 4 × WS2812B strips, GRB,
+ * 150 LEDs each, GPIO 13/27/32/33 — data leaves the board on RJ45
+ * conductors (cable as plain wire, not ethernet).
  *
  * Forked from tree-of-record's clicky effect. The difference that names this
- * project: strips are NOT equal length. The particle field lives entirely in
+ * project: strips may be ANY length (this install happens to run four equal
+ * 150s — set STRIP_LEN per strip). The particle field lives entirely in
  * normalized [0,1] space and is rasterized per-strip at each strip's own
  * length (constant-PROPORTION policy) — a blob covers the same fraction of a
  * 50-LED strip as a 150-LED one, so all LED-space tunings scale by len/REF_LEN.
@@ -21,9 +18,9 @@
  *
  *   pot position  → particle position along the strip (fixed per-pot hue)
  *   pull out      → split the blob into a spaced comb (×4 spacing)
- *   btn 0 shards  → burst of free-flying shards from each particle
- *   btn 1 pump    → grow particle size
- *   btn 2 hue-rot → +30° per press
+ *   btn 0 shards  → hold to spray free-flying shards from each particle
+ *   btn 1 pump    → hold to grow particle size
+ *   btn 2 hue-rot → hold to rotate hue continuously
  *   btn 3 gather  → hold to pull all particles to the field mean
  *   btn 4 fade    → hold to desaturate+fade to black (fires a crackle)
  *   btn 5 trail   → hold to paint a fading trail
@@ -40,8 +37,8 @@
 #include <clicky_packet_v1.h>
 
 // ── Strip layout ─────────────────────────────────────────────────
-static const uint8_t  NUM_STRIPS = 6;
-static const uint16_t STRIP_LEN[NUM_STRIPS] = {150, 50, 50, 50, 50, 150};
+static const uint8_t  NUM_STRIPS = 4;
+static const uint16_t STRIP_LEN[NUM_STRIPS] = {150, 150, 150, 150};
 #define MAX_LEDS   150
 #define REF_LEN    100.0f   // LED-space tunings were authored at this length
 #define RASTER_PROPORTIONAL 1
@@ -107,13 +104,11 @@ static void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
     clickyPktCount++;
 }
 
-// ── LED driver: 6 strips via RMT (GPIO 4/15/17/5/18/19), GRB order ──
-static NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt0Ws2812xMethod> strip0(STRIP_LEN[0], 4);
-static NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt1Ws2812xMethod> strip1(STRIP_LEN[1], 15);
-static NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt2Ws2812xMethod> strip2(STRIP_LEN[2], 17);
-static NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt3Ws2812xMethod> strip3(STRIP_LEN[3], 5);
-static NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt4Ws2812xMethod> strip4(STRIP_LEN[4], 18);
-static NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt5Ws2812xMethod> strip5(STRIP_LEN[5], 19);
+// ── LED driver: 4 strips via RMT (GPIO 13/27/32/33), GRB order ──
+static NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt0Ws2812xMethod> strip0(STRIP_LEN[0], 13);
+static NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt1Ws2812xMethod> strip1(STRIP_LEN[1], 27);
+static NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt2Ws2812xMethod> strip2(STRIP_LEN[2], 32);
+static NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt3Ws2812xMethod> strip3(STRIP_LEN[3], 33);
 
 static inline void setPixel(uint8_t s, uint16_t i, uint8_t r, uint8_t g, uint8_t b) {
     RgbColor c(r, g, b);
@@ -122,17 +117,15 @@ static inline void setPixel(uint8_t s, uint16_t i, uint8_t r, uint8_t g, uint8_t
         case 1: strip1.SetPixelColor(i, c); break;
         case 2: strip2.SetPixelColor(i, c); break;
         case 3: strip3.SetPixelColor(i, c); break;
-        case 4: strip4.SetPixelColor(i, c); break;
-        case 5: strip5.SetPixelColor(i, c); break;
     }
 }
 
 static void showAll() {
     // Stagger the Show()s to avoid RMT ISR contention (see engineering ledger
     // esp32-rmt-simultaneous-show-glitch-frames).
-    strip0.Show(); strip1.Show(); strip2.Show();
-    while (!strip0.CanShow() || !strip1.CanShow() || !strip2.CanShow()) {}
-    strip3.Show(); strip4.Show(); strip5.Show();
+    strip0.Show(); strip1.Show();
+    while (!strip0.CanShow() || !strip1.CanShow()) {}
+    strip2.Show(); strip3.Show();
 }
 
 // ── Hysteretic floor: anti-flicker policy for sub-LSB channels ───
@@ -216,9 +209,16 @@ static float clickyRufflePhase = 0.0f;
 #define CLICKY_FADE_S      1.5f
 #define CLICKY_RECOVER_S   0.7f
 #define CLICKY_CRACKLE_S   0.5f
-#define CLICKY_PUMP_KICK   0.9f    // sigma multiplier added per press
 #define CLICKY_PUMP_MAX    3.0f
 #define CLICKY_PUMP_TAU    0.6f
+#define CLICKY_PUMP_RISE_S 1.0f    // hold time to swell from 1.0 to PUMP_MAX
+#define CLICKY_SHARD_BURST_S 0.12f // seconds between shard bursts while held
+#define CLICKY_HUEROT_DEG_S  90.0f // hue rotation rate (deg/sec) while held
+#define CLICKY_RAINBOW_BURST 10    // shards per pull/push gesture
+#define CLICKY_EMIT_SPEED    0.35f // pull-out: outward shard speed (units/sec)
+#define CLICKY_EMIT_LIFE     0.55f // pull-out: shard lifetime (sec)
+#define CLICKY_ABSORB_RADIUS 0.20f // push-in: spawn radius from particle
+#define CLICKY_ABSORB_LIFE   0.50f // push-in: time to converge onto particle
 #define CLICKY_MOVE_EPS    0.0015f // per-frame smoothed-pos delta = "moving"
 #define CLICKY_GATHER_S    0.25f   // ramp time to fully gathered
 
@@ -237,7 +237,8 @@ static int   clickyShardNext = 0;
 static float clickyGather = 0.0f;
 static float clickyHueRot[CLICKY_NUM_POTS];
 static float clickyMovedAgo[CLICKY_NUM_POTS];
-static uint8_t clickyPrevBtn = 0;
+static float clickyShardTimer = 0.0f;
+static uint8_t clickyPrevPull = 0;
 
 static void resetClickyParticles() {
     resetFxDither();
@@ -252,7 +253,8 @@ static void resetClickyParticles() {
     clickyFade = 1.0f;
     clickyCrackleT = 0.0f;
     clickyGather = 0.0f;
-    clickyPrevBtn = 0;
+    clickyShardTimer = 0.0f;
+    clickyPrevPull = 0;
     clickyShardNext = 0;
 }
 
@@ -361,6 +363,30 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
     }
 }
 
+// Rainbow burst from a knob gesture. outward = pull-out (shards spray away
+// from the particle and fade); !outward = push-in (shards spawn at a radius
+// and converge onto the particle, dying as they arrive). Hues span the wheel.
+static void spawnRainbowBurst(float centerN, float pumpK, bool outward) {
+    for (int m = 0; m < CLICKY_RAINBOW_BURST; m++) {
+        ClickyShard &sh = clickyShards[clickyShardNext];
+        clickyShardNext = (clickyShardNext + 1) % CLICKY_NUM_SHARDS;
+        float dir = (m & 1) ? 1.0f : -1.0f;
+        sh.hue = fmodf(360.0f * (float)m / (float)CLICKY_RAINBOW_BURST
+                       + (randFloat() - 0.5f) * 20.0f + 360.0f, 360.0f);
+        if (outward) {
+            sh.pos = centerN + dir * 2.0f * CLICKY_SIGMA_NORM * pumpK;
+            sh.vel = dir * CLICKY_EMIT_SPEED * (0.7f + randFloat() * 0.6f);
+            sh.maxLife = CLICKY_EMIT_LIFE * (0.7f + randFloat() * 0.6f);
+        } else {
+            float radius = CLICKY_ABSORB_RADIUS * (0.7f + randFloat() * 0.6f);
+            sh.pos = centerN + dir * radius;
+            sh.vel = -dir * (radius / CLICKY_ABSORB_LIFE);
+            sh.maxLife = CLICKY_ABSORB_LIFE;
+        }
+        sh.life = sh.maxLife;
+    }
+}
+
 static void renderClickyParticles(float dt) {
     ClickyPacketV1 pkt;
     memcpy(&pkt, (const void*)&clickyPkt, sizeof(pkt));
@@ -373,8 +399,9 @@ static void renderClickyParticles(float dt) {
 
     bool fadeHeld   = pkt.btnBits & (1 << CLICKY_BTN_FADE);
     bool gatherHeld = pkt.btnBits & (1 << CLICKY_BTN_GATHER);
-    uint8_t pressed = pkt.btnBits & ~clickyPrevBtn;
-    clickyPrevBtn = pkt.btnBits;
+    bool shardsHeld = pkt.btnBits & (1 << CLICKY_BTN_SHARDS);
+    bool pumpHeld   = pkt.btnBits & (1 << CLICKY_BTN_PUMP);
+    bool hueRotHeld = pkt.btnBits & (1 << CLICKY_BTN_HUEROT);
 
     float prevFade = clickyFade;
     if (fadeHeld) clickyFade = fmaxf(0.0f, clickyFade - dt / CLICKY_FADE_S);
@@ -401,22 +428,37 @@ static void renderClickyParticles(float dt) {
     gBrightness = MASTER_BRIGHTNESS
         * (BRIGHT_FLOOR + (1.0f - BRIGHT_FLOOR) * clickyPos[CLICKY_BRIGHT_POT]);
 
-    if (pressed & (1 << CLICKY_BTN_HUEROT))
+    if (hueRotHeld)
         for (int k = 0; k < CLICKY_NUM_POTS; k++)
-            clickyHueRot[k] = fmodf(clickyHueRot[k] + 30.0f, 360.0f);
+            clickyHueRot[k] = fmodf(clickyHueRot[k] + CLICKY_HUEROT_DEG_S * dt, 360.0f);
 
-    if (pressed & (1 << CLICKY_BTN_PUMP))
+    if (pumpHeld) {
+        float rise = dt * (CLICKY_PUMP_MAX - 1.0f) / CLICKY_PUMP_RISE_S;
         for (int k = 0; k < CLICKY_NUM_POTS; k++)
-            clickyPump[k] = fminf(CLICKY_PUMP_MAX, clickyPump[k] + CLICKY_PUMP_KICK);
-    for (int k = 0; k < CLICKY_NUM_POTS; k++)
-        clickyPump[k] = 1.0f + (clickyPump[k] - 1.0f) * expf(-dt / CLICKY_PUMP_TAU);
+            clickyPump[k] = fminf(CLICKY_PUMP_MAX, clickyPump[k] + rise);
+    } else {
+        for (int k = 0; k < CLICKY_NUM_POTS; k++)
+            clickyPump[k] = 1.0f + (clickyPump[k] - 1.0f) * expf(-dt / CLICKY_PUMP_TAU);
+    }
 
-    if (pressed & (1 << CLICKY_BTN_SHARDS)) {
+    uint8_t pulledEdge = pkt.pullBits & ~clickyPrevPull;
+    uint8_t pushedEdge = ~pkt.pullBits & clickyPrevPull;
+    clickyPrevPull = pkt.pullBits;
+    for (int k = 0; k < CLICKY_NUM_POTS; k++) {
+        if (k == CLICKY_BRIGHT_POT) continue;
+        if (pulledEdge & (1 << k)) spawnRainbowBurst(clickyPos[k], clickyPump[k], true);
+        if (pushedEdge & (1 << k)) spawnRainbowBurst(clickyPos[k], clickyPump[k], false);
+    }
+
+    if (shardsHeld) clickyShardTimer -= dt;
+    else            clickyShardTimer = 0.0f;
+    if (shardsHeld && clickyShardTimer <= 0.0f) {
+        clickyShardTimer += CLICKY_SHARD_BURST_S;
         for (int k = 0; k < CLICKY_NUM_POTS; k++) {
             if (k == CLICKY_BRIGHT_POT) continue;
             float centerN = clickyPos[k];
             float edgeN = 2.0f * CLICKY_SIGMA_NORM * clickyPump[k];
-            int burst = 3 + (int)(randFloat() * 4.0f);
+            int burst = 1 + (int)(randFloat() * 2.0f);
             for (int m = 0; m < burst; m++) {
                 ClickyShard &sh = clickyShards[clickyShardNext];
                 clickyShardNext = (clickyShardNext + 1) % CLICKY_NUM_SHARDS;
@@ -454,11 +496,10 @@ void setup() {
     prngState = esp_random();
     if (prngState == 0) prngState = 1;
 
-    strip0.Begin(); strip1.Begin(); strip2.Begin();
-    strip3.Begin(); strip4.Begin(); strip5.Begin();
+    strip0.Begin(); strip1.Begin();
+    strip2.Begin(); strip3.Begin();
     strip0.ClearTo(RgbColor(0)); strip1.ClearTo(RgbColor(0));
     strip2.ClearTo(RgbColor(0)); strip3.ClearTo(RgbColor(0));
-    strip4.ClearTo(RgbColor(0)); strip5.ClearTo(RgbColor(0));
     showAll();
 
     resetClickyParticles();
@@ -487,10 +528,9 @@ void setup() {
     peer.encrypt = false;
     esp_now_add_peer(&peer);
 
-    Serial.printf("Axismundi (clicky, 6-strip) ready — ch=%u\n", FIXED_CHANNEL);
-    Serial.printf("  strips: 4=%u 15=%u 17=%u 5=%u 18=%u 19=%u\n",
-                  STRIP_LEN[0], STRIP_LEN[1], STRIP_LEN[2],
-                  STRIP_LEN[3], STRIP_LEN[4], STRIP_LEN[5]);
+    Serial.printf("Axismundi (clicky, 4-strip) ready — ch=%u\n", FIXED_CHANNEL);
+    Serial.printf("  strips: 13=%u 27=%u 32=%u 33=%u\n",
+                  STRIP_LEN[0], STRIP_LEN[1], STRIP_LEN[2], STRIP_LEN[3]);
 }
 
 // ── Main loop ────────────────────────────────────────────────────
@@ -520,10 +560,12 @@ void loop() {
     if (now - lastLogMs > 2000) {
         float fps = frameCount * 1000.0f / (now - lastLogMs);
         bool clickyLive = (int32_t)(now - clickyLastMs) < 3000;
-        Serial.printf("  FPS=%.1f  [clicky] %s pkts=%lu pull=%02X btn=%02X pos0=%u\n",
+        Serial.printf("  FPS=%.1f  [clicky] %s pkts=%lu pull=%02X btn=%02X pos=%u,%u,%u,%u,%u,%u\n",
                       fps, clickyLive ? "LIVE" : "----",
                       (unsigned long)clickyPktCount,
-                      clickyPkt.pullBits, clickyPkt.btnBits, clickyPkt.pos[0]);
+                      clickyPkt.pullBits, clickyPkt.btnBits,
+                      clickyPkt.pos[0], clickyPkt.pos[1], clickyPkt.pos[2],
+                      clickyPkt.pos[3], clickyPkt.pos[4], clickyPkt.pos[5]);
         frameCount = 0;
         lastLogMs = now;
     }

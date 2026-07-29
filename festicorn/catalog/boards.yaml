@@ -353,14 +353,15 @@ boards:
   notes: |
     Axis Mundi input console: salvaged infinite-spin water-heater encoder +
     5 buttons. Broadcasts KettlePacketV1 (13 B) on ESP-NOW ch 1; firmware
-    pins TX power to 15.75 dBm (esp_wifi_set_max_tx_power(63)) because of
-    the defect below. Receiver: led-eth-1 (axismundi).
+    pins TX power below this unit's brownout cliff (current value: see
+    esp_wifi_set_max_tx_power in kettle-knob src/main.cpp).
+    Receiver: led-eth-1 (axismundi).
 
-    HAS THE SUPER MINI TX DEFECT. rf-bench 2026-07-27: 100% unicast ACK at
-    15.75 dBm, 0% ACK and completely unheard by three independent receivers
-    at 16.00 dBm. A 0.25 dB cliff, matching esp32-c3-super-mini-tx-defect in
-    the engineering ledger. RX is unaffected (still hearing peers at -36 dBm
-    while dead on TX). Safe only if TX power is pinned <= 15.75 dBm.
+    HAS THE SUPER MINI TX DEFECT, and its cliff is duty-cycle dependent —
+    measurements and safe-pinning rationale in the engineering ledger:
+    esp32-c3-super-mini-tx-defect,
+    esp-now-c3-brownout-cliff-duty-cycle-dependent.
+    RX is unaffected. Never raise TX power on this unit in response to loss.
 
     The 2026-07-26 note below is not a contradiction: that test evidently ran
     below the cliff, so it passed. Do not treat it as evidence of a good PA.

@@ -333,6 +333,52 @@ boards:
     RX-only role suits it. Drives 50× SK6812 RGBW on GPIO 10.
 
 # ── spare / untyped C3 ───────────────────────────────────────────────
+- mac: 10:00:3B:B1:3E:80
+  id: 'kettle-knob'
+  chip: esp32-c3
+  role: kettle-knob
+  first_seen: '2026-07-26T00:00:00Z'
+  last_validated:
+    utc: '2026-07-27T00:00:00Z'
+    port: /dev/cu.usbmodem11201
+    method: KettlePacketV1 sender flashed; serial JSON verified via dashboard
+  encoder:
+    a: 20
+    b: 10
+    counts_per_detent: 2
+    detents_per_rev: 30
+  buttons:
+    pins: [21, 9, 7, 6, 5]
+    notes: 21 = knob push; 9 shares the BOOT strap (held at power-on = download mode)
+  notes: |
+    Axis Mundi input console: salvaged infinite-spin water-heater encoder +
+    5 buttons. Broadcasts KettlePacketV1 (13 B) on ESP-NOW ch 1; firmware
+    pins TX power to 15.75 dBm (esp_wifi_set_max_tx_power(63)) because of
+    the defect below. Receiver: led-eth-1 (axismundi).
+
+    HAS THE SUPER MINI TX DEFECT. rf-bench 2026-07-27: 100% unicast ACK at
+    15.75 dBm, 0% ACK and completely unheard by three independent receivers
+    at 16.00 dBm. A 0.25 dB cliff, matching esp32-c3-super-mini-tx-defect in
+    the engineering ledger. RX is unaffected (still hearing peers at -36 dBm
+    while dead on TX). Safe only if TX power is pinned <= 15.75 dBm.
+
+    The 2026-07-26 note below is not a contradiction: that test evidently ran
+    below the cliff, so it passed. Do not treat it as evidence of a good PA.
+    ESP-NOW TX+RX verified 2026-07-26: 90/90 unicast pings ACKed by
+    clicky-pots, clean 1 Hz ClickyPacketV1 heartbeat reception. Candidate
+    for the water-heater rotary-encoder control node.
+- mac: 14:63:93:6F:FF:78
+  id: ''
+  chip: esp32-c3
+  role: spare
+  first_seen: '2026-07-27T00:00:00Z'
+  last_validated:
+    utc: '2026-07-27T00:00:00Z'
+    port: /dev/cu.usbmodem2101
+    method: rf-bench four-board RSSI matrix
+  notes: |
+    No TX defect: clean unicast ACK and reception all the way to the 20.00 dBm
+    driver ceiling. Preferred over 10:00:3B:B1:3E:80 for anything TX-heavy.
 - mac: 10:00:3B:B1:5D:10
   id: ''
   chip: esp32-c3

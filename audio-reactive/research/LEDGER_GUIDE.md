@@ -6,6 +6,10 @@ findings, experiments, intuitions, and dead ends for this project.
 This is a creative research project where ideas aren't binary. Things exist on a spectrum
 from "spark" to "integrated", with many in "hasn't found its place yet."
 
+**Consult before writing.** Agents propose candidate entries to the user (title +
+one-line summary is enough) and get a yes before adding them. The ledger is curated,
+not a dumping ground for session findings.
+
 ## What Belongs in the Ledger
 
 The ledger tracks **how we think about the problem** — not what we built.

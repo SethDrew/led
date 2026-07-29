@@ -6,6 +6,10 @@ the hardware we work with — LEDs, controllers, chips, electricity, protocols o
 This is the counterpart to the **research ledger** (`audio-reactive/research/ledger.yaml`),
 which tracks how we *think* about audio, LEDs, and feelings.
 
+**Consult before writing.** Agents propose candidate entries to the user (title +
+one-line summary is enough) and get a yes before adding them. The ledger is curated,
+not a dumping ground for session findings.
+
 ## What Belongs Here
 
 The ledger tracks **properties and constraints of physical entities** — things that are

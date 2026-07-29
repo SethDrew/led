@@ -611,6 +611,178 @@ entries:
       5 simultaneous broadcasters, not hardware weakness. In isolated pair testing,
       C3-New delivers 93-99%.
 
+      REPRODUCED 2026-07-27 on a different board, 10:00:3B:B1:3E:80, at the
+      IDENTICAL threshold: 100% unicast ACK at 15.75 dBm, 0% at 16.00 dBm. A
+      0.25 dB cliff. Measured with unicast (real MAC-layer ACK), and confirmed
+      by three independent receivers: at 16.00 dBm the board is not merely
+      unacknowledged, it is completely unheard — no frame arrives at all. RX stays healthy throughout (it keeps hearing peers at
+      -36 dBm while its own TX is dead). That two boards from different batches
+      break at the same 16.00 dBm boundary strengthens the regulator-brownout
+      mechanism over per-unit antenna variation.
+
+      A fourth board, 14:63:93:6F:FF:78, showed NO defect — clean TX all the way
+      to the 20.00 dBm driver ceiling. The defect remains per-unit, so screen
+      every board; do not assume by batch.
+
+      Screening caveat learned here: 10:00:3B:B1:3E:80 had previously PASSED an
+      ESP-NOW check (90/90 ACKs, 2026-07-26) and was catalogued as verified-good.
+      That test simply ran below the cliff. A pass at default or reduced power is
+      NOT evidence of a good PA — screening must explicitly sweep to >= 16 dBm.
+
+  - id: esp-now-tx-power-ceiling-c3-vs-classic
+    date: 2026-07-27
+    touched: 2026-07-27
+    title: ESP32-C3 accepts 20 dBm TX; classic ESP32 driver ceilings at ~15-15.75 dBm
+    summary: >
+      esp_wifi_set_max_tx_power readback shows the two families do not share a
+      TX range. Both C3 Super Minis accept up to 80 quarter-dBm (20.00 dBm) with
+      exact readback at every level. Both classic ESP32 dev boards refuse to go
+      above 63 and 60 quarter-dBm (15.75 and 15.00 dBm) respectively, and quantize
+      coarsely below that. Net: C3 has ~4-5 dB more commandable TX headroom — but
+      on a defective Super Mini the usable ceiling (15.75 dBm) lands right back at
+      the classic ESP32's ceiling anyway.
+    status: validated
+    severity: info
+    scope: hardware
+    source: empirical bench measurement (2026-07-27, festicorn/rf-bench, 4 boards, 2 per family)
+    tags: [esp32, esp32-c3, esp-now, tx-power, radio]
+    relates_to: [esp32-c3-super-mini-tx-defect]
+    notes: >
+      Classic ESP32 does not accept arbitrary levels. Requested values snap onto a
+      coarse grid; on B0:CB:D8:8A:85:F4 the accepted set was
+      17, 27, 35, 39, 43, 49, 55 quarter-dBm (4.25, 6.75, 8.75, 9.75, 10.75,
+      12.25, 13.75 dBm). Within a session the snapping is exactly repeatable, not
+      random. C3 accepted every requested level exactly, 13/13.
+
+      The accepted level also depends on radio state, which is what made it look
+      non-deterministic across runs. Two observations: a request of 34 read back
+      34 immediately after a fresh boot but 27 in a warmed-up session, and
+      enabling promiscuous mode shifts the grid — the same board that accepts 27
+      before promiscuous is enabled lands on 26 if the power is set first. Set TX
+      power after the radio is fully configured, then read it back.
+
+      27 quarter-dBm (6.75 dBm) was the only level found that both families
+      accept exactly, which makes it the level to use when two chips must be
+      compared at matched power.
+
+      WIFI_POWER_19_5dBm and similar high constants are silently clamped on
+      classic ESP32.
+
+  - id: esp-now-classic-esp32-fixed-213us-transaction-overhead
+    date: 2026-07-27
+    touched: 2026-07-27
+    title: Classic ESP32 adds a fixed ~213 us per ESP-NOW transaction vs C3
+    summary: >
+      Floor (minimum) MAC ACK latency versus payload length is a straight line on
+      both families with an IDENTICAL slope of ~8.03 us/byte (= 1 Mbps, 802.11b
+      long preamble — ESP-NOW does not rate-adapt). The intercepts differ by a
+      constant: C3 = 997 us, classic ESP32 = 1210 us. The ~213 us gap is fixed,
+      independent of payload size and independent of which chip is receiving.
+    status: validated
+    severity: info
+    scope: hardware
+    source: empirical bench measurement (2026-07-27, festicorn/rf-bench, payload sweep 16/64/250 B)
+    tags: [esp32, esp32-c3, esp-now, latency, throughput]
+    notes: >
+      The latency distribution is heavily right-skewed: against a 1120 us floor,
+      sd ~763 us and max 5381 us, from CSMA backoff and retries. The family
+      difference is invisible in the mean — mean-based comparison gave a spread
+      that flipped sign depending on the receiver. The floor is uncontended
+      airtime and is extremely stable.
+
+      Tightness at the floor: all 6 C3 links landed in 989-1000 us, all 6 classic
+      links in 1204-1212 us. Zero overlap, despite different peers and different
+      distances, which is what establishes it as a transmitter-side constant
+      rather than a link property.
+
+      Consequence for packet rate: 16-byte transaction floor is 1120 us on C3 vs
+      1340 us on classic — a ~20% higher ceiling on C3 (~893 vs ~746 txn/s). This
+      matters for sensor senders running at high rates; it is irrelevant at the
+      typical 20-60 Hz.
+
+  - id: esp-now-rssi-reciprocity-method-and-limits
+    date: 2026-07-27
+    touched: 2026-07-27
+    title: Per-unit TX/RX balance spread exceeds the C3-vs-classic family difference
+    summary: >
+      A 4-board pairwise RSSI matrix at 13 dBm, reduced by reciprocity
+      (RSSI_ij - RSSI_ji = D_i - D_j, where D is a board's transmit-minus-receive
+      balance), gave C3-A +4.90, C3-B -1.67, E32-A -0.79, E32-B -2.44 dB, residual
+      RMS 1.93 dB. The within-C3 spread (6.6 dB) exceeds the between-family
+      difference (3.2 dB). No chip-family claim about TX/RX balance is supported
+      by this data; per-unit variation dominates.
+    status: validated
+    severity: info
+    scope: hardware
+    source: empirical bench measurement (2026-07-27, festicorn/rf-bench, 4-board RSSI matrix)
+    tags: [esp32, esp32-c3, esp-now, rssi]
+    relates_to: [esp32-c3-super-mini-tx-defect, esp-now-c3-supermini-tx-deficit-substitution]
+    notes: >
+      D is structurally blind to the antenna: antenna gain is reciprocal, so it
+      cancels out of the difference. D reflects PA-vs-LNA balance only. Since the
+      Super Mini's suspected weakness is its antenna, no amount of reciprocity
+      data can address it — that needed the physical substitution test, logged
+      separately.
+
+      Ambient AP beacons do not serve as a common reference here: the boards sat
+      in two physical clusters tens of dB apart, so deltas flipped sign across
+      BSSIDs. Distinct-BSSID counts showed no family pattern (C3 17/23, classic
+      14/26).
+
+      RETRACTED from this data set: an apparent finding that classic ESP32
+      radiated power is "compressed" over the low half of its commanded range.
+      RSSI-vs-command slope per link ranged 0.37 to 1.48 with no consistent
+      structure — the SAME transmitter's sweep read as 15.4 dB of change at one
+      receiver and 5.4 dB at another in the same run, which no transmitter
+      property can explain, and it did not correlate with link strength (r=0.05).
+      Per-link RSSI slope is not a stable physical quantity at this precision.
+
+  - id: esp-now-c3-supermini-tx-deficit-substitution
+    date: 2026-07-27
+    touched: 2026-07-27
+    title: C3 Super Mini radiates >=6.75 dB less than classic ESP32; its RX is fine
+    summary: >
+      Physical substitution test at a fixed remote position, both boards at an
+      identical commanded 6.75 dBm (txq 27, exact readback on both families),
+      measured by the SAME fixed receiver. The classic ESP32 was heard 6.75 dB
+      stronger than a NON-DEFECTIVE C3 Super Mini (-79.69 vs -86.44 dBm), with
+      independently corroborating beacon loss (26.5% vs 35.4%). Receive is the
+      opposite story: the C3 node ACKed 300/300 unicast where the classic node
+      managed 295/300. So the Super Mini's weakness is on TRANSMIT, not receive.
+    status: validated
+    severity: medium
+    scope: hardware
+    source: empirical bench measurement (2026-07-27, festicorn/rf-bench, node_test.py substitution)
+    tags: [esp32, esp32-c3, super-mini, antenna, esp-now, rssi]
+    relates_to: [esp32-c3-super-mini-tx-defect, esp-now-rssi-reciprocity-method-and-limits]
+    notes: >
+      This is a BASELINE deficit on a board with no TX defect (14:63:93:6F:FF:78,
+      clean to 20 dBm). It is separate from esp32-c3-super-mini-tx-defect, which
+      is a brownout cliff on specific units. Both point the same way: budget the
+      Super Mini as a weak transmitter.
+
+      6.75 dB is a LOWER BOUND. Both directions were censored by the sensitivity
+      floor (26-35% beacon loss), and censoring lifts the measured mean of the
+      weaker link more than the stronger one, so the true gap is larger.
+
+      The 6.75 dB is from the node -> bench direction, where one fixed receiver
+      measures both phases and only the transmitter changes. The reverse direction
+      showed -1.68 dB but is not interpretable: the reporting chip itself changes
+      between phases, and a C3-reported RSSI and an ESP32-reported RSSI are not
+      the same ruler. Hence the RX claim rests on ACK rate, a physical outcome,
+      not on that number.
+
+      LIMITATION, do not overstate the 6.75 dB as pure antenna: the two boards
+      are physically different objects. The classic was take-root (DevKit V1 on a
+      breadboard with 3 SK6812 strips and a 74HCT245 attached); the C3 was a bare
+      Super Mini. Same marked position is not the same RF environment — height,
+      orientation and nearby conductors all differ. Attribute the number to
+      "board as deployed", not to the silicon or the ceramic antenna alone.
+
+      Cross-check: adjacent-position baselines gave the same sign with a larger
+      magnitude (11.27 dB), but those two positions were not controlled, so they
+      support the direction only.
+
   - id: esp32-c3-super-mini-thermal-decomposition
     date: 2026-04-29
     touched: 2026-04-29
@@ -1459,3 +1631,227 @@ entries:
       - For real headroom, 500k gives ~272 kbit/s at full bus efficiency; 1M
         gives ~500 kbit/s but leaves ~13% on the table to the sender unless the
         transmit path is optimized (batch queue-fill / dedicated TX task).
+  - id: usb-cdc-baud-rate-ignored
+    date: 2026-07-27
+    touched: 2026-07-27
+    title: Native USB-CDC serial ignores the configured baud rate entirely
+    summary: >
+      A native-USB serial port has no baud rate, because there is no UART
+      wire. On a bridge-chip board (CH340/CP210x, usbserial ports) "115200"
+      describes a physical signal — bit transitions on a real TX line both
+      ends must time identically. On a native-CDC board (ESP32-C3 SuperMini,
+      usbmodem ports) the bytes travel as USB packets and the configured baud
+      is a number that connects to nothing: a C3 opened at 230400 against
+      firmware declaring 115200 decoded perfectly. Trust baud only on
+      usbserial ports; classify usbmodem ports by content.
+    status: resolved
+    severity: low
+    scope: protocol
+    source: []
+    tags: [esp32-c3, usb, cdc, serial, baud, uart, gotcha]
+    relates_to: [esp32-c3-usb-jtag-dtr-reset, ch340-macos-reset-on-open]
+    notes: >
+      Found 2026-07-27 while the unified console dashboard's serial
+      autodiscovery probed the kettle-knob C3: probe tried bauds in order and
+      "matched" at 230400. Practical rule: classify CDC ports by content, and
+      only trust baud matching on usbserial (bridge-chip) ports.
+  - id: esp32-c3-usb-jtag-dtr-reset
+    date: 2026-07-27
+    touched: 2026-07-27
+    title: Forcing DTR/RTS low resets an ESP32-C3 over native USB, with no UART present
+    summary: >
+      The ESP32-C3's built-in USB-serial-JTAG peripheral implements the
+      classic DTR/RTS auto-reset sequence in silicon, so deasserting those
+      lines reboots the chip even though a native-CDC port has no UART, no
+      transistor pair and no physical DTR wire. Opening such a port with
+      dtr=False rts=False — the usual "don't touch the board" incantation for
+      bridge-chip boards — is the one thing that guarantees a reset. Leave the
+      control lines alone and the board streams uninterrupted.
+    status: resolved
+    severity: high
+    scope: hardware
+    source: festicorn/tools/console-dashboard/dashboard.py
+    tags: [esp32-c3, usb, cdc, serial, dtr, rts, reset, gotcha]
+    relates_to: [usb-cdc-baud-rate-ignored, ch340-macos-reset-on-open]
+    notes: >
+      Verified twice on the kettle-knob console (ESP32-C3 SuperMini,
+      /dev/cu.usbmodem11201, native USB-CDC), the second time as a clean A/B
+      on 2026-07-27 with everything else held constant:
+
+        A. serial.Serial(port, baud) with the control lines untouched —
+           3 s captured, continuous JSON telemetry, uptime running through
+           at up=561314..563315 ms, seq 242..244. No banner, no discontinuity.
+        B. Serial(); .dtr = False; .rts = False; .open() —
+           3 s captured, first three lines were the ROM banner:
+             ESP-ROM:esp32c3-api1-20210207
+             Build:Feb  7 2021
+             rst:0x15 (USB_UART_CHIP_RESET),boot:0xd (SPI_FAST_FLASH_BOOT)
+           Uptime restarted from zero (up=16694 ms at the next reattach),
+           button counters and encoder position all cleared.
+
+      The chip names the cause itself: reset reason 0x15 is
+      USB_UART_CHIP_RESET, the USB-serial-JTAG peripheral's own reset path.
+      This is a hardware behavior of the C3, not a host or driver artifact.
+
+      The intuition that misleads here is that native USB "has no DTR", which
+      is true at the wire level — DTR/RTS on a CDC device are just bits in a
+      SET_CONTROL_LINE_STATE control transfer. Espressif wired those bits to
+      the same reset state machine an external bridge chip would drive, so
+      the abstraction is faithfully and inconveniently reproduced.
+
+      Practical rule: to read a running C3 without disturbing it, open the
+      port with the library defaults and change nothing. There is no safer
+      "quiet open" — the quiet-looking one is the destructive one.
+  - id: ch340-macos-reset-on-open
+    date: 2026-07-27
+    touched: 2026-07-27
+    title: A CH340-bridged ESP32 resets on port open under macOS regardless of DTR/RTS
+    summary: >
+      Opening a CH340-class usbserial port reboots the attached ESP32 under
+      macOS even when DTR and RTS are deasserted before the open. The board's
+      auto-reset transistor pair is driven by a control-line transition, and
+      the macOS driver's own open sequence supplies one before userspace gets
+      a say. There is no software-side way to read such a port without
+      resetting the board; the only protection is not opening the port.
+    status: resolved
+    severity: high
+    scope: electrical
+    source: festicorn/tools/console-dashboard/dashboard.py
+    tags: [ch340, esp32, usb, serial, dtr, rts, reset, macos, gotcha]
+    relates_to: [esp32-c3-usb-jtag-dtr-reset, usb-cdc-baud-rate-ignored]
+    notes: >
+      Observed 2026-07-27 on led-eth-1 (ESP32-D0WD + CH340-class bridge,
+      /dev/cu.usbserial-0001) while the console dashboard's autodiscovery
+      swept the port. The open was made with dtr=False and rts=False set
+      before .open(), the technique that is supposed to suppress the reset,
+      and the board rebooted anyway:
+
+        ets Jul 29 2019 12:21:46
+        rst:0x1 (POWERON_RESET),boot:0x13
+        Axismundi (clicky, 4-strip) ready — ch=1
+
+      Not re-tested since. That board is the live axismundi sculpture and
+      re-proving the claim means rebooting the running show, so the capture
+      above is the evidence of record rather than a fresh A/B.
+
+      Mechanism, part established and part hypothesis. Established: the
+      auto-reset circuit is edge-driven, not level-driven — DTR and RTS feed
+      a transistor pair that pulses EN and IO0, so requesting a deasserted
+      state does not avoid an edge, it only chooses which edge occurs.
+      HYPOTHESIS, not measured: that the edge arrives because the macOS CH340
+      driver asserts the lines during its own open handshake, before the
+      userspace dtr/rts request applies. That is consistent with everything
+      observed but was not instrumented — confirming it needs a scope or
+      logic analyzer on EN/IO0 across the open, which has not been done. The
+      reset itself is measured; this explanation of its timing is not.
+
+      Note this is the mirror image of the C3 case rather than the same fact:
+      on the C3 the default open is safe and forcing the lines low is
+      destructive, while on a CH340 board every open is destructive. So the
+      two board classes cannot share a probe policy. The dashboard's rule is
+      to sweep usbmodem ports freely with library defaults and never open a
+      usbserial port unless explicitly named, because nothing distinguishes a
+      console from the sculpture without opening the port — and by then the
+      damage is done.
+
+  - id: esp-now-broadcast-field-loss-thermal-drift
+    date: 2026-07-28
+    touched: 2026-07-28
+    title: "Raw broadcast loss on defective C3 varied 57% -> 80% -> 0.02% across one hour"
+    summary: >
+      Field measurement of the kettle-knob console (defective C3 Super Mini
+      10:00:3B:B1:3E:80, TX pinned 15.75 dBm) broadcasting to led-eth-1, loss
+      counted by receiver-side seq gaps: 57% and 80% in two runs while the
+      console had ~2.75 h uptime, then 0.02% (2 lost of ~12k at 50 Hz)
+      immediately after a reflash/reboot of the console. Same code path, same
+      commanded power. Raw broadcast loss on this link is time-varying by
+      three orders of magnitude.
+    status: validated
+    severity: high
+    scope: hardware
+    source: axismundi RF diagnostics (seq-gap ring buffer), captures 2026-07-28
+    tags: [esp32-c3, super-mini, esp-now, broadcast, packet-loss, thermal]
+    relates_to: [esp32-c3-super-mini-tx-defect, esp-now-c3-supermini-tx-deficit-substitution]
+    notes: >
+      Perceptual failure mode at 57-80%: on-change-once state packets arrive
+      whole clicks late, so the encoder-driven effect shows dead clicks then a
+      lumped catch-up jump. Fixed operationally by send redundancy (each change
+      transmitted 3x over ~40 ms + 1 s heartbeat); state packets are absolute
+      and idempotent, so duplicates are free.
+
+      RESOLVED 2026-07-28: the confound is broken by controlled A/B — the
+      variable was TX duty cycle, not uptime or reboot; see
+      esp-now-c3-brownout-cliff-duty-cycle-dependent. The "thermal drift over
+      hours" framing in this entry's title is superseded. Still true: treat
+      loss on defect-pinned units as unbounded and design senders accordingly.
+
+      Receiver-side WIFI_PS_NONE was A/B tested during the lossy period and did
+      not reduce loss (57% without, 80% with — same-direction noise, not a
+      fix). Single trial against a drifting link; weak evidence.
+
+      Measurement trap found in the analysis tooling: duplicate deliveries
+      (seq delta 0) must be counted separately from gaps, or each duplicate
+      reads as 255 lost packets under mod-256 gap math.
+
+      Synthesis and recommendations: engineering/library/WIRELESS.md.
+
+  - id: esp-now-c3-brownout-cliff-duty-cycle-dependent
+    date: 2026-07-28
+    touched: 2026-07-28
+    title: "C3 brownout cliff is TX-duty-cycle dependent: 98% loss at 50 Hz, 0% at 1 Hz, same power"
+    summary: >
+      Controlled A/B on defective C3 Super Mini 10:00:3B:B1:3E:80 (kettle-knob),
+      broadcast ESP-NOW at sustained 50 Hz, alternating only TX power in 60 s
+      blocks: txq63 (15.75 dBm) lost 96.8-99.7% in all four blocks; txq59
+      (14.75 dBm) lost 0.00% in all four (11,775 consecutive packets, zero
+      dropped). Same board at txq63 with 1 Hz heartbeats loses nothing. The
+      regulator sag that collapses the PA is driven by transmit duty cycle and
+      bites within seconds — not by die temperature drifting over hours.
+      Deployed value for this board pinned at txq51 (12.75 dBm), 2 dB below the
+      proven-clean 59; loaded cliff bracketed in (14.75, 15.75] dBm.
+    status: validated
+    severity: high
+    scope: hardware
+    source: spinbench A/B captures 2026-07-28 (kettle-knob spinbench env, receiver-side 32-bit counter)
+    tags: [esp32-c3, super-mini, esp-now, tx-power, brownout, duty-cycle, packet-loss]
+    relates_to: [esp32-c3-super-mini-tx-defect, esp-now-broadcast-field-loss-thermal-drift, esp-now-c3-supermini-tx-deficit-substitution]
+    notes: >
+      A/B detail (8 alternating 60 s blocks, identical 50 Hz burst traffic,
+      cold-reset start, receiver = axismundi led-eth-1 at lab range):
+        txq63: 3097/99 (96.80%), 3034/35 (98.85%), 3071/73 (97.62%), 3008/10 (99.67%)
+        txq59: 2899/2899, 2963/2963, 2925/2925, 2988/2988 (0.00% each)
+      Lower commanded power delivering strictly better rules out every
+      link-budget mechanism (distance, interference, RX contention); only a
+      supply/PA collapse has that sign. Receiver FPS was identical in both
+      arms (50.7-51.2), eliminating RMT/Show()-induced RX starvation as a
+      cause of these dropouts.
+
+      The first failing txq63 block began ~50 s after a cold hard reset —
+      the collapse needs seconds of sustained TX, not hours of uptime. This
+      resolves the reboot confound in
+      esp-now-broadcast-field-loss-thermal-drift: the 0.02% "after reboot" was
+      measured at idle heartbeat rate, the 57-80% while spinning. Rate, not
+      uptime or reboot, was the variable. Sparse-probe screening (unicast or
+      broadcast) is structurally blind to this failure; qualification must run
+      sustained traffic at production rate on the production transport.
+
+      Deployed-value rationale: fix-is-decrease. The failure surface is
+      non-monotonic in commanded power (brownout above, link budget below), so
+      naive loss-driven power escalation latches into the collapse. Pin below
+      the loaded cliff with margin; never raise power in response to loss on a
+      defect-pinned unit. txq27 (6.75 dBm) also delivered at lab range.
+
+      Deployed-value validation (same day, ~41k packets at sustained 50 Hz
+      across five 150-180 s blocks): txq51 lost 5 packets total (~0.01%), no
+      resets. During the same runs txq63 was 0.00% clean in 6 of 8 total
+      blocks but caused one full chip reset (cumulative counter back to zero
+      mid-block) — the brownout has a hard-reboot variant, and it is
+      intermittent: clean passes at 63 carry no safety information.
+
+      Hypothetical range at txq51, from link budget (12.75 dBm commanded minus
+      6.75 dB measured radiation deficit ~= +6 dBm effective; classic ESP32 RX
+      sensitivity ~-98 dBm at 1 Mbps; 15 dB fade/orientation reserve): ~250-300 m
+      line of sight, ~60-80 m outdoor with people, ~40 m indoor clutter —
+      roughly 3-4x those without the reserve. Estimates, not measured (lab
+      proximity cannot exercise the low edge); each input carries a few dB of
+      uncertainty and body-blocking costs 3-10 dB.

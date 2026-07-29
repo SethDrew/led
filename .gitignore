@@ -91,3 +91,6 @@ festicorn/tree-of-record/tools/sim/bloom_dither_sim
 
 # tree-of-record wav_play bring-up: 1.1MB generated audio blob, regenerate locally
 festicorn/tree-of-record/src/wav_samples.h
+
+# raw RF captures — provenance kept local, findings live in the ledger
+festicorn/rf-bench/data/

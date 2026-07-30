@@ -40,7 +40,9 @@ current tables.
 
 ## Tools
 
-- `dashboard.py` — live web UI on :8081 (positions, pull, buttons, raw
-  values). Owns the serial port: kill it before flashing or recording.
+- Live web UI: the shared console dashboard at
+  `festicorn/tools/console-dashboard/` (positions, pull, buttons, raw values,
+  alongside every other console). Owns the serial port: kill it before
+  flashing or recording.
 - `tools/record_serial.py <port> <out.jsonl>` — raw capture of the ~40Hz
   debug stream for calibration/diagnosis.

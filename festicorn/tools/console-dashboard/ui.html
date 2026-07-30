@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<title>Axis Mundi</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; }
+  body { background:#111; color:#eee; font-family:'SF Mono',Menlo,monospace;
+         padding:12px; display:flex; flex-direction:column; overflow:hidden; }
+  header { display:flex; align-items:baseline; gap:14px; margin-bottom:10px; flex:none; }
+  h1 { font-size:13px; color:#888; letter-spacing:1.5px; }
+  .roll { display:flex; gap:11px; font-size:10px; color:#666; }
+  .roll span.on { color:#4a8; }
+  .roll span.off { color:#a44; }
+
+  .stage { flex:1; min-height:0; display:grid; grid-template-columns:238px 1fr; gap:12px; }
+  #rail { min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:9px; }
+  #stagepanel { min-height:0; display:flex; }
+
+  .viewerbox { position:relative; flex:1; min-height:0;
+               background:#0d0d0d; border:1px solid #2a2a2a; border-radius:8px; overflow:hidden; }
+  .viewerbox canvas { position:absolute; inset:0; pointer-events:none; opacity:0; transition:opacity .4s; }
+  .viewerbox.live canvas { opacity:1; }
+  .viewerbox.active canvas { pointer-events:auto; }
+  .viewerbox.active { border-color:#4a8; }
+  .vfallback { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+               padding:14px; }
+  .vfallback > div { text-align:center; font-size:10px; color:#555; line-height:1.7;
+                     max-width:100%; overflow-wrap:anywhere; }
+  .viewerbox.live .vfallback { display:none; }
+  .vgain { position:absolute; right:7px; bottom:6px; font-size:9px; letter-spacing:.5px;
+           color:#555; pointer-events:none; }
+  .vhint { position:absolute; bottom:7px; left:9px; font-size:9px; color:#666; cursor:pointer;
+           background:rgba(0,0,0,.55); padding:2px 6px; border-radius:3px; display:none; }
+  .viewerbox.live .vhint { display:block; }
+  .vidle { position:absolute; top:9px; left:11px; font-size:9px; color:#4a4a4a;
+           letter-spacing:.5px; pointer-events:none; opacity:0; transition:opacity .6s; }
+  .viewerbox.live.idle .vidle { opacity:1; }
+
+  .mini { background:#1a1a1a; border:1px solid #2e2e2e; border-radius:7px; padding:9px 10px; flex:none; }
+  .mini.offline { opacity:.4; border-style:dashed; }
+  .mhead { display:flex; justify-content:space-between; align-items:baseline; gap:6px; }
+  .mname { font-size:10px; color:#bbb; letter-spacing:1px; }
+  .mmeta { font-size:9px; color:#666; white-space:nowrap; }
+  .mmeta.live { color:#4a8; }
+  .mmeta.dead { color:#a44; }
+
+  .kmini { display:flex; gap:9px; align-items:center; margin-top:8px; }
+  .dial { width:42px; height:42px; flex:none; }
+  .dial svg { width:100%; height:100%; }
+  .kbig { font-size:17px; font-weight:bold; line-height:1.1; }
+  .ksub { font-size:9px; color:#666; margin-top:2px; }
+
+  .dots { display:flex; gap:4px; margin-top:8px; }
+  .dot { flex:1; height:17px; border-radius:3px; background:#141414; border:1px solid #2a2a2a;
+         font-size:8px; color:#6a6a6a; display:flex; align-items:center; justify-content:center;
+         overflow:hidden; }
+  .dot.on { background:#2a3; border-color:#4c5; color:#fff; font-weight:bold; }
+  .dot.recent { border-color:#4c5; color:#adb; }
+
+  .vpots { display:flex; gap:4px; margin-top:8px; height:40px; }
+  .vpot { flex:1; display:flex; flex-direction:column; justify-content:flex-end;
+          background:#141414; border:1px solid #2a2a2a; border-radius:3px; overflow:hidden; }
+  .vpot i { display:block; width:100%; background:#4a8; transition:height .12s; }
+  .vpot.pulled { border-color:#c83; }
+  .vpot.pulled i { background:#c83; }
+  .vlbls { display:flex; gap:4px; margin-top:3px; }
+  .vlbls span { flex:1; font-size:8px; color:#5a5a5a; text-align:center; }
+  .chips { display:flex; gap:3px; flex-wrap:wrap; margin-top:6px; }
+  .chip { background:#141414; border:1px solid #2a2a2a; border-radius:3px;
+          padding:2px 4px; font-size:8px; color:#6a6a6a; }
+  .chip.on { background:#2a3; border-color:#4c5; color:#fff; font-weight:bold; }
+
+  .srow { display:flex; justify-content:space-between; gap:8px; font-size:10px;
+          color:#888; padding:2px 0; }
+  .srow b { color:#ddd; font-weight:normal; }
+  .srow.warn b { color:#e66; }
+  .meter { height:5px; background:#262626; border-radius:3px; overflow:hidden; margin:4px 0 2px; }
+  .meter .fill { height:100%; background:#4a8; }
+  .meter .fill.ccw { background:#c83; }
+  .sect { font-size:9px; color:#666; text-transform:uppercase; letter-spacing:1.2px; }
+
+  .scope { flex:none; margin-top:10px; }
+  .scope .sbody { display:none; grid-template-columns:1fr 186px; gap:10px;
+                  background:#181818; border:1px solid #262626; border-radius:6px;
+                  padding:8px 10px; }
+  .scope.open .sbody { display:grid; }
+  .dsplot { position:relative; height:224px; }
+  .dsplot canvas { width:100%; height:100%; display:block; }
+  .dsside { min-width:0; overflow-y:auto; max-height:224px; }
+  .dsside .srow { font-size:9px; padding:1px 0; }
+  .dsconst .srow span { color:#6a6a6a; }
+  .dslegend { position:absolute; top:0; right:44px; display:flex; gap:8px;
+              font-size:8px; color:#7a7a7a; pointer-events:none; }
+  .dslegend i { display:inline-block; width:7px; height:2px; margin-right:3px;
+                vertical-align:middle; }
+  .dstip { position:absolute; top:16px; display:none; background:rgba(12,12,12,.94);
+           border:1px solid #333; border-radius:4px; padding:5px 7px; font-size:9px;
+           color:#bbb; pointer-events:none; min-width:132px; z-index:2; }
+  .dstip b { color:#ddd; font-weight:normal; }
+  .dstipev { margin-top:4px; padding-top:3px; border-top:1px solid #333; color:#9a9; }
+  .sbtn { font:inherit; font-size:9px; color:#9a9; background:#1e1e1e;
+          border:1px solid #333; border-radius:3px; padding:2px 7px; cursor:pointer; }
+  .sbtn:hover { border-color:#4a8; color:#ddd; }
+  .sbtn.on { background:#2a3; border-color:#4c5; color:#fff; }
+
+  .events { flex:none; margin-top:10px; }
+  .ehead { display:flex; align-items:baseline; gap:8px; cursor:pointer; user-select:none;
+           margin-bottom:5px; }
+  .ehead .caret { font-size:9px; color:#666; }
+  .events pre { background:#181818; border:1px solid #262626; border-radius:6px; padding:8px 10px;
+                font-size:10px; color:#9a9; height:52px; overflow-y:auto; line-height:1.5;
+                transition:height .18s; }
+  .events.open pre { height:210px; }
+
+  @media (max-width:880px) {
+    .stage { grid-template-columns:1fr; grid-template-rows:auto 1fr; }
+    #rail { flex-direction:row; overflow-x:auto; }
+    .mini { min-width:210px; }
+  }
+</style>
+</head><body>
+<header>
+  <h1>AXIS MUNDI</h1>
+  <div class="roll" id="roll"></div>
+</header>
+<div class="stage">
+  <div id="rail"></div>
+  <div id="stagepanel"></div>
+</div>
+<div class="scope" id="scope">
+  <div class="ehead" id="shead">
+    <span class="sect">Duck scope</span>
+    <span class="caret" id="scaret">▸ expand</span>
+    <span style="flex:1"></span>
+    <button class="sbtn" id="sbpause">pause</button>
+    <button class="sbtn" id="sbreset">reset floor</button>
+    <button class="sbtn" id="sbexport">export</button>
+  </div>
+  <div class="sbody" id="sbody"></div>
+</div>
+<div class="events" id="events">
+  <div class="ehead" id="ehead"><span class="sect">Events</span><span class="caret" id="caret">▸ expand</span></div>
+  <pre id="log"></pre>
+</div>
+<script type="importmap">
+{ "imports": {
+  "three": "/viz/vendor/three/three.module.js",
+  "three/addons/": "/viz/vendor/three/addons/"
+}}
+</script>
+<script>
+let CFG = null, cursor = 0, logLines = [];
+
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const clamp01 = v => Math.max(0, Math.min(1, v));
+
+function fmtUp(ms) {
+  if (ms === null || ms === undefined) return '—';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  return m + 'm' + String(s % 60).padStart(2, '0');
+}
+
+function headHtml(rec, spec) {
+  const cls = rec.online ? 'live' : 'dead';
+  const meta = rec.online ? rec.rate.toFixed(1) + ' Hz' : 'offline';
+  return '<div class="mhead"><span class="mname">' + esc(spec.role) + '</span>' +
+         '<span class="mmeta ' + cls + '">' + (rec.online ? '● ' : '○ ') + esc(meta) + '</span></div>';
+}
+
+function clickyHtml(rec) {
+  if (!rec.online && !rec.packets) return '';
+  const s = rec.state, p = s.p || [], pull = s.pull || [], btn = s.btn || [];
+  let h = '<div class="vpots">';
+  for (let i = 0; i < CFG.clicky_pots.length; i++) {
+    const v = clamp01(p[i] || 0);
+    h += '<div class="vpot' + (pull[i] ? ' pulled' : '') + '" title="' + esc(CFG.clicky_pots[i]) +
+         ' ' + v.toFixed(2) + '"><i style="height:' + (v * 100) + '%"></i></div>';
+  }
+  h += '</div><div class="vlbls">';
+  for (const nm of CFG.clicky_pots) h += '<span>' + esc(nm) + '</span>';
+  h += '</div><div class="chips">';
+  for (let i = 0; i < CFG.clicky_btns.length; i++)
+    h += '<div class="chip' + (btn[i] ? ' on' : '') + '">' + esc(CFG.clicky_btns[i]) + '</div>';
+  return h + '</div>';
+}
+
+function kettleHtml(rec) {
+  if (!rec.online && !rec.packets) return '';
+  const d = rec.derived, s = rec.state, btn = s.btn || [], n = s.n || [];
+  const det = d.detents || 0, spin = d.spin || 0;
+  let h = '<div class="kmini"><div class="dial"><svg viewBox="0 0 100 100">' +
+    '<circle cx="50" cy="50" r="44" fill="none" stroke="#333" stroke-width="5"/>' +
+    '<line x1="50" y1="50" x2="50" y2="14" stroke="' + (spin < -0.05 ? '#c83' : '#4a8') +
+    '" stroke-width="6" stroke-linecap="round" transform="rotate(' + (det * 12) + ' 50 50)"/>' +
+    '<circle cx="50" cy="50" r="6" fill="#666"/></svg></div>' +
+    '<div><div class="kbig">' + det.toFixed(1) + '</div>' +
+    '<div class="ksub">det · ' + spin.toFixed(1) + '/s' +
+    (d.hold ? ' · <b style="color:#4c5">' + esc(CFG.kettle_btns[0].label) + '</b>' : '') +
+    '</div></div></div>';
+  h += '<div class="meter"><div class="fill' + (spin < 0 ? ' ccw' : '') +
+       '" style="width:' + (clamp01(Math.abs(spin) / 12) * 100) + '%"></div></div>';
+  h += '<div class="dots">';
+  for (let i = 0; i < CFG.kettle_btns.length; i++) {
+    const b = CFG.kettle_btns[i];
+    h += '<div class="dot' + (btn[i] ? ' on' : '') + '" title="' + esc(b.sub) +
+         ' · #' + (n[i] || 0) + '">' + esc(b.label) + '</div>';
+  }
+  return h + '</div>';
+}
+
+function duckHtml(rec) {
+  if (!rec.packets) return '';
+  const s = rec.state, d = rec.derived || {};
+  if (s.rms_mean === undefined)
+    return '<div class="srow"><span>accel</span><b>' + (s.amag_max || 0) + '</b></div>' +
+           '<div class="srow"><span>gyro</span><b>' + (s.gmag_max || 0) + '</b></div>';
+  return '<div class="srow"><span>rms mean</span><b>' + Math.round(d.rms_mean || 0) + '</b></div>' +
+         '<div class="srow"><span>rms max</span><b>' + Math.round(d.rms_max || 0) + '</b></div>' +
+         '<div class="srow"><span>grav</span><b>' + s.ax + ',' + s.ay + ',' + s.az + '</b></div>' +
+         '<div class="srow"><span>imu</span><b>' + (d.imu ? 'ok' : 'absent') + '</b></div>';
+}
+
+const BODY = { clicky: clickyHtml, kettle: kettleHtml, duck: duckHtml };
+
+function render(st) {
+  let roll = '';
+  for (const spec of CFG.roster) {
+    const on = st.roles[spec.role].online;
+    roll += '<span class="' + (on ? 'on' : 'off') + '">' +
+            (on ? '●' : '○') + ' ' + esc(spec.role) + '</span>';
+  }
+  document.getElementById('roll').innerHTML = roll;
+
+  let rail = '';
+  for (const spec of CFG.roster) {
+    const rec = st.roles[spec.role];
+    rail += '<div class="mini' + (rec.online ? '' : ' offline') + '">' +
+            headHtml(rec, spec) + (BODY[spec.role] ? BODY[spec.role](rec, spec) : '') + '</div>';
+  }
+
+  const sc = st.sculpture, spin = sc.spin || 0;
+  rail += '<div class="mini"><div class="mhead"><span class="mname">sculpture</span>' +
+          '<span class="mmeta">' + spin.toFixed(1) + ' det/s' +
+          (sc.hold ? ' · frozen' : '') + '</span></div>';
+  for (const meta of CFG.kettle_btns) {
+    if (!meta.region) {
+      rail += '<div class="srow"><span>' + esc(meta.label) + '</span><b>unassigned</b></div>';
+      continue;
+    }
+    const w = sc.waves[meta.region];
+    const fresh = w.age !== null && w.age < 1.2;
+    rail += '<div class="srow"' + (fresh ? ' style="color:#adb"' : '') + '><span>' +
+            esc(meta.label) + '</span><b>' +
+            (w.age !== null && w.age < 60 ? w.age.toFixed(1) + 's · ' : '') +
+            '#' + w.count + '</b></div>';
+  }
+  rail += '<div class="srow"><span>brightness</span><b>' +
+          (sc.brightness === null || sc.brightness === undefined
+            ? '—' : sc.brightness.toFixed(2)) + '</b></div></div>';
+
+  rail += '<div class="mini"><div class="sect" style="margin-bottom:5px">Health</div>';
+  for (const spec of CFG.roster) {
+    const rec = st.roles[spec.role];
+    rail += '<div class="srow' + (rec.reboots ? ' warn' : '') + '"><span>' + esc(spec.role) +
+      '</span><b>' + (rec.online ? fmtUp(rec.up_ms) : 'offline') + ' · ' +
+      rec.reboots + 'rb · ' + rec.seq_gaps + 'gap</b></div>';
+  }
+  rail += '</div>';
+  document.getElementById('rail').innerHTML = rail;
+
+  if (window.LED3D) window.LED3D.applyState(st);
+  markActivity(sc, spin);
+}
+
+// Energy decays with a 6 s time constant, so ~20 s after the last input the
+// sculpture renders black. The caption says that state is intentional.
+const IDLE_AFTER = 20;
+let lastActivity = 0;
+
+function markActivity(sc, spin) {
+  const box = document.getElementById('viewerbox');
+  if (!box) return;
+  const now = Date.now() / 1000;
+  const stirred = Math.abs(spin) > 0.05 || sc.hold ||
+    CFG.regions.some(r => sc.waves[r].age !== null && sc.waves[r].age < 1.0);
+  if (stirred) lastActivity = now;
+  box.classList.toggle('idle', now - lastActivity > IDLE_AFTER);
+}
+
+const PLACEHOLDER = '<div>booting sculpture engine…</div>';
+
+// The stage is built once and never re-rendered: render() only rewrites #rail,
+// which does not contain it.
+function buildStage() {
+  document.getElementById('stagepanel').innerHTML =
+    '<div class="viewerbox" id="viewerbox">' +
+    '<div class="vfallback" id="vfallback">' + PLACEHOLDER + '</div>' +
+    '<div class="vidle">at rest · sparkles mint per detent</div>' +
+    '<div class="vgain" id="vgain"></div>' +
+    '<div class="vhint" id="vhint">click to orbit</div></div>';
+  wireViewer();
+}
+
+function wireViewer() {
+  const box = document.getElementById('viewerbox');
+  const hint = document.getElementById('vhint');
+
+  import('/viz/led3d.mjs')
+    .then(m => m.default(box, { gainLabel: document.getElementById('vgain') }))
+    .then(v => { window.LED3D = v; box.classList.add('live'); })
+    .catch(e => {
+      document.getElementById('vfallback').innerHTML = '<div>3D engine failed<br>' +
+        '<span style="color:#a44">' + esc(e.message) + '</span></div>';
+    });
+
+  const release = () => {
+    box.classList.remove('active');
+    hint.textContent = 'click to orbit';
+  };
+  box.addEventListener('click', () => {
+    if (!box.classList.contains('live') || box.classList.contains('active')) return;
+    box.classList.add('active');
+    hint.textContent = 'esc to release';
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') release(); });
+  document.addEventListener('click', (e) => { if (!box.contains(e.target)) release(); });
+}
+
+// The scope carries its own WASM engine instance, so it is mounted on first
+// expand rather than at load. ?scope opens it immediately.
+function wireScope() {
+  const sc = document.getElementById('scope'), caret = document.getElementById('scaret');
+  let scope = null;
+
+  const mount = () => {
+    if (scope) return Promise.resolve(scope);
+    scope = import('/viz/duckscope.mjs')
+      .then(m => m.default(document.getElementById('sbody')))
+      .then(s => { window.__duckScope = s; return s; })
+      .catch(e => {
+        document.getElementById('sbody').innerHTML =
+          '<div style="font-size:10px;color:#a44">duck scope failed — ' + esc(e.message) + '</div>';
+        throw e;
+      });
+    return scope;
+  };
+
+  const open = () => {
+    sc.classList.add('open');
+    caret.textContent = '▾ collapse';
+    return mount();
+  };
+
+  document.getElementById('shead').addEventListener('click', (e) => {
+    if (e.target.tagName === 'BUTTON') return;
+    if (sc.classList.contains('open')) {
+      sc.classList.remove('open');
+      caret.textContent = '▸ expand';
+    } else open();
+  });
+
+  const btn = (id, fn) => document.getElementById(id).addEventListener('click', (e) => {
+    e.stopPropagation();
+    mount().then(s => fn(s, e.target)).catch(() => {});
+  });
+
+  btn('sbpause', (s, el) => {
+    const p = s.togglePause();
+    el.textContent = p ? 'resume' : 'pause';
+    el.classList.toggle('on', p);
+  });
+  btn('sbreset', (s) => s.reset());
+  btn('sbexport', (s) => {
+    const blob = new Blob([JSON.stringify(s.exportWindow(), null, 1)],
+                          {type: 'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'duckscope-' + Math.floor(Date.now() / 1000) + '.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
+  window.__openDuckScope = open;
+  if (location.search.includes('scope') || location.hash.includes('scope')) open();
+}
+
+function wireLog() {
+  const ev = document.getElementById('events'), caret = document.getElementById('caret');
+  document.getElementById('ehead').addEventListener('click', () => {
+    const open = ev.classList.toggle('open');
+    caret.textContent = open ? '▾ collapse' : '▸ expand';
+  });
+}
+
+function pollState() {
+  fetch('/api/state', {signal: AbortSignal.timeout(1500)})
+    .then(r => r.json()).then(render).catch(() => {})
+    .finally(() => setTimeout(pollState, 33));
+}
+
+function pollEvents() {
+  fetch('/api/events?since=' + cursor, {signal: AbortSignal.timeout(1500)})
+    .then(r => r.json()).then(d => {
+      cursor = d.cursor;
+      for (const e of d.events) {
+        const t = new Date(e.t * 1000).toLocaleTimeString('en-US', {hour12: false});
+        const ms = String(Math.floor((e.t % 1) * 1000)).padStart(3, '0');
+        logLines.unshift(t + '.' + ms + '  ' + e.role.padEnd(7) + e.text);
+      }
+      if (logLines.length > 300) logLines.length = 300;
+      if (d.events.length) document.getElementById('log').textContent = logLines.join('\n');
+    }).catch(() => {})
+    .finally(() => setTimeout(pollEvents, 100));
+}
+
+fetch('/api/config').then(r => r.json()).then(c => {
+  CFG = c;
+  buildStage();
+  wireScope();
+  wireLog();
+  pollState();
+  pollEvents();
+});
+</script>
+</body></html>

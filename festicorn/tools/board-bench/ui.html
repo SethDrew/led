@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>board bench</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2129; --line: #2d333b;
+    --fg: #c9d1d9; --dim: #768390; --accent: #58a6ff; --ok: #3fb950;
+    --warn: #d29922; --err: #f85149; --tx: #d2a8ff;
+    font-size: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+  header {
+    padding: 8px 14px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 12px; flex: none;
+  }
+  header h1 { font-size: 1rem; margin: 0; letter-spacing: 2px; }
+  header .sub { color: var(--dim); font-size: .8rem; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #ports {
+    width: 300px; flex: none; border-right: 1px solid var(--line);
+    overflow-y: auto; padding: 8px;
+  }
+  .portcard {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px 10px; margin-bottom: 8px; cursor: pointer;
+  }
+  .portcard.sel { border-color: var(--accent); }
+  .portcard .pname { font-weight: bold; word-break: break-all; }
+  .portcard .pboard { color: var(--accent); font-size: .85rem; margin-top: 2px; }
+  .portcard .pboard.unknown { color: var(--warn); }
+  .portcard .pmac { color: var(--dim); font-size: .75rem; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+         background: var(--dim); margin-right: 6px; }
+  .dot.live { background: var(--ok); }
+  .actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
+  button {
+    background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 4px; padding: 3px 10px; font: inherit; font-size: .8rem;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .4; cursor: default; }
+  button.danger:hover { border-color: var(--err); color: var(--err); }
+  select, input[type=text] {
+    background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 4px; padding: 3px 6px; font: inherit; font-size: .8rem;
+  }
+  #center { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #detail {
+    flex: none; max-height: 45%; overflow-y: auto;
+    border-bottom: 1px solid var(--line); padding: 12px 16px;
+  }
+  #detail h2 { margin: 0 0 4px; font-size: 1.05rem; color: var(--accent); }
+  #detail .meta { color: var(--dim); font-size: .8rem; margin-bottom: 8px; }
+  #detail .warnbox {
+    border: 1px solid var(--warn); border-radius: 6px; padding: 8px 10px;
+    color: var(--warn); margin: 8px 0; white-space: pre-wrap; font-size: .82rem;
+  }
+  #detail pre {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px 10px; white-space: pre-wrap; font-size: .82rem; margin: 6px 0;
+    overflow-x: auto;
+  }
+  #detail .kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px;
+                font-size: .85rem; margin: 8px 0; }
+  #detail .kv .k { color: var(--dim); }
+  .empty { color: var(--dim); padding: 24px; text-align: center; }
+  #console { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  #conshead {
+    flex: none; padding: 6px 12px; display: flex; gap: 10px; align-items: center;
+    border-bottom: 1px solid var(--line); font-size: .8rem; color: var(--dim);
+  }
+  #lines {
+    flex: 1; overflow-y: auto; padding: 6px 12px; font-size: .8rem;
+    line-height: 1.5; white-space: pre-wrap; word-break: break-all;
+  }
+  .ln .t { color: #444c56; margin-right: 8px; }
+  .ln.tx { color: var(--tx); }
+  .ln.err { color: var(--err); }
+  #sendrow { flex: none; display: flex; gap: 8px; padding: 8px 12px;
+             border-top: 1px solid var(--line); }
+  #sendrow input { flex: 1; }
+  #right {
+    width: 260px; flex: none; border-left: 1px solid var(--line);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  #topo { flex: none; max-height: 40%; overflow-y: auto; padding: 8px;
+          border-bottom: 1px solid var(--line); }
+  .tnode { font-size: .74rem; padding: 1px 0; color: var(--dim);
+           white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tnode.serial { color: var(--fg); cursor: pointer; }
+  .tnode.serial:hover { color: var(--accent); }
+  .tnode.serial.sel { color: var(--accent); }
+  .tnode .tboard { color: var(--ok); }
+  .tnode .tunknown { color: var(--warn); }
+  .tnode .tdot { color: var(--ok); }
+  #fleet { flex: 1; overflow-y: auto; padding: 8px; min-height: 80px; }
+  .fboard .fmeta { color: #545d68; font-size: .68rem; }
+  #topo h3, #fleet h3, #eventlog h3 {
+    margin: 4px 6px 8px; font-size: .75rem; letter-spacing: 1.5px; color: var(--dim);
+  }
+  .fboard { padding: 4px 8px; border-radius: 4px; font-size: .78rem; }
+  .fboard .frow { display: flex; justify-content: space-between; gap: 6px; }
+  .fboard .fid { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fboard .frole { color: var(--dim); flex: none; }
+  .fboard.here { background: #12261a; }
+  .fboard.here .fid { color: var(--ok); }
+  #eventlog {
+    flex: none; height: 200px; border-top: 1px solid var(--line);
+    display: flex; flex-direction: column;
+  }
+  #events { flex: 1; overflow-y: auto; padding: 0 8px 8px; font-size: .72rem;
+            line-height: 1.6; }
+  #events .e-error { color: var(--err); }
+  #events .e-identify { color: var(--accent); }
+  #events .e-reset, #events .e-send { color: var(--tx); }
+  #events .eport { color: var(--dim); }
+  .spin { color: var(--warn); }
+</style>
+</head>
+<body>
+<header>
+  <h1>BOARD BENCH</h1>
+  <span class="sub">festicorn USB fleet · catalog/boards.yaml</span>
+  <span class="sub" style="margin-left:auto">⚠ identify / monitor-open / reset all reboot the board</span>
+</header>
+<main>
+  <div id="ports"></div>
+  <div id="center">
+    <div id="detail"><div class="empty">select a port</div></div>
+    <div id="console">
+      <div id="conshead">
+        <span id="constitle">serial monitor — no port</span>
+        <label style="margin-left:auto"><input type="checkbox" id="autoscroll" checked> autoscroll</label>
+        <button onclick="clearLines()">clear</button>
+      </div>
+      <div id="lines"></div>
+      <div id="sendrow">
+        <input type="text" id="sendbox" placeholder="send line…"
+               onkeydown="if(event.key==='Enter')sendLine()">
+        <button onclick="sendLine()">send</button>
+      </div>
+    </div>
+  </div>
+  <div id="right">
+    <div id="topo"><h3>USB TOPOLOGY</h3><div id="topolist"></div></div>
+    <div id="fleet"><h3>FLEET (catalog)</h3><div id="fleetlist"></div></div>
+    <div id="eventlog"><h3>EVENTS</h3><div id="events"></div></div>
+  </div>
+</main>
+<script>
+let ports = [], bauds = [115200], sel = null, busy = new Set();
+let consoleCursor = 0, logCursor = 0, catalog = null;
+const $ = id => document.getElementById(id);
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  return r.json();
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+
+function boardName(p) {
+  if (!p.identified) return null;
+  if (!p.board || !p.board.known) return {name: 'NOT IN CATALOG', unknown: true};
+  const e = p.board.entry;
+  return {name: e.id || e.role || '?', unknown: false};
+}
+
+function renderPorts() {
+  const el = $('ports');
+  if (!ports.length) {
+    el.innerHTML = '<div class="empty">no /dev/cu.usb* ports</div>';
+    return;
+  }
+  el.innerHTML = ports.map(p => {
+    const b = boardName(p);
+    const isBusy = busy.has(p.port);
+    const short = p.port.replace('/dev/cu.', '');
+    return `<div class="portcard ${sel === p.port ? 'sel' : ''}" onclick="select('${p.port}')">
+      <div class="pname"><span class="dot ${p.monitoring ? 'live' : ''}"></span>${esc(short)}</div>
+      ${b ? `<div class="pboard ${b.unknown ? 'unknown' : ''}">${esc(b.name)}</div>
+             <div class="pmac">${esc(p.identified.mac)}${p.monitoring ? ' · @' + p.monitoring : ''}</div>`
+          : `<div class="pmac">${p.monitoring ? 'monitoring @' + p.monitoring : 'unidentified'}</div>`}
+      <div class="actions" onclick="event.stopPropagation()">
+        ${isBusy ? '<span class="spin">working…</span>' : `
+        <button onclick="identify('${p.port}')" title="esptool read_mac — resets the board">identify</button>
+        ${p.monitoring
+          ? `<button onclick="stopMon('${p.port}')">stop</button>`
+          : `<select id="baud-${cssId(p.port)}">${bauds.map(x =>
+               `<option ${x === 115200 ? 'selected' : ''}>${x}</option>`).join('')}</select>
+             <button onclick="startMon('${p.port}')" title="opening the port resets the board">monitor</button>`}
+        <button class="danger" onclick="resetBoard('${p.port}')" title="pulse EN low via RTS">reset</button>`}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function cssId(port) { return port.replace(/[^a-zA-Z0-9]/g, '_'); }
+
+function select(port) {
+  if (sel !== port) { sel = port; consoleCursor = 0; clearLines(); }
+  renderPorts(); renderDetail();
+}
+
+function renderDetail() {
+  const el = $('detail');
+  const p = ports.find(x => x.port === sel);
+  if (!p) { el.innerHTML = '<div class="empty">select a port</div>'; return; }
+  if (!p.identified) {
+    el.innerHTML = `<h2>${esc(p.port)}</h2>
+      <div class="meta">not identified yet — click <b>identify</b> to read the MAC and match the catalog (resets the board)</div>`;
+    return;
+  }
+  if (!p.board.known) {
+    el.innerHTML = `<h2>${esc(p.port)}</h2>
+      <div class="warnbox">MAC ${esc(p.identified.mac)} is not in catalog/boards.yaml — new board? Register it there.</div>
+      <div class="kv"><span class="k">chip</span><span>${esc(p.identified.chip || '?')}</span></div>`;
+    return;
+  }
+  const e = p.board.entry, ri = p.board.role_info;
+  let kv = [
+    ['port', p.port], ['mac', e.mac], ['chip', e.chip],
+    ['role', e.role], ['detected', p.identified.chip || ''],
+  ];
+  if (e.strips) kv.push(['strips', `${e.strips.count}× ${e.strips.leds_each} LEDs · pins ${(e.strips.pins || []).join('/')}`]);
+  if (e.can) kv.push(['CAN', `TX=GPIO${e.can.tx} RX=GPIO${e.can.rx}`]);
+  if (e.encoder) kv.push(['encoder', `A=${e.encoder.a} B=${e.encoder.b} · ${e.encoder.detents_per_rev} detents/rev`]);
+  if (e.buttons && e.buttons.pins) kv.push(['buttons', e.buttons.pins.join(', ')]);
+  if (ri && ri.source) kv.push(['firmware', ri.source]);
+  if (ri && ri.packet_format) kv.push(['packet', ri.packet_format]);
+  if (ri && ri.deployment) kv.push(['deployment', ri.deployment]);
+
+  const hazardText = [e.notes, ri && ri.notes, ri && ri.hardware && JSON.stringify(ri.hardware)]
+    .filter(Boolean).join(' ');
+  const hazardHit = /defect|hazard|strap|never|broken|dead|WRONG|must read/i.test(hazardText);
+
+  el.innerHTML = `<h2>${esc(e.id || e.role)}</h2>
+    <div class="meta">${kv.map(([k]) => '').join('')}</div>
+    <div class="kv">${kv.filter(([, v]) => v).map(([k, v]) =>
+      `<span class="k">${esc(k)}</span><span>${esc(v)}</span>`).join('')}</div>
+    ${hazardHit ? `<div class="warnbox">⚠ notes below mention straps / defects / hazards — read before flashing</div>` : ''}
+    ${e.notes ? `<pre>${esc(e.notes.trim())}</pre>` : ''}
+    ${ri && ri.notes ? `<pre>role: ${esc(String(ri.notes).trim())}</pre>` : ''}
+    ${ri && ri.hardware ? `<pre>hardware: ${esc(yamlish(ri.hardware))}</pre>` : ''}`;
+}
+
+function yamlish(o, ind) {
+  ind = ind || '';
+  if (typeof o !== 'object' || o === null) return String(o).trim();
+  return Object.entries(o).map(([k, v]) =>
+    typeof v === 'object' && v !== null
+      ? `${ind}${k}:\n${yamlish(v, ind + '  ')}`
+      : `${ind}${k}: ${String(v).trim()}`).join('\n');
+}
+
+async function identify(port) {
+  busy.add(port); renderPorts();
+  try {
+    const r = await api(`/api/identify?port=${encodeURIComponent(port)}`, {method: 'POST'});
+    if (r.error) alert(r.error);
+  } finally {
+    busy.delete(port);
+    await refreshPorts();
+    if (sel === port) renderDetail();
+  }
+}
+
+async function startMon(port) {
+  const baudEl = $(`baud-${cssId(port)}`);
+  const baud = baudEl ? baudEl.value : 115200;
+  const r = await api(`/api/monitor/start?port=${encodeURIComponent(port)}&baud=${baud}`, {method: 'POST'});
+  if (r.error) alert(r.error);
+  select(port);
+  await refreshPorts();
+}
+
+async function stopMon(port) {
+  await api(`/api/monitor/stop?port=${encodeURIComponent(port)}`, {method: 'POST'});
+  await refreshPorts();
+}
+
+async function resetBoard(port) {
+  const r = await api(`/api/reset?port=${encodeURIComponent(port)}`, {method: 'POST'});
+  if (r.error) alert(r.error);
+}
+
+async function sendLine() {
+  if (!sel) return;
+  const box = $('sendbox');
+  if (!box.value) return;
+  const r = await api(`/api/send?port=${encodeURIComponent(sel)}`, {method: 'POST', body: box.value});
+  if (r.error) alert(r.error); else box.value = '';
+}
+
+function clearLines() { $('lines').innerHTML = ''; }
+
+function fmtT(t) {
+  const d = new Date(t * 1000);
+  return d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+}
+
+async function pollConsole() {
+  if (!sel) return;
+  const p = ports.find(x => x.port === sel);
+  $('constitle').textContent = p && p.monitoring
+    ? `serial monitor — ${sel.replace('/dev/cu.', '')} @ ${p.monitoring}`
+    : `serial monitor — ${sel ? sel.replace('/dev/cu.', '') + ' (stopped)' : 'no port'}`;
+  if (!p || !p.monitoring) return;
+  const r = await api(`/api/monitor/read?port=${encodeURIComponent(sel)}&since=${consoleCursor}`);
+  if (!r.lines.length) { consoleCursor = r.cursor; return; }
+  consoleCursor = r.cursor;
+  const el = $('lines');
+  const frag = document.createDocumentFragment();
+  for (const l of r.lines) {
+    const d = document.createElement('div');
+    d.className = 'ln ' + l.kind;
+    d.innerHTML = `<span class="t">${fmtT(l.t)}</span>${esc(l.text)}`;
+    frag.appendChild(d);
+  }
+  el.appendChild(frag);
+  while (el.childNodes.length > 4000) el.removeChild(el.firstChild);
+  if ($('autoscroll').checked) el.scrollTop = el.scrollHeight;
+}
+
+function renderFleet() {
+  if (!catalog) return;
+  const connectedMacs = new Set(ports.filter(p => p.identified).map(p => p.identified.mac));
+  $('fleetlist').innerHTML = catalog.boards.map(b => {
+    const here = b.mac && connectedMacs.has(b.mac.toUpperCase());
+    return `<div class="fboard ${here ? 'here' : ''}">
+      <div class="frow"><span class="fid">${esc(b.id || b.mac || '?')}</span>
+        <span class="frole">${esc(b.role || '')}</span></div>
+      <div class="fmeta">${esc(b.mac || 'no MAC')} · ${esc(b.chip || '?')}</div></div>`;
+  }).join('');
+}
+
+function renderTopo(topo) {
+  const rows = [];
+  const walk = (n, depth) => {
+    const pad = 8 + depth * 12;
+    if (n.tty) {
+      const short = n.tty.replace('/dev/cu.', '');
+      const tag = n.board_id
+        ? (n.board_id === 'not in catalog'
+            ? `<span class="tunknown">not in catalog</span>`
+            : `<span class="tboard">${esc(n.board_id)}</span>`)
+        : '';
+      rows.push(`<div class="tnode serial ${sel === n.tty ? 'sel' : ''}"
+        style="padding-left:${pad}px" onclick="select('${n.tty}')"
+        title="${esc(n.tty)}${n.mac ? ' · ' + n.mac : ''}">
+        ${n.monitoring ? '<span class="tdot">●</span> ' : ''}${esc(n.name)} → ${esc(short)} ${tag}</div>`);
+    } else {
+      rows.push(`<div class="tnode" style="padding-left:${pad}px"
+        title="${esc(n.sn || '')}">${esc(n.name)}${n.vendor ? ' · ' + esc(n.vendor) : ''}</div>`);
+    }
+    for (const c of n.children) walk(c, depth + 1);
+  };
+  for (const bus of topo.tree) {
+    if (!bus.children.length) continue;
+    walk(bus, 0);
+  }
+  $('topolist').innerHTML = rows.join('') || '<div class="empty">no USB devices</div>';
+}
+
+async function pollLog() {
+  const r = await api(`/api/log?since=${logCursor}`);
+  if (!r.events.length) { logCursor = r.cursor; return; }
+  logCursor = r.cursor;
+  const el = $('events');
+  for (const e of r.events) {
+    const d = document.createElement('div');
+    d.className = 'e-' + e.kind;
+    d.innerHTML = `<span class="eport">${fmtT(e.t).slice(0, 8)} ${esc(e.port)}</span> ${esc(e.text)}`;
+    el.appendChild(d);
+  }
+  while (el.childNodes.length > 400) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+}
+
+async function refreshPorts() {
+  const r = await api('/api/ports');
+  ports = r.ports; bauds = r.bauds;
+  renderPorts(); renderDetail(); renderFleet();
+  const t = await api('/api/topology');
+  if (!t.error) renderTopo(t);
+}
+
+async function init() {
+  catalog = await api('/api/catalog');
+  await refreshPorts();
+  setInterval(refreshPorts, 3000);
+  setInterval(pollConsole, 400);
+  setInterval(pollLog, 1000);
+}
+init();
+</script>
+</body>
+</html>

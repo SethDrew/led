@@ -24,6 +24,28 @@
  *   btn 3 gather  → hold to pull all particles to the field mean
  *   btn 4 fade    → hold to desaturate+fade to black (fires a crackle)
  *   btn 5 trail   → hold to paint a fading trail
+ *
+ * Also driven by the kettle-knob console (infinite-spin encoder + 5 buttons)
+ * over ESP-NOW. Spin turns the whole picture: each strip is a closed ring
+ * and the composed frame rotates around it, one knob revolution per ring
+ * trip, signed with direction.
+ *
+ *   btn A flywheel → hold; spin adds velocity and the picture coasts
+ *   btn B twist    → hold; rings fan apart into a helix as you spin
+ *   btn C counter  → hold; rings 1 and 3 turn the other way
+ *   btn D crackle  → hold; sparks pinned to physical positions
+ *
+ * And by the duck console (mic + IMU totem) over ESP-NOW: mic energy pours an
+ * energy waterfall down every strip, and turning the duck over changes the
+ * water's color — the tilt-hue interaction of tree-of-record's sparkle effect,
+ * re-aimed at the falling water. Any console may be absent. See README.md.
+ *
+ * Layer order matters: the clicky field is composed in logical ring space and
+ * rotated by the carousel, while the duck waterfall and the kettle crackle are
+ * composited afterwards in physical space, so spin never drags them off their
+ * spot on the sculpture. All chromatic layers map their hue through the shared
+ * rotation base, so the palette turns as one. Red-with-blue is kept off the
+ * piece by the choice of the six pot seeds alone; see CLICKY_HUES.
  */
 
 #include <Arduino.h>
@@ -34,7 +56,13 @@
 #include <NeoPixelBus.h>
 #include <math.h>
 #include <fast_math.h>
+#include <oklch_lut.h>
 #include <clicky_packet_v1.h>
+#include <kettle_packet_v1.h>
+#include <duck_packet_v1.h>
+#include <kettle_energy.h>
+#include <duck_energy.h>
+#include <hue_arc.h>
 
 // ── Strip layout ─────────────────────────────────────────────────
 static const uint8_t  NUM_STRIPS = 4;
@@ -51,12 +79,27 @@ static const uint16_t STRIP_LEN[NUM_STRIPS] = {150, 150, 150, 150};
 
 static float gBrightness = MASTER_BRIGHTNESS;
 
-static float gDt = 1.0f / 60.0f;   // current frame dt, set each loop iteration
-
 // ── clicky-pots panel state (over ESP-NOW) ──────────────────────
 static volatile ClickyPacketV1 clickyPkt = {};
 static volatile uint32_t clickyLastMs = 0;
 static volatile uint32_t clickyPktCount = 0;
+
+// ── kettle-knob console state (over ESP-NOW) ────────────────────
+static volatile KettlePacketV1 kettlePkt = {};
+static volatile uint32_t kettleLastMs = 0;
+static volatile uint32_t kettlePktCount = 0;
+
+// ── duck console state (over ESP-NOW) ───────────────────────────
+static volatile DuckPacketV1 duckPkt = {};
+static volatile uint32_t duckLastMs = 0;
+static volatile uint32_t duckPktCount = 0;
+
+// RF diagnostics: every kettle arrival ring-buffered in the RX callback and
+// drained to serial in loop(), so seq gaps give exact broadcast loss.
+struct KettleArrival { uint32_t ms; uint8_t seq; int32_t enc; };
+static KettleArrival kettleArr[64];
+static volatile uint8_t kettleArrHead = 0;
+static uint8_t kettleArrTail = 0;
 
 // ── PRNG ─────────────────────────────────────────────────────────
 static uint32_t prngState;
@@ -93,22 +136,65 @@ static void hsvToRgb(float h, float s, float v, float &r, float &g, float &b) {
     b = (b1 + m) * 255.0f;
 }
 
-// ── ESP-NOW receive (clicky packets only) ───────────────────────
-static void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
-    if (len != (int)sizeof(ClickyPacketV1)) return;
-    ClickyPacketV1 cp;
-    memcpy(&cp, data, sizeof(cp));
-    if (cp.magic != CLICKY_MAGIC || cp.ver != CLICKY_VER) return;
-    memcpy((void*)&clickyPkt, &cp, sizeof(cp));
-    clickyLastMs = millis();
-    clickyPktCount++;
+// Raw arrivals before any magic/ver filtering: a rejected packet is otherwise
+// indistinguishable from an absent sender at the per-console counters.
+static volatile uint32_t rxAnyCount = 0;
+static volatile uint32_t rxDropCount = 0;
+static volatile uint16_t rxLastLen = 0;
+static volatile uint16_t rxLastMagic = 0;
+static volatile uint16_t rxDropLen = 0;
+static volatile uint16_t rxDropMagic = 0;
+static volatile uint8_t  rxDropVer = 0;
+
+static inline void rxNoteDrop(const uint8_t *data, int len) {
+    rxDropCount++;
+    rxDropLen = (uint16_t)len;
+    if (len >= 2) rxDropMagic = (uint16_t)(data[0] | (data[1] << 8));
+    if (len >= 3) rxDropVer = data[2];
 }
 
-// ── LED driver: 4 strips via RMT (GPIO 13/27/32/33), GRB order ──
-static NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt0Ws2812xMethod> strip0(STRIP_LEN[0], 13);
-static NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt1Ws2812xMethod> strip1(STRIP_LEN[1], 27);
-static NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt2Ws2812xMethod> strip2(STRIP_LEN[2], 32);
-static NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt3Ws2812xMethod> strip3(STRIP_LEN[3], 33);
+// ── ESP-NOW receive (clicky packets only) ───────────────────────
+static void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
+    rxAnyCount++;
+    rxLastLen = (uint16_t)len;
+    if (len >= 2) rxLastMagic = (uint16_t)(data[0] | (data[1] << 8));
+    if (len == (int)sizeof(ClickyPacketV1)) {
+        ClickyPacketV1 cp;
+        memcpy(&cp, data, sizeof(cp));
+        if (cp.magic != CLICKY_MAGIC || cp.ver != CLICKY_VER) { rxNoteDrop(data, len); return; }
+        memcpy((void*)&clickyPkt, &cp, sizeof(cp));
+        clickyLastMs = millis();
+        clickyPktCount++;
+    } else if (len == (int)sizeof(KettlePacketV1)) {
+        KettlePacketV1 kp;
+        memcpy(&kp, data, sizeof(kp));
+        if (kp.magic != KETTLE_MAGIC || kp.ver != KETTLE_VER) { rxNoteDrop(data, len); return; }
+        memcpy((void*)&kettlePkt, &kp, sizeof(kp));
+        kettleLastMs = millis();
+        kettlePktCount++;
+        KettleArrival &a = kettleArr[kettleArrHead & 63];
+        a.ms = millis(); a.seq = kp.seq; a.enc = kp.enc;
+        kettleArrHead++;
+    } else if (len == (int)sizeof(DuckPacketV1)) {
+        DuckPacketV1 dp;
+        memcpy(&dp, data, sizeof(dp));
+        if (dp.magic != DUCK_MAGIC || dp.ver != DUCK_VER) { rxNoteDrop(data, len); return; }
+        memcpy((void*)&duckPkt, &dp, sizeof(dp));
+        duckLastMs = millis();
+        duckPktCount++;
+    } else {
+        rxNoteDrop(data, len);
+    }
+}
+
+// ── LED driver: 4 strips (GPIO 13/27/32/33), GRB order ──
+// I2S1 parallel DMA: whole frame streams from one buffer, no mid-frame refill
+// ISR, so ESP-NOW/WiFi interrupts can't bit-slip it (RMT did; A/B 2026-07-29).
+#define OUT_DRV "I2S1X8"
+static NeoPixelBus<NeoGrbFeature, NeoEsp32I2s1X8Ws2812xMethod> strip0(STRIP_LEN[0], 13);
+static NeoPixelBus<NeoGrbFeature, NeoEsp32I2s1X8Ws2812xMethod> strip1(STRIP_LEN[1], 27);
+static NeoPixelBus<NeoGrbFeature, NeoEsp32I2s1X8Ws2812xMethod> strip2(STRIP_LEN[2], 32);
+static NeoPixelBus<NeoGrbFeature, NeoEsp32I2s1X8Ws2812xMethod> strip3(STRIP_LEN[3], 33);
 
 static inline void setPixel(uint8_t s, uint16_t i, uint8_t r, uint8_t g, uint8_t b) {
     RgbColor c(r, g, b);
@@ -120,58 +206,92 @@ static inline void setPixel(uint8_t s, uint16_t i, uint8_t r, uint8_t g, uint8_t
     }
 }
 
+static uint32_t outFillUs[NUM_STRIPS];
+static uint32_t outShowUs;
+
 static void showAll() {
-    // Stagger the Show()s to avoid RMT ISR contention (see engineering ledger
-    // esp32-rmt-simultaneous-show-glitch-frames).
-    strip0.Show(); strip1.Show();
-    while (!strip0.CanShow() || !strip1.CanShow()) {}
-    strip2.Show(); strip3.Show();
-}
-
-// ── Hysteretic floor: anti-flicker policy for sub-LSB channels ───
-// Per-pixel timer (seconds). Positive = time below threshold (→ dormant),
-// negative = time above (→ active). See original for the full state machine.
-#define FLOOR_DEACTIVATE_S  1.0f
-#define FLOOR_REACTIVATE_S  0.5f
-#define FLOOR_THRESHOLD     256    // target16 below this = sub-LSB danger zone
-
-static float fxFloorTimer[NUM_STRIPS][MAX_LEDS];
-
-static void resetFxDither() {
-    memset(fxFloorTimer, 0, sizeof(fxFloorTimer));
-}
-
-static inline uint16_t applyFloorPolicy(uint16_t target16, float &timer, float dt) {
-    if (target16 < FLOOR_THRESHOLD) {
-        timer += dt;
-        if (timer >= FLOOR_DEACTIVATE_S) {
-            timer = FLOOR_DEACTIVATE_S;
-            return 0;
-        }
-        return FLOOR_THRESHOLD;
-    } else {
-        timer -= dt;
-        if (timer <= -FLOOR_REACTIVATE_S) {
-            timer = 0.0f;
-            return target16;
-        }
-        if (timer > 0.0f) return 0;
-        return target16;
-    }
+    uint32_t t0 = micros();
+    // One shared DMA stream: every instance must fill its mux slot each frame
+    // or the transfer never kicks. No partial shows, no CanShow() between.
+    strip0.Show(); uint32_t t1 = micros();
+    strip1.Show(); uint32_t t2 = micros();
+    strip2.Show(); uint32_t t3 = micros();
+    strip3.Show(); uint32_t t4 = micros();
+    outFillUs[0] = t1 - t0; outFillUs[1] = t2 - t1;
+    outFillUs[2] = t3 - t2; outFillUs[3] = t4 - t3;
+    outShowUs = t4 - t0;
 }
 
 // fr/fg/fb in 0–255 linear range (already gamma-shaped by the effect).
+// No anti-flicker floor here: the hysteretic sub-LSB policy inherited from
+// tree-of-record assumes parked content and erased the rotating carousel
+// frame (simulated 94-97% light loss while spinning).
 static inline void setPixelScaled(uint8_t s, uint16_t i, float fr, float fg, float fb) {
-    uint16_t t16R = (uint16_t)fminf(fr * 256.0f * gBrightness, 65535.0f);
-    uint16_t t16G = (uint16_t)fminf(fg * 256.0f * gBrightness, 65535.0f);
-    uint16_t t16B = (uint16_t)fminf(fb * 256.0f * gBrightness, 65535.0f);
-    uint16_t maxT16 = t16R > t16G ? (t16R > t16B ? t16R : t16B)
-                                   : (t16G > t16B ? t16G : t16B);
-    uint16_t floorResult = applyFloorPolicy(maxT16, fxFloorTimer[s][i], gDt);
-    if (floorResult == 0 && maxT16 < FLOOR_THRESHOLD) {
-        t16R = t16G = t16B = 0;
-    }
+    hueArcRolloff(fr, fg, fb, 255.0f);
+    uint16_t t16R = (uint16_t)fminf(fr * 256.0f, 65535.0f);
+    uint16_t t16G = (uint16_t)fminf(fg * 256.0f, 65535.0f);
+    uint16_t t16B = (uint16_t)fminf(fb * 256.0f, 65535.0f);
     setPixel(s, i, t16R >> 8, t16G >> 8, t16B >> 8);
+}
+
+// ── Kettle carousel (spin-driven) ───────────────────────────────
+// The spin drives kettle.rot — the carousel phase the output stage rotates
+// the whole composed frame by. Math in lib/kettle_energy, shared with the
+// viz twin.
+static KettleState kettle;
+
+static void kettleUpdate(float dt) {
+    KettlePacketV1 pkt;
+    memcpy(&pkt, (const void*)&kettlePkt, sizeof(pkt));
+    if (kettleLastMs != 0) kettleInput(kettle, pkt.enc, pkt.btnBits, pkt.upMs);
+    kettleRotStep(kettle, dt);
+}
+
+// ── Composed frame + carousel output ────────────────────────────
+// The clicky field renders into frameBuf in LOGICAL ring space and the output
+// stage reads each strip as a ring rotated by that ring's phase. The duck
+// waterfall and the kettle crackle render into PHYSICAL space and are added
+// after the rotation, so spin slides the particle field underneath while they
+// stay pinned to the sculpture. Rotating them with the frame is what made the
+// old spin-energy sparkle read as glitches.
+#define KETTLE_CRK_LEVEL 220.0f   // frameBuf is 0..255 scale
+
+static float frameBuf[NUM_STRIPS][MAX_LEDS][3];
+static float duckBuf[NUM_STRIPS][MAX_LEDS][3];
+
+static void outputRotated() {
+    static float phys[MAX_LEDS][3];
+    static float crk[MAX_LEDS];
+    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        uint16_t len = STRIP_LEN[s];
+        float off = kettleRot(kettle, s) * (float)len;
+        for (uint16_t i = 0; i < len; i++) {
+            float srcF = fmodf((float)i - off, (float)len);
+            if (srcF < 0.0f) srcF += (float)len;
+            uint16_t i0 = (uint16_t)srcF;
+            if (i0 >= len) i0 = len - 1;
+            uint16_t i1 = (uint16_t)((i0 + 1) % len);
+            float fr = srcF - (float)i0;
+            phys[i][0] = lerpf(frameBuf[s][i0][0], frameBuf[s][i1][0], fr);
+            phys[i][1] = lerpf(frameBuf[s][i0][1], frameBuf[s][i1][1], fr);
+            phys[i][2] = lerpf(frameBuf[s][i0][2], frameBuf[s][i1][2], fr);
+        }
+        memset(crk, 0, sizeof(float) * len);
+        kettleCrackleSplat(kettle, s, len, crk);
+        for (uint16_t i = 0; i < len; i++) {
+            // Neutral, not warm white: the crackle is additive over every
+            // other layer, and an off-arc tint near-cancels the arc's cyan
+            // chroma and leaves the residual hue pointing anywhere -- the
+            // one way past the red/blue arc guarantee.
+            float c = crk[i] * KETTLE_CRK_LEVEL;
+            // gBrightness (pot 5) is a clicky-layer fader: it scales the
+            // rotated particle field only, never the duck or the crackle.
+            setPixelScaled(s, i,
+                           phys[i][0] * gBrightness + duckBuf[s][i][0] + c,
+                           phys[i][1] * gBrightness + duckBuf[s][i][1] + c,
+                           phys[i][2] * gBrightness + duckBuf[s][i][2] + c);
+        }
+    }
 }
 
 // ── Clicky particles (pot-driven) ───────────────────────────────
@@ -188,7 +308,15 @@ static inline void setPixelScaled(uint8_t s, uint16_t i, float fr, float fg, flo
 #define CLICKY_RUFFLE_FREQ   1.4f    // rad per REF-LED
 #define CLICKY_RUFFLE_SPEED  7.0f    // rad per second
 
-static const float CLICKY_HUES[CLICKY_NUM_POTS] = {0, 60, 120, 180, 240, 300};
+// Red spans [340,20] and blue [225,265], so the short way round from blue's
+// high edge to red's low edge is 75 deg: any two hues sitting one in red and
+// one in blue are at least that far apart. These six span 70, under that, so no
+// rotation can light both bands at once however far the palette turns. The span
+// is centred in the 205 deg gap on the far side, as clear of both as it fits.
+static const float CLICKY_HUES[CLICKY_NUM_POTS] = {0, 60, 120, 180, 272, 300};
+// The rotation base. btn 2 spins it; the duck reads it too, so all layers rotate
+// as one palette rather than each owning a slice of the wheel.
+static float gHueRotDeg = 0.0f;
 static float clickyPos[CLICKY_NUM_POTS];
 static bool  clickyPosInit = false;
 // Ruffle time phase, wrapped to [0, 2π): an unbounded seconds accumulator
@@ -205,6 +333,7 @@ static float clickyRufflePhase = 0.0f;
 #define CLICKY_BTN_FADE    4
 #define CLICKY_TRAIL_K     1.4f    // exp fade: ~0.1% left after 5 s
 #define CLICKY_PAINT_S     0.6f    // dwell time to saturate paint to its cap
+#define CLICKY_PAINT_STOP_S 0.3f   // paint gate fade-out after the knob stops
 #define CLICKY_PAINT_CAP   160.0f  // max paint level (vs 255-scale particle)
 #define CLICKY_FADE_S      1.5f
 #define CLICKY_RECOVER_S   0.7f
@@ -214,11 +343,10 @@ static float clickyRufflePhase = 0.0f;
 #define CLICKY_PUMP_RISE_S 1.0f    // hold time to swell from 1.0 to PUMP_MAX
 #define CLICKY_SHARD_BURST_S 0.12f // seconds between shard bursts while held
 #define CLICKY_HUEROT_DEG_S  90.0f // hue rotation rate (deg/sec) while held
-#define CLICKY_RAINBOW_BURST 10    // shards per pull/push gesture
-#define CLICKY_EMIT_SPEED    0.35f // pull-out: outward shard speed (units/sec)
-#define CLICKY_EMIT_LIFE     0.55f // pull-out: shard lifetime (sec)
-#define CLICKY_ABSORB_RADIUS 0.20f // push-in: spawn radius from particle
-#define CLICKY_ABSORB_LIFE   0.50f // push-in: time to converge onto particle
+#define CLICKY_RAINBOW_BURST 10    // shards per pull/push gesture (= comb teeth ±1..±5)
+#define CLICKY_EMIT_LIFE     0.45f // pull-out: shard reaches its comb tooth as it dies
+#define CLICKY_ABSORB_LIFE   0.50f // push-in: shard converges from its tooth onto center
+#define CLICKY_SPLIT_S       0.10f // comb spacing ramp time, 1 ↔ full, on pull/push
 #define CLICKY_MOVE_EPS    0.0015f // per-frame smoothed-pos delta = "moving"
 #define CLICKY_GATHER_S    0.25f   // ramp time to fully gathered
 
@@ -229,23 +357,30 @@ struct ClickyShard {
 };
 static ClickyShard clickyShards[CLICKY_NUM_SHARDS];
 
-static float clickyTrail[NUM_STRIPS][MAX_LEDS][3];
+// The trail stores a LEVEL plus a LOGICAL hue, never a rendered RGB: a stored
+// color is a stored arc position, and paint outlives the rotation that made it,
+// so baked RGB would leave old strokes stranded outside the current arc.
+static float clickyTrailLvl[NUM_STRIPS][MAX_LEDS];
+static float clickyTrailHue[NUM_STRIPS][MAX_LEDS];
 static float clickyFade = 1.0f;
 static float clickyCrackleT = 0.0f;
 static float clickyPump[CLICKY_NUM_POTS];
 static int   clickyShardNext = 0;
 static float clickyGather = 0.0f;
-static float clickyHueRot[CLICKY_NUM_POTS];
 static float clickyMovedAgo[CLICKY_NUM_POTS];
 static float clickyShardTimer = 0.0f;
 static uint8_t clickyPrevPull = 0;
+static float clickySplit[CLICKY_NUM_POTS];
+static float clickySplitEase[CLICKY_NUM_POTS];
 
 static void resetClickyParticles() {
-    resetFxDither();
     clickyPosInit = false;
-    memset(clickyTrail, 0, sizeof(clickyTrail));
+    memset(clickyTrailLvl, 0, sizeof(clickyTrailLvl));
+    memset(clickyTrailHue, 0, sizeof(clickyTrailHue));
     memset(clickyShards, 0, sizeof(clickyShards));
-    memset(clickyHueRot, 0, sizeof(clickyHueRot));
+    gHueRotDeg = 0.0f;
+    memset(clickySplit, 0, sizeof(clickySplit));
+    memset(clickySplitEase, 0, sizeof(clickySplitEase));
     for (int k = 0; k < CLICKY_NUM_POTS; k++) {
         clickyMovedAgo[k] = 1e9f;
         clickyPump[k] = 1.0f;
@@ -263,8 +398,13 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
                         float gatherT, float meanPos, float dt) {
     static float buf[MAX_LEDS][3];
     static float cov[MAX_LEDS];
+    static float bufHue[MAX_LEDS];
+    static float bufW[MAX_LEDS];
+    static int8_t bufPot[MAX_LEDS];
     memset(buf, 0, sizeof(float) * len * 3);
     memset(cov, 0, sizeof(float) * len);
+    memset(bufW, 0, sizeof(float) * len);
+    memset(bufPot, 0xFF, sizeof(int8_t) * len);
 
 #if RASTER_PROPORTIONAL
     float sigScale = (float)len / REF_LEN;   // LED-space per REF-LED
@@ -284,7 +424,7 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
             for (int n = 0; n < 4; n++) {
                 if (randFloat() > env) continue;
                 int i = (int)lroundf(center + (randFloat() - 0.5f) * 4.0f * sigma);
-                if (i < 0 || i >= (int)len) continue;
+                i = ((i % (int)len) + (int)len) % (int)len;
                 float v = (8.0f + randFloat() * 30.0f) * env;
                 buf[i][0] = buf[i][1] = buf[i][2] = v;
                 cov[i] = 1.0f;
@@ -294,29 +434,38 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
         if (clickyFade <= 0.0f) continue;
 
         float r, g, b;
-        hsvToRgb(fmodf(CLICKY_HUES[k] + clickyHueRot[k], 360.0f),
+        hsvToRgb(hueWrap360(CLICKY_HUES[k] + gHueRotDeg),
                  sqrtf(clickyFade), 1.0f, r, g, b);
 
-        int spacing = 1;
-        if (pkt.pullBits & (1 << k))
-            spacing = (int)fmaxf(1.0f, lroundf(CLICKY_PULL_NORM * REF_LEN * sigScale));
+        float fullSpacing = fmaxf(1.0f, CLICKY_PULL_NORM * REF_LEN * sigScale);
+        float spacingF = lerpf(1.0f, fullSpacing, clickySplitEase[k]);
         int reach = (int)(4.0f * sigma);
         for (int j = -reach; j <= reach; j++) {
-            int i = (int)lroundf(center) + j * spacing;
-            if (i < 0 || i >= (int)len) continue;
+            float tc = center + (float)j * spacingF;
             float d = (float)j / sigma;
-            // Evaluate ruffle on the REF_LEN-normalized index so the number of
-            // ripples across a blob is the same on a 50- and a 150-LED strip.
-            float ei = (float)i / (float)len * REF_LEN;
-            float ruffle = 1.0f + CLICKY_RUFFLE_AMP
-                * fastSin(ei * CLICKY_RUFFLE_FREQ
-                          + clickyRufflePhase
-                          + (float)k * 2.1f);
-            float w = expf(-d * d) * ruffle * clickyFade;
-            buf[i][0] += r * w;
-            buf[i][1] += g * w;
-            buf[i][2] += b * w;
-            cov[i] += w;
+            float w = expf(-d * d) * clickyFade;
+            // Sub-pixel splat only while the split animates; settled comb
+            // snaps to single crisp pixels (and settled blob keeps the old
+            // integer-center look).
+            float tcs = (clickySplitEase[k] <= 0.001f || clickySplitEase[k] >= 0.999f)
+                ? (float)lroundf(tc) : tc;
+            tcs -= floorf(tcs / (float)len) * (float)len;
+            int i0 = (int)tcs;
+            float fr = tcs - (float)i0;
+            i0 %= (int)len;
+            int i1 = (i0 + 1) % (int)len;
+            float w0 = w * (1.0f - fr);
+            if (w0 > bufW[i0]) { bufW[i0] = w0; bufHue[i0] = CLICKY_HUES[k]; bufPot[i0] = (int8_t)k; }
+            buf[i0][0] += r * w0;
+            buf[i0][1] += g * w0;
+            buf[i0][2] += b * w0;
+            cov[i0] += w0;
+            float w1 = w * fr;
+            if (w1 > bufW[i1]) { bufW[i1] = w1; bufHue[i1] = CLICKY_HUES[k]; bufPot[i1] = (int8_t)k; }
+            buf[i1][0] += r * w1;
+            buf[i1][1] += g * w1;
+            buf[i1][2] += b * w1;
+            cov[i1] += w1;
         }
     }
 
@@ -326,15 +475,20 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
         if (sh.life <= 0.0f) continue;
         float fadeF = fmaxf(0.0f, sh.life / sh.maxLife);
         float r, g, b;
-        hsvToRgb(sh.hue, 1.0f, 1.0f, r, g, b);
+        hsvToRgb(hueWrap360(sh.hue + gHueRotDeg), 1.0f, 1.0f, r, g, b);
         int i = (int)lroundf(sh.pos * (float)(len - 1));
         for (int o = -1; o <= 1; o++) {
-            int ii = i + o;
-            if (ii < 0 || ii >= (int)len) continue;
+            int ii = ((i + o) % (int)len + (int)len) % (int)len;
             float w = fadeF * (o == 0 ? 0.4f : 0.125f);
-            buf[ii][0] = fmaxf(buf[ii][0], r * w);
-            buf[ii][1] = fmaxf(buf[ii][1], g * w);
-            buf[ii][2] = fmaxf(buf[ii][2], b * w);
+            // Brightest-wins on the whole pixel, not per channel: a per-channel
+            // max of two colors yields a hue that is neither of them, which
+            // walks the shard off the arc.
+            float sr = r * w, sg = g * w, sb = b * w;
+            if (fmaxf(sr, fmaxf(sg, sb)) >
+                fmaxf(buf[ii][0], fmaxf(buf[ii][1], buf[ii][2]))) {
+                buf[ii][0] = sr; buf[ii][1] = sg; buf[ii][2] = sb;
+                bufW[ii] = w; bufHue[ii] = sh.hue; bufPot[ii] = -1;
+            }
             cov[ii] = fmaxf(cov[ii], w);
         }
     }
@@ -343,45 +497,69 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
     bool trailHeld = pkt.btnBits & (1 << CLICKY_BTN_TRAIL);
     if (trailHeld) {
         float rate = dt * (CLICKY_PAINT_CAP / 255.0f) / CLICKY_PAINT_S;
-        for (uint16_t i = 0; i < len; i++)
-            for (int c = 0; c < 3; c++)
-                clickyTrail[s][i][c] = fminf(CLICKY_PAINT_CAP,
-                                             clickyTrail[s][i][c] + buf[i][c] * rate);
+        for (uint16_t i = 0; i < len; i++) {
+            float add = fmaxf(fmaxf(buf[i][0], buf[i][1]), buf[i][2]) * rate;
+            if (add <= 0.0f) continue;
+            int8_t p = bufPot[i];
+            if (p >= 0) {
+                float gate = 1.0f - clickyMovedAgo[p] / CLICKY_PAINT_STOP_S;
+                if (gate <= 0.0f) continue;
+                add *= gate;
+            }
+            float lvl = clickyTrailLvl[s][i];
+            float dh = fmodf(bufHue[i] - clickyTrailHue[s][i] + 540.0f, 360.0f)
+                       - 180.0f;
+            clickyTrailHue[s][i] = hueWrap360(clickyTrailHue[s][i]
+                                              + dh * (add / (add + lvl + 1e-6f)));
+            clickyTrailLvl[s][i] = fminf(CLICKY_PAINT_CAP, lvl + add);
+        }
     } else {
         float decay = expf(-CLICKY_TRAIL_K * dt);
         for (uint16_t i = 0; i < len; i++)
-            for (int c = 0; c < 3; c++)
-                clickyTrail[s][i][c] *= decay;
+            clickyTrailLvl[s][i] *= decay;
     }
 
+    // Ruffle is applied ONCE here, over blobs + trail summed: a texture on the
+    // combined field, so paint under a blob adds color without changing the
+    // ripple depth. One shared carrier on the REF_LEN-normalized index — same
+    // ripple count on a 50- and 150-LED strip, and it factors out of any
+    // overlap instead of cancelling (measured 0.45 -> 0.22 depth with
+    // per-blob phases).
     for (uint16_t i = 0; i < len; i++) {
-        float bg = 1.0f - fminf(cov[i], 1.0f);
-        float r = buf[i][0] + clickyTrail[s][i][0] * bg;
-        float g = buf[i][1] + clickyTrail[s][i][1] * bg;
-        float b = buf[i][2] + clickyTrail[s][i][2] * bg;
-        setPixelScaled(s, i, fminf(r, 255.0f), fminf(g, 255.0f), fminf(b, 255.0f));
+        float ei = (float)i / (float)len * REF_LEN;
+        float ruffle = 1.0f + CLICKY_RUFFLE_AMP
+            * fastSin(ei * CLICKY_RUFFLE_FREQ + clickyRufflePhase);
+        float bg = clickyTrailLvl[s][i] * (1.0f / 255.0f);
+        float tr = 0.0f, tg = 0.0f, tb = 0.0f;
+        if (bg > 0.0f)
+            hsvToRgb(hueWrap360(clickyTrailHue[s][i] + gHueRotDeg), 1.0f, 1.0f, tr, tg, tb);
+        frameBuf[s][i][0] = (buf[i][0] + tr * bg) * ruffle;
+        frameBuf[s][i][1] = (buf[i][1] + tg * bg) * ruffle;
+        frameBuf[s][i][2] = (buf[i][2] + tb * bg) * ruffle;
     }
 }
 
-// Rainbow burst from a knob gesture. outward = pull-out (shards spray away
-// from the particle and fade); !outward = push-in (shards spawn at a radius
-// and converge onto the particle, dying as they arrive). Hues span the wheel.
-static void spawnRainbowBurst(float centerN, float pumpK, bool outward) {
+// Rainbow burst from a knob gesture, aimed at the comb geometry. One shard
+// per tooth (j = ±1..±5 at spacing CLICKY_PULL_NORM). outward = pull-out:
+// shards launch from the particle and arrive at their tooth as they die —
+// the motion blur of the split. !outward = push-in: shards spawn at the
+// tooth positions and converge onto the particle. Hues span the wheel.
+static void spawnRainbowBurst(float centerN, bool outward) {
     for (int m = 0; m < CLICKY_RAINBOW_BURST; m++) {
         ClickyShard &sh = clickyShards[clickyShardNext];
         clickyShardNext = (clickyShardNext + 1) % CLICKY_NUM_SHARDS;
-        float dir = (m & 1) ? 1.0f : -1.0f;
-        sh.hue = fmodf(360.0f * (float)m / (float)CLICKY_RAINBOW_BURST
-                       + (randFloat() - 0.5f) * 20.0f + 360.0f, 360.0f);
+        int j = (m / 2 + 1) * ((m & 1) ? 1 : -1);
+        float toothN = (float)j * CLICKY_PULL_NORM;
+        sh.hue = 360.0f * (float)m / (float)CLICKY_RAINBOW_BURST
+                 + (randFloat() - 0.5f) * 20.0f;
         if (outward) {
-            sh.pos = centerN + dir * 2.0f * CLICKY_SIGMA_NORM * pumpK;
-            sh.vel = dir * CLICKY_EMIT_SPEED * (0.7f + randFloat() * 0.6f);
-            sh.maxLife = CLICKY_EMIT_LIFE * (0.7f + randFloat() * 0.6f);
+            sh.maxLife = CLICKY_EMIT_LIFE * (0.8f + randFloat() * 0.4f);
+            sh.pos = centerN;
+            sh.vel = toothN / sh.maxLife;
         } else {
-            float radius = CLICKY_ABSORB_RADIUS * (0.7f + randFloat() * 0.6f);
-            sh.pos = centerN + dir * radius;
-            sh.vel = -dir * (radius / CLICKY_ABSORB_LIFE);
-            sh.maxLife = CLICKY_ABSORB_LIFE;
+            sh.maxLife = CLICKY_ABSORB_LIFE * (0.8f + randFloat() * 0.4f);
+            sh.pos = centerN + toothN;
+            sh.vel = -toothN / sh.maxLife;
         }
         sh.life = sh.maxLife;
     }
@@ -429,8 +607,7 @@ static void renderClickyParticles(float dt) {
         * (BRIGHT_FLOOR + (1.0f - BRIGHT_FLOOR) * clickyPos[CLICKY_BRIGHT_POT]);
 
     if (hueRotHeld)
-        for (int k = 0; k < CLICKY_NUM_POTS; k++)
-            clickyHueRot[k] = fmodf(clickyHueRot[k] + CLICKY_HUEROT_DEG_S * dt, 360.0f);
+        gHueRotDeg = hueWrap360(gHueRotDeg + CLICKY_HUEROT_DEG_S * dt);
 
     if (pumpHeld) {
         float rise = dt * (CLICKY_PUMP_MAX - 1.0f) / CLICKY_PUMP_RISE_S;
@@ -446,8 +623,14 @@ static void renderClickyParticles(float dt) {
     clickyPrevPull = pkt.pullBits;
     for (int k = 0; k < CLICKY_NUM_POTS; k++) {
         if (k == CLICKY_BRIGHT_POT) continue;
-        if (pulledEdge & (1 << k)) spawnRainbowBurst(clickyPos[k], clickyPump[k], true);
-        if (pushedEdge & (1 << k)) spawnRainbowBurst(clickyPos[k], clickyPump[k], false);
+        if (pulledEdge & (1 << k)) spawnRainbowBurst(clickyPos[k], true);
+        if (pushedEdge & (1 << k)) spawnRainbowBurst(clickyPos[k], false);
+        if (pkt.pullBits & (1 << k))
+            clickySplit[k] = fminf(1.0f, clickySplit[k] + dt / CLICKY_SPLIT_S);
+        else
+            clickySplit[k] = fmaxf(0.0f, clickySplit[k] - dt / CLICKY_SPLIT_S);
+        float t = clickySplit[k];
+        clickySplitEase[k] = t * t * (3.0f - 2.0f * t);
     }
 
     if (shardsHeld) clickyShardTimer -= dt;
@@ -465,20 +648,21 @@ static void renderClickyParticles(float dt) {
                 float dir = (randFloat() < 0.5f) ? -1.0f : 1.0f;
                 sh.pos = centerN + dir * edgeN;
                 sh.vel = dir * (0.25f + randFloat() * 0.20f);   // units/sec
-                sh.hue = fmodf(CLICKY_HUES[k] + clickyHueRot[k]
-                               + (randFloat() - 0.5f) * 50.0f + 360.0f, 360.0f);
+                sh.hue = CLICKY_HUES[k] + (randFloat() - 0.5f) * 50.0f;
                 sh.maxLife = 0.20f + randFloat() * 0.15f;
                 sh.life = sh.maxLife;
             }
         }
     }
 
-    // Integrate shards once (rasterStrip reads them read-only).
+    // Integrate shards once (rasterStrip reads them read-only). Positions
+    // wrap: the field is a ring, so shards launched off one end come around.
     for (int n = 0; n < CLICKY_NUM_SHARDS; n++) {
         ClickyShard &sh = clickyShards[n];
         if (sh.life <= 0.0f) continue;
         sh.life -= dt;
         sh.pos += sh.vel * dt;
+        sh.pos -= floorf(sh.pos);
     }
 
     // ── Rasterize onto every strip ────────────────────────────────
@@ -486,6 +670,48 @@ static void renderClickyParticles(float dt) {
         rasterStrip(s, STRIP_LEN[s], pkt, gatherT, meanPos, dt);
 
     if (clickyCrackleT > 0.0f) clickyCrackleT -= dt;
+}
+
+// ── Duck: audio features + rotate-to-change-color ───────────────
+// Feature extraction and the waterfall itself live in lib/duck_energy, shared
+// with the viz twin. This file owns only the per-strip state
+// and the wiring into the composed frame.
+#define WF_REVERSE 0    // 1 if the strips hang head-at-the-far-end
+
+static DuckFeatures duck;
+
+static float wfLevel[NUM_STRIPS][MAX_LEDS];
+static float wfHue[NUM_STRIPS][MAX_LEDS];
+static float wfTilt[NUM_STRIPS][MAX_LEDS];
+
+static void resetWaterfall() {
+    memset(wfLevel, 0, sizeof(wfLevel));
+    memset(wfHue, 0, sizeof(wfHue));
+    memset(wfTilt, 0, sizeof(wfTilt));
+}
+
+static bool duckLive() {
+    uint32_t now = millis();
+    return duckLastMs != 0
+        && (int32_t)(now - duckLastMs) < (int32_t)DUCK_TIMEOUT_MS;
+}
+
+static void duckUpdate(float dt) {
+    DuckPacketV1 pkt;
+    memcpy(&pkt, (const void*)&duckPkt, sizeof(pkt));
+    bool wasCal = duck.calibrated;
+    duckFeaturesUpdate(duck, pkt, dt, millis(), duckLive(), gHueRotDeg);
+    if (duck.calibrated && !wasCal)
+        Serial.printf("duck rest vector (%.3f, %.3f, %.3f)\n",
+                      duck.restAx, duck.restAy, duck.restAz);
+}
+
+static void renderWaterfall(float dt, bool live) {
+    float inject = duckWaterfallInject(duck, live);
+    memset(duckBuf, 0, sizeof(duckBuf));
+    for (uint8_t s = 0; s < NUM_STRIPS; s++)
+        duckWaterfallStep(wfLevel[s], wfHue[s], wfTilt[s], STRIP_LEN[s],
+                          duck, inject, dt, randFloat, duckBuf[s], WF_REVERSE);
 }
 
 // ── Setup ────────────────────────────────────────────────────────
@@ -501,11 +727,18 @@ void setup() {
     strip0.ClearTo(RgbColor(0)); strip1.ClearTo(RgbColor(0));
     strip2.ClearTo(RgbColor(0)); strip3.ClearTo(RgbColor(0));
     showAll();
+    Serial.printf("boot drv=%s built=%s %s heap=%u\n",
+                  OUT_DRV, __DATE__, __TIME__, ESP.getFreeHeap());
 
     resetClickyParticles();
+    resetWaterfall();
+    duckFeaturesReset(duck);
+    kettleReset(kettle);
+    kettleSetRings(kettle, NUM_STRIPS);
 
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
+    esp_wifi_set_ps(WIFI_PS_NONE);
 
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_channel(FIXED_CHANNEL, WIFI_SECOND_CHAN_NONE);
@@ -539,11 +772,10 @@ void loop() {
     static uint32_t lastRenderMs = 0;
     float dt = (lastRenderMs > 0) ? (now - lastRenderMs) / 1000.0f : (1.0f / 60.0f);
     if (dt > 0.1f) dt = 0.1f;
-    gDt = dt;
     lastRenderMs = now;
 
-    // No panel seen yet → hold dark.
-    if (clickyLastMs == 0) {
+    // No console seen yet → hold dark.
+    if (clickyLastMs == 0 && kettleLastMs == 0 && duckLastMs == 0) {
         for (uint8_t s = 0; s < NUM_STRIPS; s++)
             for (uint16_t i = 0; i < STRIP_LEN[s]; i++)
                 setPixel(s, i, 0, 0, 0);
@@ -551,21 +783,78 @@ void loop() {
         return;
     }
 
-    renderClickyParticles(dt);
+#if DIAG_KETTLE_LOG
+    while (kettleArrTail != (uint8_t)kettleArrHead) {
+        KettleArrival &a = kettleArr[kettleArrTail & 63];
+        kettleArrTail++;
+        Serial.printf("KP t=%lu seq=%u enc=%ld\n",
+                      (unsigned long)a.ms, a.seq, (long)a.enc);
+    }
+    static uint32_t lastRotLogMs = 0;
+    if (now - lastRotLogMs >= 100) {
+        lastRotLogMs = now;
+        Serial.printf("RT t=%lu rot=%.4f pend=%.4f vel=%.3f fly=%d ctr=%d\n",
+                      (unsigned long)now, kettle.rot, kettle.rotPending,
+                      kettle.vel, (int)kettleHeld(kettle, KETTLE_BTN_FLYWHEEL),
+                      (int)kettleHeld(kettle, KETTLE_BTN_COUNTER));
+    }
+#else
+    kettleArrTail = (uint8_t)kettleArrHead;
+#endif
+
+    uint32_t renderT0 = micros();
+    kettleUpdate(dt);
+    duckUpdate(dt);
+    if (clickyLastMs != 0) {
+        renderClickyParticles(dt);
+    } else {
+        gBrightness = MASTER_BRIGHTNESS;
+        memset(frameBuf, 0, sizeof(frameBuf));
+    }
+    renderWaterfall(dt, duckLive());
+    outputRotated();
+    uint32_t renderUs = micros() - renderT0;
     showAll();
 
     static uint32_t lastLogMs = 0;
     static uint32_t frameCount = 0;
+    static uint32_t showSum = 0, showMax = 0, renderSum = 0, renderMax = 0;
+    showSum += outShowUs;   if (outShowUs > showMax) showMax = outShowUs;
+    renderSum += renderUs;  if (renderUs > renderMax) renderMax = renderUs;
     frameCount++;
     if (now - lastLogMs > 2000) {
         float fps = frameCount * 1000.0f / (now - lastLogMs);
-        bool clickyLive = (int32_t)(now - clickyLastMs) < 3000;
-        Serial.printf("  FPS=%.1f  [clicky] %s pkts=%lu pull=%02X btn=%02X pos=%u,%u,%u,%u,%u,%u\n",
+        Serial.printf("[rx] any=%lu drop=%lu lastLen=%u lastMagic=%04X"
+                      " dropLen=%u dropMagic=%04X dropVer=%u\n",
+                      (unsigned long)rxAnyCount, (unsigned long)rxDropCount,
+                      rxLastLen, rxLastMagic,
+                      rxDropLen, rxDropMagic, rxDropVer);
+        Serial.printf("[out] drv=%s show=%lu/%lu render=%lu/%lu fill=%lu,%lu,%lu,%lu heap=%u\n",
+                      OUT_DRV,
+                      (unsigned long)(showSum / frameCount), (unsigned long)showMax,
+                      (unsigned long)(renderSum / frameCount), (unsigned long)renderMax,
+                      (unsigned long)outFillUs[0], (unsigned long)outFillUs[1],
+                      (unsigned long)outFillUs[2], (unsigned long)outFillUs[3],
+                      ESP.getFreeHeap());
+        showSum = showMax = renderSum = renderMax = 0;
+        bool clickyLive = clickyLastMs != 0 && (int32_t)(now - clickyLastMs) < 3000;
+        bool kettleLive = kettleLastMs != 0 && (int32_t)(now - kettleLastMs) < 3000;
+        bool duckIsLive = duckLive();
+        Serial.printf("  FPS=%.1f  [clicky] %s pkts=%lu pull=%02X btn=%02X pos=%u,%u,%u,%u,%u,%u"
+                      "  [kettle] %s pkts=%lu enc=%ld btn=%02X rot=%.3f"
+                      "  [duck] %s pkts=%lu e=%.2f on=%.2f hue=%.0f tilt=%.2f cal=%d\n",
                       fps, clickyLive ? "LIVE" : "----",
                       (unsigned long)clickyPktCount,
                       clickyPkt.pullBits, clickyPkt.btnBits,
                       clickyPkt.pos[0], clickyPkt.pos[1], clickyPkt.pos[2],
-                      clickyPkt.pos[3], clickyPkt.pos[4], clickyPkt.pos[5]);
+                      clickyPkt.pos[3], clickyPkt.pos[4], clickyPkt.pos[5],
+                      kettleLive ? "LIVE" : "----",
+                      (unsigned long)kettlePktCount,
+                      (long)kettlePkt.enc, kettlePkt.btnBits, kettle.rot,
+                      duckIsLive ? "LIVE" : "----",
+                      (unsigned long)duckPktCount,
+                      duck.energy, duck.onset, duck.hueIdx, duck.tilt,
+                      duck.calibrated ? 1 : 0);
         frameCount = 0;
         lastLogMs = now;
     }

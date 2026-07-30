@@ -607,3 +607,59 @@ boards:
     by the decouter ring. Identify by MAC; port re-enumerates on replug.
     CAN transceiver soldered TX=GPIO16 RX=GPIO17 (verified 2026-07-08, 3-node
     mesh) — the only board on the originally-planned UART2 pinout.
+
+- mac: 04:B2:47:82:7E:BC
+  id: 'led-eth-3'
+  chip: esp32
+  role: bench-test
+  first_seen: '2026-07-30T00:00:00Z'
+  last_validated:
+    utc: '2026-07-30T00:00:00Z'
+    port: /dev/cu.usbserial-1130
+    method: esptool read-mac (ESP32-D0WD-V3 rev v3.1); axismundi boot banner verified
+  strips:
+    count: 4
+    leds_each: 150
+    pins: [13, 27, 32, 33]
+  can:
+    tx: 2
+    rx: 15
+  notes: |
+    Fourth eth-board clone, user-wired 2026-07-30 (74AHCT125 level shifter).
+    Bench-verified with axismundi firmware: I2S1X8 driver, 139 fps, live
+    clicky+kettle ESP-NOW reception on first boot.
+    CAN transceiver TX=GPIO2 RX=GPIO15 (verified 2026-07-30, 2-node exchange
+    with led-eth-1 @500kbps, zero errors both directions). GPIO2 straps:
+    boot/reflash wiggles TXD and spews error frames on the bus (same
+    tradeoff as led-eth-0); GPIO15 straps MTDO, safe as RX (idles
+    recessive/high).
+    Identify by MAC; port re-enumerates on replug.
+
+- mac: B4:BF:E9:C9:E0:54
+  id: 'led-eth-4'
+  chip: esp32
+  role: bench-test
+  first_seen: '2026-07-30T00:00:00Z'
+  last_validated:
+    utc: '2026-07-30T00:00:00Z'
+    port: /dev/cu.usbserial-1130
+    method: esptool read-mac (ESP32-D0WD-V3 rev v3.1); axismundi boot banner verified
+  strips:
+    count: 4
+    leds_each: 150
+    pins: [13, 27, 32, 33]
+  can:
+    tx: 2
+    rx: 15
+  notes: |
+    Fifth eth-board clone, user-wired 2026-07-30 alongside led-eth-3 (same
+    build: 74AHCT125 level shifter, CAN TX=GPIO2 RX=GPIO15). Bench-verified
+    with axismundi firmware: I2S1X8 driver, 140 fps, live clicky+kettle
+    ESP-NOW reception. CAN verified 2026-07-30 (2-node exchange with
+    led-eth-1 @500kbps, zero errors) after a transceiver-hookup fault was
+    fixed: the pre-fix symptom was instant bus-off (node deaf to its own
+    echo) plus ground-bounce reset loops on the peer. Its original USB
+    cable/hub jack failed to enumerate (board fine on a known-good path) —
+    distrust that cable.
+    GPIO2 straps: boot/reflash spews CAN error frames (see led-eth-0/3).
+    Identify by MAC; port re-enumerates on replug.

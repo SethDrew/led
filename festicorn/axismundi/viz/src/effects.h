@@ -811,6 +811,8 @@ static inline void fx_creatures_lin(RGBf* out, float t) {
     }
 }
 
+#include "axismundi_fx.h"   // the Axis Mundi installation layer (console-driven)
+
 // ── Registry (add effects here; the sim exposes them by name) ────────────
 typedef void (*HcEffectFn)(RGBf*, float);
 struct HcEffect { const char* name; HcEffectFn fn; };
@@ -823,6 +825,7 @@ static const HcEffect HC_EFFECTS[] = {
     { "line",          fx_line },
     { "creatures",     fx_creatures_lin },   // original look · spins via B (output resample)
     { "creatures_az",  fx_creatures },       // azimuthal port · spins via A (field-correct)
+    { "axismundi",     fx_axismundi },       // clicky-pots particle field, live console
 };
 static const int HC_NUM_EFFECTS = sizeof(HC_EFFECTS) / sizeof(HC_EFFECTS[0]);
 
@@ -847,5 +850,6 @@ static HcParamDef HC_PARAMS[] = {
     { "creatures_az",  "speed",      &CREAT_speed,     0.2f,  3.0f  },
     { "creatures_az",  "size_deg",   &CREAT_size_deg,  1.0f,  20.0f },
     { "creatures_az",  "thick_m",    &CREAT_thick_m,   0.05f, 0.6f  },
+    { "axismundi",     "armature",    &AXK_armature,    0.0f, 1.0f  },
 };
 static const int HC_NUM_PARAMS = sizeof(HC_PARAMS) / sizeof(HC_PARAMS[0]);

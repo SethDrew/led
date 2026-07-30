@@ -1,6 +1,6 @@
-# helix-canopy — Power & Wiring
+# Axis Mundi — Power & Wiring
 
-Running design doc for the power distribution of the helix-canopy install.
+Running design doc for the power distribution of the Axis Mundi install.
 Numbers derive from `geometry/meta.json` (1697 LEDs: helix 2×297, canopy 14×50,
 roots 7 strands ≈ 403). The Blender wiring model is `tools/wiring_blender.py`
 → renders + `wiring.blend` in `wiring/`. Last updated 2026-07-07.

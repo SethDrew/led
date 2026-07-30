@@ -12,6 +12,7 @@
 // display transform — effects.h authors in linear; the device sink owns gamma.
 
 #include "effects.h"   // pulls in geometry/topology.h (LED_POS, HC_NUM_LEDS)
+#include <duck_energy.h>
 #include <string.h>    // strcmp (resample-spin effect gate)
 
 extern "C" {
@@ -46,6 +47,112 @@ float get_trunk_bright()           { return g_trunk_bright; }
 // effects with no angular structure. Quantization is real (see effects.h).
 void  set_spin(float rad)          { HC_SPIN = rad; }
 float get_spin()                   { return HC_SPIN; }
+
+// ── Physical console state (Axis Mundi) ────────────────────────────────────
+// The browser pushes whatever the desk consoles are doing; these mirror
+// ClickyPacketV1 / KettlePacketV1 so the transport that delivered the state
+// (kettle USB serial JSON, or clicky over an ESP-NOW bridge) is invisible here.
+void set_clicky(int pullBits, int btnBits,
+                int p0, int p1, int p2, int p3, int p4, int p5) {
+    AX_CLICKY.pullBits = (uint8_t)pullBits;
+    AX_CLICKY.btnBits  = (uint8_t)btnBits;
+    const int p[6] = { p0, p1, p2, p3, p4, p5 };
+    for (int i = 0; i < 6; i++) AX_CLICKY.pos[i] = (uint16_t)p[i];
+    AX_CLICKY_SEEN = true;
+}
+void set_kettle(int btnBits, int enc, int upMs) {
+    AX_KETTLE.btnBits = (uint8_t)btnBits;
+    AX_KETTLE.enc     = (int32_t)enc;
+    AX_KETTLE.upMs    = (uint32_t)upMs;
+    AX_KETTLE_SEEN = true;
+    AX_KETTLE_AGE  = 0.0f;
+}
+void set_duck(int seq, int rmsMean, int rmsMax, int ax, int ay, int az,
+              int flags, int upMs) {
+    AX_DUCK.seq      = (uint8_t)seq;
+    AX_DUCK.rms_mean = (uint8_t)rmsMean;
+    AX_DUCK.rms_max  = (uint8_t)rmsMax;
+    AX_DUCK.ax       = (int8_t)ax;
+    AX_DUCK.ay       = (int8_t)ay;
+    AX_DUCK.az       = (int8_t)az;
+    AX_DUCK.flags    = (uint8_t)flags;
+    AX_DUCK.upMs     = (uint32_t)upMs;
+    AX_DUCK_SEEN = true;
+    AX_DUCK_AGE  = 0.0f;
+}
+
+// ── Duck feature probe (console dashboard's duck scope) ────────────────────
+// A DuckFeatures instance private to the probe, so replaying the received rms
+// stream to inspect the pipeline never disturbs the rendered effect's own duck
+// state. The dashboard plots what comes back; it computes none of it, which is
+// what keeps the panel from drifting off lib/duck_energy.
+static DuckFeatures g_probe;
+static bool  g_probe_ready = false;
+static float g_probe_out[17];
+
+void duck_probe_reset() { duckFeaturesReset(g_probe); g_probe_ready = true; }
+
+const float* duck_probe_feed(int rmsMean, int rmsMax, int seq, float dt) {
+    if (!g_probe_ready) duck_probe_reset();
+
+    DuckPacketV1 p;
+    memset(&p, 0, sizeof(p));
+    p.magic    = DUCK_MAGIC;
+    p.ver      = DUCK_VER;
+    p.seq      = (uint8_t)seq;
+    p.rms_mean = (uint8_t)rmsMean;
+    p.rms_max  = (uint8_t)rmsMax;
+    p.flags    = DUCK_FLAG_NO_IMU;
+    duckFeaturesUpdate(g_probe, p, dt, 0, true, 0.0f);
+
+    const float rms      = duckDecodeRms(p.rms_mean);
+    const float effFloor = g_probe.floorV * DUCK_FLOOR_HEADROOM;
+    const float rise     = g_probe.onsetFast - g_probe.onsetSlow;
+
+    g_probe_out[0]  = rms;
+    g_probe_out[1]  = duckDecodeRms(p.rms_max);
+    g_probe_out[2]  = g_probe.floorV;
+    g_probe_out[3]  = effFloor;
+    g_probe_out[4]  = g_probe.floorV * DUCK_GATE_OPEN_RATIO;
+    g_probe_out[5]  = g_probe.ceilV;
+    g_probe_out[6]  = g_probe.energy;
+    g_probe_out[7]  = g_probe.gateOpen ? 1.0f : 0.0f;
+    g_probe_out[8]  = g_probe.gateHold;
+    g_probe_out[9]  = (float)g_probe.belowCnt;
+    g_probe_out[10] = g_probe.onsetFast;
+    g_probe_out[11] = g_probe.onsetSlow;
+    g_probe_out[12] = rise;
+    g_probe_out[13] = fmaxf(DUCK_ONSET_FLOOR, DUCK_ONSET_RISE_FRAC * g_probe.onsetSlow);
+    g_probe_out[14] = g_probe.onset;
+    g_probe_out[15] = g_probe.onsetLock;
+    g_probe_out[16] = 20.0f * log10f(fmaxf(rms, 1.0f) / fmaxf(g_probe.floorV, 1.0f));
+    return g_probe_out;
+}
+
+struct DuckConst { const char* name; float value; };
+static const DuckConst DUCK_CONSTS[] = {
+    { "DUCK_RMS_FS",          DUCK_RMS_FS },
+    { "DUCK_RMS_FLOOR_MIN",   DUCK_RMS_FLOOR_MIN },
+    { "DUCK_RMS_CEIL_MIN",    DUCK_RMS_CEIL_MIN },
+    { "DUCK_FLOOR_HEADROOM",  DUCK_FLOOR_HEADROOM },
+    { "DUCK_GATE_OPEN_RATIO", DUCK_GATE_OPEN_RATIO },
+    { "DUCK_GATE_HOLD_S",     DUCK_GATE_HOLD_S },
+    { "DUCK_FLOOR_TAU",       DUCK_FLOOR_TAU },
+    { "DUCK_FLOOR_LEAK",      DUCK_FLOOR_LEAK },
+    { "DUCK_FLOOR_SNAP_EPS",  DUCK_FLOOR_SNAP_EPS },
+    { "DUCK_FLOOR_SOFT_SIG",  DUCK_FLOOR_SOFT_SIG },
+    { "DUCK_CEIL_LEAK_K",     DUCK_CEIL_LEAK_K },
+    { "DUCK_ONSET_FLOOR",     DUCK_ONSET_FLOOR },
+    { "DUCK_ONSET_RISE_FRAC", DUCK_ONSET_RISE_FRAC },
+    { "DUCK_ONSET_FAST_TAU",  DUCK_ONSET_FAST_TAU },
+    { "DUCK_ONSET_SLOW_TAU",  DUCK_ONSET_SLOW_TAU },
+    { "DUCK_ONSET_REFRAC",    DUCK_ONSET_REFRAC },
+};
+static const int DUCK_NCONST = (int)(sizeof(DUCK_CONSTS) / sizeof(DUCK_CONSTS[0]));
+
+int         duck_const_count()      { return DUCK_NCONST; }
+const char* duck_const_name(int i)  { return (i >= 0 && i < DUCK_NCONST) ? DUCK_CONSTS[i].name : ""; }
+float       duck_const_value(int i) { return (i >= 0 && i < DUCK_NCONST) ? DUCK_CONSTS[i].value : 0.0f; }
 
 // Live tunables — straight passthrough to the HC_PARAMS registry in effects.h.
 int         param_count()        { return HC_NUM_PARAMS; }

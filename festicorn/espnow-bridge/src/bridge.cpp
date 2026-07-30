@@ -9,7 +9,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 
-#define FIXED_CHANNEL 6
+#define FIXED_CHANNEL 1
 
 static uint8_t broadcastAddr[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 

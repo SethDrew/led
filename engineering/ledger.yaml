@@ -1013,7 +1013,7 @@ entries:
 
   - id: neopixelbus-i2s1x8-ws2812b-fill-serialization
     date: 2026-04-17
-    touched: 2026-04-17
+    touched: 2026-07-30
     title: "NeoPixelBus I2s1X8 method serializes buffer fills per bus instance"
     summary: >
       The NeoEsp32I2s1X8Ws2812xMethod driver in NeoPixelBus 2.8.4 uses a
@@ -1045,7 +1045,15 @@ entries:
 
       Where I2S1X8 wins: fewer pins (2-4) sharing the single DMA stream —
       fill count drops proportionally. For 4 strips × 100 LEDs, expected
-      fill ~1.4ms < RMT's 4-channel parallel overhead. Not measured here.
+      fill ~1.4ms < RMT's 4-channel parallel overhead.
+
+      MEASURED 2026-07-30 (axismundi, led-eth-1, 4 strips × 150 WS2812B,
+      ESP-NOW active): prediction confirmed — total show 2.1ms vs 14.5ms
+      for the RMT path on the same firmware, 48 → 130 fps. Gotcha for
+      sparse configs: with 4 of 8 mux slots used, DMA does not kick until
+      every registered instance's Show() has filled its slot — partial
+      shows (updating one strip) output nothing. Call all Show()s
+      back-to-back every frame.
 
       Alternative: a single I2S driver that takes a packed [LEDs × strips]
       array and writes one bit-column loop (no per-instance API) would
@@ -1100,7 +1108,7 @@ entries:
 
   - id: esp32-rmt-wifi-isr-white-flash
     date: 2026-05-22
-    touched: 2026-05-22
+    touched: 2026-07-30
     title: "WiFi interrupts cause all-white flash glitches on 4+ concurrent RMT channels"
     summary: >
       When WiFi is active on classic ESP32, 6 concurrent RMT channels driving
@@ -1159,6 +1167,20 @@ entries:
         stagger Show() in batches of 3. Cost is ~3ms added latency per frame
         (one wire-time wait between batches). Below 4 channels or below ~50 LEDs
         per strip, stagger is unnecessary.
+
+      UPDATE 2026-07-30 (axismundi, led-eth-1 A4:F0:0F:61:40:18, 4×150 WS2812B):
+        Answers the ESP-NOW open question: ESP-NOW-only (no STA association)
+        still glitches — 4 RMT channels at 150 LEDs showed intermittent
+        corrupted frames in the field. Confirmed causal by a live mid-episode
+        driver swap (A/B 2026-07-29): reflashing NeoEsp32I2s1X8Ws2812xMethod
+        during an active glitch episode ended it; RMT build reproduced it.
+        I2S1 parallel DMA is immune by construction — the whole frame streams
+        from one pre-filled buffer with no mid-frame refill ISRs to preempt.
+        For ≤8 strips on classic ESP32 with any radio active, I2S1X8 is now
+        the preferred fix over staggering (which only reduces odds): show
+        14.5ms → 2.1ms, 48 → 130 fps at 4×150 (see
+        neopixelbus-i2s1x8-ws2812b-fill-serialization for why 4 strips also
+        wins on throughput).
 
   # ── Wireless Telemetry Protocol ──────────────────────────────────
 

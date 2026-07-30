@@ -31,6 +31,15 @@ firmware_by_role:
     notes: |
       Outlier wiring (SDA=20, SCL=21). INMP441 mic + MPU-6050 IMU.
       Festival v0.1 deploy. Pairs with rgbw-receiver.
+  axismundi-duck-sender:
+    deployment: static
+    source: festicorn/axismundi/src/duck_sender.cpp
+    packet_format: DuckPacketV1-14B
+    notes: |
+      Same board build as duck-sender (INMP441 mic + MPU-6050, SDA=20,
+      SCL=21) but a different packet and a different installation: broadcasts
+      DuckPacketV1 at 25 Hz on channel 1 for axismundi's energy waterfall.
+      Build env `duck-sender` in festicorn/axismundi.
   rgbw-receiver:
     deployment: static
     source: festicorn/original-duck/src/bulb_receiver.cpp
@@ -306,19 +315,20 @@ boards:
     Replacement for dead-IMU board F8:08. Standard wiring (SDA=8, SCL=7).
     Assigned to biolum strip 5 (pin 19).
 
-# ── v0.1 duck installation (original-duck/) ──────────────────────────
+# ── duck sender board ────────────────────────────────────────────────
 - mac: 38:44:BE:45:D9:CC
   id: 'duck'
   chip: esp32-c3
-  role: duck-sender
+  role: axismundi-duck-sender
   last_validated:
-    utc: '2026-06-09T00:00:00Z'
-    port: /dev/cu.usbmodem1114301
-    notes: MAC confirmed via esptool read_mac (ESP32-C3 QFN32 rev v0.4, USB-Serial/JTAG, 4MB embedded flash).
+    utc: '2026-07-28T00:00:00Z'
+    port: /dev/cu.usbmodem2101
+    notes: MAC confirmed via esptool read_mac before flashing the axismundi duck sender.
   notes: |
-    Festival v0.1 deploy. MAC-verified by direct scan 2026-06-09 on
-    /dev/cu.usbmodem1114301. Working WiFi TX/RX (was "Board A" in gyro-sense
-    platformio header).
+    Working WiFi TX/RX (was "Board A" in gyro-sense platformio header).
+    Reflashed 2026-07-28 from the v0.1 duck-sender role to
+    axismundi-duck-sender; original-duck's sender.cpp still fits this board
+    if it is ever returned to that installation.
 - mac: 10:00:3B:B0:6E:04
   id: ''
   chip: esp32-c3

@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <esp_now.h>
+#include <esp_task_wdt.h>
 #include <clicky_packet_v1.h>
 
 // Faroudja LD100 front panel → LED instrument. 6 push-pull pots + 6 buttons.
@@ -84,10 +85,39 @@ float potRawToR(int16_t raw) {
     return v * RREF / (VCC - v);
 }
 
+static const uint16_t ADS_MUX[4] = {
+    ADS1X15_REG_CONFIG_MUX_SINGLE_0, ADS1X15_REG_CONFIG_MUX_SINGLE_1,
+    ADS1X15_REG_CONFIG_MUX_SINGLE_2, ADS1X15_REG_CONFIG_MUX_SINGLE_3};
+
+// Adafruit's readADC_SingleEnded() polls conversionComplete() with no timeout;
+// a dead I2C bus hangs it forever, and because that poll yields to the idle
+// task the idle-watching WDT never fires (the 12h silent-hang bug). Bound it:
+// 860SPS converts in ~1.2ms, so 5ms of no completion means the bus is gone.
+bool readAdsBounded(Adafruit_ADS1115 &ads, uint8_t ch, int16_t &out) {
+    ads.startADCReading(ADS_MUX[ch], false);
+    uint32_t t0 = millis();
+    while (!ads.conversionComplete())
+        if (millis() - t0 > 5) return false;
+    out = ads.getLastConversionResults();
+    return true;
+}
+
+// 9 SCL pulses release a slave that's mid-transaction holding SDA low.
+void i2cBusRecover() {
+    pinMode(22, OUTPUT);
+    pinMode(21, INPUT_PULLUP);
+    for (int i = 0; i < 9 && digitalRead(21) == LOW; i++) {
+        digitalWrite(22, LOW);  delayMicroseconds(5);
+        digitalWrite(22, HIGH); delayMicroseconds(5);
+    }
+}
+
 float readPotPosition(int i, bool pulled) {
-    int16_t raw = (i < 3)
-        ? (adsAOk ? adsA.readADC_SingleEnded(ADS_CH[i]) : 0)
-        : (adsBOk ? adsB.readADC_SingleEnded(ADS_CH[i]) : 0);
+    Adafruit_ADS1115 &ads = (i < 3) ? adsA : adsB;
+    bool &ok = (i < 3) ? adsAOk : adsBOk;
+    int16_t raw = 0;
+    if (ok && !readAdsBounded(ads, ADS_CH[i], raw)) ok = false;
+    if (!ok) return potPos[i];
     potRaw[i] = raw;
     int s = pulled ? 1 : 0;
     float r = potRawToR(raw);
@@ -130,7 +160,9 @@ void setup() {
     for (int i = 0; i < NUM_BTNS; i++) pinMode(BUTTON_PINS[i], INPUT_PULLUP);
     analogSetAttenuation(ADC_11db);
 
+    i2cBusRecover();
     Wire.begin(21, 22);
+    Wire.setTimeOut(20);
     adsA.setGain(GAIN_ONE);
     adsB.setGain(GAIN_ONE);
     adsA.setDataRate(RATE_ADS1115_860SPS);
@@ -155,9 +187,24 @@ void setup() {
     } else {
         Serial.println("ESP-NOW FAIL");
     }
+
+    // Core already panic-reboots on idle-CPU0 starvation; subscribing the loop
+    // task makes the WDT also catch a loop that stalls while yielding.
+    esp_task_wdt_add(NULL);
 }
 
 void loop() {
+    esp_task_wdt_reset();
+
+    static unsigned long lastAdsRetry = 0;
+    if ((!adsAOk || !adsBOk) && millis() - lastAdsRetry >= 1000) {
+        lastAdsRetry = millis();
+        i2cBusRecover();
+        Wire.begin(21, 22);
+        if (!adsAOk) adsAOk = adsA.begin(0x48, &Wire);
+        if (!adsBOk) adsBOk = adsB.begin(0x49, &Wire);
+    }
+
     for (int i = 0; i < NUM_POTS; i++) {
         int s1 = classifyWhite(i);
         if (s1 >= 0) {

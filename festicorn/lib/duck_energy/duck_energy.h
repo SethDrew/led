@@ -76,7 +76,6 @@ struct DuckFeatures {
     float gateHold;
     bool  gateOpen;
 
-    float hueRotDeg;
     float restAx, restAy, restAz;
     float calSumAx, calSumAy, calSumAz;
     uint32_t calSamples, calStartMs;
@@ -149,7 +148,6 @@ static inline void duckFeaturesReset(DuckFeatures &f) {
     duckResetAudio(f);
     duckResetTilt(f);
     f.hueIdx = 0.0f;
-    f.hueRotDeg = 0.0f;
     f.restAx = 0.0f; f.restAy = 0.0f; f.restAz = 1.0f;
     f.lastUpMs = 0;
 }
@@ -179,12 +177,9 @@ static inline void duckUpdateFloor(DuckFeatures &f, float rms, float dt) {
 
 // live = a fresh packet inside DUCK_TIMEOUT_MS. nowMs only needs to be a
 // monotonic host clock; it is compared against itself for the calibration
-// window, never against the packet's own uptime. hueRotDeg is the shared
-// rotation base, which the duck adds to its own full-wheel hue so its water
-// turns with the rest of the palette.
+// window, never against the packet's own uptime.
 static inline void duckFeaturesUpdate(DuckFeatures &f, const DuckPacketV1 &pkt,
-                                      float dt, uint32_t nowMs, bool live,
-                                      float hueRotDeg) {
+                                      float dt, uint32_t nowMs, bool live) {
     if (!live) {
         duckResetAudio(f);
         duckResetTilt(f);
@@ -194,8 +189,6 @@ static inline void duckFeaturesUpdate(DuckFeatures &f, const DuckPacketV1 &pkt,
 
     if (pkt.upMs < f.lastUpMs) duckResetTilt(f);
     f.lastUpMs = pkt.upMs;
-
-    f.hueRotDeg = hueRotDeg;
 
     float rms = duckDecodeRms(pkt.rms_mean);
 
@@ -304,7 +297,6 @@ static inline void duckWaterfallStep(float *lvl, float *hue, float *tlt, int len
     if (len > DUCK_WF_MAX_LEN) len = DUCK_WF_MAX_LEN;
 
     float cacheHue = -1.0f, cacheR = 0.0f, cacheG = 0.0f, cacheB = 0.0f;
-    const uint8_t baseIdx = duckOklchIdx(hueWrap360(f.hueRotDeg));
 
     for (int i = 0; i < len; i++) {
         float src = (float)i - shift;
@@ -318,27 +310,28 @@ static inline void duckWaterfallStep(float *lvl, float *hue, float *tlt, int len
             int i1 = (i0 + 1 < len) ? i0 + 1 : i0;
             float fr = src - (float)i0;
             nl = duckLerpf(lvl[i0], lvl[i1], fr) * decay;
-            int n = (fr < 0.5f) ? i0 : i1;
-            nh = hue[n];
-            nt = tlt[n];
+            // Interpolate hue/tilt too (hue on the wheel's shortest arc):
+            // nearest-neighbor self-samples whenever the per-frame shift is
+            // under half a cell (150 LEDs at 130fps = 0.35), freezing color
+            // in place forever while the level happily advects.
+            float dh = fmodf(hue[i1] - hue[i0] + 384.0f, 256.0f) - 128.0f;
+            nh = fmodf(hue[i0] + dh * fr + 256.0f, 256.0f);
+            nt = duckLerpf(tlt[i0], tlt[i1], fr);
         }
         nlv[i] = nl; nhu[i] = nh; ntl[i] = nt;
 
         float sp = fminf(nl, 1.0f);
         if (sp < DUCK_WF_DEADBAND) continue;
 
-        // Base water is the arc's own base hue, whitened as the level rises
-        // (the crest). It must not be a fixed color outside the arc: additive
-        // compositing only preserves hue within a convex arc, so an off-arc
-        // base mixed with an arc blue can land in the red band.
-        const float crest = 0.35f * sp;
-        float colR = duckLerpf((float)oklchConstL[baseIdx][0], 255.0f, crest);
-        float colG = duckLerpf((float)oklchConstL[baseIdx][1], 255.0f, crest);
-        float colB = duckLerpf((float)oklchConstL[baseIdx][2], 255.0f, crest);
+        // White water by default; rotation blends arc color in. The duck is
+        // its own palette on purpose (2026-07-31): it ignores the shared hue
+        // rotation, and the white base additively washing overlapped clicky
+        // pixels toward pastel is an accepted look, not a bug.
+        float colR = 255.0f, colG = 255.0f, colB = 255.0f;
         if (nt > 0.0f) {
             if (nh != cacheHue) {
                 cacheHue = nh;
-                uint8_t hi = duckOklchIdx(hueWrap360(cacheHue * (360.0f / 255.0f) + f.hueRotDeg));
+                uint8_t hi = duckOklchIdx(hueWrap360(cacheHue * (360.0f / 255.0f)));
                 // Constant-L, not the variable-L LUT the original duck uses:
                 // that one banks on an RGBW white channel carrying luminance,
                 // and on RGB-only strips its per-hue lightness swing (red 0.52,

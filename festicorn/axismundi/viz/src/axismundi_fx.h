@@ -56,7 +56,7 @@ static float AX_KETTLE_AGE = 1e9f;
 #define AX_RUFFLE_FREQ   1.4f
 #define AX_RUFFLE_SPEED  7.0f
 
-#define AX_BTN_SHARDS  0
+#define AX_BTN_DESAT   0
 #define AX_BTN_PUMP    1
 #define AX_BTN_HUEROT  2
 #define AX_BTN_GATHER  3
@@ -73,7 +73,6 @@ static float AX_KETTLE_AGE = 1e9f;
 #define AX_PUMP_MAX    3.0f
 #define AX_PUMP_TAU    0.6f
 #define AX_PUMP_RISE_S 1.0f
-#define AX_SHARD_BURST_S 0.12f
 #define AX_HUEROT_DEG_S  90.0f
 #define AX_RAINBOW_BURST 10
 #define AX_EMIT_LIFE     0.45f
@@ -81,6 +80,8 @@ static float AX_KETTLE_AGE = 1e9f;
 #define AX_SPLIT_S       0.10f
 #define AX_MOVE_EPS    0.0015f
 #define AX_GATHER_S    0.25f
+#define AX_DESAT_MIN   0.5f
+#define AX_DESAT_S     0.3f
 #define AX_NUM_SHARDS  48
 
 static uint32_t ax_prng = 0x1234567u;
@@ -126,7 +127,7 @@ static float ax_pump[AX_NUM_POTS];
 static int   ax_shardNext = 0;
 static float ax_gather = 0.0f;
 static float ax_movedAgo[AX_NUM_POTS];
-static float ax_shardTimer = 0.0f;
+static float ax_desat = 1.0f;
 static uint8_t ax_prevPull = 0;
 static float ax_split[AX_NUM_POTS];
 static float ax_splitEase[AX_NUM_POTS];
@@ -143,7 +144,7 @@ static void ax_reset() {
     memset(ax_splitEase, 0, sizeof(ax_splitEase));
     for (int k = 0; k < AX_NUM_POTS; k++) { ax_movedAgo[k] = 1e9f; ax_pump[k] = 1.0f; }
     ax_fade = 1.0f; ax_crackleT = 0.0f; ax_gather = 0.0f;
-    ax_shardTimer = 0.0f; ax_prevPull = 0; ax_shardNext = 0;
+    ax_desat = 1.0f; ax_prevPull = 0; ax_shardNext = 0;
     ax_ready = true;
 }
 
@@ -194,8 +195,7 @@ static void ax_duck_update(float dt) {
     AX_DUCK_AGE += dt;
     ax_now_ms += dt * 1000.0f;
     bool live = AX_DUCK_SEEN && AX_DUCK_AGE < AXK_STALE_S;
-    duckFeaturesUpdate(ax_duck, AX_DUCK, dt, (uint32_t)ax_now_ms, live,
-                       ax_hueRotDeg);
+    duckFeaturesUpdate(ax_duck, AX_DUCK, dt, (uint32_t)ax_now_ms, live);
     ax_duck_inject = duckWaterfallInject(ax_duck, live);
 }
 
@@ -345,9 +345,18 @@ static void ax_raster_strip(RGBf* out, int base, int len, int ring,
         float tr = 0.0f, tg = 0.0f, tb = 0.0f;
         if (bg > 0.0f)
             ax_hsv(hueWrap360(ax_trailHue[base+i] + ax_hueRotDeg), 1.0f, 1.0f, tr, tg, tb);
-        comp[i][0] = (buf[i][0] + tr * bg) * ruffle;
-        comp[i][1] = (buf[i][1] + tg * bg) * ruffle;
-        comp[i][2] = (buf[i][2] + tb * bg) * ruffle;
+        float cr = buf[i][0] + tr * bg;
+        float cg = buf[i][1] + tg * bg;
+        float cb = buf[i][2] + tb * bg;
+        if (ax_desat < 0.999f) {
+            float luma = 0.299f * cr + 0.587f * cg + 0.114f * cb;
+            cr = luma + (cr - luma) * ax_desat;
+            cg = luma + (cg - luma) * ax_desat;
+            cb = luma + (cb - luma) * ax_desat;
+        }
+        comp[i][0] = cr * ruffle;
+        comp[i][1] = cg * ruffle;
+        comp[i][2] = cb * ruffle;
     }
 
     static float dbuf[AX_MAX_STRIP][3];
@@ -409,7 +418,7 @@ static void ax_render_clicky(RGBf* out, float dt) {
 
     bool fadeHeld   = AX_CLICKY.btnBits & (1 << AX_BTN_FADE);
     bool gatherHeld = AX_CLICKY.btnBits & (1 << AX_BTN_GATHER);
-    bool shardsHeld = AX_CLICKY.btnBits & (1 << AX_BTN_SHARDS);
+    bool desatHeld  = AX_CLICKY.btnBits & (1 << AX_BTN_DESAT);
     bool pumpHeld   = AX_CLICKY.btnBits & (1 << AX_BTN_PUMP);
     bool hueRotHeld = AX_CLICKY.btnBits & (1 << AX_BTN_HUEROT);
 
@@ -464,26 +473,10 @@ static void ax_render_clicky(RGBf* out, float dt) {
         ax_splitEase[k] = s * s * (3.0f - 2.0f * s);
     }
 
-    if (shardsHeld) ax_shardTimer -= dt;
-    else            ax_shardTimer = 0.0f;
-    if (shardsHeld && ax_shardTimer <= 0.0f) {
-        ax_shardTimer += AX_SHARD_BURST_S;
-        for (int k = 0; k < AX_NUM_POTS; k++) {
-            if (k == AX_BRIGHT_POT) continue;
-            float centerN = ax_pos[k];
-            float edgeN = 2.0f * AX_SIGMA_NORM * ax_pump[k];
-            int burst = 1 + (int)(ax_rand() * 2.0f);
-            for (int m = 0; m < burst; m++) {
-                AxShard &sh = ax_shards[ax_shardNext];
-                ax_shardNext = (ax_shardNext + 1) % AX_NUM_SHARDS;
-                float dir = (ax_rand() < 0.5f) ? -1.0f : 1.0f;
-                sh.pos = centerN + dir * edgeN;
-                sh.vel = dir * (0.25f + ax_rand() * 0.20f);
-                sh.hue = AX_HUES[k] + (ax_rand() - 0.5f) * 50.0f;
-                sh.maxLife = 0.20f + ax_rand() * 0.15f;
-                sh.life = sh.maxLife;
-            }
-        }
+    {
+        float target = desatHeld ? AX_DESAT_MIN : 1.0f;
+        float da = fminf(1.0f, dt / AX_DESAT_S);
+        ax_desat += da * (target - ax_desat);
     }
 
     for (int n = 0; n < AX_NUM_SHARDS; n++) {

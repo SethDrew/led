@@ -103,7 +103,7 @@ const float* duck_probe_feed(int rmsMean, int rmsMax, int seq, float dt) {
     p.rms_mean = (uint8_t)rmsMean;
     p.rms_max  = (uint8_t)rmsMax;
     p.flags    = DUCK_FLAG_NO_IMU;
-    duckFeaturesUpdate(g_probe, p, dt, 0, true, 0.0f);
+    duckFeaturesUpdate(g_probe, p, dt, 0, true);
 
     const float rms      = duckDecodeRms(p.rms_mean);
     const float effFloor = g_probe.floorV * DUCK_FLOOR_HEADROOM;

@@ -74,14 +74,17 @@ needing a gain knob; a steady tone correctly reads as background and fades
 to nothing. Onsets (fast vs slow EMA, with a refractory lock) shove an
 extra slug of energy in, which is what reads as beat response.
 
-**Rotate the duck to change colour**, mirroring the original duck's sparkle
-interaction: the first 2 s at rest calibrates a rest vector, then the angle
-away from it (10° deadzone, saturating at 180°) picks a hue from the OKLCH
-LUT and blends it in over the next 40°. Rotation is a *colour* control
-only — the water level owns brightness, so axismundi uses the constant-L
-LUT rather than the variable-L one the original duck uses. The original
-banks on an RGBW white channel to carry luminance; on these RGB-only
-WS2812B strips, variable-L would make rotation read partly as dimming.
+**The water is white at rest; rotate the duck to colour it**, mirroring the
+original duck's sparkle interaction: the first 2 s at rest calibrates a rest
+vector, then the angle away from it (10° deadzone, saturating at 180°) picks
+a hue from the OKLCH LUT and blends it in over the next 40°. Rotation is a
+*colour* control only — the water level owns brightness, so axismundi uses
+the constant-L LUT rather than the variable-L one the original duck uses
+(that one banks on an RGBW white channel; on RGB-only WS2812B, variable-L
+would make rotation read partly as dimming). The duck is its own palette:
+it ignores the clicky hue-rot and every other layer's colour state, and its
+white base additively washing overlapped particles toward pastel is an
+accepted look (2026-07-31).
 
 Shared math lives in `lib/duck_energy` so the firmware and the
 visualizer twin in `viz/` cannot drift apart.

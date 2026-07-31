@@ -18,7 +18,7 @@
  *
  *   pot position  → particle position along the strip (fixed per-pot hue)
  *   pull out      → split the blob into a spaced comb (×4 spacing)
- *   btn 0 shards  → hold to spray free-flying shards from each particle
+ *   btn 0 desat   → hold to fade chroma to 20% (pastel), release restores
  *   btn 1 pump    → hold to grow particle size
  *   btn 2 hue-rot → hold to rotate hue continuously
  *   btn 3 gather  → hold to pull all particles to the field mean
@@ -43,9 +43,10 @@
  * Layer order matters: the clicky field is composed in logical ring space and
  * rotated by the carousel, while the duck waterfall and the kettle crackle are
  * composited afterwards in physical space, so spin never drags them off their
- * spot on the sculpture. All chromatic layers map their hue through the shared
- * rotation base, so the palette turns as one. Red-with-blue is kept off the
- * piece by the choice of the six pot seeds alone; see CLICKY_HUES.
+ * spot on the sculpture. Clicky layers map their hue through the shared
+ * rotation base; the duck water is its own palette (white at rest, duck
+ * rotation colors it) and deliberately ignores hue-rot. Red-with-blue is kept
+ * off the piece by the choice of the six pot seeds alone; see CLICKY_HUES.
  */
 
 #include <Arduino.h>
@@ -325,7 +326,7 @@ static bool  clickyPosInit = false;
 static float clickyRufflePhase = 0.0f;
 
 // Buttons (bit = panel position, left to right). See header comment.
-#define CLICKY_BTN_SHARDS  0
+#define CLICKY_BTN_DESAT   0
 #define CLICKY_BTN_PUMP    1
 #define CLICKY_BTN_HUEROT  2
 #define CLICKY_BTN_GATHER  3
@@ -341,7 +342,6 @@ static float clickyRufflePhase = 0.0f;
 #define CLICKY_PUMP_MAX    3.0f
 #define CLICKY_PUMP_TAU    0.6f
 #define CLICKY_PUMP_RISE_S 1.0f    // hold time to swell from 1.0 to PUMP_MAX
-#define CLICKY_SHARD_BURST_S 0.12f // seconds between shard bursts while held
 #define CLICKY_HUEROT_DEG_S  90.0f // hue rotation rate (deg/sec) while held
 #define CLICKY_RAINBOW_BURST 10    // shards per pull/push gesture (= comb teeth ±1..±5)
 #define CLICKY_EMIT_LIFE     0.45f // pull-out: shard reaches its comb tooth as it dies
@@ -349,6 +349,8 @@ static float clickyRufflePhase = 0.0f;
 #define CLICKY_SPLIT_S       0.10f // comb spacing ramp time, 1 ↔ full, on pull/push
 #define CLICKY_MOVE_EPS    0.0015f // per-frame smoothed-pos delta = "moving"
 #define CLICKY_GATHER_S    0.25f   // ramp time to fully gathered
+#define CLICKY_DESAT_MIN   0.5f    // chroma floor while desat button held
+#define CLICKY_DESAT_S     0.3f    // ramp time full color <-> desaturated
 
 // Shard field lives in normalized space: pos in [0,1], vel in units/sec.
 #define CLICKY_NUM_SHARDS  48
@@ -368,7 +370,7 @@ static float clickyPump[CLICKY_NUM_POTS];
 static int   clickyShardNext = 0;
 static float clickyGather = 0.0f;
 static float clickyMovedAgo[CLICKY_NUM_POTS];
-static float clickyShardTimer = 0.0f;
+static float clickyDesat = 1.0f;
 static uint8_t clickyPrevPull = 0;
 static float clickySplit[CLICKY_NUM_POTS];
 static float clickySplitEase[CLICKY_NUM_POTS];
@@ -388,7 +390,7 @@ static void resetClickyParticles() {
     clickyFade = 1.0f;
     clickyCrackleT = 0.0f;
     clickyGather = 0.0f;
-    clickyShardTimer = 0.0f;
+    clickyDesat = 1.0f;
     clickyPrevPull = 0;
     clickyShardNext = 0;
 }
@@ -533,9 +535,18 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
         float tr = 0.0f, tg = 0.0f, tb = 0.0f;
         if (bg > 0.0f)
             hsvToRgb(hueWrap360(clickyTrailHue[s][i] + gHueRotDeg), 1.0f, 1.0f, tr, tg, tb);
-        frameBuf[s][i][0] = (buf[i][0] + tr * bg) * ruffle;
-        frameBuf[s][i][1] = (buf[i][1] + tg * bg) * ruffle;
-        frameBuf[s][i][2] = (buf[i][2] + tb * bg) * ruffle;
+        float cr = buf[i][0] + tr * bg;
+        float cg = buf[i][1] + tg * bg;
+        float cb = buf[i][2] + tb * bg;
+        if (clickyDesat < 0.999f) {
+            float luma = 0.299f * cr + 0.587f * cg + 0.114f * cb;
+            cr = luma + (cr - luma) * clickyDesat;
+            cg = luma + (cg - luma) * clickyDesat;
+            cb = luma + (cb - luma) * clickyDesat;
+        }
+        frameBuf[s][i][0] = cr * ruffle;
+        frameBuf[s][i][1] = cg * ruffle;
+        frameBuf[s][i][2] = cb * ruffle;
     }
 }
 
@@ -577,7 +588,7 @@ static void renderClickyParticles(float dt) {
 
     bool fadeHeld   = pkt.btnBits & (1 << CLICKY_BTN_FADE);
     bool gatherHeld = pkt.btnBits & (1 << CLICKY_BTN_GATHER);
-    bool shardsHeld = pkt.btnBits & (1 << CLICKY_BTN_SHARDS);
+    bool desatHeld  = pkt.btnBits & (1 << CLICKY_BTN_DESAT);
     bool pumpHeld   = pkt.btnBits & (1 << CLICKY_BTN_PUMP);
     bool hueRotHeld = pkt.btnBits & (1 << CLICKY_BTN_HUEROT);
 
@@ -633,26 +644,10 @@ static void renderClickyParticles(float dt) {
         clickySplitEase[k] = t * t * (3.0f - 2.0f * t);
     }
 
-    if (shardsHeld) clickyShardTimer -= dt;
-    else            clickyShardTimer = 0.0f;
-    if (shardsHeld && clickyShardTimer <= 0.0f) {
-        clickyShardTimer += CLICKY_SHARD_BURST_S;
-        for (int k = 0; k < CLICKY_NUM_POTS; k++) {
-            if (k == CLICKY_BRIGHT_POT) continue;
-            float centerN = clickyPos[k];
-            float edgeN = 2.0f * CLICKY_SIGMA_NORM * clickyPump[k];
-            int burst = 1 + (int)(randFloat() * 2.0f);
-            for (int m = 0; m < burst; m++) {
-                ClickyShard &sh = clickyShards[clickyShardNext];
-                clickyShardNext = (clickyShardNext + 1) % CLICKY_NUM_SHARDS;
-                float dir = (randFloat() < 0.5f) ? -1.0f : 1.0f;
-                sh.pos = centerN + dir * edgeN;
-                sh.vel = dir * (0.25f + randFloat() * 0.20f);   // units/sec
-                sh.hue = CLICKY_HUES[k] + (randFloat() - 0.5f) * 50.0f;
-                sh.maxLife = 0.20f + randFloat() * 0.15f;
-                sh.life = sh.maxLife;
-            }
-        }
+    {
+        float target = desatHeld ? CLICKY_DESAT_MIN : 1.0f;
+        float da = fminf(1.0f, dt / CLICKY_DESAT_S);
+        clickyDesat += da * (target - clickyDesat);
     }
 
     // Integrate shards once (rasterStrip reads them read-only). Positions
@@ -700,7 +695,7 @@ static void duckUpdate(float dt) {
     DuckPacketV1 pkt;
     memcpy(&pkt, (const void*)&duckPkt, sizeof(pkt));
     bool wasCal = duck.calibrated;
-    duckFeaturesUpdate(duck, pkt, dt, millis(), duckLive(), gHueRotDeg);
+    duckFeaturesUpdate(duck, pkt, dt, millis(), duckLive());
     if (duck.calibrated && !wasCal)
         Serial.printf("duck rest vector (%.3f, %.3f, %.3f)\n",
                       duck.restAx, duck.restAy, duck.restAz);

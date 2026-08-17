@@ -308,7 +308,7 @@ function wireViewer() {
   const box = document.getElementById('viewerbox');
   const hint = document.getElementById('vhint');
 
-  import('/viz/led3d.mjs')
+  importRetry('/viz/led3d.mjs')
     .then(m => m.default(box, { gainLabel: document.getElementById('vgain') }))
     .then(v => { window.LED3D = v; box.classList.add('live'); })
     .catch(e => {
@@ -337,7 +337,7 @@ function wireScope() {
 
   const mount = () => {
     if (scope) return Promise.resolve(scope);
-    scope = import('/viz/duckscope.mjs')
+    scope = importRetry('/viz/duckscope.mjs')
       .then(m => m.default(document.getElementById('sbody')))
       .then(s => { window.__duckScope = s; return s; })
       .catch(e => {
@@ -416,13 +416,170 @@ function pollEvents() {
     .finally(() => setTimeout(pollEvents, 100));
 }
 
-fetch('/api/config').then(r => r.json()).then(c => {
+// This host's loopback flakily drops SYNs; an unarmored fetch can hang for
+// minutes holding one of Chrome's 6 per-origin sockets. Everything at boot
+// retries with a short timeout so one black-holed request can't wedge the page.
+function fetchRetry(url, tries = 10) {
+  return fetch(url, {signal: AbortSignal.timeout(2000)})
+    .catch(e => tries <= 1 ? Promise.reject(e)
+      : new Promise(r => setTimeout(r, 250)).then(() => fetchRetry(url, tries - 1)));
+}
+
+function importRetry(url, tries = 6) {
+  const once = () => Promise.race([
+    import(url),
+    new Promise((_, rej) =>
+      setTimeout(() => rej(new Error('import timeout: ' + url)), 4000)),
+  ]);
+  return once().catch(e => tries <= 1 ? Promise.reject(e)
+    : new Promise(r => setTimeout(r, 300)).then(() => importRetry(url, tries - 1)));
+}
+
+fetchRetry('/api/config').then(r => r.json()).then(c => {
   CFG = c;
   buildStage();
   wireScope();
   wireLog();
   pollState();
   pollEvents();
+  if (new URLSearchParams(location.search).has('sim')) wireSimConsole();
 });
+
+// Virtual clicky console (?sim=1): drives the engine directly, for boardless
+// work. Hold a REC button (or keys 1-6) while dragging its pot. The real
+// bridge path is untouched — applyState only pushes clicky while the physical
+// console is online, which it isn't when this panel is in use.
+function wireSimConsole() {
+  const st = { p: [0.5, 0.5, 0.5, 0.5, 0.5, 1.0],
+               btn: [0, 0, 0, 0, 0, 0], pull: [0, 0, 0, 0, 0, 0] };
+  const kt = { enc: 0, hold: 0, twist: 0, fly: 0, counter: 0, crackle: 0 };
+  window.__sim = {
+    set(k, v) { st.p[k] = v; },
+    btn(mask) { for (let k = 0; k < 6; k++) st.btn[k] = (mask >> k) & 1; },
+    pull(mask) { for (let k = 0; k < 6; k++) st.pull[k] = (mask >> k) & 1; },
+    spin(counts) { kt.enc += counts; },
+    kpress(v) { kt.hold = v ? 1 : 0; },
+    ktwist(v) { kt.twist = v ? 1 : 0; },
+    kmode(m) { const f = ['fly', 'counter', 'crackle'][m];
+               kt[f] = 1; setTimeout(() => { kt[f] = 0; }, 150); },
+    state: st, kettle: kt,
+  };
+  const css = document.createElement('style');
+  css.textContent =
+    '#simpanel{position:fixed;left:10px;bottom:10px;z-index:50;background:#111c;' +
+    'border:1px solid #345;border-radius:6px;padding:8px 10px;font:11px monospace;color:#9ab}' +
+    '#simpanel .srowx{display:flex;align-items:center;gap:6px;margin:3px 0}' +
+    '#simpanel input[type=range]{width:130px}' +
+    '#simpanel button{background:#223;border:1px solid #456;color:#9ab;border-radius:3px;' +
+    'cursor:pointer;font:10px monospace;padding:2px 6px}' +
+    '#simpanel button.on{background:#286;color:#fff}' +
+    '#simpanel .hue{display:inline-block;width:9px;height:9px;border-radius:2px}';
+  document.head.appendChild(css);
+  const hues = [0, 60, 120, 180, 272, 300];
+  const div = document.createElement('div');
+  div.id = 'simpanel';
+  div.innerHTML = '<b>virtual clicky</b> <span style="color:#678">(hold B0-B5 / keys 1-6)</span>' +
+    st.p.map((v, k) =>
+      '<div class="srowx"><span class="hue" style="background:hsl(' + hues[k] + ',90%,55%)"></span>' +
+      '<input type="range" min="0" max="1" step="0.001" value="' + v + '" id="simp' + k + '">' +
+      '<button id="simb' + k + '">B' + k + '</button>' +
+      '<button id="simu' + k + '">pull</button>' +
+      '<span>' + (k === 5 ? 'bright' : 'pot ' + k) + '</span></div>').join('') +
+    '<b style="display:block;margin-top:6px">virtual kettle</b>' +
+    '<div class="srowx"><div id="simwheel" style="width:130px;height:22px;border:1px solid #456;' +
+    'border-radius:3px;cursor:ew-resize;text-align:center;line-height:22px;user-select:none">' +
+    'drag / &larr;&rarr; to spin</div>' +
+    '<button id="simkp">PRESS</button><button id="simkt">TWIST</button>' +
+    '<span style="color:#678">twist toggles (or T)</span></div>' +
+    '<div class="srowx"><span style="color:#678">mode:</span>' +
+    '<button id="simkm0" class="on">ROT</button>' +
+    '<button id="simkm1">DUP</button>' +
+    '<button id="simkm2">COMB</button>' +
+    '<span style="color:#678">(or 7/8/9)</span></div>';
+  document.body.appendChild(div);
+  for (let k = 0; k < 6; k++) {
+    document.getElementById('simp' + k).addEventListener('input',
+      e => { st.p[k] = parseFloat(e.target.value); });
+    const b = document.getElementById('simb' + k);
+    const dn = () => { st.btn[k] = 1; b.classList.add('on'); };
+    const up = () => { st.btn[k] = 0; b.classList.remove('on'); };
+    b.addEventListener('mousedown', dn);
+    b.addEventListener('touchstart', e => { e.preventDefault(); dn(); });
+    ['mouseup', 'mouseleave'].forEach(ev => b.addEventListener(ev, up));
+    b.addEventListener('touchend', up);
+    const u = document.getElementById('simu' + k);
+    u.addEventListener('click', () => {
+      st.pull[k] ^= 1; u.classList.toggle('on', !!st.pull[k]);
+    });
+  }
+  document.addEventListener('keydown', e => {
+    const k = '123456'.indexOf(e.key);
+    if (k >= 0 && !e.repeat) {
+      st.btn[k] = 1;
+      document.getElementById('simb' + k).classList.add('on');
+    }
+  });
+  document.addEventListener('keyup', e => {
+    const k = '123456'.indexOf(e.key);
+    if (k >= 0) {
+      st.btn[k] = 0;
+      document.getElementById('simb' + k).classList.remove('on');
+    }
+  });
+  const wheel = document.getElementById('simwheel');
+  let dragX = null;
+  wheel.addEventListener('pointerdown', e => {
+    dragX = e.clientX; wheel.setPointerCapture(e.pointerId);
+  });
+  wheel.addEventListener('pointermove', e => {
+    if (dragX === null) return;
+    kt.enc += Math.round((e.clientX - dragX) * 60 / 200);
+    dragX = e.clientX;
+  });
+  ['pointerup', 'pointercancel'].forEach(ev =>
+    wheel.addEventListener(ev, () => { dragX = null; }));
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowLeft') kt.enc -= 2;
+    if (e.key === 'ArrowRight') kt.enc += 2;
+  });
+  const kp = document.getElementById('simkp'), ktb = document.getElementById('simkt');
+  const hold = (el, fn) => {
+    const dn = () => { fn(1); el.classList.add('on'); };
+    const up = () => { fn(0); el.classList.remove('on'); };
+    el.addEventListener('mousedown', dn);
+    el.addEventListener('touchstart', e => { e.preventDefault(); dn(); });
+    ['mouseup', 'mouseleave'].forEach(ev => el.addEventListener(ev, up));
+    el.addEventListener('touchend', up);
+  };
+  hold(kp, v => { kt.hold = v; });
+  const twistToggle = () => {
+    kt.twist ^= 1;
+    ktb.classList.toggle('on', !!kt.twist);
+  };
+  ktb.addEventListener('click', twistToggle);
+  document.addEventListener('keydown', e => {
+    if ((e.key === 't' || e.key === 'T') && !e.repeat) twistToggle();
+  });
+  const modeSel = m => {
+    window.__sim.kmode(m);
+    for (let i = 0; i < 3; i++)
+      document.getElementById('simkm' + i).classList.toggle('on', i === m);
+  };
+  for (let m = 0; m < 3; m++)
+    document.getElementById('simkm' + m).addEventListener('click', () => modeSel(m));
+  document.addEventListener('keydown', e => {
+    const m = '789'.indexOf(e.key);
+    if (m >= 0 && !e.repeat) modeSel(m);
+  });
+  setInterval(() => {
+    if (!window.LED3D) return;
+    window.LED3D.applyState({ roles: {
+      clicky: { online: true, state: st },
+      kettle: { online: true, state: {
+        c: kt.enc, btn: [kt.hold, kt.fly, kt.twist, kt.counter, kt.crackle],
+        up: Math.round(performance.now()) } },
+    } });
+  }, 33);
+}
 </script>
 </body></html>

@@ -61,7 +61,8 @@ KETTLE_COUNTS_PER_DETENT = 2
 KETTLE_DETENTS_PER_REV = 30
 
 KETTLE_BTNS = [
-    {"label": "knob", "sub": "knob push · GPIO 21 · unassigned", "region": None},
+    {"label": "knob", "sub": "knob push · GPIO 21 · sandbox: ease all spin "
+                            "integrals home", "region": None},
     {"label": "flywheel", "sub": "top · GPIO 9 · toggle · spin keeps coasting",
      "region": "top"},
     {"label": "twist", "sub": "left · GPIO 7 · hold+spin · fans rings out of phase",
@@ -83,7 +84,7 @@ ROSTER = [
     {"role": "kettle", "title": "KETTLE-KNOB", "baud": 115200,
      "detail": "30-detent encoder + 5 buttons"},
     {"role": "duck", "title": "DUCK-SENDER", "baud": 115200,
-     "detail": "accel telemetry · integration TBD"},
+     "detail": "mic energy waterfall · tilt recolors the water"},
 ]
 ROLES = [r["role"] for r in ROSTER]
 BAUD_BY_ROLE = {r["role"]: r["baud"] for r in ROSTER}
@@ -739,15 +740,13 @@ def main():
     if not sources and not args.replay_duck:
         print("[warn] no sources — dashboard will show every console offline")
 
-    class DualStackServer(ThreadingHTTPServer):
-        address_family = socket.AF_INET6
+    # IPv4-only on purpose: the macOS application firewall silently drops IPv6
+    # TCP to python, so a dual-stack bind makes Chrome hang on localhost (::1
+    # never gets a RST to trigger IPv4 fallback).
+    class Server(ThreadingHTTPServer):
         daemon_threads = True
 
-        def server_bind(self):
-            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-            super().server_bind()
-
-    httpd = DualStackServer(("::", args.http), Handler)
+    httpd = Server(("0.0.0.0", args.http), Handler)
     print(f"Dashboard: http://localhost:{args.http}/")
     try:
         httpd.serve_forever()

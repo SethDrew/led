@@ -31,6 +31,12 @@
 
 #define KETTLE_ROT_TAU 0.12f   // detent steps glide instead of snapping
 
+// Spin-to-carousel gain: rings advanced per knob revolution. Hosts may
+// override before including (sandbox runs 0.5); default is the production 1:1.
+#ifndef KETTLE_SPIN_GAIN
+#define KETTLE_SPIN_GAIN 1.0f
+#endif
+
 #define KETTLE_BTN_FLYWHEEL 1
 #define KETTLE_BTN_TWIST    2
 #define KETTLE_BTN_COUNTER  3
@@ -122,7 +128,7 @@ static inline void kettleInput(KettleState &k, int32_t enc, uint8_t btnBits,
     int32_t delta = enc - k.lastEnc;
     k.lastEnc = enc;
     k.lastUp = upMs;
-    k.rotPending += (float)delta
+    k.rotPending += (float)delta * KETTLE_SPIN_GAIN
         / (float)(KETTLE_COUNTS_PER_DETENT * KETTLE_DETENTS_PER_REV);
     k.btnBits = btnBits;
 }

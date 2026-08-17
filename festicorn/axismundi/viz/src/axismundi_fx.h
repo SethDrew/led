@@ -19,6 +19,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
+#define KETTLE_SPIN_GAIN 0.5f
 #include <kettle_energy.h>
 #include <duck_energy.h>
 #include <hue_arc.h>
@@ -83,6 +84,37 @@ static float AX_KETTLE_AGE = 1e9f;
 #define AX_DESAT_MIN   0.5f
 #define AX_DESAT_S     0.3f
 #define AX_NUM_SHARDS  48
+
+// ── Ghost recorder (sandbox experiment, mirrors axismundi_sandbox.cpp) ──────
+// AX_GHOST 1 replaces the six button holds: hold button k to record particle
+// k's motion, release to leave a dim ghost looping the gesture ping-pong.
+// Tap (< GHOST_MIN samples) clears. 0 restores production button behavior.
+#define AX_GHOST 1
+#define AXG_CAP_HZ       25.0f
+#define AXG_MAX_S        15
+#define AXG_MAX_SAMPLES  ((int)(AXG_CAP_HZ * AXG_MAX_S))
+#define AXG_MIN_SAMPLES  6
+#define AXG_LEVEL        0.45f
+#define AXG_FADE_S       30.0f
+
+// Button -> pots recorded, many-to-many. Mirrors GHOST_BTN_POTS in
+// axismundi_sandbox.cpp — keep the two tables identical.
+static const uint8_t AXG_BTN_POTS[6] =
+    { 1 << 0, 1 << 1, 1 << 2, 1 << 3, 1 << 4, 0 };
+
+static float    axg_track[AX_NUM_POTS][AXG_MAX_SAMPLES];
+static float    axg_splitTrack[AX_NUM_POTS][AXG_MAX_SAMPLES];
+static uint16_t axg_count[AX_NUM_POTS];
+static bool     axg_rec[AX_NUM_POTS];
+static float    axg_playPos[AX_NUM_POTS];
+static float    axg_playDir[AX_NUM_POTS];
+static float    axg_capAccum[AX_NUM_POTS];
+static uint8_t  axg_prevBtn = 0;
+static float    axg_renderPos[AX_NUM_POTS];
+static float    axg_renderSplit[AX_NUM_POTS];
+static float    axg_renderLvl[AX_NUM_POTS];
+static float    axg_age[AX_NUM_POTS];
+static bool     axg_renderOn[AX_NUM_POTS];
 
 static uint32_t ax_prng = 0x1234567u;
 static inline uint32_t ax_xorshift32() {
@@ -164,11 +196,129 @@ static void ax_kettle_reset() {
     kettleSetRings(ax_kettle, 4);
 }
 
+#define AX_LOOP_RECORD 0
+#if AX_LOOP_RECORD
+#include "loop_record_fx.h"
+#endif
+
+// Sandbox: knob press = return to known-good state — quadratic ease-out home
+// along each ring's shortest path, not a snap. Only twist (btn B) reaches the
+// kettle math; flywheel, counter-rotate, and crackle are masked off,
+// reserved. Mirrors axismundi_sandbox.cpp.
+#define AXK_RESET_S 1.2f
+static float axk_resetFrom[4];
+static float axk_resetT = -1.0f;
+
+// Sandbox: three spin modes on the freed kettle buttons, tap to select.
+// Buttons are physical-panel dependent — edit AXK_MODE_BTNS to remap; keep
+// identical to KMODE_BTNS in axismundi_sandbox.cpp.
+#define AXK_MODE_ROTATE 0   // carousel; leaks home while the knob rests
+#define AXK_MODE_DUP    1   // lives pinned; spun duplicates fade after stop
+#define AXK_MODE_COMB   2   // spin speed pushes out every particle's comb
+static const uint8_t AXK_MODE_BTNS[3] =
+    { KETTLE_BTN_FLYWHEEL, KETTLE_BTN_COUNTER, KETTLE_BTN_CRACKLE };
+#define AXK_LEAK_TAU       6.0f
+#define AXK_LEAK_EPS_REVS  0.02f
+#define AXK_DUP_LEVEL      0.55f
+#define AXK_DUP_RISE_S     0.15f
+#define AXK_DUP_FADE_S     2.5f
+#define AXK_COMB_FULL_REVS 0.5f
+#define AXK_COMB_RISE_TAU  0.12f
+#define AXK_COMB_FALL_TAU  1.0f
+
+static int     axk_mode = AXK_MODE_ROTATE;
+static uint8_t axk_prevModeBtns = 0;
+static float   axk_dupLvl = 0.0f;
+static float   axk_combPump = 0.0f;
+static float   axk_combEase = 0.0f;
+
+static void axk_zero_rot() {
+    for (int r = 0; r < 4; r++) ax_kettle.ringRot[r] = 0.0f;
+    ax_kettle.rot = 0.0f;
+    ax_kettle.rotPending = 0.0f;
+    ax_kettle.vel = 0.0f;
+}
+
 static void ax_kettle_update(float dt) {
     AX_KETTLE_AGE += dt;
-    if (AX_KETTLE_SEEN && AX_KETTLE_AGE < AXK_STALE_S)
-        kettleInput(ax_kettle, AX_KETTLE.enc, AX_KETTLE.btnBits, AX_KETTLE.upMs);
+    if (AX_KETTLE_SEEN && AX_KETTLE_AGE < AXK_STALE_S) {
+        static uint8_t prevHold = 0;
+        uint8_t hold = (AX_KETTLE.btnBits >> KETTLE_BTN_HOLD) & 1;
+        if (hold && !prevHold) {
+            ax_kettle.rotPending = 0.0f;
+            ax_kettle.vel = 0.0f;
+            for (int r = 0; r < 4; r++) {
+                float p = ax_kettle.ringRot[r];
+                axk_resetFrom[r] = p - roundf(p);
+            }
+            axk_resetT = 0.0f;
+        }
+        prevHold = hold;
+        uint8_t modeBtns = 0;
+        for (int m = 0; m < 3; m++)
+            if ((AX_KETTLE.btnBits >> AXK_MODE_BTNS[m]) & 1) modeBtns |= 1 << m;
+        uint8_t modeEdge = modeBtns & ~axk_prevModeBtns;
+        axk_prevModeBtns = modeBtns;
+        for (int m = 0; m < 3; m++)
+            if (modeEdge & (1 << m)) {
+                axk_mode = m;
+                axk_zero_rot();
+                axk_dupLvl = 0.0f;
+            }
+        kettleInput(ax_kettle, AX_KETTLE.enc,
+                    AX_KETTLE.btnBits & (uint8_t)(1 << KETTLE_BTN_TWIST),
+                    AX_KETTLE.upMs);
+    }
+    float rotBefore = ax_kettle.rot;
     kettleRotStep(ax_kettle, dt);
+    float adv = ax_kettle.rot - rotBefore;
+    adv -= roundf(adv);
+    float speed = (dt > 0.0f) ? adv / dt : 0.0f;
+
+    if (axk_mode == AXK_MODE_ROTATE && axk_resetT < 0.0f
+        && fabsf(speed) < AXK_LEAK_EPS_REVS) {
+        float f = expf(-dt / AXK_LEAK_TAU);
+        for (int r = 0; r < 4; r++) {
+            float d = ax_kettle.ringRot[r];
+            d -= roundf(d);
+            ax_kettle.ringRot[r] = kettleWrap01(d * f);
+        }
+        float d = ax_kettle.rot;
+        d -= roundf(d);
+        ax_kettle.rot = kettleWrap01(d * f);
+    }
+
+    if (axk_mode == AXK_MODE_DUP) {
+        if (fabsf(speed) > AXK_LEAK_EPS_REVS) {
+            axk_dupLvl = fminf(1.0f, axk_dupLvl + dt / AXK_DUP_RISE_S);
+        } else {
+            axk_dupLvl -= dt / AXK_DUP_FADE_S;
+            if (axk_dupLvl <= 0.0f) { axk_dupLvl = 0.0f; axk_zero_rot(); }
+        }
+    }
+
+    {
+        float target = (axk_mode == AXK_MODE_COMB)
+            ? fminf(1.0f, fabsf(speed) / AXK_COMB_FULL_REVS) : 0.0f;
+        float tau = (target > axk_combPump) ? AXK_COMB_RISE_TAU : AXK_COMB_FALL_TAU;
+        axk_combPump += fminf(1.0f, dt / tau) * (target - axk_combPump);
+        axk_combEase = axk_combPump * axk_combPump * (3.0f - 2.0f * axk_combPump);
+    }
+
+    if (axk_resetT >= 0.0f) {
+        axk_resetT += dt;
+        float u = axk_resetT / AXK_RESET_S;
+        if (u >= 1.0f) {
+            for (int r = 0; r < 4; r++) ax_kettle.ringRot[r] = 0.0f;
+            ax_kettle.rot = 0.0f;
+            axk_resetT = -1.0f;
+        } else {
+            float f = (1.0f - u) * (1.0f - u);
+            for (int r = 0; r < 4; r++)
+                ax_kettle.ringRot[r] = kettleWrap01(axk_resetFrom[r] * f);
+            ax_kettle.rot = 0.0f;
+        }
+    }
 }
 
 // ── Duck energy waterfall ───────────────────────────────────────
@@ -206,7 +356,8 @@ static void ax_duck_update(float dt) {
 static void ax_write_ring(RGBf* out, int base, int len, int ring,
                           const float (*comp)[3], const float (*duck)[3]) {
     static float crk[AX_MAX_STRIP];
-    const float off = kettleRot(ax_kettle, ring) * (float)len;
+    const float off = (axk_mode == AXK_MODE_ROTATE)
+        ? kettleRot(ax_kettle, ring) * (float)len : 0.0f;
     memset(crk, 0, sizeof(float) * len);
     kettleCrackleSplat(ax_kettle, ring, len, crk);
     const float s = ax_brightness / 255.0f;
@@ -225,6 +376,69 @@ static void ax_write_ring(RGBf* out, int base, int len, int ring,
         out[base+i].r = pr;
         out[base+i].g = pg;
         out[base+i].b = pb;
+    }
+}
+
+static void axg_update(uint8_t btnBits, float dt) {
+    uint8_t heldPots = 0;
+    for (int b = 0; b < 6; b++)
+        if (btnBits & (1 << b)) heldPots |= AXG_BTN_POTS[b];
+    uint8_t edgeDown = heldPots & ~axg_prevBtn;
+    uint8_t edgeUp   = ~heldPots & axg_prevBtn;
+    axg_prevBtn = heldPots;
+    for (int k = 0; k < AX_NUM_POTS; k++) {
+        axg_renderOn[k] = false;
+        if (k == AX_BRIGHT_POT) continue;
+        if (edgeDown & (1 << k)) {
+            axg_count[k] = 0;
+            axg_rec[k] = true;
+            axg_capAccum[k] = 1e9f;
+        }
+        if (axg_rec[k]) {
+            axg_capAccum[k] += dt;
+            if (axg_capAccum[k] >= 1.0f / AXG_CAP_HZ) {
+                axg_capAccum[k] = 0.0f;
+                if (axg_count[k] < AXG_MAX_SAMPLES) {
+                    axg_track[k][axg_count[k]] = ax_pos[k];
+                    axg_splitTrack[k][axg_count[k]++] = ax_splitEase[k];
+                }
+            }
+            if (edgeUp & (1 << k)) {
+                axg_rec[k] = false;
+                if (axg_count[k] < AXG_MIN_SAMPLES) axg_count[k] = 0;
+                axg_playPos[k] = 0.0f;
+                axg_playDir[k] = 1.0f;
+                axg_age[k] = 0.0f;
+            }
+            continue;
+        }
+        if (axg_count[k] == 0) continue;
+        axg_age[k] += dt;
+        if (axg_age[k] >= AXG_FADE_S) { axg_count[k] = 0; continue; }
+        axg_renderLvl[k] = AXG_LEVEL * (1.0f - axg_age[k] / AXG_FADE_S);
+        float span = (float)axg_count[k] - 1.0f;
+        axg_playPos[k] += axg_playDir[k] * AXG_CAP_HZ * dt;
+        if (span <= 0.0f) {
+            axg_playPos[k] = 0.0f;
+        } else {
+            while (axg_playPos[k] > span || axg_playPos[k] < 0.0f) {
+                if (axg_playPos[k] > span) {
+                    axg_playPos[k] = 2.0f * span - axg_playPos[k];
+                    axg_playDir[k] = -1.0f;
+                }
+                if (axg_playPos[k] < 0.0f) {
+                    axg_playPos[k] = -axg_playPos[k];
+                    axg_playDir[k] = 1.0f;
+                }
+            }
+        }
+        uint16_t i0 = (uint16_t)axg_playPos[k];
+        if (i0 >= axg_count[k]) i0 = axg_count[k] - 1;
+        uint16_t i1 = (uint16_t)((i0 + 1 < axg_count[k]) ? i0 + 1 : i0);
+        float fr = axg_playPos[k] - (float)i0;
+        axg_renderPos[k] = ax_lerp(axg_track[k][i0], axg_track[k][i1], fr);
+        axg_renderSplit[k] = ax_lerp(axg_splitTrack[k][i0], axg_splitTrack[k][i1], fr);
+        axg_renderOn[k] = true;
     }
 }
 
@@ -266,14 +480,15 @@ static void ax_raster_strip(RGBf* out, int base, int len, int ring,
         ax_hsv(hueWrap360(AX_HUES[k] + ax_hueRotDeg),
                sqrtf(ax_fade), 1.0f, r, g, b);
 
+        float easeK = fmaxf(ax_splitEase[k], axk_combEase);
         float fullSpacing = fmaxf(1.0f, AX_PULL_NORM * AX_REF_LEN * sigScale);
-        float spacingF = ax_lerp(1.0f, fullSpacing, ax_splitEase[k]);
+        float spacingF = ax_lerp(1.0f, fullSpacing, easeK);
         int reach = (int)(4.0f * sigma);
         for (int j = -reach; j <= reach; j++) {
             float tc = center + (float)j * spacingF;
             float d = (float)j / sigma;
             float w = expf(-d * d) * ax_fade;
-            float tcs = (ax_splitEase[k] <= 0.001f || ax_splitEase[k] >= 0.999f)
+            float tcs = (easeK <= 0.001f || easeK >= 0.999f)
                 ? (float)lroundf(tc) : tc;
             tcs -= floorf(tcs / (float)len) * (float)len;
             int i0 = (int)tcs;
@@ -290,6 +505,77 @@ static void ax_raster_strip(RGBf* out, int base, int len, int ring,
             if (w1 > bufW[i1]) { bufW[i1] = w1; bufHue[i1] = AX_HUES[k]; bufPot[i1] = (int8_t)k; }
         }
     }
+
+    if (axk_mode == AXK_MODE_DUP && axk_dupLvl > 0.001f
+        && ax_fade > 0.0f && ax_crackleT <= 0.0f) {
+        const float rotOff = kettleRot(ax_kettle, ring);
+        for (int k = 0; k < AX_NUM_POTS; k++) {
+            if (k == AX_BRIGHT_POT) continue;
+            float centerN = kettleWrap01(
+                ax_lerp(ax_pos[k], meanPos, gatherT) + rotOff);
+            float center = centerN * (float)(len - 1);
+            float sigma = fmaxf(0.5f,
+                AX_SIGMA_NORM * AX_REF_LEN * sigScale * ax_pump[k]);
+            float r, g, b;
+            ax_hsv(hueWrap360(AX_HUES[k] + ax_hueRotDeg),
+                   sqrtf(ax_fade), 1.0f, r, g, b);
+            float easeK = fmaxf(ax_splitEase[k], axk_combEase);
+            float fullSpacing = fmaxf(1.0f, AX_PULL_NORM * AX_REF_LEN * sigScale);
+            float spacingF = ax_lerp(1.0f, fullSpacing, easeK);
+            int reach = (int)(4.0f * sigma);
+            float lvl = AXK_DUP_LEVEL * axk_dupLvl * ax_fade;
+            for (int j = -reach; j <= reach; j++) {
+                float tc = center + (float)j * spacingF;
+                float d = (float)j / sigma;
+                float w = expf(-d * d) * lvl;
+                float tcs = (easeK <= 0.001f || easeK >= 0.999f)
+                    ? (float)lroundf(tc) : tc;
+                tcs -= floorf(tcs / (float)len) * (float)len;
+                int i0 = (int)tcs;
+                float fr = tcs - (float)i0;
+                i0 %= len;
+                int i1 = (i0 + 1) % len;
+                float w0 = w * (1.0f - fr);
+                buf[i0][0] += r * w0; buf[i0][1] += g * w0; buf[i0][2] += b * w0;
+                cov[i0] += w0;
+                float w1 = w * fr;
+                buf[i1][0] += r * w1; buf[i1][1] += g * w1; buf[i1][2] += b * w1;
+                cov[i1] += w1;
+            }
+        }
+    }
+
+#if AX_GHOST
+    for (int k = 0; k < AX_NUM_POTS; k++) {
+        if (!axg_renderOn[k]) continue;
+        float center = axg_renderPos[k] * (float)(len - 1);
+        float sigma = fmaxf(0.5f, AX_SIGMA_NORM * AX_REF_LEN * sigScale);
+        float r, g, b;
+        ax_hsv(hueWrap360(AX_HUES[k] + ax_hueRotDeg), 1.0f, 1.0f, r, g, b);
+        float ease = axg_renderSplit[k];
+        float fullSpacing = fmaxf(1.0f, AX_PULL_NORM * AX_REF_LEN * sigScale);
+        float spacingF = ax_lerp(1.0f, fullSpacing, ease);
+        int reach = (int)(4.0f * sigma);
+        for (int j = -reach; j <= reach; j++) {
+            float tc = center + (float)j * spacingF;
+            float d = (float)j / sigma;
+            float w = expf(-d * d) * axg_renderLvl[k];
+            float tcs = (ease <= 0.001f || ease >= 0.999f)
+                ? (float)lroundf(tc) : tc;
+            tcs -= floorf(tcs / (float)len) * (float)len;
+            int i0 = (int)tcs;
+            float fr = tcs - (float)i0;
+            i0 %= len;
+            int i1 = (i0 + 1) % len;
+            float w0 = w * (1.0f - fr);
+            buf[i0][0] += r * w0; buf[i0][1] += g * w0; buf[i0][2] += b * w0;
+            cov[i0] += w0;
+            float w1 = w * fr;
+            buf[i1][0] += r * w1; buf[i1][1] += g * w1; buf[i1][2] += b * w1;
+            cov[i1] += w1;
+        }
+    }
+#endif
 
     for (int n = 0; n < AX_NUM_SHARDS; n++) {
         AxShard &sh = ax_shards[n];
@@ -311,7 +597,11 @@ static void ax_raster_strip(RGBf* out, int base, int len, int ring,
         }
     }
 
+#if AX_GHOST
+    bool trailHeld = false;
+#else
     bool trailHeld = AX_CLICKY.btnBits & (1 << AX_BTN_TRAIL);
+#endif
     if (trailHeld) {
         float rate = dt * (AX_PAINT_CAP / 255.0f) / AX_PAINT_S;
         for (int i = 0; i < len; i++) {
@@ -416,11 +706,19 @@ static void ax_render_clicky(RGBf* out, float dt) {
     if (ax_rufflePhase >= 2.0f * (float)M_PI) ax_rufflePhase -= 2.0f * (float)M_PI;
     float alpha = fminf(1.0f, dt / AX_POS_TAU);
 
+#if AX_GHOST
+    bool fadeHeld   = false;
+    bool gatherHeld = false;
+    bool desatHeld  = false;
+    bool pumpHeld   = false;
+    bool hueRotHeld = false;
+#else
     bool fadeHeld   = AX_CLICKY.btnBits & (1 << AX_BTN_FADE);
     bool gatherHeld = AX_CLICKY.btnBits & (1 << AX_BTN_GATHER);
     bool desatHeld  = AX_CLICKY.btnBits & (1 << AX_BTN_DESAT);
     bool pumpHeld   = AX_CLICKY.btnBits & (1 << AX_BTN_PUMP);
     bool hueRotHeld = AX_CLICKY.btnBits & (1 << AX_BTN_HUEROT);
+#endif
 
     float prevFade = ax_fade;
     if (fadeHeld) ax_fade = fmaxf(0.0f, ax_fade - dt / AX_FADE_S);
@@ -487,6 +785,10 @@ static void ax_render_clicky(RGBf* out, float dt) {
         sh.pos -= floorf(sh.pos);
     }
 
+#if AX_GHOST
+    axg_update(AX_CLICKY.btnBits, dt);
+#endif
+
     for (int s = 0; s < HC_NUM_STRIPS; s++)
         ax_raster_strip(out, HC_STRIPS[s].start, HC_STRIPS[s].count, s & 3,
                         gatherT, meanPos, dt);
@@ -537,6 +839,9 @@ static inline void fx_axismundi(RGBf* out, float t) {
     }
 
     ax_kettle_update(dt);
+#if AX_LOOP_RECORD
+    axlr_tick(dt);
+#endif
     ax_duck_update(dt);
 
     if (AX_CLICKY_SEEN) {
@@ -548,5 +853,8 @@ static inline void fx_axismundi(RGBf* out, float t) {
             ax_raster_duck_only(out, HC_STRIPS[s].start, HC_STRIPS[s].count,
                                 s & 3, dt);
     }
+#if AX_LOOP_RECORD
+    axlr_apply(out);
+#endif
     ax_apply_armature(out, dt);
 }

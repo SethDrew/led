@@ -180,10 +180,13 @@ static inline void duckUpdateFloor(DuckFeatures &f, float rms, float dt) {
 // window, never against the packet's own uptime.
 static inline void duckFeaturesUpdate(DuckFeatures &f, const DuckPacketV1 &pkt,
                                       float dt, uint32_t nowMs, bool live) {
+    // An RF gap resets audio state (the room may have changed) but KEEPS the
+    // rest-vector calibration — the duck's mounting doesn't change because
+    // its radio hiccuped, and recalibrating mid-gesture inverts the tilt
+    // interaction until the next reboot. lastUpMs survives the gap so a
+    // sender reboot DURING silence is still caught by the regression check.
     if (!live) {
         duckResetAudio(f);
-        duckResetTilt(f);
-        f.lastUpMs = 0;
         return;
     }
 

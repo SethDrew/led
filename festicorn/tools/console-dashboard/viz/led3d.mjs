@@ -147,8 +147,8 @@ export default async function mountLed3d(container, { fx = "axismundi", gainLabe
   const sizeAttr = new THREE.BufferAttribute(sizeArr, 1);
   geo.setAttribute("aSize", sizeAttr);
 
-  // per-section glow diameter (m), indexed by kind 0=helix 1=canopy 2=root
-  const sectionSize = [0.028, 0.06, 0.06];
+  // per-section glow diameter (m), indexed by kind 0=helix(retired) 1=canopy 2=root 3=strap
+  const sectionSize = [0.028, 0.06, 0.06, 0.045];
   function applySectionSizes() {
     for (let i = 0; i < N; i++) sizeArr[i] = sectionSize[kinds[i]] ?? 0.05;
     sizeAttr.needsUpdate = true;

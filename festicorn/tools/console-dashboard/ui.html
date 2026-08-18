@@ -460,8 +460,8 @@ function wireSimConsole() {
     spin(counts) { kt.enc += counts; },
     kpress(v) { kt.hold = v ? 1 : 0; },
     ktwist(v) { kt.twist = v ? 1 : 0; },
-    kmode(m) { const f = ['fly', 'counter', 'crackle'][m];
-               kt[f] = 1; setTimeout(() => { kt[f] = 0; }, 150); },
+    kdup(v) { kt.counter = v ? 1 : 0; },
+    ksplay(v) { kt.crackle = v ? 1 : 0; },
     state: st, kettle: kt,
   };
   const css = document.createElement('style');
@@ -491,11 +491,10 @@ function wireSimConsole() {
     'drag / &larr;&rarr; to spin</div>' +
     '<button id="simkp">PRESS</button><button id="simkt">TWIST</button>' +
     '<span style="color:#678">twist toggles (or T)</span></div>' +
-    '<div class="srowx"><span style="color:#678">mode:</span>' +
-    '<button id="simkm0" class="on">ROT</button>' +
-    '<button id="simkm1">DUP</button>' +
-    '<button id="simkm2">COMB</button>' +
-    '<span style="color:#678">(or 7/8/9)</span></div>';
+    '<div class="srowx"><span style="color:#678">hold:</span>' +
+    '<button id="simkd">DUP</button>' +
+    '<button id="simks">SPLAY</button>' +
+    '<span style="color:#678">latch here, hold on the real panel (D / S)</span></div>';
   document.body.appendChild(div);
   for (let k = 0; k < 6; k++) {
     document.getElementById('simp' + k).addEventListener('input',
@@ -560,17 +559,16 @@ function wireSimConsole() {
   document.addEventListener('keydown', e => {
     if ((e.key === 't' || e.key === 'T') && !e.repeat) twistToggle();
   });
-  const modeSel = m => {
-    window.__sim.kmode(m);
-    for (let i = 0; i < 3; i++)
-      document.getElementById('simkm' + i).classList.toggle('on', i === m);
+  const latch = (id, field, key) => {
+    const el = document.getElementById(id);
+    const flip = () => { kt[field] ^= 1; el.classList.toggle('on', !!kt[field]); };
+    el.addEventListener('click', flip);
+    document.addEventListener('keydown', e => {
+      if (e.key.toLowerCase() === key && !e.repeat) flip();
+    });
   };
-  for (let m = 0; m < 3; m++)
-    document.getElementById('simkm' + m).addEventListener('click', () => modeSel(m));
-  document.addEventListener('keydown', e => {
-    const m = '789'.indexOf(e.key);
-    if (m >= 0 && !e.repeat) modeSel(m);
-  });
+  latch('simkd', 'counter', 'd');
+  latch('simks', 'crackle', 's');
   setInterval(() => {
     if (!window.LED3D) return;
     window.LED3D.applyState({ roles: {

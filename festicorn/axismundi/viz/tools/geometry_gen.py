@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-geometry_gen.py — parametric geometry for the helix-canopy sculpture.
+geometry_gen.py — parametric geometry for the strap-canopy sculpture.
 
-A "T"/spire form:
-  - a vertical DOUBLE HELIX trunk that TAPERS from a wide base to a narrow top,
-  - a FILLED HEPTAGON canopy partway up, which the helix POKES THROUGH and
-    continues above,
-  - a ROOT SYSTEM of strips splaying randomly from the trunk base along the floor.
+Canopy-on-straps form (2026-08-17 reshape — the middle helix is gone):
+  - a FILLED HEPTAGON canopy held up at each tip,
+  - one RATCHET STRAP per tip (decorated), running from the tip radially
+    down-and-out to a ground anchor — the bm26 n7-radial single-guy layout,
+  - a ROOT SYSTEM of paper-mache poles radiating on the floor, each decorated
+    with an IP67 strip in a different shape (spiral / serpentine cage /
+    out-and-back / meander).
 
 Anti-drift principle (the ledsim doctrine, applied to geometry):
   The position math lives in exactly ONE place — here. We compute every LED's
@@ -15,12 +17,12 @@ Anti-drift principle (the ledsim doctrine, applied to geometry):
     - geometry/topology.h   — Vec3 LED_POS[] literal table, for the firmware
   The device reads the table; it never recomputes geometry, so nothing drifts.
 
-Units: meters internally. Z is up. The trunk axis is the z axis through (0, 0).
+Units: meters internally. Z is up. The center axis is the z axis through (0, 0).
 
 Wire/strip model (festicorn multi-strip setPixel(s, i) convention):
-  strip 0..1  — helix strand A / B (floor -> top, tapering)
-  strip 2     — heptagon canopy (serpentine fill, with a hole for the trunk)
-  strip 3..9  — roots (one strip each)
+  strip 0..13  — canopy spokes (center hole -> rim, then along the rim)
+  strip 14..20 — ratchet straps (canopy tip -> ground anchor)
+  strip 21..27 — roots (one strip each)
 """
 
 import json
@@ -35,16 +37,14 @@ IN = 0.0254   # meters per inch
 # TUNABLE PARAMETERS — physical dimensions in ft/in for legibility.
 # ─────────────────────────────────────────────────────────────────────────
 P = {
-    # ── Tapered double helix (the trunk) ─────────────────────────────────
-    "helix_strands":      2,
-    "helix_base_radius_m": 1.25 * FT,   # ~2.5 ft wide at the base
-    "helix_top_radius_m":  3.0 * IN,    # ~6 in wide at the top
-    "helix_height_m":     15.0 * FT,    # rises to 15 ft (pokes 5 ft above canopy)
-    "helix_turns":        6.0,          # full revolutions base -> top
-    "helix_led_pitch_m":  0.0333,       # ~30 LEDs/m along the strand
-    "helix_z_start_m":    0.0,          # base sits at the floor (meets the roots)
+    # ── Ratchet straps (canopy support, decorated) ───────────────────────
+    # One strap per canopy tip, on the tip's radial azimuth (bm26 n7-radial,
+    # single guy per pole): tip at canopy height -> ground anchor strap_run
+    # horizontally past the tip's floor projection.
+    "strap_run_m":        96.0 * IN,    # bm26 GUY_RUN default (8 ft past the tip)
+    "strap_led_pitch_m":  0.05,         # decorated with 20/m strip along the strap
 
-    # ── Heptagon canopy (filled, the helix passes through it) ────────────
+    # ── Heptagon canopy ──────────────────────────────────────────────────
     "hept_sides":         7,
     "hept_side_len_m":    10.0 * FT,    # each edge 10 ft -> circumradius ~11.5 ft
     "canopy_height_m":    10.0 * FT,    # ceiling plane at 10 ft
@@ -54,15 +54,15 @@ P = {
     "canopy_pixel_pitch_m": 0.10,       # 100mm node pitch (the real default)
     "canopy_strand_nodes": 50,          # nodes per real strand (caps a spoke's length)
     "canopy_rotation_deg": 0.0,
-    "canopy_center_hole_m": 0.35,       # radius of the hole the trunk passes through
+    "canopy_center_hole_m": 0.35,       # center hole where the spokes start
 
-    # ── Root system ──────────────────────────────────────────────────────
-    "roots_count":        7,
-    "roots_len_min_m":    9.0 * FT,     # ~= straight-line reach (endpoint anchored on spoke)
-    "roots_len_max_m":    10.0 * FT,    # tight variance so roots are comparable
+    # ── Root system: IP67 strip laid on paper-mache poles, one shape each ──
+    "roots_count":        4,
+    "root_len_m":         6.0 * FT,     # straight pole length
+    "root_radius_m":      3.5 * IN,     # ~7 in diameter paper-mache root
+    "root_wrap_pitch_m":  0.20,         # spiral shape: axis advance per wrap turn
+    "root_inner_m":       1.0 * FT,     # pole's inner end, out from center
     "roots_led_pitch_m":  0.05,
-    "roots_wave_amp_m":   0.22,         # lateral waviness amplitude (0 at base + tip)
-    "roots_wave_freq":    2.0,          # ~wave cycles along a root
     "roots_jitter_deg":   4.0,          # +/- jitter on the even radial spoke (symmetry)
     "roots_seed":         7,            # deterministic layout (re-run = same roots)
 }
@@ -100,30 +100,24 @@ def resample_polyline(pts, pitch):
 # ─────────────────────────────────────────────────────────────────────────
 # Geometry builders
 # ─────────────────────────────────────────────────────────────────────────
-def build_helix(p):
-    """Tapered conical double helix. Returns (strands, arc_len, leds_per_strand)."""
-    R0 = p["helix_base_radius_m"]
-    R1 = p["helix_top_radius_m"]
-    H = p["helix_height_m"]
-    turns = p["helix_turns"]
-    z0 = p["helix_z_start_m"]
-    n_strands = p["helix_strands"]
-    SAMPLES = 8000  # dense base curve, then resample to equidistant LEDs
+def build_straps(p, verts, canopy_z):
+    """One taut ratchet strap per canopy tip: tip -> radial ground anchor.
 
-    strands, arc_len, n_leds = [], 0.0, 0
-    for j in range(n_strands):
-        phase = 2.0 * math.pi * j / n_strands
-        raw = []
-        for s in range(SAMPLES + 1):
-            t = s / SAMPLES
-            r = R0 + t * (R1 - R0)                 # linear taper
-            th = 2.0 * math.pi * turns * t + phase
-            raw.append((r * math.cos(th), r * math.sin(th), z0 + H * t))
-        pts, total = resample_polyline(raw, p["helix_led_pitch_m"])
-        strands.append(pts)
-        arc_len = total
-        n_leds = len(pts)
-    return strands, arc_len, n_leds
+    Straps are tensioned, so each is a straight line. LED index 0 is at the
+    TIP (top), matching the canopy spokes' center-out convention: normalized
+    position 0 reads as "inner/high" on both kinds.
+    """
+    run = p["strap_run_m"]
+    pitch = p["strap_led_pitch_m"]
+    straps = []
+    for (vx, vy) in verts:
+        r = math.hypot(vx, vy)
+        ux, uy = vx / r, vy / r
+        tip = (vx, vy, canopy_z)
+        anchor = (vx + ux * run, vy + uy * run, 0.0)
+        pts, _ = resample_polyline([tip, anchor], pitch)
+        straps.append(pts)
+    return straps
 
 
 def _heptagon_vertices(p):
@@ -219,42 +213,73 @@ def build_canopy(p):
 
 
 def build_roots(p):
-    """N roots splaying evenly from the trunk base along the floor.
+    """Root poles on the floor, one strip-decoration SHAPE per root.
 
-    Symmetry and waviness are decoupled. Each root's ENDPOINT is anchored on an
-    evenly-spaced radial spoke (2*pi*k/count + small jitter) at the chosen reach,
-    so the tips fan out evenly. Organic waviness is a LATERAL offset perpendicular
-    to the spoke, modulated by a sin(pi*s) envelope that is zero at both the base
-    and the tip — so the root meanders in the middle but always starts at the
-    trunk and lands exactly on its spoke. Reach ~= length by construction.
+    Each root is a straight cylinder (root_len long, root_radius thick) lying
+    on the floor on an evenly-spaced radial azimuth (+ small jitter). The four
+    shapes are all paths an IP67 strip will actually lie along on a cylinder —
+    straight longitudinal runs, helices, end-cap arcs, gentle azimuth meanders;
+    never a sharp in-plane bend:
+      0 spiral      — wrap, root_wrap_pitch of axis advance per turn
+      1 serpentine  — 4 longitudinal runs over the top, half-arcs join them
+                      at alternating ends (a zigzag cage)
+      2 out-and-back — up one shoulder, arc around the far cap, back the other
+      3 meander     — one run whose azimuth sways sinusoidally over the top
+    LED 0 is at the inner (center) end of every shape.
     """
     rng = random.Random(p["roots_seed"])
     pitch = p["roots_led_pitch_m"]
-    amp = p["roots_wave_amp_m"]
-    basefreq = p["roots_wave_freq"]
+    R = p["root_radius_m"]
+    L = p["root_len_m"]
     jitter = math.radians(p["roots_jitter_deg"])
     count = p["roots_count"]
+    top = math.pi / 2.0
+
+    def spiral(pt):
+        wrap = p["root_wrap_pitch_m"]
+        n = int(L / wrap * 64)
+        return [pt(L * i / n, 2.0 * math.pi * (L * i / n) / wrap)
+                for i in range(n + 1)]
+
+    def runs(pt, phis):
+        raw = []
+        for idx, phi in enumerate(phis):
+            svals = [L * i / 64 for i in range(65)]
+            if idx % 2:
+                svals.reverse()
+            raw += [pt(s, phi) for s in svals]
+            if idx + 1 < len(phis):
+                send = svals[-1]
+                nxt = phis[idx + 1]
+                raw += [pt(send, phi + (nxt - phi) * i / 16)
+                        for i in range(1, 16)]
+        return raw
+
+    def meander(pt):
+        return [pt(L * i / 512,
+                   top + 1.1 * math.sin(2.0 * math.pi * 3.0 * i / 512))
+                for i in range(513)]
+
+    shapes = [
+        spiral,
+        lambda pt: runs(pt, [top + 1.6, top + 0.55, top - 0.55, top - 1.6]),
+        lambda pt: runs(pt, [top + 0.8, top - 0.8]),
+        meander,
+    ]
     roots = []
     for k in range(count):
-        base = 2.0 * math.pi * k / count + rng.uniform(-jitter, jitter)
-        reach = rng.uniform(p["roots_len_min_m"], p["roots_len_max_m"])
-        n = max(2, int(round(reach / pitch)))
-        cb, sb = math.cos(base), math.sin(base)
-        # two random sinusoids per root for non-repeating organic wave
-        f1 = basefreq * rng.uniform(0.8, 1.2); ph1 = rng.uniform(0, 2 * math.pi)
-        f2 = basefreq * rng.uniform(1.8, 2.4); ph2 = rng.uniform(0, 2 * math.pi)
-        a2 = rng.uniform(0.3, 0.6)
-        pts = []
-        for i in range(n):
-            s = i / (n - 1)                                  # 0..1 along the root
-            rr = s * reach                                   # radial distance out the spoke
-            env = math.sin(math.pi * s)                      # 0 at base + tip, 1 mid
-            lateral = env * amp * (math.sin(2 * math.pi * f1 * s + ph1)
-                                   + a2 * math.sin(2 * math.pi * f2 * s + ph2))
-            x = rr * cb - lateral * sb                       # spoke + perpendicular wiggle
-            y = rr * sb + lateral * cb
-            z = 0.01 + 0.015 * math.sin(i * 0.4)             # gentle ground undulation
-            pts.append((x, y, max(0.0, z)))
+        th = 2.0 * math.pi * k / count + rng.uniform(-jitter, jitter)
+        ux, uy = math.cos(th), math.sin(th)
+        vx, vy = -uy, ux
+        x0, y0 = p["root_inner_m"] * ux, p["root_inner_m"] * uy
+
+        def pt(s, phi):
+            c = R * math.cos(phi)
+            return (x0 + ux * s + c * vx, y0 + uy * s + c * vy,
+                    R + R * math.sin(phi))
+
+        raw = shapes[k % len(shapes)](pt)
+        pts, _ = resample_polyline(raw, pitch)
         roots.append(pts)
     return roots
 
@@ -267,23 +292,25 @@ def main():
     out_dir = os.path.normpath(os.path.join(here, "..", "geometry"))
     os.makedirs(out_dir, exist_ok=True)
 
-    strands, helix_arc, helix_n = build_helix(P)
     canopy_spokes, hept_verts, canopy_z = build_canopy(P)
+    straps = build_straps(P, hept_verts, canopy_z)
     roots = build_roots(P)
 
     flat, strips = [], []
 
-    def add_strip(name, kind, pts):
+    def add_strip(name, kind, pts, axn=0):
         start = len(flat)
         flat.extend(pts)
-        strips.append({"name": name, "kind": kind, "start": start, "count": len(pts)})
+        strips.append({"name": name, "kind": kind, "start": start,
+                       "count": len(pts), "axn": axn})
 
-    for j, strand in enumerate(strands):
-        add_strip(f"helix_{chr(ord('A') + j)}", "helix", strand)
     for k, spoke in enumerate(canopy_spokes):       # one real strand per spoke
         add_strip(f"canopy_{k}", "canopy", spoke)
+    for k, strap in enumerate(straps):
+        add_strip(f"strap_{k}", "strap", strap)
+    root_axn = int(round(P["root_len_m"] / P["roots_led_pitch_m"])) + 1
     for k, root in enumerate(roots):
-        add_strip(f"root_{k}", "root", root)
+        add_strip(f"root_{k}", "root", root, root_axn)
 
     n_total = len(flat)
 
@@ -295,9 +322,7 @@ def main():
         "params": P,
         "n_total": n_total,
         "canopy_z_m": round(canopy_z, 4),
-        "helix_top_z_m": round(P["helix_z_start_m"] + P["helix_height_m"], 4),
-        "helix_arc_len_m": round(helix_arc, 4),
-        "helix_leds_per_strand": helix_n,
+        "strap_leds_each": len(straps[0]) if straps else 0,
         "heptagon_vertices_xy": [[round(x, 5), round(y, 5)] for (x, y) in hept_verts],
         "strips": strips,
     }
@@ -307,18 +332,20 @@ def main():
     write_topology_h(os.path.join(out_dir, "topology.h"), flat, strips, P, canopy_z)
 
     # ── console summary ─────────────────────────────────────────────────
-    print(f"helix-canopy geometry generated -> {out_dir}")
+    print(f"strap-canopy geometry generated -> {out_dir}")
     print(f"  total LEDs: {n_total}")
     by_kind = {}
     for s in strips:
         by_kind[s["kind"]] = by_kind.get(s["kind"], 0) + s["count"]
     for kind, c in by_kind.items():
         print(f"    {kind:>7}: {c:>5} LEDs")
-    print(f"  helix: {helix_n} LEDs/strand, arc {helix_arc:.2f} m, "
-          f"top z {P['helix_z_start_m']+P['helix_height_m']:.2f} m "
-          f"(canopy at {canopy_z:.2f} m -> pokes "
-          f"{(P['helix_z_start_m']+P['helix_height_m']-canopy_z)/FT:.1f} ft above)")
-    print(f"  roots: {P['roots_count']}")
+    print(f"  straps: {len(straps)} x {len(straps[0])} LEDs "
+          f"(tip z {canopy_z:.2f} m -> anchor {P['strap_run_m']/FT:.1f} ft past tip)")
+    shape_names = ["spiral", "serpentine", "out-and-back", "meander"]
+    for k, root in enumerate(roots):
+        wire = (len(root) - 1) * P["roots_led_pitch_m"]
+        print(f"  root {k} ({shape_names[k % 4]:>12}): {len(root):>3} LEDs, "
+              f"{wire:.2f} m of strip")
     est_w = n_total * 0.06
     print(f"  rough power @ ~60mW/LED avg: ~{est_w:.0f} W  "
           f"(peak full-white ~{n_total*0.3:.0f} W) — sanity-check controllers/PSU")
@@ -327,7 +354,7 @@ def main():
 def write_topology_h(path, flat, strips, p, canopy_z):
     n = len(flat)
     L = []
-    L.append("// topology.h — helix-canopy 3D pixel map.")
+    L.append("// topology.h — strap-canopy 3D pixel map.")
     L.append("// GENERATED by tools/geometry_gen.py — DO NOT EDIT BY HAND.")
     L.append("// Single source of truth for geometry; re-run the generator to change shape.")
     L.append("#pragma once")
@@ -344,12 +371,15 @@ def write_topology_h(path, flat, strips, p, canopy_z):
         L.append(f"  {{ {x:.5f}f, {y:.5f}f, {z:.5f}f }},")
     L.append("};")
     L.append("")
-    L.append("// Strip ranges into LED_POS[]. kind: 0=helix, 1=canopy, 2=root.")
-    L.append("struct HcStrip { uint16_t start, count; uint8_t kind; };")
-    kind_map = {"helix": 0, "canopy": 1, "root": 2}
+    L.append("// Strip ranges into LED_POS[]. kind: 0=helix(retired), 1=canopy, 2=root, 3=strap.")
+    L.append("// axn: axial raster resolution for wrapped/folded strips (0 = index space).")
+    L.append("// A renderer rasterizing a root at axn pixels and sampling by each LED's")
+    L.append("// axial position makes effects travel DOWN the pole, whatever the wire path.")
+    L.append("struct HcStrip { uint16_t start, count; uint8_t kind; uint16_t axn; };")
+    kind_map = {"helix": 0, "canopy": 1, "root": 2, "strap": 3}
     L.append("static const HcStrip HC_STRIPS[HC_NUM_STRIPS] = {")
     for s in strips:
-        L.append(f"  {{ {s['start']}, {s['count']}, {kind_map[s['kind']]} }}, // {s['name']}")
+        L.append(f"  {{ {s['start']}, {s['count']}, {kind_map[s['kind']]}, {s['axn']} }}, // {s['name']}")
     L.append("};")
     L.append("")
     xs = [v[0] for v in flat]; ys = [v[1] for v in flat]; zs = [v[2] for v in flat]

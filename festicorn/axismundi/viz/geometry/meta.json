@@ -1,12 +1,7 @@
 {
   "params": {
-    "helix_strands": 2,
-    "helix_base_radius_m": 0.381,
-    "helix_top_radius_m": 0.07619999999999999,
-    "helix_height_m": 4.572,
-    "helix_turns": 6.0,
-    "helix_led_pitch_m": 0.0333,
-    "helix_z_start_m": 0.0,
+    "strap_run_m": 2.4383999999999997,
+    "strap_led_pitch_m": 0.05,
     "hept_sides": 7,
     "hept_side_len_m": 3.048,
     "canopy_height_m": 3.048,
@@ -15,20 +10,18 @@
     "canopy_strand_nodes": 50,
     "canopy_rotation_deg": 0.0,
     "canopy_center_hole_m": 0.35,
-    "roots_count": 7,
-    "roots_len_min_m": 2.7432000000000003,
-    "roots_len_max_m": 3.048,
+    "roots_count": 4,
+    "root_len_m": 1.8288000000000002,
+    "root_radius_m": 0.08889999999999999,
+    "root_wrap_pitch_m": 0.2,
+    "root_inner_m": 0.3048,
     "roots_led_pitch_m": 0.05,
-    "roots_wave_amp_m": 0.22,
-    "roots_wave_freq": 2.0,
     "roots_jitter_deg": 4.0,
     "roots_seed": 7
   },
-  "n_total": 1697,
+  "n_total": 1627,
   "canopy_z_m": 3.048,
-  "helix_top_z_m": 4.572,
-  "helix_arc_len_m": 9.9056,
-  "helix_leds_per_strand": 297,
+  "strap_leds_each": 78,
   "heptagon_vertices_xy": [
     [
       0.0,
@@ -61,142 +54,179 @@
   ],
   "strips": [
     {
-      "name": "helix_A",
-      "kind": "helix",
-      "start": 0,
-      "count": 297
-    },
-    {
-      "name": "helix_B",
-      "kind": "helix",
-      "start": 297,
-      "count": 297
-    },
-    {
       "name": "canopy_0",
       "kind": "canopy",
-      "start": 594,
-      "count": 50
+      "start": 0,
+      "count": 50,
+      "axn": 0
     },
     {
       "name": "canopy_1",
       "kind": "canopy",
-      "start": 644,
-      "count": 50
+      "start": 50,
+      "count": 50,
+      "axn": 0
     },
     {
       "name": "canopy_2",
       "kind": "canopy",
-      "start": 694,
-      "count": 50
+      "start": 100,
+      "count": 50,
+      "axn": 0
     },
     {
       "name": "canopy_3",
       "kind": "canopy",
-      "start": 744,
-      "count": 50
+      "start": 150,
+      "count": 50,
+      "axn": 0
     },
     {
       "name": "canopy_4",
       "kind": "canopy",
-      "start": 794,
-      "count": 50
+      "start": 200,
+      "count": 50,
+      "axn": 0
     },
     {
       "name": "canopy_5",
       "kind": "canopy",
-      "start": 844,
-      "count": 50
+      "start": 250,
+      "count": 50,
+      "axn": 0
     },
     {
       "name": "canopy_6",
       "kind": "canopy",
-      "start": 894,
-      "count": 50
+      "start": 300,
+      "count": 50,
+      "axn": 0
     },
     {
       "name": "canopy_7",
       "kind": "canopy",
-      "start": 944,
-      "count": 50
+      "start": 350,
+      "count": 50,
+      "axn": 0
     },
     {
       "name": "canopy_8",
       "kind": "canopy",
-      "start": 994,
-      "count": 50
+      "start": 400,
+      "count": 50,
+      "axn": 0
     },
     {
       "name": "canopy_9",
       "kind": "canopy",
-      "start": 1044,
-      "count": 50
+      "start": 450,
+      "count": 50,
+      "axn": 0
     },
     {
       "name": "canopy_10",
       "kind": "canopy",
-      "start": 1094,
-      "count": 50
+      "start": 500,
+      "count": 50,
+      "axn": 0
     },
     {
       "name": "canopy_11",
       "kind": "canopy",
-      "start": 1144,
-      "count": 50
+      "start": 550,
+      "count": 50,
+      "axn": 0
     },
     {
       "name": "canopy_12",
       "kind": "canopy",
-      "start": 1194,
-      "count": 50
+      "start": 600,
+      "count": 50,
+      "axn": 0
     },
     {
       "name": "canopy_13",
       "kind": "canopy",
-      "start": 1244,
-      "count": 50
+      "start": 650,
+      "count": 50,
+      "axn": 0
+    },
+    {
+      "name": "strap_0",
+      "kind": "strap",
+      "start": 700,
+      "count": 78,
+      "axn": 0
+    },
+    {
+      "name": "strap_1",
+      "kind": "strap",
+      "start": 778,
+      "count": 78,
+      "axn": 0
+    },
+    {
+      "name": "strap_2",
+      "kind": "strap",
+      "start": 856,
+      "count": 78,
+      "axn": 0
+    },
+    {
+      "name": "strap_3",
+      "kind": "strap",
+      "start": 934,
+      "count": 78,
+      "axn": 0
+    },
+    {
+      "name": "strap_4",
+      "kind": "strap",
+      "start": 1012,
+      "count": 78,
+      "axn": 0
+    },
+    {
+      "name": "strap_5",
+      "kind": "strap",
+      "start": 1090,
+      "count": 78,
+      "axn": 0
+    },
+    {
+      "name": "strap_6",
+      "kind": "strap",
+      "start": 1168,
+      "count": 78,
+      "axn": 0
     },
     {
       "name": "root_0",
       "kind": "root",
-      "start": 1294,
-      "count": 56
+      "start": 1246,
+      "count": 108,
+      "axn": 38
     },
     {
       "name": "root_1",
       "kind": "root",
-      "start": 1350,
-      "count": 55
+      "start": 1354,
+      "count": 152,
+      "axn": 38
     },
     {
       "name": "root_2",
       "kind": "root",
-      "start": 1405,
-      "count": 56
+      "start": 1506,
+      "count": 76,
+      "axn": 38
     },
     {
       "name": "root_3",
       "kind": "root",
-      "start": 1461,
-      "count": 60
-    },
-    {
-      "name": "root_4",
-      "kind": "root",
-      "start": 1521,
-      "count": 58
-    },
-    {
-      "name": "root_5",
-      "kind": "root",
-      "start": 1579,
-      "count": 59
-    },
-    {
-      "name": "root_6",
-      "kind": "root",
-      "start": 1638,
-      "count": 59
+      "start": 1582,
+      "count": 45,
+      "axn": 38
     }
   ]
 }

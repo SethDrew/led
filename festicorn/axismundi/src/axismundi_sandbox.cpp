@@ -307,39 +307,38 @@ static KettleState kettle;
 static float kResetFrom[AM_NUM_RINGS];
 static float kResetT = -1.0f;
 
-// Sandbox: three spin modes on the freed kettle buttons, tap to select.
-// Buttons are physical-panel dependent — edit KMODE_BTNS to remap; keep
-// identical to AXK_MODE_BTNS in viz/src/axismundi_fx.h.
-#define KMODE_ROTATE 0   // carousel; leaks home while the knob rests
-#define KMODE_DUP    1   // lives pinned; spun duplicates fade after stop
-#define KMODE_COMB   2   // spin speed pushes out every particle's comb
-static const uint8_t KMODE_BTNS[3] =
-    { KETTLE_BTN_FLYWHEEL, KETTLE_BTN_COUNTER, KETTLE_BTN_CRACKLE };
+// Sandbox: the freed kettle buttons are HOLD-TO-ACTUATE spin modifiers, like
+// twist. Bare spin = carousel (leaks home at rest). Hold DUP: lives pinned,
+// spin builds duplicates that fade out on release. Hold SPLAY: spin pushes
+// every particle's comb outward with NO cap (counter-spin dials it back);
+// release drifts the combs home. Buttons are physical-panel dependent — edit
+// these two picks; keep identical to viz/src/axismundi_fx.h.
+#define KETTLE_BTN_DUP    KETTLE_BTN_COUNTER
+#define KETTLE_BTN_SPLAY  KETTLE_BTN_CRACKLE
 #define KETTLE_LEAK_TAU       6.0f
 #define KETTLE_LEAK_EPS_REVS  0.02f
 #define KETTLE_DUP_LEVEL      0.55f
 #define KETTLE_DUP_RISE_S     0.15f
 #define KETTLE_DUP_FADE_S     2.5f
-#define KETTLE_COMB_FULL_REVS 0.5f
-#define KETTLE_COMB_RISE_TAU  0.12f
-#define KETTLE_COMB_FALL_TAU  1.0f
+// Ease-units of splay per unit of carousel advance. Advance already carries
+// KETTLE_SPIN_GAIN 0.5, so 1.0 here = two physical knob revs per old-full-comb
+// (half the old pump rate), and it keeps integrating past that without limit.
+#define KETTLE_SPLAY_PER_ADV  1.0f
+#define KETTLE_SPLAY_HOME_S   1.5f
 
-static int     kMode = KMODE_ROTATE;
-static uint8_t kPrevModeBtns = 0;
-static float   kDupLvl = 0.0f;
-static float   kCombPump = 0.0f;
-static float   kCombEase = 0.0f;
-
-static void kZeroRot() {
-    for (int r = 0; r < AM_NUM_RINGS; r++) kettle.ringRot[r] = 0.0f;
-    kettle.rot = 0.0f;
-    kettle.rotPending = 0.0f;
-    kettle.vel = 0.0f;
-}
+static bool  kDupHeld = false;
+static bool  kSplayHeld = false;
+static float kDupRot[AM_NUM_RINGS];
+static float kDupLvl = 0.0f;
+static float kSplay = 0.0f;
+static float kSplayFrom = 0.0f;
+static float kSplayT = -1.0f;
 
 static void kettleUpdate(float dt) {
     KettlePacketV1 pkt;
     memcpy(&pkt, (const void*)&kettlePkt, sizeof(pkt));
+    kDupHeld = false;
+    kSplayHeld = false;
     if (kettleLastMs != 0) {
         static uint8_t prevHold = 0;
         uint8_t hold = (pkt.btnBits >> KETTLE_BTN_HOLD) & 1;
@@ -354,21 +353,13 @@ static void kettleUpdate(float dt) {
             Serial.println("[kettle] knob press -> easing home");
         }
         prevHold = hold;
-        uint8_t modeBtns = 0;
-        for (int m = 0; m < 3; m++)
-            if ((pkt.btnBits >> KMODE_BTNS[m]) & 1) modeBtns |= 1 << m;
-        uint8_t modeEdge = modeBtns & ~kPrevModeBtns;
-        kPrevModeBtns = modeBtns;
-        for (int m = 0; m < 3; m++)
-            if (modeEdge & (1 << m)) {
-                kMode = m;
-                kZeroRot();
-                kDupLvl = 0.0f;
-                Serial.printf("[kettle] mode -> %s\n",
-                              m == 0 ? "rotate" : m == 1 ? "dup" : "comb");
-            }
+        kDupHeld   = (pkt.btnBits >> KETTLE_BTN_DUP) & 1;
+        kSplayHeld = (pkt.btnBits >> KETTLE_BTN_SPLAY) & 1;
+        // Twist implies alternate-direction rings: feed the lib's counter
+        // bit alongside twist so every other ring runs opposite.
+        uint8_t tw = pkt.btnBits & (uint8_t)(1 << KETTLE_BTN_TWIST);
         kettleInput(kettle, pkt.enc,
-                    pkt.btnBits & (uint8_t)(1 << KETTLE_BTN_TWIST),
+                    tw ? (uint8_t)(tw | (1 << KETTLE_BTN_COUNTER)) : 0,
                     pkt.upMs);
     }
     float rotBefore = kettle.rot;
@@ -377,8 +368,51 @@ static void kettleUpdate(float dt) {
     adv -= roundf(adv);
     float speed = (dt > 0.0f) ? adv / dt : 0.0f;
 
-    if (kMode == KMODE_ROTATE && kResetT < 0.0f
-        && fabsf(speed) < KETTLE_LEAK_EPS_REVS) {
+    // While a modifier is held the frame must not rotate: undo this frame's
+    // carousel advance and reroute it into the modifier's own integrator.
+    if (kDupHeld || kSplayHeld) {
+        bool twist = kettleHeld(kettle, KETTLE_BTN_TWIST);
+        for (int r = 0; r < AM_NUM_RINGS; r++) {
+            float ra = adv * (twist ? 1.0f + KETTLE_TWIST_GAIN * (float)r : 1.0f);
+            if (twist && (r & 1)) ra = -ra;
+            kettle.ringRot[r] = kettleWrap01(kettle.ringRot[r] - ra);
+            if (kDupHeld)
+                kDupRot[r] = kettleWrap01(kDupRot[r] + ra);
+        }
+        kettle.rot = kettleWrap01(kettle.rot - adv);
+        if (kSplayHeld) {
+            kSplay += adv * KETTLE_SPLAY_PER_ADV;
+            if (kSplay < -1.0f) kSplay = -1.0f;
+        }
+    }
+
+    if (kDupHeld) {
+        if (fabsf(speed) > KETTLE_LEAK_EPS_REVS)
+            kDupLvl = fminf(1.0f, kDupLvl + dt / KETTLE_DUP_RISE_S);
+    } else if (kDupLvl > 0.0f) {
+        kDupLvl -= dt / KETTLE_DUP_FADE_S;
+        if (kDupLvl <= 0.0f) {
+            kDupLvl = 0.0f;
+            for (int r = 0; r < AM_NUM_RINGS; r++) kDupRot[r] = 0.0f;
+        }
+    }
+
+    // Release: smoothstep home — slow leave, fast middle, soft landing.
+    if (kSplayHeld) {
+        kSplayT = -1.0f;
+    } else if (kSplay != 0.0f) {
+        if (kSplayT < 0.0f) { kSplayFrom = kSplay; kSplayT = 0.0f; }
+        kSplayT += dt;
+        float u = kSplayT / KETTLE_SPLAY_HOME_S;
+        if (u >= 1.0f) {
+            kSplay = 0.0f;
+            kSplayT = -1.0f;
+        } else {
+            kSplay = kSplayFrom * (1.0f - u * u * (3.0f - 2.0f * u));
+        }
+    }
+
+    if (kResetT < 0.0f && fabsf(speed) < KETTLE_LEAK_EPS_REVS) {
         float f = expf(-dt / KETTLE_LEAK_TAU);
         for (int r = 0; r < AM_NUM_RINGS; r++) {
             float d = kettle.ringRot[r];
@@ -388,23 +422,6 @@ static void kettleUpdate(float dt) {
         float d = kettle.rot;
         d -= roundf(d);
         kettle.rot = kettleWrap01(d * f);
-    }
-
-    if (kMode == KMODE_DUP) {
-        if (fabsf(speed) > KETTLE_LEAK_EPS_REVS) {
-            kDupLvl = fminf(1.0f, kDupLvl + dt / KETTLE_DUP_RISE_S);
-        } else {
-            kDupLvl -= dt / KETTLE_DUP_FADE_S;
-            if (kDupLvl <= 0.0f) { kDupLvl = 0.0f; kZeroRot(); }
-        }
-    }
-
-    {
-        float target = (kMode == KMODE_COMB)
-            ? fminf(1.0f, fabsf(speed) / KETTLE_COMB_FULL_REVS) : 0.0f;
-        float tau = (target > kCombPump) ? KETTLE_COMB_RISE_TAU : KETTLE_COMB_FALL_TAU;
-        kCombPump += fminf(1.0f, dt / tau) * (target - kCombPump);
-        kCombEase = kCombPump * kCombPump * (3.0f - 2.0f * kCombPump);
     }
 
     if (kResetT >= 0.0f) {
@@ -440,8 +457,7 @@ static void outputRotated() {
     static float crk[MAX_LEDS];
     for (uint8_t s = 0; s < NUM_STRIPS; s++) {
         uint16_t len = STRIP_LEN[s];
-        float off = (kMode == KMODE_ROTATE)
-            ? kettleRot(kettle, SEG[s].strip) * (float)len : 0.0f;
+        float off = kettleRot(kettle, SEG[s].strip) * (float)len;
         for (uint16_t i = 0; i < len; i++) {
             float srcF = fmodf((float)i - off, (float)len);
             if (srcF < 0.0f) srcF += (float)len;
@@ -532,37 +548,51 @@ static float clickyRufflePhase = 0.0f;
 #define CLICKY_DESAT_S     0.3f    // ramp time full color <-> desaturated
 
 // ── Ghost recorder (sandbox) ────────────────────────────────────
-// Hold button k: wipe and record particle k's smoothed position at
-// GHOST_CAP_HZ. Release: a dim ghost blob loops the recorded gesture
-// ping-pong at recorded speed. Tracks live in normalized [0,1] space,
-// so playback is topology-independent like everything else.
+// Hold a button: wipe THAT BUTTON'S slot and record every mapped pot's
+// smoothed position at GHOST_CAP_HZ. Release: dim ghost blobs loop the
+// recorded gesture ping-pong at recorded speed. Tracks live in normalized
+// [0,1] space, so playback is topology-independent like everything else.
+//
+// Recordings are keyed by BUTTON, not by pot: each button is an independent
+// slot, so two buttons mapped to the same pot hold two coexisting ghosts of
+// that particle. Re-press overwrites only that slot; tap clears only it.
 #define GHOST_CAP_HZ       25.0f
 #define GHOST_MAX_S        15
 #define GHOST_MAX_SAMPLES  ((int)(GHOST_CAP_HZ * GHOST_MAX_S))
-#define GHOST_MIN_SAMPLES  6      // shorter press = tap = clear the ghost
+#define GHOST_MIN_SAMPLES  6      // shorter press = tap = clear the slot
+#define GHOST_BTN_LANES    3      // pots one button can record at once
 #define GHOST_LEVEL        0.45f
 #define GHOST_FADE_S       30.0f  // ghost lifetime: fades to nothing, then expires
 
 // Button -> pots it records (bitmask per button). The physical buttons do not
 // sit over the knobs, so the wiring is a free choice and MANY-TO-MANY: one
-// button may record several pots, one pot may appear under several buttons.
-// Edit this table to taste; default is identity, button 5 unassigned.
+// button may record several pots (first GHOST_BTN_LANES of the mask), one pot
+// may appear under several buttons. Edit to taste; default doubles pot 4 on
+// buttons E and F so the same particle can hold two gestures.
 static const uint8_t GHOST_BTN_POTS[6] =
-    { 1 << 0, 1 << 1, 1 << 2, 1 << 3, 1 << 4, 0 };
+    { 1 << 0, 1 << 1, 1 << 2, 1 << 3, 1 << 4, 1 << 4 };
 
-static float    ghostTrack[CLICKY_NUM_POTS][GHOST_MAX_SAMPLES];
-static float    ghostSplitTrack[CLICKY_NUM_POTS][GHOST_MAX_SAMPLES];
-static uint16_t ghostCount[CLICKY_NUM_POTS];
-static bool     ghostRec[CLICKY_NUM_POTS];
-static float    ghostPlayPos[CLICKY_NUM_POTS];
-static float    ghostPlayDir[CLICKY_NUM_POTS];
-static float    ghostCapAccum[CLICKY_NUM_POTS];
+// Tracks quantized to u16 in [0,1] — 6 slots x 3 lanes of floats blew the
+// DRAM segment; 1/65535 is far below one LED of position resolution.
+static uint16_t ghostTrack[6][GHOST_BTN_LANES][GHOST_MAX_SAMPLES];
+static uint16_t ghostSplitTrack[6][GHOST_BTN_LANES][GHOST_MAX_SAMPLES];
+static inline uint16_t ghostQ(float x) {
+    return (uint16_t)(fminf(1.0f, fmaxf(0.0f, x)) * 65535.0f + 0.5f);
+}
+#define GHOST_DQ (1.0f / 65535.0f)
+static uint8_t  ghostLanePot[6][GHOST_BTN_LANES];
+static uint8_t  ghostLanes[6];
+static uint16_t ghostCount[6];
+static bool     ghostRec[6];
+static float    ghostPlayPos[6];
+static float    ghostPlayDir[6];
+static float    ghostCapAccum[6];
 static uint8_t  ghostPrevBtn = 0;
-static float    ghostRenderPos[CLICKY_NUM_POTS];
-static float    ghostRenderSplit[CLICKY_NUM_POTS];
-static float    ghostRenderLvl[CLICKY_NUM_POTS];
-static float    ghostAge[CLICKY_NUM_POTS];
-static bool     ghostRenderOn[CLICKY_NUM_POTS];
+static float    ghostRenderPos[6][GHOST_BTN_LANES];
+static float    ghostRenderSplit[6][GHOST_BTN_LANES];
+static float    ghostRenderLvl[6];
+static float    ghostAge[6];
+static bool     ghostRenderOn[6];
 
 // Shard field lives in normalized space: pos in [0,1], vel in units/sec.
 #define CLICKY_NUM_SHARDS  48
@@ -608,72 +638,79 @@ static void resetClickyParticles() {
 }
 
 static void ghostUpdate(uint8_t btnBits, float dt) {
-    uint8_t heldPots = 0;
-    for (int b = 0; b < 6; b++)
-        if (btnBits & (1 << b)) heldPots |= GHOST_BTN_POTS[b];
-    uint8_t edgeDown = heldPots & ~ghostPrevBtn;
-    uint8_t edgeUp   = ~heldPots & ghostPrevBtn;
-    if (heldPots != ghostPrevBtn)
-        Serial.printf("[ghost] rec pots %02X -> %02X (btn %02X)\n",
-                      ghostPrevBtn, heldPots, btnBits);
-    ghostPrevBtn = heldPots;
-    for (int k = 0; k < CLICKY_NUM_POTS; k++) {
-        ghostRenderOn[k] = false;
-        if (k == CLICKY_BRIGHT_POT) continue;
-        if (edgeDown & (1 << k)) {
-            ghostCount[k] = 0;
-            ghostRec[k] = true;
-            ghostCapAccum[k] = 1e9f;
-            Serial.printf("[ghost] rec start pot %d pos %.3f\n", k, clickyPos[k]);
+    uint8_t edgeDown = btnBits & ~ghostPrevBtn;
+    uint8_t edgeUp   = ~btnBits & ghostPrevBtn;
+    ghostPrevBtn = btnBits;
+    for (int b = 0; b < 6; b++) {
+        ghostRenderOn[b] = false;
+        if (GHOST_BTN_POTS[b] == 0) continue;
+        if (edgeDown & (1 << b)) {
+            ghostLanes[b] = 0;
+            for (int k = 0; k < CLICKY_NUM_POTS && ghostLanes[b] < GHOST_BTN_LANES; k++)
+                if ((GHOST_BTN_POTS[b] & (1 << k)) && k != CLICKY_BRIGHT_POT)
+                    ghostLanePot[b][ghostLanes[b]++] = (uint8_t)k;
+            ghostCount[b] = 0;
+            ghostRec[b] = true;
+            ghostCapAccum[b] = 1e9f;
+            Serial.printf("[ghost] rec start btn %d pots %02X\n",
+                          b, GHOST_BTN_POTS[b]);
         }
-        if (ghostRec[k]) {
-            ghostCapAccum[k] += dt;
-            if (ghostCapAccum[k] >= 1.0f / GHOST_CAP_HZ) {
-                ghostCapAccum[k] = 0.0f;
-                if (ghostCount[k] < GHOST_MAX_SAMPLES) {
-                    ghostTrack[k][ghostCount[k]] = clickyPos[k];
-                    ghostSplitTrack[k][ghostCount[k]++] = clickySplitEase[k];
+        if (ghostRec[b]) {
+            ghostCapAccum[b] += dt;
+            if (ghostCapAccum[b] >= 1.0f / GHOST_CAP_HZ) {
+                ghostCapAccum[b] = 0.0f;
+                if (ghostCount[b] < GHOST_MAX_SAMPLES) {
+                    for (int L = 0; L < ghostLanes[b]; L++) {
+                        int k = ghostLanePot[b][L];
+                        ghostTrack[b][L][ghostCount[b]] = ghostQ(clickyPos[k]);
+                        ghostSplitTrack[b][L][ghostCount[b]] = ghostQ(clickySplitEase[k]);
+                    }
+                    ghostCount[b]++;
                 }
             }
-            if (edgeUp & (1 << k)) {
-                ghostRec[k] = false;
-                if (ghostCount[k] < GHOST_MIN_SAMPLES) ghostCount[k] = 0;
-                ghostPlayPos[k] = 0.0f;
-                ghostPlayDir[k] = 1.0f;
-                ghostAge[k] = 0.0f;
-                Serial.printf("[ghost] rec end pot %d samples %u%s\n", k,
-                              ghostCount[k],
-                              ghostCount[k] ? "" : " (tap -> cleared)");
+            if (edgeUp & (1 << b)) {
+                ghostRec[b] = false;
+                if (ghostCount[b] < GHOST_MIN_SAMPLES) ghostCount[b] = 0;
+                ghostPlayPos[b] = 0.0f;
+                ghostPlayDir[b] = 1.0f;
+                ghostAge[b] = 0.0f;
+                Serial.printf("[ghost] rec end btn %d samples %u%s\n", b,
+                              ghostCount[b],
+                              ghostCount[b] ? "" : " (tap -> cleared)");
             }
             continue;
         }
-        if (ghostCount[k] == 0) continue;
-        ghostAge[k] += dt;
-        if (ghostAge[k] >= GHOST_FADE_S) { ghostCount[k] = 0; continue; }
-        ghostRenderLvl[k] = GHOST_LEVEL * (1.0f - ghostAge[k] / GHOST_FADE_S);
-        float span = (float)ghostCount[k] - 1.0f;
-        ghostPlayPos[k] += ghostPlayDir[k] * GHOST_CAP_HZ * dt;
+        if (ghostCount[b] == 0) continue;
+        ghostAge[b] += dt;
+        if (ghostAge[b] >= GHOST_FADE_S) { ghostCount[b] = 0; continue; }
+        ghostRenderLvl[b] = GHOST_LEVEL * (1.0f - ghostAge[b] / GHOST_FADE_S);
+        float span = (float)ghostCount[b] - 1.0f;
+        ghostPlayPos[b] += ghostPlayDir[b] * GHOST_CAP_HZ * dt;
         if (span <= 0.0f) {
-            ghostPlayPos[k] = 0.0f;
+            ghostPlayPos[b] = 0.0f;
         } else {
-            while (ghostPlayPos[k] > span || ghostPlayPos[k] < 0.0f) {
-                if (ghostPlayPos[k] > span) {
-                    ghostPlayPos[k] = 2.0f * span - ghostPlayPos[k];
-                    ghostPlayDir[k] = -1.0f;
+            while (ghostPlayPos[b] > span || ghostPlayPos[b] < 0.0f) {
+                if (ghostPlayPos[b] > span) {
+                    ghostPlayPos[b] = 2.0f * span - ghostPlayPos[b];
+                    ghostPlayDir[b] = -1.0f;
                 }
-                if (ghostPlayPos[k] < 0.0f) {
-                    ghostPlayPos[k] = -ghostPlayPos[k];
-                    ghostPlayDir[k] = 1.0f;
+                if (ghostPlayPos[b] < 0.0f) {
+                    ghostPlayPos[b] = -ghostPlayPos[b];
+                    ghostPlayDir[b] = 1.0f;
                 }
             }
         }
-        uint16_t i0 = (uint16_t)ghostPlayPos[k];
-        if (i0 >= ghostCount[k]) i0 = ghostCount[k] - 1;
-        uint16_t i1 = (uint16_t)((i0 + 1 < ghostCount[k]) ? i0 + 1 : i0);
-        float fr = ghostPlayPos[k] - (float)i0;
-        ghostRenderPos[k] = lerpf(ghostTrack[k][i0], ghostTrack[k][i1], fr);
-        ghostRenderSplit[k] = lerpf(ghostSplitTrack[k][i0], ghostSplitTrack[k][i1], fr);
-        ghostRenderOn[k] = true;
+        uint16_t i0 = (uint16_t)ghostPlayPos[b];
+        if (i0 >= ghostCount[b]) i0 = ghostCount[b] - 1;
+        uint16_t i1 = (uint16_t)((i0 + 1 < ghostCount[b]) ? i0 + 1 : i0);
+        float fr = ghostPlayPos[b] - (float)i0;
+        for (int L = 0; L < ghostLanes[b]; L++) {
+            ghostRenderPos[b][L] = GHOST_DQ *
+                lerpf(ghostTrack[b][L][i0], ghostTrack[b][L][i1], fr);
+            ghostRenderSplit[b][L] = GHOST_DQ *
+                lerpf(ghostSplitTrack[b][L][i0], ghostSplitTrack[b][L][i1], fr);
+        }
+        ghostRenderOn[b] = true;
     }
 }
 
@@ -702,6 +739,9 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
         float centerN = lerpf(ownN, meanPos, gatherT);
         float center = centerN * (float)(len - 1);
         float sigma = fmaxf(0.5f, CLICKY_SIGMA_NORM * REF_LEN * sigScale * clickyPump[k]);
+        // Negative splay (dialed back past home) squeezes the blob toward a
+        // single pixel; positive splay only spreads the comb.
+        sigma = fmaxf(0.35f, sigma * (1.0f + fminf(0.0f, kSplay)));
 
         if (clickyCrackleT > 0.0f) {
             float env = clickyCrackleT / CLICKY_CRACKLE_S;
@@ -721,9 +761,10 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
         hsvToRgb(hueWrap360(CLICKY_HUES[k] + gHueRotDeg),
                  sqrtf(clickyFade), 1.0f, r, g, b);
 
-        float easeK = fmaxf(clickySplitEase[k], kCombEase);
+        float easeK = clickySplitEase[k];
         float fullSpacing = fmaxf(1.0f, CLICKY_PULL_NORM * REF_LEN * sigScale);
-        float spacingF = lerpf(1.0f, fullSpacing, easeK);
+        float spacingF = lerpf(1.0f, fullSpacing, easeK)
+            + fmaxf(0.0f, kSplay) * (fullSpacing - 1.0f);
         int reach = (int)(4.0f * sigma);
         for (int j = -reach; j <= reach; j++) {
             float tc = center + (float)j * spacingF;
@@ -732,7 +773,8 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
             // Sub-pixel splat only while the split animates; settled comb
             // snaps to single crisp pixels (and settled blob keeps the old
             // integer-center look).
-            float tcs = (easeK <= 0.001f || easeK >= 0.999f)
+            float tcs = (kSplay <= 0.001f
+                         && (easeK <= 0.001f || easeK >= 0.999f))
                 ? (float)lroundf(tc) : tc;
             tcs -= floorf(tcs / (float)len) * (float)len;
             int i0 = (int)tcs;
@@ -754,9 +796,8 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
         }
     }
 
-    if (kMode == KMODE_DUP && kDupLvl > 0.001f
-        && clickyFade > 0.0f && clickyCrackleT <= 0.0f) {
-        const float rotOff = kettleRot(kettle, SEG[s].strip);
+    if (kDupLvl > 0.001f && clickyFade > 0.0f && clickyCrackleT <= 0.0f) {
+        const float rotOff = kDupRot[SEG[s].strip & (AM_NUM_RINGS - 1)];
         for (int k = 0; k < CLICKY_NUM_POTS; k++) {
             if (k == CLICKY_BRIGHT_POT) continue;
             float centerN = kettleWrap01(
@@ -764,19 +805,22 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
             float center = centerN * (float)(len - 1);
             float sigma = fmaxf(0.5f,
                 CLICKY_SIGMA_NORM * REF_LEN * sigScale * clickyPump[k]);
+            sigma = fmaxf(0.35f, sigma * (1.0f + fminf(0.0f, kSplay)));
             float r, g, b;
             hsvToRgb(hueWrap360(CLICKY_HUES[k] + gHueRotDeg),
                      sqrtf(clickyFade), 1.0f, r, g, b);
-            float easeK = fmaxf(clickySplitEase[k], kCombEase);
+            float easeK = clickySplitEase[k];
             float fullSpacing = fmaxf(1.0f, CLICKY_PULL_NORM * REF_LEN * sigScale);
-            float spacingF = lerpf(1.0f, fullSpacing, easeK);
+            float spacingF = lerpf(1.0f, fullSpacing, easeK)
+                + fmaxf(0.0f, kSplay) * (fullSpacing - 1.0f);
             int reach = (int)(4.0f * sigma);
             float lvl = KETTLE_DUP_LEVEL * kDupLvl * clickyFade;
             for (int j = -reach; j <= reach; j++) {
                 float tc = center + (float)j * spacingF;
                 float d = (float)j / sigma;
                 float w = expf(-d * d) * lvl;
-                float tcs = (easeK <= 0.001f || easeK >= 0.999f)
+                float tcs = (kSplay <= 0.001f
+                             && (easeK <= 0.001f || easeK >= 0.999f))
                     ? (float)lroundf(tc) : tc;
                 tcs -= floorf(tcs / (float)len) * (float)len;
                 int i0 = (int)tcs;
@@ -793,20 +837,22 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
         }
     }
 
-    for (int k = 0; k < CLICKY_NUM_POTS; k++) {
-        if (!ghostRenderOn[k]) continue;
-        float center = ghostRenderPos[k] * (float)(len - 1);
+    for (int gb = 0; gb < 6; gb++) {
+        if (!ghostRenderOn[gb]) continue;
+        for (int L = 0; L < ghostLanes[gb]; L++) {
+        int k = ghostLanePot[gb][L];
+        float center = ghostRenderPos[gb][L] * (float)(len - 1);
         float sigma = fmaxf(0.5f, CLICKY_SIGMA_NORM * REF_LEN * sigScale);
         float r, g, b;
         hsvToRgb(hueWrap360(CLICKY_HUES[k] + gHueRotDeg), 1.0f, 1.0f, r, g, b);
-        float ease = ghostRenderSplit[k];
+        float ease = ghostRenderSplit[gb][L];
         float fullSpacing = fmaxf(1.0f, CLICKY_PULL_NORM * REF_LEN * sigScale);
         float spacingF = lerpf(1.0f, fullSpacing, ease);
         int reach = (int)(4.0f * sigma);
         for (int j = -reach; j <= reach; j++) {
             float tc = center + (float)j * spacingF;
             float d = (float)j / sigma;
-            float w = expf(-d * d) * ghostRenderLvl[k];
+            float w = expf(-d * d) * ghostRenderLvl[gb];
             float tcs = (ease <= 0.001f || ease >= 0.999f)
                 ? (float)lroundf(tc) : tc;
             tcs -= floorf(tcs / (float)len) * (float)len;
@@ -820,6 +866,7 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
             float w1 = w * fr;
             buf[i1][0] += r * w1; buf[i1][1] += g * w1; buf[i1][2] += b * w1;
             cov[i1] += w1;
+        }
         }
     }
 

@@ -152,6 +152,15 @@ firmware_by_role:
     notes: |
       Bring-up + experimentation breadboard. Not pinned to one firmware —
       reflash freely. Per-board `last_flashed` may record current state.
+  axismundi-mockup:
+    deployment: static
+    source: festicorn/axismundi/src/axismundi.cpp
+    packet_format: ClickyPacketV1 + KettlePacketV1 + DuckPacketV1 (receiver)
+    notes: |
+      Backyard mockup, single board: 2 canopy chains (folded radials) +
+      2 helix+roots chains on GPIO 13/27/32/33. Segment layout, LED counts,
+      and fold geometry are owned by SEG[] in axismundi.cpp (AM_MOCKUP
+      block) — do not restate them here.
   wormhole-eth:
     deployment: static
     source: festicorn/tree-of-record/src/wormhole_eth.cpp
@@ -168,6 +177,20 @@ firmware_by_role:
       Standalone ambient wormhole (4-strip variant of wormhole.cpp), tuned
       denser: ~60% of the strip lit vs ~41% on biolum-b. No radio/sensors.
       Build/flash with env:wormhole-eth in the tree-of-record project.
+
+  trike:
+    deployment: static
+    source: festicorn/trike/src/main.cpp
+    packet_format: standalone
+    hardware:
+      chip: esp32-c3 super mini
+      strips: 1× WS2812 RGB, 150 LEDs
+      pins: GPIO 4 (LED data), GPIO 3 (button, INPUT_PULLUP to GND)
+    notes: |
+      Trike installation. Three effects — butterfly OKLCH rainbow, pink/teal
+      traveling weave, solid pink. Button: press = next effect, hold =
+      brightness ramp (direction alternates per hold), double press = speed
+      cycle 1x → 2x → 0.5x. No radio.
 
 boards:
 
@@ -342,6 +365,20 @@ boards:
     "Board B" in the historical gyro-sense platformio header — broken WiFi TX,
     RX-only role suits it. Drives 50× SK6812 RGBW on GPIO 10.
 
+# ── trike ────────────────────────────────────────────────────────────
+- mac: 10:00:3B:B0:5C:90
+  id: 'trike'
+  chip: esp32-c3
+  role: trike
+  first_seen: '2026-08-16T00:00:00Z'
+  last_validated:
+    utc: '2026-08-17T00:00:00Z'
+    port: /dev/cu.usbmodem112101
+    method: esptool MAC verified during flash; boot banner confirmed over serial
+  notes: |
+    C3 Super Mini. See firmware_by_role.trike for wiring and behavior.
+    Identify by MAC; port re-enumerates on replug.
+
 # ── spare / untyped C3 ───────────────────────────────────────────────
 - mac: 10:00:3B:B1:3E:80
   id: 'kettle-knob'
@@ -379,17 +416,21 @@ boards:
     clicky-pots, clean 1 Hz ClickyPacketV1 heartbeat reception. Candidate
     for the water-heater rotary-encoder control node.
 - mac: 14:63:93:6F:FF:78
-  id: ''
+  id: 'espnow-usb-bridge'
   chip: esp32-c3
-  role: spare
+  role: espnow-bridge
   first_seen: '2026-07-27T00:00:00Z'
   last_validated:
-    utc: '2026-07-27T00:00:00Z'
+    utc: '2026-07-31T00:00:00Z'
     port: /dev/cu.usbmodem2101
-    method: rf-bench four-board RSSI matrix
+    method: bridge frames verified (clicky 18B + kettle 13B over the air, XOR framing clean)
   notes: |
     No TX defect: clean unicast ACK and reception all the way to the 20.00 dBm
     driver ceiling. Preferred over 10:00:3B:B1:3E:80 for anything TX-heavy.
+    Flashed 2026-07-31 as the console-dashboard ESP-NOW bridge
+    (festicorn/console-bridge env:bridge, src/bridge.cpp): forwards every
+    ch-1 ESP-NOW packet over USB CDC as A5 5A | len | payload | XOR at
+    460800. Dashboard runs with --no-discover --port bridge=<port>.
 - mac: 10:00:3B:B1:5D:10
   id: ''
   chip: esp32-c3
@@ -532,24 +573,25 @@ boards:
 - mac: 04:B2:47:82:74:20
   id: 'led-eth-0'
   chip: esp32
-  role: wormhole-eth
+  role: axismundi-mockup
   first_seen: '2026-06-17T00:00:00Z'
   last_validated:
-    utc: '2026-06-17T00:00:00Z'
-    port: /dev/cu.usbserial-111430
-    method: esptool read-mac (chip detect ESP32, 240MHz, 40MHz xtal)
+    utc: '2026-07-31T00:00:00Z'
+    port: /dev/cu.usbserial-210
+    method: esptool read-mac; mockup boot banner + live clicky/kettle RX verified
   strips:
     count: 4
-    leds_each: 150
     pins: [13, 27, 32, 33]
   can:
     tx: 2
     rx: 4
   notes: |
     LED data carried over ethernet CABLE as a physical conductor only — not
-    networked. 4× WS2812, 150 LEDs each, clean output pins 13/27/32/33.
-    Runs the 4-strip wormhole (env:wormhole-eth). Port re-enumerates on
-    replug — identify by MAC.
+    networked. Clean output pins 13/27/32/33; per-pin LED counts are owned
+    by the flashed firmware's strip table (see firmware_by_role for the role).
+    Backyard axismundi mockup board since 2026-07-31 (env:axismundi-mockup).
+    Previously ran the 4-strip wormhole (env:wormhole-eth — reflash from
+    tree-of-record to restore). Port re-enumerates on replug — identify by MAC.
     CAN transceiver soldered TX=GPIO2 RX=GPIO4 (verified 2026-07-08, 3-node
     mesh). GPIO2 is a strapping pin: boot/flash wiggles TXD and spews error
     frames onto the bus — other nodes recover, but expect counter noise after
@@ -587,12 +629,12 @@ boards:
 - mac: B4:BF:E9:33:63:C0
   id: 'led-eth-2'
   chip: esp32
-  role: tree-of-record-eth
+  role: bench-test
   first_seen: '2026-06-29T00:00:00Z'
   last_validated:
-    utc: '2026-06-29T00:00:00Z'
-    port: /dev/cu.usbserial-11220
-    method: esptool read-mac (chip detect ESP32, 240MHz, 40MHz xtal)
+    utc: '2026-07-31T00:00:00Z'
+    port: /dev/cu.usbserial-130
+    method: esptool read-mac; briefly ran the 2-board helix-mockup firmware, then freed
   strips:
     count: 4
     leds_each: 150
@@ -601,10 +643,12 @@ boards:
     tx: 16
     rx: 17
   notes: |
-    Third eth-board clone (after led-eth-0/1), same pinout. 4× WS2812, 150 LEDs
-    each, output pins 13/27/32/33. Flashed with the tree-of-record receiver
-    (env:tree-of-record-eth): ESP-NOW BS-26 + duck audio, effect catalog scanned
-    by the decouter ring. Identify by MAC; port re-enumerates on replug.
+    Third eth-board clone (after led-eth-0/1), same pinout, output pins
+    13/27/32/33. Freed 2026-07-31 when the axismundi backyard mockup was
+    consolidated onto led-eth-0; still flashed with the interim 2-board
+    helix firmware (harmless). Previously the tree-of-record receiver
+    (env:tree-of-record-eth — reflash to restore). Identify by MAC; port
+    re-enumerates on replug.
     CAN transceiver soldered TX=GPIO16 RX=GPIO17 (verified 2026-07-08, 3-node
     mesh) — the only board on the originally-planned UART2 pinout.
 

@@ -48,6 +48,24 @@ static float AX_KETTLE_AGE = 1e9f;
 #define AX_REF_LEN    100.0f
 #define AX_MAX_STRIP  297
 
+#define AXFX_NS     HC_NUM_STRIPS
+#define AXFX_MAXLEN AX_MAX_STRIP
+#define AXFX_LEN(s) HC_STRIPS[s].count
+#include <axfx_ambient.h>
+
+// Ambient effect triggers (axfx). Three freed kettle buttons each summon one
+// overlay while held; the knob spin is diverted from the carousel into that
+// effect's drive. Mirrors axismundi_sandbox.cpp.
+#define AXFX_BTN_BLOOM     KETTLE_BTN_FLYWHEEL
+#define AXFX_BTN_FIRE      KETTLE_BTN_COUNTER
+#define AXFX_BTN_LEAFWIND  KETTLE_BTN_CRACKLE
+#define AXFX_CEIL_POT      0
+static AxfxDrive ax_axfxDrive;
+static int       ax_axfxEffect = AXFX_NONE;
+static int32_t   ax_axfxPrevEnc = 0;
+static bool      ax_axfxEncInit = false;
+static float     ax_axfxCeiling = 1.0f;
+
 #define AX_BRIGHT_POT  5
 #define AX_BRIGHT_FLOOR 0.0f
 
@@ -247,6 +265,7 @@ static void ax_kettle_reset() {
     // The viewer has 23 strips but the sculpture has 4 rings; strips fan into
     // the same four phase groups via (s & 3) at the call sites.
     kettleSetRings(ax_kettle, 4);
+    axfxDriveInit(ax_axfxDrive);
 }
 
 #define AX_LOOP_RECORD 0
@@ -262,39 +281,17 @@ static void ax_kettle_reset() {
 static float axk_resetFrom[4];
 static float axk_resetT = -1.0f;
 
-// Sandbox: the freed kettle buttons are HOLD-TO-ACTUATE spin modifiers, like
-// twist. Bare spin = carousel (leaks home at rest). Hold DUP: lives pinned,
-// spin builds duplicates that fade out on release. Hold SPLAY: spin pushes
-// every particle's comb outward with NO cap (counter-spin dials it back);
-// release drifts the combs home. Buttons are physical-panel dependent — edit
-// these two picks; keep identical to axismundi_sandbox.cpp.
-#define AXK_BTN_DUP    KETTLE_BTN_COUNTER
-#define AXK_BTN_SPLAY  KETTLE_BTN_CRACKLE
+// Sandbox v2: twist is the only surviving spin modifier. Bare spin = carousel
+// (leaks home at rest); hold twist and spin fans the rings into a helix. The
+// other kettle buttons are freed for the ambient-effect triggers (axfx). Keep
+// identical to axismundi_sandbox.cpp.
 #define AXK_LEAK_TAU       6.0f
 #define AXK_LEAK_DELAY_S   1.0f
 #define AXK_LEAK_RAMP_S    2.0f
 #define AXK_LEAK_EPS_REVS  0.02f
-#define AXK_DUP_LEVEL      0.55f
-#define AXK_DUP_RISE_S     0.15f
-#define AXK_DUP_FADE_S     2.5f
-// Ease-units of splay per unit of carousel advance. Advance already carries
-// KETTLE_SPIN_GAIN 0.5, so 1.0 here = two physical knob revs per old-full-comb
-// (half the old pump rate), and it keeps integrating past that without limit.
-#define AXK_SPLAY_PER_ADV  1.0f
-#define AXK_SPLAY_HOME_S   1.5f
-
-static bool  axk_dupHeld = false;
-static bool  axk_splayHeld = false;
-static float axk_dupRot[4];
-static float axk_dupLvl = 0.0f;
-static float axk_splay = 0.0f;
-static float axk_splayFrom = 0.0f;
-static float axk_splayT = -1.0f;
 
 static void ax_kettle_update(float dt) {
     AX_KETTLE_AGE += dt;
-    axk_dupHeld = false;
-    axk_splayHeld = false;
     if (AX_KETTLE_SEEN && AX_KETTLE_AGE < AXK_STALE_S) {
         static uint8_t prevHold = 0;
         uint8_t hold = (AX_KETTLE.btnBits >> KETTLE_BTN_HOLD) & 1;
@@ -308,64 +305,43 @@ static void ax_kettle_update(float dt) {
             axk_resetT = 0.0f;
         }
         prevHold = hold;
-        axk_dupHeld   = (AX_KETTLE.btnBits >> AXK_BTN_DUP) & 1;
-        axk_splayHeld = (AX_KETTLE.btnBits >> AXK_BTN_SPLAY) & 1;
         // Twist implies alternate-direction rings: feed the lib's counter
         // bit alongside twist so every other ring runs opposite.
         uint8_t tw = AX_KETTLE.btnBits & (uint8_t)(1 << KETTLE_BTN_TWIST);
         kettleInput(ax_kettle, AX_KETTLE.enc,
                     tw ? (uint8_t)(tw | (1 << KETTLE_BTN_COUNTER)) : 0,
                     AX_KETTLE.upMs);
+
+        int held = AXFX_NONE;
+        if ((AX_KETTLE.btnBits >> AXFX_BTN_BLOOM) & 1)         held = AXFX_BLOOM;
+        else if ((AX_KETTLE.btnBits >> AXFX_BTN_FIRE) & 1)     held = AXFX_FIRE;
+        else if ((AX_KETTLE.btnBits >> AXFX_BTN_LEAFWIND) & 1) held = AXFX_LEAFWIND;
+
+        if (!ax_axfxEncInit) { ax_axfxPrevEnc = AX_KETTLE.enc; ax_axfxEncInit = true; }
+        int32_t encDelta = AX_KETTLE.enc - ax_axfxPrevEnc;
+        ax_axfxPrevEnc = AX_KETTLE.enc;
+        float encRev = (float)encDelta
+            / (float)(KETTLE_COUNTS_PER_DETENT * KETTLE_DETENTS_PER_REV);
+
+        float driveSpin = 0.0f;
+        if (held != AXFX_NONE) {
+            ax_kettle.rotPending -= encRev * KETTLE_SPIN_GAIN;
+            driveSpin = (dt > 0.0f) ? encRev / dt : 0.0f;
+            if (held != ax_axfxEffect) { ax_axfxEffect = held; axfxReset(held); }
+            ax_axfxDrive.floor = AXFX_FLOOR;
+        } else if (ax_axfxEffect != AXFX_NONE) {
+            ax_axfxDrive.floor = 0.0f;
+            if (ax_axfxDrive.level < 0.006f && ax_axfxDrive.energy < 0.01f)
+                ax_axfxEffect = AXFX_NONE;
+        }
+        ax_axfxDrive.ceiling = ax_axfxCeiling;
+        axfxDriveStep(ax_axfxDrive, driveSpin, dt);
     }
     float rotBefore = ax_kettle.rot;
     kettleRotStep(ax_kettle, dt);
     float adv = ax_kettle.rot - rotBefore;
     adv -= roundf(adv);
     float speed = (dt > 0.0f) ? adv / dt : 0.0f;
-
-    // While a modifier is held the frame must not rotate: undo this frame's
-    // carousel advance and reroute it into the modifier's own integrator.
-    if (axk_dupHeld || axk_splayHeld) {
-        bool twist = kettleHeld(ax_kettle, KETTLE_BTN_TWIST);
-        for (int r = 0; r < 4; r++) {
-            float ra = adv * (twist ? 1.0f + KETTLE_TWIST_GAIN * (float)r : 1.0f);
-            if (twist && (r & 1)) ra = -ra;
-            ax_kettle.ringRot[r] = kettleWrap01(ax_kettle.ringRot[r] - ra);
-            if (axk_dupHeld)
-                axk_dupRot[r] = kettleWrap01(axk_dupRot[r] + ra);
-        }
-        ax_kettle.rot = kettleWrap01(ax_kettle.rot - adv);
-        if (axk_splayHeld) {
-            axk_splay += adv * AXK_SPLAY_PER_ADV;
-            if (axk_splay < -1.0f) axk_splay = -1.0f;
-        }
-    }
-
-    if (axk_dupHeld) {
-        if (fabsf(speed) > AXK_LEAK_EPS_REVS)
-            axk_dupLvl = fminf(1.0f, axk_dupLvl + dt / AXK_DUP_RISE_S);
-    } else if (axk_dupLvl > 0.0f) {
-        axk_dupLvl -= dt / AXK_DUP_FADE_S;
-        if (axk_dupLvl <= 0.0f) {
-            axk_dupLvl = 0.0f;
-            for (int r = 0; r < 4; r++) axk_dupRot[r] = 0.0f;
-        }
-    }
-
-    // Release: smoothstep home — slow leave, fast middle, soft landing.
-    if (axk_splayHeld) {
-        axk_splayT = -1.0f;
-    } else if (axk_splay != 0.0f) {
-        if (axk_splayT < 0.0f) { axk_splayFrom = axk_splay; axk_splayT = 0.0f; }
-        axk_splayT += dt;
-        float u = axk_splayT / AXK_SPLAY_HOME_S;
-        if (u >= 1.0f) {
-            axk_splay = 0.0f;
-            axk_splayT = -1.0f;
-        } else {
-            axk_splay = axk_splayFrom * (1.0f - u * u * (3.0f - 2.0f * u));
-        }
-    }
 
     // Drift-home waits out a deadband after the spin stops, then ramps in.
     static float axk_idleT = 0.0f;
@@ -432,7 +408,7 @@ static void ax_duck_update(float dt) {
 // rotated by this ring's phase and scaled by the pot-5 fader; duck is the
 // waterfall in PHYSICAL space and the crackle is splatted at fixed physical
 // positions, so neither moves when the carousel spins.
-static void ax_write_ring(RGBf* out, int base, int len, int ring,
+static void ax_write_ring(RGBf* out, int sIdx, int base, int len, int ring,
                           const float (*comp)[3], const float (*duck)[3]) {
     static float crk[AX_MAX_STRIP];
     const float off = (ring < 0) ? 0.0f
@@ -448,9 +424,9 @@ static void ax_write_ring(RGBf* out, int base, int len, int ring,
         int i1 = (i0 + 1) % len;
         float fr = srcF - (float)i0;
         const float c = crk[i] * AXK_CRK_LEVEL;
-        float pr = ax_lerp(comp[i0][0], comp[i1][0], fr) * s + duck[i][0] / 255.0f + c;
-        float pg = ax_lerp(comp[i0][1], comp[i1][1], fr) * s + duck[i][1] / 255.0f + c;
-        float pb = ax_lerp(comp[i0][2], comp[i1][2], fr) * s + duck[i][2] / 255.0f + c;
+        float pr = ax_lerp(comp[i0][0], comp[i1][0], fr) * s + duck[i][0] / 255.0f + axfxBuf[sIdx][i][0] / 255.0f + c;
+        float pg = ax_lerp(comp[i0][1], comp[i1][1], fr) * s + duck[i][1] / 255.0f + axfxBuf[sIdx][i][1] / 255.0f + c;
+        float pb = ax_lerp(comp[i0][2], comp[i1][2], fr) * s + duck[i][2] / 255.0f + axfxBuf[sIdx][i][2] / 255.0f + c;
         hueArcRolloff(pr, pg, pb, 1.0f);
         out[base+i].r = pr;
         out[base+i].g = pg;
@@ -666,7 +642,7 @@ static void ax_build_axfrac() {
 // most strips lenR == len and the mapping is the identity. For roots lenR =
 // axn (the pole's axial resolution), so a particle reads as a circumferential
 // band sliding down the root, whatever shape the wire takes.
-static void ax_raster_strip(RGBf* out, int base, int len, int lenR, int ring,
+static void ax_raster_strip(RGBf* out, int sIdx, int base, int len, int lenR, int ring,
                             int kind, float gatherT, float meanPos, float dt) {
     const bool canopy = (kind == 1);
     static float buf[AX_MAX_STRIP][3];
@@ -694,9 +670,6 @@ static void ax_raster_strip(RGBf* out, int base, int len, int lenR, int ring,
         // tails/teeth clip
         center = fminf(fmaxf(center, 0.0f), (float)(lenR - 1));
         float sigma = fmaxf(0.5f, AX_SIGMA_NORM * AX_REF_LEN * sigScale * ax_pump[k]);
-        // Negative splay (dialed back past home) squeezes the blob toward a
-        // single pixel; positive splay only spreads the comb.
-        sigma = fmaxf(0.35f, sigma * (1.0f + fminf(0.0f, axk_splay)));
 
         if (ax_crackleT > 0.0f) {
             float env = ax_crackleT / AX_CRACKLE_S;
@@ -718,15 +691,13 @@ static void ax_raster_strip(RGBf* out, int base, int len, int lenR, int ring,
 
         float easeK = ax_splitEase[k];
         float fullSpacing = fmaxf(1.0f, AX_PULL_NORM * AX_REF_LEN * sigScale);
-        float spacingF = ax_lerp(1.0f, fullSpacing, easeK)
-            + fmaxf(0.0f, axk_splay) * (fullSpacing - 1.0f);
+        float spacingF = ax_lerp(1.0f, fullSpacing, easeK);
         int reach = (int)(4.0f * sigma);
         for (int j = -reach; j <= reach; j++) {
             float tc = center + (float)j * spacingF;
             float d = (float)j / sigma;
             float w = expf(-d * d) * ax_fade;
-            float tcs = (axk_splay <= 0.001f
-                         && (easeK <= 0.001f || easeK >= 0.999f))
+            float tcs = (easeK <= 0.001f || easeK >= 0.999f)
                 ? (float)lroundf(tc) : tc;
             // Clip at the strip ends — the field is a LINE, not a ring; only
             // kettle displacement (dup layer, carousel stage) bridges the seam.
@@ -742,48 +713,6 @@ static void ax_raster_strip(RGBf* out, int base, int len, int lenR, int ring,
             buf[i1][0] += r * w1; buf[i1][1] += g * w1; buf[i1][2] += b * w1;
             cov[i1] += w1;
             if (w1 > bufW[i1]) { bufW[i1] = w1; bufHue[i1] = AX_HUES[k]; bufPot[i1] = (int8_t)k; }
-        }
-    }
-
-    if (!canopy && axk_dupLvl > 0.001f && ax_fade > 0.0f
-        && ax_crackleT <= 0.0f) {
-        const float rotOff = axk_dupRot[ring & 3];
-        for (int k = 0; k < AX_NUM_POTS; k++) {
-            if (k == AX_BRIGHT_POT) continue;
-            float centerN = kettleWrap01(
-                ax_lerp(ax_pos[k], meanPos, gatherT) + rotOff);
-            float center = centerN * (float)(lenR - 1);
-            float sigma = fmaxf(0.5f,
-                AX_SIGMA_NORM * AX_REF_LEN * sigScale * ax_pump[k]);
-            sigma = fmaxf(0.35f, sigma * (1.0f + fminf(0.0f, axk_splay)));
-            float r, g, b;
-            ax_hsv(hueWrap360(AX_HUES[k] + ax_hueRotDeg),
-                   sqrtf(ax_fade), 1.0f, r, g, b);
-            float easeK = ax_splitEase[k];
-            float fullSpacing = fmaxf(1.0f, AX_PULL_NORM * AX_REF_LEN * sigScale);
-            float spacingF = ax_lerp(1.0f, fullSpacing, easeK)
-                + fmaxf(0.0f, axk_splay) * (fullSpacing - 1.0f);
-            int reach = (int)(4.0f * sigma);
-            float lvl = AXK_DUP_LEVEL * axk_dupLvl * ax_fade;
-            for (int j = -reach; j <= reach; j++) {
-                float tc = center + (float)j * spacingF;
-                float d = (float)j / sigma;
-                float w = expf(-d * d) * lvl;
-                float tcs = (axk_splay <= 0.001f
-                             && (easeK <= 0.001f || easeK >= 0.999f))
-                    ? (float)lroundf(tc) : tc;
-                tcs -= floorf(tcs / (float)lenR) * (float)lenR;
-                int i0 = (int)tcs;
-                float fr = tcs - (float)i0;
-                i0 %= lenR;
-                int i1 = (i0 + 1) % lenR;
-                float w0 = w * (1.0f - fr);
-                buf[i0][0] += r * w0; buf[i0][1] += g * w0; buf[i0][2] += b * w0;
-                cov[i0] += w0;
-                float w1 = w * fr;
-                buf[i1][0] += r * w1; buf[i1][1] += g * w1; buf[i1][2] += b * w1;
-                cov[i1] += w1;
-            }
         }
     }
 
@@ -969,7 +898,7 @@ static void ax_raster_strip(RGBf* out, int base, int len, int lenR, int ring,
     duckWaterfallStep(ax_wf_lvl + base, ax_wf_hue + base, ax_wf_tlt + base, len,
                       ax_duck, ax_duck_inject, dt, ax_rand, dbuf, false);
 
-    ax_write_ring(out, base, len, canopy ? -1 : ring, comp, dbuf);
+    ax_write_ring(out, sIdx, base, len, canopy ? -1 : ring, comp, dbuf);
 }
 
 static void ax_spawn_burst(float centerN, bool outward) {
@@ -1006,14 +935,14 @@ static inline float ax_dt(float t) {
 
 // Duck alone: the firmware's clicky-absent branch (zeroed frame, waterfall,
 // carousel) with no particle layer to compose against.
-static void ax_raster_duck_only(RGBf* out, int base, int len, int ring, float dt) {
+static void ax_raster_duck_only(RGBf* out, int sIdx, int base, int len, int ring, float dt) {
     static float comp[AX_MAX_STRIP][3];
     static float dbuf[AX_MAX_STRIP][3];
     memset(comp, 0, sizeof(float) * len * 3);
     memset(dbuf, 0, sizeof(float) * len * 3);
     duckWaterfallStep(ax_wf_lvl + base, ax_wf_hue + base, ax_wf_tlt + base, len,
                       ax_duck, ax_duck_inject, dt, ax_rand, dbuf, false);
-    ax_write_ring(out, base, len, ring, comp, dbuf);
+    ax_write_ring(out, sIdx, base, len, ring, comp, dbuf);
 }
 
 static void ax_render_clicky(RGBf* out, float dt) {
@@ -1058,6 +987,7 @@ static void ax_render_clicky(RGBf* out, float dt) {
     ax_posInit = true;
 
     ax_brightness = AX_BRIGHT_FLOOR + (1.0f - AX_BRIGHT_FLOOR) * ax_pos[AX_BRIGHT_POT];
+    ax_axfxCeiling = ax_pos[AXFX_CEIL_POT];
 
     if (hueRotHeld)
         ax_hueRotDeg = hueWrap360(ax_hueRotDeg + AX_HUEROT_DEG_S * dt);
@@ -1107,7 +1037,7 @@ static void ax_render_clicky(RGBf* out, float dt) {
         int count = HC_STRIPS[s].count;
         int lenR = HC_STRIPS[s].axn ? HC_STRIPS[s].axn : count;
         if (lenR < 2) lenR = 2;
-        ax_raster_strip(out, HC_STRIPS[s].start, count, lenR, s & 3,
+        ax_raster_strip(out, s, HC_STRIPS[s].start, count, lenR, s & 3,
                         HC_STRIPS[s].kind, gatherT, meanPos, dt);
     }
 
@@ -1162,6 +1092,7 @@ static inline void fx_axismundi(RGBf* out, float t) {
     axlr_tick(dt);
 #endif
     ax_duck_update(dt);
+    axfxRender(ax_axfxEffect, ax_axfxDrive, dt);
 
     if (AX_CLICKY_SEEN) {
         ax_render_clicky(out, dt);
@@ -1169,7 +1100,7 @@ static inline void fx_axismundi(RGBf* out, float t) {
         for (int i = 0; i < HC_NUM_LEDS; i++) out[i].r = out[i].g = out[i].b = 0.0f;
         ax_brightness = 1.0f;
         for (int s = 0; s < HC_NUM_STRIPS; s++)
-            ax_raster_duck_only(out, HC_STRIPS[s].start, HC_STRIPS[s].count,
+            ax_raster_duck_only(out, s, HC_STRIPS[s].start, HC_STRIPS[s].count,
                                 s & 3, dt);
     }
 #if AX_LOOP_RECORD

@@ -113,6 +113,11 @@ static uint16_t STRIP_LEN[AM_NS];
 #define REF_LEN    100.0f   // LED-space tunings were authored at this length
 #define RASTER_PROPORTIONAL 1
 
+#define AXFX_NS     NUM_STRIPS
+#define AXFX_MAXLEN MAX_LEDS
+#define AXFX_LEN(s) STRIP_LEN[s]
+#include "axfx_ambient.h"
+
 #define FIXED_CHANNEL 1
 
 #define MASTER_BRIGHTNESS 1.0f   // brightness ceiling (pot 5 fully out), 0..1
@@ -307,40 +312,32 @@ static KettleState kettle;
 static float kResetFrom[AM_NUM_RINGS];
 static float kResetT = -1.0f;
 
-// Sandbox: the freed kettle buttons are HOLD-TO-ACTUATE spin modifiers, like
-// twist. Bare spin = carousel (leaks home at rest). Hold DUP: lives pinned,
-// spin builds duplicates that fade out on release. Hold SPLAY: spin pushes
-// every particle's comb outward with NO cap (counter-spin dials it back);
-// release drifts the combs home. Buttons are physical-panel dependent — edit
-// these two picks; keep identical to viz/src/axismundi_fx.h.
-#define KETTLE_BTN_DUP    KETTLE_BTN_COUNTER
-#define KETTLE_BTN_SPLAY  KETTLE_BTN_CRACKLE
+// Sandbox v2: twist is the only surviving spin modifier. Bare spin = carousel
+// (leaks home at rest); hold twist and spin fans the rings into a helix. The
+// other kettle buttons are freed for the ambient-effect triggers (axfx). Keep
+// identical to viz/src/axismundi_fx.h.
 #define KETTLE_LEAK_TAU       6.0f
 #define KETTLE_LEAK_DELAY_S   1.0f
 #define KETTLE_LEAK_RAMP_S    2.0f
 #define KETTLE_LEAK_EPS_REVS  0.02f
-#define KETTLE_DUP_LEVEL      0.55f
-#define KETTLE_DUP_RISE_S     0.15f
-#define KETTLE_DUP_FADE_S     2.5f
-// Ease-units of splay per unit of carousel advance. Advance already carries
-// KETTLE_SPIN_GAIN 0.5, so 1.0 here = two physical knob revs per old-full-comb
-// (half the old pump rate), and it keeps integrating past that without limit.
-#define KETTLE_SPLAY_PER_ADV  1.0f
-#define KETTLE_SPLAY_HOME_S   1.5f
 
-static bool  kDupHeld = false;
-static bool  kSplayHeld = false;
-static float kDupRot[AM_NUM_RINGS];
-static float kDupLvl = 0.0f;
-static float kSplay = 0.0f;
-static float kSplayFrom = 0.0f;
-static float kSplayT = -1.0f;
+// ── Ambient effect triggers (axfx) ──────────────────────────────
+// Three freed kettle buttons each summon one overlay effect while held; the
+// knob spin is diverted from the carousel into that effect's drive (energy +
+// brightness up to the clicky ceiling pot). Release fades the effect out.
+#define AXFX_BTN_BLOOM     KETTLE_BTN_FLYWHEEL   // bit 1
+#define AXFX_BTN_FIRE      KETTLE_BTN_COUNTER    // bit 3
+#define AXFX_BTN_LEAFWIND  KETTLE_BTN_CRACKLE    // bit 4
+#define AXFX_CEIL_POT      0                     // clicky pot: max effect brightness
+static AxfxDrive axfxDrive;
+static int       axfxEffect = AXFX_NONE;
+static int32_t   axfxPrevEnc = 0;
+static bool      axfxEncInit = false;
+static float     axfxCeiling = 1.0f;   // clicky ceiling pot, set by the clicky render
 
 static void kettleUpdate(float dt) {
     KettlePacketV1 pkt;
     memcpy(&pkt, (const void*)&kettlePkt, sizeof(pkt));
-    kDupHeld = false;
-    kSplayHeld = false;
     if (kettleLastMs != 0) {
         static uint8_t prevHold = 0;
         uint8_t hold = (pkt.btnBits >> KETTLE_BTN_HOLD) & 1;
@@ -355,64 +352,43 @@ static void kettleUpdate(float dt) {
             Serial.println("[kettle] knob press -> easing home");
         }
         prevHold = hold;
-        kDupHeld   = (pkt.btnBits >> KETTLE_BTN_DUP) & 1;
-        kSplayHeld = (pkt.btnBits >> KETTLE_BTN_SPLAY) & 1;
         // Twist implies alternate-direction rings: feed the lib's counter
         // bit alongside twist so every other ring runs opposite.
         uint8_t tw = pkt.btnBits & (uint8_t)(1 << KETTLE_BTN_TWIST);
         kettleInput(kettle, pkt.enc,
                     tw ? (uint8_t)(tw | (1 << KETTLE_BTN_COUNTER)) : 0,
                     pkt.upMs);
+
+        int held = AXFX_NONE;
+        if ((pkt.btnBits >> AXFX_BTN_BLOOM) & 1)         held = AXFX_BLOOM;
+        else if ((pkt.btnBits >> AXFX_BTN_FIRE) & 1)     held = AXFX_FIRE;
+        else if ((pkt.btnBits >> AXFX_BTN_LEAFWIND) & 1) held = AXFX_LEAFWIND;
+
+        if (!axfxEncInit || pkt.upMs < kettleLastMs) { axfxPrevEnc = pkt.enc; axfxEncInit = true; }
+        int32_t encDelta = pkt.enc - axfxPrevEnc;
+        axfxPrevEnc = pkt.enc;
+        float encRev = (float)encDelta
+            / (float)(KETTLE_COUNTS_PER_DETENT * KETTLE_DETENTS_PER_REV);
+
+        float driveSpin = 0.0f;
+        if (held != AXFX_NONE) {
+            // Steal the spin back off the carousel and steer the effect with it.
+            kettle.rotPending -= encRev * KETTLE_SPIN_GAIN;
+            driveSpin = (dt > 0.0f) ? encRev / dt : 0.0f;
+            if (held != axfxEffect) { axfxEffect = held; axfxReset(held); }
+            axfxDrive.floor = AXFX_FLOOR;
+        } else if (axfxEffect != AXFX_NONE) {
+            axfxDrive.floor = 0.0f;
+            if (axfxDrive.level < 0.006f && axfxDrive.energy < 0.01f) axfxEffect = AXFX_NONE;
+        }
+        axfxDrive.ceiling = axfxCeiling;
+        axfxDriveStep(axfxDrive, driveSpin, dt);
     }
     float rotBefore = kettle.rot;
     kettleRotStep(kettle, dt);
     float adv = kettle.rot - rotBefore;
     adv -= roundf(adv);
     float speed = (dt > 0.0f) ? adv / dt : 0.0f;
-
-    // While a modifier is held the frame must not rotate: undo this frame's
-    // carousel advance and reroute it into the modifier's own integrator.
-    if (kDupHeld || kSplayHeld) {
-        bool twist = kettleHeld(kettle, KETTLE_BTN_TWIST);
-        for (int r = 0; r < AM_NUM_RINGS; r++) {
-            float ra = adv * (twist ? 1.0f + KETTLE_TWIST_GAIN * (float)r : 1.0f);
-            if (twist && (r & 1)) ra = -ra;
-            kettle.ringRot[r] = kettleWrap01(kettle.ringRot[r] - ra);
-            if (kDupHeld)
-                kDupRot[r] = kettleWrap01(kDupRot[r] + ra);
-        }
-        kettle.rot = kettleWrap01(kettle.rot - adv);
-        if (kSplayHeld) {
-            kSplay += adv * KETTLE_SPLAY_PER_ADV;
-            if (kSplay < -1.0f) kSplay = -1.0f;
-        }
-    }
-
-    if (kDupHeld) {
-        if (fabsf(speed) > KETTLE_LEAK_EPS_REVS)
-            kDupLvl = fminf(1.0f, kDupLvl + dt / KETTLE_DUP_RISE_S);
-    } else if (kDupLvl > 0.0f) {
-        kDupLvl -= dt / KETTLE_DUP_FADE_S;
-        if (kDupLvl <= 0.0f) {
-            kDupLvl = 0.0f;
-            for (int r = 0; r < AM_NUM_RINGS; r++) kDupRot[r] = 0.0f;
-        }
-    }
-
-    // Release: smoothstep home — slow leave, fast middle, soft landing.
-    if (kSplayHeld) {
-        kSplayT = -1.0f;
-    } else if (kSplay != 0.0f) {
-        if (kSplayT < 0.0f) { kSplayFrom = kSplay; kSplayT = 0.0f; }
-        kSplayT += dt;
-        float u = kSplayT / KETTLE_SPLAY_HOME_S;
-        if (u >= 1.0f) {
-            kSplay = 0.0f;
-            kSplayT = -1.0f;
-        } else {
-            kSplay = kSplayFrom * (1.0f - u * u * (3.0f - 2.0f * u));
-        }
-    }
 
     // Drift-home waits out a deadband after the spin stops, then ramps in.
     static float kIdleT = 0.0f;
@@ -486,9 +462,9 @@ static void outputRotated() {
             float c = crk[i] * KETTLE_CRK_LEVEL;
             // gBrightness (pot 5) is a clicky-layer fader: it scales the
             // rotated particle field only, never the duck or the crackle.
-            float cr = phys[i][0] * gBrightness + duckBuf[s][i][0] + c;
-            float cg = phys[i][1] * gBrightness + duckBuf[s][i][1] + c;
-            float cb = phys[i][2] * gBrightness + duckBuf[s][i][2] + c;
+            float cr = phys[i][0] * gBrightness + duckBuf[s][i][0] + axfxBuf[s][i][0] + c;
+            float cg = phys[i][1] * gBrightness + duckBuf[s][i][1] + axfxBuf[s][i][1] + c;
+            float cb = phys[i][2] * gBrightness + duckBuf[s][i][2] + axfxBuf[s][i][2] + c;
 #if LOOP_RECORD
             lrTap(s, i, cr, cg, cb);
 #endif
@@ -887,9 +863,6 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
         // tails/teeth clip
         center = fminf(fmaxf(center, 0.0f), (float)(len - 1));
         float sigma = fmaxf(0.5f, CLICKY_SIGMA_NORM * REF_LEN * sigScale * clickyPump[k]);
-        // Negative splay (dialed back past home) squeezes the blob toward a
-        // single pixel; positive splay only spreads the comb.
-        sigma = fmaxf(0.35f, sigma * (1.0f + fminf(0.0f, kSplay)));
 
         if (clickyCrackleT > 0.0f) {
             float env = clickyCrackleT / CLICKY_CRACKLE_S;
@@ -911,8 +884,7 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
 
         float easeK = clickySplitEase[k];
         float fullSpacing = fmaxf(1.0f, CLICKY_PULL_NORM * REF_LEN * sigScale);
-        float spacingF = lerpf(1.0f, fullSpacing, easeK)
-            + fmaxf(0.0f, kSplay) * (fullSpacing - 1.0f);
+        float spacingF = lerpf(1.0f, fullSpacing, easeK);
         int reach = (int)(4.0f * sigma);
         for (int j = -reach; j <= reach; j++) {
             float tc = center + (float)j * spacingF;
@@ -921,8 +893,7 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
             // Sub-pixel splat only while the split animates; settled comb
             // snaps to single crisp pixels (and settled blob keeps the old
             // integer-center look).
-            float tcs = (kSplay <= 0.001f
-                         && (easeK <= 0.001f || easeK >= 0.999f))
+            float tcs = (easeK <= 0.001f || easeK >= 0.999f)
                 ? (float)lroundf(tc) : tc;
             // Clip at the strip ends — the field is a LINE, not a ring; only
             // kettle displacement (dup layer, carousel stage) bridges the seam.
@@ -942,47 +913,6 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
             buf[i1][1] += g * w1;
             buf[i1][2] += b * w1;
             cov[i1] += w1;
-        }
-    }
-
-    if (kDupLvl > 0.001f && clickyFade > 0.0f && clickyCrackleT <= 0.0f) {
-        const float rotOff = kDupRot[SEG[s].strip & (AM_NUM_RINGS - 1)];
-        for (int k = 0; k < CLICKY_NUM_POTS; k++) {
-            if (k == CLICKY_BRIGHT_POT) continue;
-            float centerN = kettleWrap01(
-                lerpf(clickyPos[k], meanPos, gatherT) + rotOff);
-            float center = centerN * (float)(len - 1);
-            float sigma = fmaxf(0.5f,
-                CLICKY_SIGMA_NORM * REF_LEN * sigScale * clickyPump[k]);
-            sigma = fmaxf(0.35f, sigma * (1.0f + fminf(0.0f, kSplay)));
-            float r, g, b;
-            hsvToRgb(hueWrap360(CLICKY_HUES[k] + gHueRotDeg),
-                     sqrtf(clickyFade), 1.0f, r, g, b);
-            float easeK = clickySplitEase[k];
-            float fullSpacing = fmaxf(1.0f, CLICKY_PULL_NORM * REF_LEN * sigScale);
-            float spacingF = lerpf(1.0f, fullSpacing, easeK)
-                + fmaxf(0.0f, kSplay) * (fullSpacing - 1.0f);
-            int reach = (int)(4.0f * sigma);
-            float lvl = KETTLE_DUP_LEVEL * kDupLvl * clickyFade;
-            for (int j = -reach; j <= reach; j++) {
-                float tc = center + (float)j * spacingF;
-                float d = (float)j / sigma;
-                float w = expf(-d * d) * lvl;
-                float tcs = (kSplay <= 0.001f
-                             && (easeK <= 0.001f || easeK >= 0.999f))
-                    ? (float)lroundf(tc) : tc;
-                tcs -= floorf(tcs / (float)len) * (float)len;
-                int i0 = (int)tcs;
-                float fr = tcs - (float)i0;
-                i0 %= (int)len;
-                int i1 = (i0 + 1) % (int)len;
-                float w0 = w * (1.0f - fr);
-                buf[i0][0] += r * w0; buf[i0][1] += g * w0; buf[i0][2] += b * w0;
-                cov[i0] += w0;
-                float w1 = w * fr;
-                buf[i1][0] += r * w1; buf[i1][1] += g * w1; buf[i1][2] += b * w1;
-                cov[i1] += w1;
-            }
         }
     }
 
@@ -1227,6 +1157,7 @@ static void renderClickyParticles(float dt) {
 
     gBrightness = MASTER_BRIGHTNESS
         * (BRIGHT_FLOOR + (1.0f - BRIGHT_FLOOR) * clickyPos[CLICKY_BRIGHT_POT]);
+    axfxCeiling = clickyPos[AXFX_CEIL_POT];
 
     if (hueRotHeld)
         gHueRotDeg = hueWrap360(gHueRotDeg + CLICKY_HUEROT_DEG_S * dt);
@@ -1344,6 +1275,7 @@ void setup() {
     duckFeaturesReset(duck);
     kettleReset(kettle);
     kettleSetRings(kettle, AM_NUM_RINGS);
+    axfxDriveInit(axfxDrive);
 
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
@@ -1432,6 +1364,7 @@ void loop() {
         memset(frameBuf, 0, sizeof(frameBuf));
     }
     renderWaterfall(dt, duckLive());
+    axfxRender(axfxEffect, axfxDrive, dt);
     outputRotated();
 #if LOOP_RECORD
     lrApply(now);

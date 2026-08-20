@@ -39,6 +39,7 @@ static const uint8_t BROADCAST_ADDR[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static KettlePacketV1 pkt = {KETTLE_MAGIC, KETTLE_VER, 0, 0, 0, 0};
 
 void setup() {
+    setCpuFrequencyMhz(80);
     Serial.begin(115200);
     delay(1500);
     pinMode(ENC_A, INPUT_PULLUP);
@@ -65,6 +66,9 @@ void setup() {
     // 51 = 2 dB under this unit's load-measured brownout cliff; raising it collapses TX
     // (ledger: esp-now-c3-brownout-cliff-duty-cycle-dependent)
     esp_wifi_set_max_tx_power(51);
+    // wake_window 0 = radio sleeps except during TX; this board can never receive
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    esp_now_set_wake_window(0);
     esp_now_peer_info_t peer = {};
     memcpy(peer.peer_addr, BROADCAST_ADDR, 6);
     peer.channel = FIXED_CHANNEL;

@@ -1877,3 +1877,78 @@ entries:
       roughly 3-4x those without the reserve. Estimates, not measured (lab
       proximity cannot exercise the low edge); each input carries a few dB of
       uncertainty and body-blocking costs 3-10 dB.
+
+  - id: esp-now-sender-power-profile
+    date: 2026-08-18
+    touched: 2026-08-18
+    title: "ESP-NOW sender power profile: idle RX listen dominates (~60-80 mA); TX events are nearly free at console duty cycles"
+    summary: >
+      Power decomposition for TX-only ESP-NOW senders, measured at 5 V (meter
+      self-draw subtracted). The dominant term is the radio's full RX listen
+      chain, on 24/7 by default even on a board that never receives: ~60 mA of
+      pure waste. The transmit events themselves are negligible at console duty
+      cycles (change-triggered bursts + 1 Hz heartbeat). Sleeping the radio
+      between transmits (wake_window 0 — TX wakes the radio itself, so sends
+      are unaffected) plus downclocking to 80 MHz: kettle-knob (C3 Super Mini,
+      encoder+buttons only) ~78 -> ~18 mA; clicky-pots (classic ESP32)
+      ~178 -> ~104 mA. Radio sleep is ~60 mA of each drop; the CPU downclock
+      ~10-25 mA. A bare C3 sender floor is thus ~18 mA; clicky's higher floor
+      is real board load, not radio: 6 pot networks against 330 ohm reference
+      (~2-3 mA each, continuous), CAN transceiver idle (~10 mA), USB-UART
+      bridge streaming 230 kbaud debug. A sender that must also RECEIVE cannot
+      use wake_window 0 — this profile is for one-way senders only.
+    status: validated
+    severity: medium
+    scope: electrical
+    source: festicorn/kettle-knob, festicorn/clicky-pots (hybrid build 2026-08-18); inline USB meter A/B
+    tags: [esp-now, power, current-draw, sender, esp32-c3, esp32, power-save]
+    relates_to: [esp32-c3-super-mini-tx-defect, esp32-c3-super-mini-thermal-decomposition, esp-now-receiver-power-profile]
+    notes: >
+      Implementation gotcha that hides the whole saving:
+      esp_now_set_wake_window(0) + esp_wifi_set_ps(WIFI_PS_MIN_MODEM) only work
+      if the WiFi lib is compiled with CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE,
+      which the prebuilt Arduino-ESP32 SDK libraries ship DISABLED for every
+      chip (esp32, esp32c3, esp32s2 checked) — the calls succeed and do
+      nothing. Fix: PlatformIO `framework = arduino, espidf` hybrid build:
+      CMakeLists.txt wrapping project.cmake, src/CMakeLists.txt
+      idf_component_register, sdkconfig.defaults with CONFIG_AUTOSTART_ARDUINO=y,
+      CONFIG_FREERTOS_HZ=1000, CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y.
+      Add CONFIG_LOG_DEFAULT_LEVEL_ERROR=y — hybrid defaults to INFO and
+      analogRead() then spams a gpio-config log line per call at runtime.
+
+      Measurement traps from the same session: (1) this inline USB meter's own
+      electronics (~22 mA) are included in its displayed reading — subtract the
+      no-load baseline; (2) flashing a classic ESP32 through the inline meter
+      fails reproducibly mid-write (short esptool ops like read-mac succeed,
+      sustained flash writes die from shunt-induced sag) and leaves the app
+      partition partially written, i.e. unbootable until a clean reflash.
+      Remove the meter to flash.
+
+  - id: esp-now-receiver-power-profile
+    date: 2026-08-18
+    touched: 2026-08-18
+    title: "ESP-NOW receiver power profile: ~157 mA on classic ESP32 is the honest floor; sender-side savings do not transfer"
+    summary: >
+      Counterpart to esp-now-sender-power-profile. The axismundi receiver
+      (classic ESP32, rendering ~140 fps) measures ~157 mA true at 5 V (0.179
+      displayed minus 22 mA meter self-draw) — expected and healthy, because
+      neither sender-side lever applies: an async ESP-NOW receiver must keep
+      the RX listen chain on continuously (~80-100 mA, the job itself), and
+      the CPU is doing real render work at 240 MHz (~40-50 mA), plus ~10-15 mA
+      bridge/LDO/power-LED overhead. Nothing is idle waste. Receiver-side
+      connectionless power save (esp_wifi_set_connectionless_wake_interval)
+      exists but requires every sender to time transmissions into the
+      receiver's wake windows — a protocol redesign adding latency and loss
+      risk, not a tuning knob. Only board-level nibbles remain: feeding the
+      5V pin instead of the USB jack unpowers the UART bridge (~10-15 mA).
+    status: validated
+    severity: info
+    scope: electrical
+    source: inline USB meter on axismundi receiver 2026-08-18; sender comparison same session
+    tags: [esp-now, power, current-draw, receiver, esp32]
+    relates_to: [esp-now-sender-power-profile]
+    notes: >
+      Measurement caveat: dark WS2812/SK6812 pixels draw ~0.6-1 mA each
+      quiescent. If the strip chain is powered downstream of the meter, even
+      50 dark pixels add ~30-50 mA to the reading — check whether a receiver
+      measurement includes strips before attributing the draw to the board.

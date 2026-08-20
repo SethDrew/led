@@ -155,6 +155,7 @@ void broadcastState() {
 }
 
 void setup() {
+    setCpuFrequencyMhz(80);
     Serial.begin(230400);
 
     for (int i = 0; i < NUM_BTNS; i++) pinMode(BUTTON_PINS[i], INPUT_PULLUP);
@@ -179,6 +180,9 @@ void setup() {
     esp_wifi_set_promiscuous(false);
     if (esp_now_init() == ESP_OK) {
         Serial.println("ESP-NOW OK ch1");
+        // wake_window 0 = radio sleeps except during TX; this board can never receive
+        esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+        esp_now_set_wake_window(0);
         esp_now_peer_info_t peer = {};
         memcpy(peer.peer_addr, broadcastAddr, 6);
         peer.channel = 0;

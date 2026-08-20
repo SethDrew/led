@@ -4,7 +4,7 @@ Standalone bench firmware for characterizing new I2C sensors on an
 ESP32-C3-DevKitM-1 before they earn a home in an installation. Each probe is
 its own `build_src_filter` env; flash one, read it over USB serial, move on.
 
-Sibling diagnostic rigs: `espnow-sniffer`, `espnow-bridge`, `topo-tester`,
+Sibling diagnostic rigs: `console-bridge`, `espnow-bridge`, `topo-tester`,
 `bench-rmt-test`. Sensor pipelines tied to a specific installation live with
 that installation (e.g. the duck's IMU + gesture research in `gyro-sense`).
 

@@ -5,6 +5,7 @@
     "hept_sides": 7,
     "hept_side_len_m": 3.048,
     "canopy_height_m": 3.048,
+    "canopy_edge_pull_m": 0.45720000000000005,
     "canopy_spoke_count": 14,
     "canopy_pixel_pitch_m": 0.1,
     "canopy_strand_nodes": 50,
@@ -13,13 +14,15 @@
     "roots_count": 4,
     "root_len_m": 1.8288000000000002,
     "root_radius_m": 0.08889999999999999,
-    "root_wrap_pitch_m": 0.2,
     "root_inner_m": 0.3048,
-    "roots_led_pitch_m": 0.05,
+    "root_strip_leds": 150,
+    "root_strip_pitch_m": 0.03333333333333333,
+    "root_meander_cycles": 3.0,
+    "root_meander_sep_rad": 1.1,
     "roots_jitter_deg": 4.0,
     "roots_seed": 7
   },
-  "n_total": 1627,
+  "n_total": 1846,
   "canopy_z_m": 3.048,
   "strap_leds_each": 78,
   "heptagon_vertices_xy": [
@@ -58,98 +61,98 @@
       "kind": "canopy",
       "start": 0,
       "count": 50,
-      "axn": 0
+      "axn": 32
     },
     {
       "name": "canopy_1",
       "kind": "canopy",
       "start": 50,
       "count": 50,
-      "axn": 0
+      "axn": 24
     },
     {
       "name": "canopy_2",
       "kind": "canopy",
       "start": 100,
       "count": 50,
-      "axn": 0
+      "axn": 32
     },
     {
       "name": "canopy_3",
       "kind": "canopy",
       "start": 150,
       "count": 50,
-      "axn": 0
+      "axn": 24
     },
     {
       "name": "canopy_4",
       "kind": "canopy",
       "start": 200,
       "count": 50,
-      "axn": 0
+      "axn": 32
     },
     {
       "name": "canopy_5",
       "kind": "canopy",
       "start": 250,
       "count": 50,
-      "axn": 0
+      "axn": 24
     },
     {
       "name": "canopy_6",
       "kind": "canopy",
       "start": 300,
       "count": 50,
-      "axn": 0
+      "axn": 32
     },
     {
       "name": "canopy_7",
       "kind": "canopy",
       "start": 350,
       "count": 50,
-      "axn": 0
+      "axn": 24
     },
     {
       "name": "canopy_8",
       "kind": "canopy",
       "start": 400,
       "count": 50,
-      "axn": 0
+      "axn": 32
     },
     {
       "name": "canopy_9",
       "kind": "canopy",
       "start": 450,
       "count": 50,
-      "axn": 0
+      "axn": 24
     },
     {
       "name": "canopy_10",
       "kind": "canopy",
       "start": 500,
       "count": 50,
-      "axn": 0
+      "axn": 32
     },
     {
       "name": "canopy_11",
       "kind": "canopy",
       "start": 550,
       "count": 50,
-      "axn": 0
+      "axn": 24
     },
     {
       "name": "canopy_12",
       "kind": "canopy",
       "start": 600,
       "count": 50,
-      "axn": 0
+      "axn": 32
     },
     {
       "name": "canopy_13",
       "kind": "canopy",
       "start": 650,
       "count": 50,
-      "axn": 0
+      "axn": 24
     },
     {
       "name": "strap_0",
@@ -204,29 +207,29 @@
       "name": "root_0",
       "kind": "root",
       "start": 1246,
-      "count": 108,
-      "axn": 38
+      "count": 150,
+      "axn": 56
     },
     {
       "name": "root_1",
       "kind": "root",
-      "start": 1354,
-      "count": 152,
-      "axn": 38
+      "start": 1396,
+      "count": 150,
+      "axn": 56
     },
     {
       "name": "root_2",
       "kind": "root",
-      "start": 1506,
-      "count": 76,
-      "axn": 38
+      "start": 1546,
+      "count": 150,
+      "axn": 56
     },
     {
       "name": "root_3",
       "kind": "root",
-      "start": 1582,
-      "count": 45,
-      "axn": 38
+      "start": 1696,
+      "count": 150,
+      "axn": 56
     }
   ]
 }

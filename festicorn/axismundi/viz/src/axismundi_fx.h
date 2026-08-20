@@ -18,6 +18,7 @@
 #pragma once
 #include <math.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #define KETTLE_SPIN_GAIN 0.5f
 #include <kettle_energy.h>
@@ -87,30 +88,51 @@ static float AX_KETTLE_AGE = 1e9f;
 
 // ── Ghost recorder (sandbox experiment, mirrors axismundi_sandbox.cpp) ──────
 // AX_GHOST 1 replaces the six button holds: hold button k to record particle
-// k's motion, release to leave a dim ghost looping the gesture ping-pong.
-// Tap (< GHOST_MIN samples) clears. 0 restores production button behavior.
+// k's motion, release to leave a dim ghost looping the gesture ping-pong,
+// starting from the release pose (backward first) after press/release-lag
+// stillness is trimmed. Tap (< GHOST_MIN samples) clears. 0 restores
+// production button behavior.
 #define AX_GHOST 1
-#define AXG_CAP_HZ       25.0f
-#define AXG_MAX_S        15
+#define AXG_CAP_HZ       10.0f
+#define AXG_MAX_S        90
 #define AXG_MAX_SAMPLES  ((int)(AXG_CAP_HZ * AXG_MAX_S))
-#define AXG_MIN_SAMPLES  6
-#define AXG_BTN_LANES    3
+#define AXG_MIN_SAMPLES  3
+#define AXG_BTN_LANES    5
 #define AXG_LEVEL        0.45f
 #define AXG_FADE_S       30.0f
+#define AXG_TRIM_MAX_S   1.0f
+#define AXG_TRIM_EPS     0.003f
 
 // Button -> pots recorded, many-to-many; recordings are keyed by BUTTON so
-// two buttons mapped to the same pot hold two coexisting ghosts. Mirrors
-// GHOST_BTN_POTS in axismundi_sandbox.cpp — keep the two tables identical.
-static const uint8_t AXG_BTN_POTS[6] =
-    { 1 << 0, 1 << 1, 1 << 2, 1 << 3, 1 << 4, 1 << 4 };
+// two buttons can hold two gestures of the same particles. Default: every
+// recording button captures the WHOLE FIELD. Mirrors GHOST_BTN_POTS in
+// axismundi_sandbox.cpp — keep the two tables identical.
+static const uint8_t AXG_BTN_POTS[6] = { 0x1F, 0x1F, 0x1F, 0x1F, 0, 0 };
 
-// u16-quantized like the firmware (its DRAM constraint, kept identical here).
-static uint16_t axg_track[6][AXG_BTN_LANES][AXG_MAX_SAMPLES];
-static uint16_t axg_splitTrack[6][AXG_BTN_LANES][AXG_MAX_SAMPLES];
+// Buttons 4 (GPIO 16) and 5 (GPIO 13) keep their production functions.
+#define AXG_BTN_TRAIL  4
+#define AXG_BTN_HUEROT 5
+
+// Heap-allocated and quantized like the firmware (its DRAM constraint,
+// kept identical here): pos u16, split u8.
+typedef uint16_t AxgPosTrack[AXG_BTN_LANES][AXG_MAX_SAMPLES];
+typedef uint8_t  AxgSplitTrack[AXG_BTN_LANES][AXG_MAX_SAMPLES];
+static AxgPosTrack*   axg_track = nullptr;
+static AxgSplitTrack* axg_splitTrack = nullptr;
 static inline uint16_t axg_q(float x) {
     return (uint16_t)(fminf(1.0f, fmaxf(0.0f, x)) * 65535.0f + 0.5f);
 }
-#define AXG_DQ (1.0f / 65535.0f)
+static inline uint8_t axg_q8(float x) {
+    return (uint8_t)(fminf(1.0f, fmaxf(0.0f, x)) * 255.0f + 0.5f);
+}
+#define AXG_DQ  (1.0f / 65535.0f)
+#define AXG_DQ8 (1.0f / 255.0f)
+// Per-sample console context, replayed with the gesture: global hue offset
+// (ghost = self-contained color memory) and the trail bit.
+typedef uint16_t AxgHueTrack[AXG_MAX_SAMPLES];
+typedef uint8_t  AxgFlagTrack[AXG_MAX_SAMPLES];
+static AxgHueTrack*  axg_hueTrack = nullptr;
+static AxgFlagTrack* axg_flagTrack = nullptr;
 static uint8_t  axg_lanePot[6][AXG_BTN_LANES];
 static uint8_t  axg_lanes[6];
 static uint16_t axg_count[6];
@@ -124,6 +146,20 @@ static float    axg_renderSplit[6][AXG_BTN_LANES];
 static float    axg_renderLvl[6];
 static float    axg_age[6];
 static bool     axg_renderOn[6];
+
+// Overwritten (or tapped-away) recording dissolves instead of vanishing.
+#define AXG_OUT_S 3.0f
+static float   axg_outPos[6][AXG_BTN_LANES];
+static float   axg_outSplit[6][AXG_BTN_LANES];
+static uint8_t axg_outPot[6][AXG_BTN_LANES];
+static uint8_t axg_outLanes[6];
+static float   axg_outLvl[6];
+static float   axg_outT[6];
+static float   axg_outHueRot[6];
+
+static float axg_renderHueRot[6];
+static bool  axg_renderTrail[6];
+static float axg_laneMovedAgo[6][AXG_BTN_LANES];
 
 static uint32_t ax_prng = 0x1234567u;
 static inline uint32_t ax_xorshift32() {
@@ -162,6 +198,14 @@ static float ax_rufflePhase = 0.0f;
 // made it, so a baked color would strand old strokes outside the current arc.
 static float ax_trailLvl[HC_NUM_LEDS];
 static float ax_trailHue[HC_NUM_LEDS];
+
+static inline void axg_paint(int idx, float add, float hue) {
+    float lvl = ax_trailLvl[idx];
+    float dh = fmodf(hue - ax_trailHue[idx] + 540.0f, 360.0f) - 180.0f;
+    ax_trailHue[idx] = hueWrap360(ax_trailHue[idx]
+                                  + dh * (add / (add + lvl + 1e-6f)));
+    ax_trailLvl[idx] = fminf(AX_PAINT_CAP, lvl + add);
+}
 static float ax_fade = 1.0f;
 static float ax_crackleT = 0.0f;
 static float ax_pump[AX_NUM_POTS];
@@ -227,6 +271,8 @@ static float axk_resetT = -1.0f;
 #define AXK_BTN_DUP    KETTLE_BTN_COUNTER
 #define AXK_BTN_SPLAY  KETTLE_BTN_CRACKLE
 #define AXK_LEAK_TAU       6.0f
+#define AXK_LEAK_DELAY_S   1.0f
+#define AXK_LEAK_RAMP_S    2.0f
 #define AXK_LEAK_EPS_REVS  0.02f
 #define AXK_DUP_LEVEL      0.55f
 #define AXK_DUP_RISE_S     0.15f
@@ -321,8 +367,13 @@ static void ax_kettle_update(float dt) {
         }
     }
 
-    if (axk_resetT < 0.0f && fabsf(speed) < AXK_LEAK_EPS_REVS) {
-        float f = expf(-dt / AXK_LEAK_TAU);
+    // Drift-home waits out a deadband after the spin stops, then ramps in.
+    static float axk_idleT = 0.0f;
+    if (fabsf(speed) >= AXK_LEAK_EPS_REVS) axk_idleT = 0.0f;
+    else axk_idleT += dt;
+    if (axk_resetT < 0.0f && axk_idleT > AXK_LEAK_DELAY_S) {
+        float u = fminf(1.0f, (axk_idleT - AXK_LEAK_DELAY_S) / AXK_LEAK_RAMP_S);
+        float f = expf(-dt * u / AXK_LEAK_TAU);
         for (int r = 0; r < 4; r++) {
             float d = ax_kettle.ringRot[r];
             d -= roundf(d);
@@ -384,7 +435,8 @@ static void ax_duck_update(float dt) {
 static void ax_write_ring(RGBf* out, int base, int len, int ring,
                           const float (*comp)[3], const float (*duck)[3]) {
     static float crk[AX_MAX_STRIP];
-    const float off = kettleRot(ax_kettle, ring) * (float)len;
+    const float off = (ring < 0) ? 0.0f
+        : kettleRot(ax_kettle, ring) * (float)len;
     memset(crk, 0, sizeof(float) * len);
     kettleCrackleSplat(ax_kettle, ring, len, crk);
     const float s = ax_brightness / 255.0f;
@@ -406,14 +458,73 @@ static void ax_write_ring(RGBf* out, int base, int len, int ring,
     }
 }
 
+static inline bool axg_sampleNear(int b, int i, int j, int epsQ, int epsQ8) {
+    for (int L = 0; L < axg_lanes[b]; L++) {
+        int dp = (int)axg_track[b][L][i] - (int)axg_track[b][L][j];
+        int ds = (int)axg_splitTrack[b][L][i] - (int)axg_splitTrack[b][L][j];
+        if (dp > epsQ || -dp > epsQ || ds > epsQ8 || -ds > epsQ8) return false;
+    }
+    return true;
+}
+
+static void axg_trimStill(int b) {
+    int n = axg_count[b];
+    int cap = (int)(AXG_CAP_HZ * AXG_TRIM_MAX_S);
+    int epsQ = (int)(AXG_TRIM_EPS * 65535.0f + 0.5f);
+    int head = 0;
+    while (head < cap && head + 1 < n
+           && axg_sampleNear(b, head + 1, 0, epsQ, 2))
+        head++;
+    int tail = 0;
+    while (tail < cap && head + tail + 2 < n
+           && axg_sampleNear(b, n - 2 - tail, n - 1, epsQ, 2))
+        tail++;
+    int m = n - head - tail;
+    if (head > 0) {
+        for (int L = 0; L < axg_lanes[b]; L++) {
+            memmove(axg_track[b][L], axg_track[b][L] + head,
+                    m * sizeof(uint16_t));
+            memmove(axg_splitTrack[b][L], axg_splitTrack[b][L] + head,
+                    m * sizeof(uint8_t));
+        }
+        memmove(axg_hueTrack[b], axg_hueTrack[b] + head, m * sizeof(uint16_t));
+        memmove(axg_flagTrack[b], axg_flagTrack[b] + head, m * sizeof(uint8_t));
+    }
+    axg_count[b] = (uint16_t)m;
+}
+
 static void axg_update(uint8_t btnBits, float dt) {
+    if (!axg_track) {
+        axg_track = (AxgPosTrack*)malloc(sizeof(AxgPosTrack) * 6);
+        axg_splitTrack = (AxgSplitTrack*)malloc(sizeof(AxgSplitTrack) * 6);
+        axg_hueTrack = (AxgHueTrack*)malloc(sizeof(AxgHueTrack) * 6);
+        axg_flagTrack = (AxgFlagTrack*)malloc(sizeof(AxgFlagTrack) * 6);
+    }
+    if (!axg_track || !axg_splitTrack || !axg_hueTrack || !axg_flagTrack)
+        return;
+    uint8_t trailBit = (btnBits >> AXG_BTN_TRAIL) & 1;
     uint8_t edgeDown = btnBits & ~axg_prevBtn;
     uint8_t edgeUp   = ~btnBits & axg_prevBtn;
     axg_prevBtn = btnBits;
     for (int b = 0; b < 6; b++) {
         axg_renderOn[b] = false;
         if (AXG_BTN_POTS[b] == 0) continue;
+        if (axg_outLvl[b] > 0.0f) {
+            axg_outT[b] += dt;
+            if (axg_outT[b] >= AXG_OUT_S) axg_outLvl[b] = 0.0f;
+        }
         if (edgeDown & (1 << b)) {
+            if (axg_count[b] > 0 && !axg_rec[b]) {
+                axg_outLanes[b] = axg_lanes[b];
+                for (int L = 0; L < axg_lanes[b]; L++) {
+                    axg_outPot[b][L] = axg_lanePot[b][L];
+                    axg_outPos[b][L] = axg_renderPos[b][L];
+                    axg_outSplit[b][L] = axg_renderSplit[b][L];
+                }
+                axg_outLvl[b] = axg_renderLvl[b];
+                axg_outHueRot[b] = axg_renderHueRot[b];
+                axg_outT[b] = 0.0f;
+            }
             axg_lanes[b] = 0;
             for (int k = 0; k < AX_NUM_POTS && axg_lanes[b] < AXG_BTN_LANES; k++)
                 if ((AXG_BTN_POTS[b] & (1 << k)) && k != AX_BRIGHT_POT)
@@ -430,16 +541,20 @@ static void axg_update(uint8_t btnBits, float dt) {
                     for (int L = 0; L < axg_lanes[b]; L++) {
                         int k = axg_lanePot[b][L];
                         axg_track[b][L][axg_count[b]] = axg_q(ax_pos[k]);
-                        axg_splitTrack[b][L][axg_count[b]] = axg_q(ax_splitEase[k]);
+                        axg_splitTrack[b][L][axg_count[b]] = axg_q8(ax_splitEase[k]);
                     }
+                    axg_hueTrack[b][axg_count[b]] = (uint16_t)
+                        (hueWrap360(ax_hueRotDeg) * (65535.0f / 360.0f));
+                    axg_flagTrack[b][axg_count[b]] = trailBit;
                     axg_count[b]++;
                 }
             }
             if (edgeUp & (1 << b)) {
                 axg_rec[b] = false;
                 if (axg_count[b] < AXG_MIN_SAMPLES) axg_count[b] = 0;
-                axg_playPos[b] = 0.0f;
-                axg_playDir[b] = 1.0f;
+                if (axg_count[b] > 0) axg_trimStill(b);
+                axg_playPos[b] = (float)(axg_count[b] > 0 ? axg_count[b] - 1 : 0);
+                axg_playDir[b] = -1.0f;
                 axg_age[b] = 0.0f;
             }
             continue;
@@ -469,25 +584,64 @@ static void axg_update(uint8_t btnBits, float dt) {
         uint16_t i1 = (uint16_t)((i0 + 1 < axg_count[b]) ? i0 + 1 : i0);
         float fr = axg_playPos[b] - (float)i0;
         for (int L = 0; L < axg_lanes[b]; L++) {
-            axg_renderPos[b][L] = AXG_DQ *
+            float npos = AXG_DQ *
                 ax_lerp(axg_track[b][L][i0], axg_track[b][L][i1], fr);
-            axg_renderSplit[b][L] = AXG_DQ *
+            if (fabsf(npos - axg_renderPos[b][L]) > AX_MOVE_EPS)
+                axg_laneMovedAgo[b][L] = 0.0f;
+            else
+                axg_laneMovedAgo[b][L] += dt;
+            axg_renderPos[b][L] = npos;
+            axg_renderSplit[b][L] = AXG_DQ8 *
                 ax_lerp(axg_splitTrack[b][L][i0], axg_splitTrack[b][L][i1], fr);
         }
+        float h0 = axg_hueTrack[b][i0] * (360.0f / 65535.0f);
+        float h1 = axg_hueTrack[b][i1] * (360.0f / 65535.0f);
+        float dh = h1 - h0;
+        dh -= 360.0f * roundf(dh / 360.0f);
+        axg_renderHueRot[b] = hueWrap360(h0 + dh * fr);
+        axg_renderTrail[b] = axg_flagTrack[b][i0] & 1;
         axg_renderOn[b] = true;
     }
+}
+
+static float ax_axfrac[HC_NUM_LEDS];
+// Canopy azimuth per LED: the rim samples the field by wheel angle.
+static float ax_azim[HC_NUM_LEDS];
+static bool  ax_axfrac_ready = false;
+
+// Canopy sampling: the field is rasterized at the spoke's RADIAL length
+// (lenR = axn). Spoke LEDs (i < axn) read it by index — knobs own this axis,
+// and travel ENDS at the spoke tip. Rim LEDs read it by wheel azimuth,
+// triangle-folded so the whole particle list appears TWICE, mirror-reflected
+// around the wheel — and the kettle rotation spins that layer only.
+static inline float ax_coordF(bool canopy, int base, int i, int lenR) {
+    if (!canopy)
+        return ax_axfrac[base + i] * (float)(lenR - 1);
+    if (i < lenR)
+        return (float)i;
+    float u = ax_azim[base + i] * (0.5f / (float)M_PI) - ax_kettle.rot;
+    u -= floorf(u);
+    // the particle list spans half the wheel and repeats point-reflected
+    // through the center: every particle's twin sits 180 deg across
+    if (u >= 0.5f) u -= 0.5f;
+    return 2.0f * u * (float)(lenR - 1);
 }
 
 // Per-LED raster coordinate in [0,1]. Index-space for normal strips; for
 // roots (kind 2, axn set) it is the LED's position along the POLE AXIS,
 // measured as normalized radial distance from the sculpture center — valid
 // for any wire path on the pole (spiral, serpentine, out-and-back, meander).
-static float ax_axfrac[HC_NUM_LEDS];
-static bool  ax_axfrac_ready = false;
 
 static void ax_build_axfrac() {
     for (int s = 0; s < HC_NUM_STRIPS; s++) {
         int b = HC_STRIPS[s].start, n = HC_STRIPS[s].count;
+        if (HC_STRIPS[s].kind == 1) {
+            for (int i = 0; i < n; i++) {
+                ax_azim[b + i] = atan2f(LED_POS[b + i].y, LED_POS[b + i].x);
+                ax_axfrac[b + i] = (n > 1) ? (float)i / (float)(n - 1) : 0.0f;
+            }
+            continue;
+        }
         if (HC_STRIPS[s].axn == 0) {
             for (int i = 0; i < n; i++)
                 ax_axfrac[b + i] = (n > 1) ? (float)i / (float)(n - 1) : 0.0f;
@@ -513,7 +667,8 @@ static void ax_build_axfrac() {
 // axn (the pole's axial resolution), so a particle reads as a circumferential
 // band sliding down the root, whatever shape the wire takes.
 static void ax_raster_strip(RGBf* out, int base, int len, int lenR, int ring,
-                            float gatherT, float meanPos, float dt) {
+                            int kind, float gatherT, float meanPos, float dt) {
+    const bool canopy = (kind == 1);
     static float buf[AX_MAX_STRIP][3];
     static float cov[AX_MAX_STRIP];
     static float bufHue[AX_MAX_STRIP];
@@ -523,6 +678,11 @@ static void ax_raster_strip(RGBf* out, int base, int len, int lenR, int ring,
     memset(buf, 0, sizeof(float) * lenR * 3);
     memset(cov, 0, sizeof(float) * lenR);
     memset(bufPot, 0xFF, sizeof(int8_t) * lenR);
+    static float gpW[AX_MAX_STRIP];
+    static float gpBest[AX_MAX_STRIP];
+    static float gpHue[AX_MAX_STRIP];
+    memset(gpW, 0, sizeof(float) * lenR);
+    memset(gpBest, 0, sizeof(float) * lenR);
 
     const float sigScale = (float)lenR / AX_REF_LEN;
 
@@ -530,6 +690,9 @@ static void ax_raster_strip(RGBf* out, int base, int len, int lenR, int ring,
         if (k == AX_BRIGHT_POT) continue;
         float centerN = ax_lerp(ax_pos[k], meanPos, gatherT);
         float center = centerN * (float)(lenR - 1);
+        // the END position renders: peak may sit on the last LED, only
+        // tails/teeth clip
+        center = fminf(fmaxf(center, 0.0f), (float)(lenR - 1));
         float sigma = fmaxf(0.5f, AX_SIGMA_NORM * AX_REF_LEN * sigScale * ax_pump[k]);
         // Negative splay (dialed back past home) squeezes the blob toward a
         // single pixel; positive splay only spreads the comb.
@@ -540,7 +703,7 @@ static void ax_raster_strip(RGBf* out, int base, int len, int lenR, int ring,
             for (int n = 0; n < 4; n++) {
                 if (ax_rand() > env) continue;
                 int i = (int)lroundf(center + (ax_rand() - 0.5f) * 4.0f * sigma);
-                i = ((i % lenR) + lenR) % lenR;
+                if (i < 0 || i >= lenR) continue;
                 float v = (8.0f + ax_rand() * 30.0f) * env;
                 buf[i][0] = buf[i][1] = buf[i][2] = v;
                 cov[i] = 1.0f;
@@ -565,11 +728,12 @@ static void ax_raster_strip(RGBf* out, int base, int len, int lenR, int ring,
             float tcs = (axk_splay <= 0.001f
                          && (easeK <= 0.001f || easeK >= 0.999f))
                 ? (float)lroundf(tc) : tc;
-            tcs -= floorf(tcs / (float)lenR) * (float)lenR;
+            // Clip at the strip ends — the field is a LINE, not a ring; only
+            // kettle displacement (dup layer, carousel stage) bridges the seam.
+            if (tcs < 0.0f || tcs > (float)(lenR - 1)) continue;
             int i0 = (int)tcs;
             float fr = tcs - (float)i0;
-            i0 %= lenR;
-            int i1 = (i0 + 1) % lenR;
+            int i1 = (i0 + 1 < lenR) ? i0 + 1 : i0;
             float w0 = w * (1.0f - fr);
             buf[i0][0] += r * w0; buf[i0][1] += g * w0; buf[i0][2] += b * w0;
             cov[i0] += w0;
@@ -581,7 +745,8 @@ static void ax_raster_strip(RGBf* out, int base, int len, int lenR, int ring,
         }
     }
 
-    if (axk_dupLvl > 0.001f && ax_fade > 0.0f && ax_crackleT <= 0.0f) {
+    if (!canopy && axk_dupLvl > 0.001f && ax_fade > 0.0f
+        && ax_crackleT <= 0.0f) {
         const float rotOff = axk_dupRot[ring & 3];
         for (int k = 0; k < AX_NUM_POTS; k++) {
             if (k == AX_BRIGHT_POT) continue;
@@ -627,25 +792,81 @@ static void ax_raster_strip(RGBf* out, int base, int len, int lenR, int ring,
         if (!axg_renderOn[gb]) continue;
         for (int L = 0; L < axg_lanes[gb]; L++) {
         int k = axg_lanePot[gb][L];
-        float center = axg_renderPos[gb][L] * (float)(lenR - 1);
+        float center = fminf(axg_renderPos[gb][L], 1.0f) * (float)(lenR - 1);
         float sigma = fmaxf(0.5f, AX_SIGMA_NORM * AX_REF_LEN * sigScale);
         float r, g, b;
-        ax_hsv(hueWrap360(AX_HUES[k] + ax_hueRotDeg), 1.0f, 1.0f, r, g, b);
+        ax_hsv(hueWrap360(AX_HUES[k] + axg_renderHueRot[gb]), 1.0f, 1.0f, r, g, b);
         float ease = axg_renderSplit[gb][L];
         float fullSpacing = fmaxf(1.0f, AX_PULL_NORM * AX_REF_LEN * sigScale);
         float spacingF = ax_lerp(1.0f, fullSpacing, ease);
         int reach = (int)(4.0f * sigma);
+        bool gpaint = axg_renderTrail[gb];
+        float prate = 0.0f, ghue = 0.0f;
+        if (gpaint) {
+            float gate = 1.0f - axg_laneMovedAgo[gb][L] / AX_PAINT_STOP_S;
+            if (gate <= 0.0f) {
+                gpaint = false;
+            } else {
+                prate = dt * (AX_PAINT_CAP / 255.0f) / AX_PAINT_S * gate;
+                // stored hue is LOGICAL: compose adds the live rotation, so
+                // subtract it out to land exactly on the ghost's color now
+                ghue = hueWrap360(AX_HUES[k] + axg_renderHueRot[gb]
+                                  - ax_hueRotDeg);
+            }
+        }
         for (int j = -reach; j <= reach; j++) {
             float tc = center + (float)j * spacingF;
             float d = (float)j / sigma;
             float w = expf(-d * d) * axg_renderLvl[gb];
             float tcs = (ease <= 0.001f || ease >= 0.999f)
                 ? (float)lroundf(tc) : tc;
-            tcs -= floorf(tcs / (float)lenR) * (float)lenR;
+            if (tcs < 0.0f || tcs > (float)(lenR - 1)) continue;
             int i0 = (int)tcs;
             float fr = tcs - (float)i0;
-            i0 %= lenR;
-            int i1 = (i0 + 1) % lenR;
+            int i1 = (i0 + 1 < lenR) ? i0 + 1 : i0;
+            float w0 = w * (1.0f - fr);
+            buf[i0][0] += r * w0; buf[i0][1] += g * w0; buf[i0][2] += b * w0;
+            cov[i0] += w0;
+            float w1 = w * fr;
+            buf[i1][0] += r * w1; buf[i1][1] += g * w1; buf[i1][2] += b * w1;
+            cov[i1] += w1;
+            if (gpaint) {
+                float bmax = fmaxf(r, fmaxf(g, b));
+                float a0 = bmax * w0 * prate;
+                gpW[i0] += a0;
+                if (a0 > gpBest[i0]) { gpBest[i0] = a0; gpHue[i0] = ghue; }
+                float a1 = bmax * w1 * prate;
+                gpW[i1] += a1;
+                if (a1 > gpBest[i1]) { gpBest[i1] = a1; gpHue[i1] = ghue; }
+            }
+        }
+        }
+    }
+
+    for (int gb = 0; gb < 6; gb++) {
+        if (axg_outLvl[gb] <= 0.001f) continue;
+        float lvl = axg_outLvl[gb]
+            * fmaxf(0.0f, 1.0f - axg_outT[gb] / AXG_OUT_S);
+        for (int L = 0; L < axg_outLanes[gb]; L++) {
+        int k = axg_outPot[gb][L];
+        float center = fminf(axg_outPos[gb][L], 1.0f) * (float)(lenR - 1);
+        float sigma = fmaxf(0.5f, AX_SIGMA_NORM * AX_REF_LEN * sigScale);
+        float r, g, b;
+        ax_hsv(hueWrap360(AX_HUES[k] + axg_outHueRot[gb]), 1.0f, 1.0f, r, g, b);
+        float ease = axg_outSplit[gb][L];
+        float fullSpacing = fmaxf(1.0f, AX_PULL_NORM * AX_REF_LEN * sigScale);
+        float spacingF = ax_lerp(1.0f, fullSpacing, ease);
+        int reach = (int)(4.0f * sigma);
+        for (int j = -reach; j <= reach; j++) {
+            float tc = center + (float)j * spacingF;
+            float d = (float)j / sigma;
+            float w = expf(-d * d) * lvl;
+            float tcs = (ease <= 0.001f || ease >= 0.999f)
+                ? (float)lroundf(tc) : tc;
+            if (tcs < 0.0f || tcs > (float)(lenR - 1)) continue;
+            int i0 = (int)tcs;
+            float fr = tcs - (float)i0;
+            int i1 = (i0 + 1 < lenR) ? i0 + 1 : i0;
             float w0 = w * (1.0f - fr);
             buf[i0][0] += r * w0; buf[i0][1] += g * w0; buf[i0][2] += b * w0;
             cov[i0] += w0;
@@ -657,6 +878,12 @@ static void ax_raster_strip(RGBf* out, int base, int len, int lenR, int ring,
     }
 #endif
 
+    for (int i = 0; i < len; i++) {
+        int ai = (int)(ax_coordF(canopy, base, i, lenR) + 0.5f);
+        if (ai >= lenR) ai = lenR - 1;
+        if (gpW[ai] > 0.0f) axg_paint(base + i, gpW[ai], gpHue[ai]);
+    }
+
     for (int n = 0; n < AX_NUM_SHARDS; n++) {
         AxShard &sh = ax_shards[n];
         if (sh.life <= 0.0f) continue;
@@ -665,7 +892,8 @@ static void ax_raster_strip(RGBf* out, int base, int len, int lenR, int ring,
         ax_hsv(hueWrap360(sh.hue + ax_hueRotDeg), 1.0f, 1.0f, r, g, b);
         int i = (int)lroundf(sh.pos * (float)(lenR - 1));
         for (int o = -1; o <= 1; o++) {
-            int ii = ((i + o) % lenR + lenR) % lenR;
+            int ii = i + o;
+            if (ii < 0 || ii >= lenR) continue;
             float w = fadeF * (o == 0 ? 0.4f : 0.125f);
             float sr = r * w, sg = g * w, sb = b * w;
             if (fmaxf(sr, fmaxf(sg, sb)) >
@@ -678,14 +906,14 @@ static void ax_raster_strip(RGBf* out, int base, int len, int lenR, int ring,
     }
 
 #if AX_GHOST
-    bool trailHeld = false;
+    bool trailHeld = AX_CLICKY.btnBits & (1 << AXG_BTN_TRAIL);
 #else
     bool trailHeld = AX_CLICKY.btnBits & (1 << AX_BTN_TRAIL);
 #endif
     if (trailHeld) {
         float rate = dt * (AX_PAINT_CAP / 255.0f) / AX_PAINT_S;
         for (int i = 0; i < len; i++) {
-            int ai = (int)(ax_axfrac[base + i] * (float)(lenR - 1) + 0.5f);
+            int ai = (int)(ax_coordF(canopy, base, i, lenR) + 0.5f);
             if (ai >= lenR) ai = lenR - 1;
             float add = fmaxf(fmaxf(buf[ai][0], buf[ai][1]), buf[ai][2]) * rate;
             if (add <= 0.0f) continue;
@@ -717,7 +945,7 @@ static void ax_raster_strip(RGBf* out, int base, int len, int lenR, int ring,
         float tr = 0.0f, tg = 0.0f, tb = 0.0f;
         if (bg > 0.0f)
             ax_hsv(hueWrap360(ax_trailHue[base+i] + ax_hueRotDeg), 1.0f, 1.0f, tr, tg, tb);
-        float srcF = ax_axfrac[base + i] * (float)(lenR - 1);
+        float srcF = ax_coordF(canopy, base, i, lenR);
         int a0 = (int)srcF;
         float afr = srcF - (float)a0;
         a0 %= lenR;
@@ -741,7 +969,7 @@ static void ax_raster_strip(RGBf* out, int base, int len, int lenR, int ring,
     duckWaterfallStep(ax_wf_lvl + base, ax_wf_hue + base, ax_wf_tlt + base, len,
                       ax_duck, ax_duck_inject, dt, ax_rand, dbuf, false);
 
-    ax_write_ring(out, base, len, ring, comp, dbuf);
+    ax_write_ring(out, base, len, canopy ? -1 : ring, comp, dbuf);
 }
 
 static void ax_spawn_burst(float centerN, bool outward) {
@@ -798,7 +1026,7 @@ static void ax_render_clicky(RGBf* out, float dt) {
     bool gatherHeld = false;
     bool desatHeld  = false;
     bool pumpHeld   = false;
-    bool hueRotHeld = false;
+    bool hueRotHeld = AX_CLICKY.btnBits & (1 << AXG_BTN_HUEROT);
 #else
     bool fadeHeld   = AX_CLICKY.btnBits & (1 << AX_BTN_FADE);
     bool gatherHeld = AX_CLICKY.btnBits & (1 << AX_BTN_GATHER);
@@ -869,7 +1097,6 @@ static void ax_render_clicky(RGBf* out, float dt) {
         if (sh.life <= 0.0f) continue;
         sh.life -= dt;
         sh.pos += sh.vel * dt;
-        sh.pos -= floorf(sh.pos);
     }
 
 #if AX_GHOST
@@ -881,7 +1108,7 @@ static void ax_render_clicky(RGBf* out, float dt) {
         int lenR = HC_STRIPS[s].axn ? HC_STRIPS[s].axn : count;
         if (lenR < 2) lenR = 2;
         ax_raster_strip(out, HC_STRIPS[s].start, count, lenR, s & 3,
-                        gatherT, meanPos, dt);
+                        HC_STRIPS[s].kind, gatherT, meanPos, dt);
     }
 
     if (ax_crackleT > 0.0f) ax_crackleT -= dt;

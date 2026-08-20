@@ -316,6 +316,8 @@ static float kResetT = -1.0f;
 #define KETTLE_BTN_DUP    KETTLE_BTN_COUNTER
 #define KETTLE_BTN_SPLAY  KETTLE_BTN_CRACKLE
 #define KETTLE_LEAK_TAU       6.0f
+#define KETTLE_LEAK_DELAY_S   1.0f
+#define KETTLE_LEAK_RAMP_S    2.0f
 #define KETTLE_LEAK_EPS_REVS  0.02f
 #define KETTLE_DUP_LEVEL      0.55f
 #define KETTLE_DUP_RISE_S     0.15f
@@ -412,8 +414,13 @@ static void kettleUpdate(float dt) {
         }
     }
 
-    if (kResetT < 0.0f && fabsf(speed) < KETTLE_LEAK_EPS_REVS) {
-        float f = expf(-dt / KETTLE_LEAK_TAU);
+    // Drift-home waits out a deadband after the spin stops, then ramps in.
+    static float kIdleT = 0.0f;
+    if (fabsf(speed) >= KETTLE_LEAK_EPS_REVS) kIdleT = 0.0f;
+    else kIdleT += dt;
+    if (kResetT < 0.0f && kIdleT > KETTLE_LEAK_DELAY_S) {
+        float u = fminf(1.0f, (kIdleT - KETTLE_LEAK_DELAY_S) / KETTLE_LEAK_RAMP_S);
+        float f = expf(-dt * u / KETTLE_LEAK_TAU);
         for (int r = 0; r < AM_NUM_RINGS; r++) {
             float d = kettle.ringRot[r];
             d -= roundf(d);
@@ -550,36 +557,60 @@ static float clickyRufflePhase = 0.0f;
 // ── Ghost recorder (sandbox) ────────────────────────────────────
 // Hold a button: wipe THAT BUTTON'S slot and record every mapped pot's
 // smoothed position at GHOST_CAP_HZ. Release: dim ghost blobs loop the
-// recorded gesture ping-pong at recorded speed. Tracks live in normalized
+// recorded gesture ping-pong at recorded speed, starting from the release
+// pose (played backward first) so the ghost takes over seamlessly. Tracks live in normalized
 // [0,1] space, so playback is topology-independent like everything else.
 //
 // Recordings are keyed by BUTTON, not by pot: each button is an independent
 // slot, so two buttons mapped to the same pot hold two coexisting ghosts of
 // that particle. Re-press overwrites only that slot; tap clears only it.
-#define GHOST_CAP_HZ       25.0f
-#define GHOST_MAX_S        15
+// 10 Hz is plenty: pot positions are EMA-smoothed (tau 50 ms), so gesture
+// content lives below ~3 Hz and replay interpolation fills the gaps.
+#define GHOST_CAP_HZ       10.0f
+#define GHOST_MAX_S        90
 #define GHOST_MAX_SAMPLES  ((int)(GHOST_CAP_HZ * GHOST_MAX_S))
-#define GHOST_MIN_SAMPLES  6      // shorter press = tap = clear the slot
-#define GHOST_BTN_LANES    3      // pots one button can record at once
+#define GHOST_MIN_SAMPLES  3      // shorter press (~300 ms) = tap = clear the slot
+#define GHOST_BTN_LANES    5      // pots one button can record at once
 #define GHOST_LEVEL        0.45f
 #define GHOST_FADE_S       30.0f  // ghost lifetime: fades to nothing, then expires
+// Button press/release lag is not part of the gesture: stillness at either
+// end of a take is trimmed (up to GHOST_TRIM_MAX_S per end), keeping one
+// still sample so replay still eases out of / into rest.
+#define GHOST_TRIM_MAX_S   1.0f
+#define GHOST_TRIM_EPS     0.003f
 
-// Button -> pots it records (bitmask per button). The physical buttons do not
-// sit over the knobs, so the wiring is a free choice and MANY-TO-MANY: one
-// button may record several pots (first GHOST_BTN_LANES of the mask), one pot
-// may appear under several buttons. Edit to taste; default doubles pot 4 on
-// buttons E and F so the same particle can hold two gestures.
-static const uint8_t GHOST_BTN_POTS[6] =
-    { 1 << 0, 1 << 1, 1 << 2, 1 << 3, 1 << 4, 1 << 4 };
+// Button -> pots it records (bitmask per button). Default: every recording
+// button captures the WHOLE FIELD (all five particles), so a slot replays
+// the full gesture. Narrow a row's mask to record a subset instead; 0 = the
+// button does not record (buttons 4/5 are trail/huerot).
+static const uint8_t GHOST_BTN_POTS[6] = { 0x1F, 0x1F, 0x1F, 0x1F, 0, 0 };
 
-// Tracks quantized to u16 in [0,1] — 6 slots x 3 lanes of floats blew the
-// DRAM segment; 1/65535 is far below one LED of position resolution.
-static uint16_t ghostTrack[6][GHOST_BTN_LANES][GHOST_MAX_SAMPLES];
-static uint16_t ghostSplitTrack[6][GHOST_BTN_LANES][GHOST_MAX_SAMPLES];
+// Buttons 4 (GPIO 16) and 5 (GPIO 13) keep their production functions.
+#define SANDBOX_BTN_TRAIL  4
+#define SANDBOX_BTN_HUEROT 5
+
+// Tracks are HEAP-allocated (lazily, first ghostUpdate): the static DRAM
+// segment overflows long before the runtime heap does. Quantized [0,1] —
+// pos u16 (1/65535, far below one LED), split u8 (it's an ease curve).
+typedef uint16_t GhostPosTrack[GHOST_BTN_LANES][GHOST_MAX_SAMPLES];
+typedef uint8_t  GhostSplitTrack[GHOST_BTN_LANES][GHOST_MAX_SAMPLES];
+static GhostPosTrack*   ghostTrack = nullptr;
+static GhostSplitTrack* ghostSplitTrack = nullptr;
 static inline uint16_t ghostQ(float x) {
     return (uint16_t)(fminf(1.0f, fmaxf(0.0f, x)) * 65535.0f + 0.5f);
 }
-#define GHOST_DQ (1.0f / 65535.0f)
+static inline uint8_t ghostQ8(float x) {
+    return (uint8_t)(fminf(1.0f, fmaxf(0.0f, x)) * 255.0f + 0.5f);
+}
+#define GHOST_DQ  (1.0f / 65535.0f)
+#define GHOST_DQ8 (1.0f / 255.0f)
+// Per-sample console context, replayed with the gesture: the global hue
+// offset (so a ghost is a self-contained color memory of its era) and the
+// trail bit (so a ghost re-draws while its moving lanes had paint held).
+typedef uint16_t GhostHueTrack[GHOST_MAX_SAMPLES];
+typedef uint8_t  GhostFlagTrack[GHOST_MAX_SAMPLES];
+static GhostHueTrack*  ghostHueTrack = nullptr;
+static GhostFlagTrack* ghostFlagTrack = nullptr;
 static uint8_t  ghostLanePot[6][GHOST_BTN_LANES];
 static uint8_t  ghostLanes[6];
 static uint16_t ghostCount[6];
@@ -594,6 +625,21 @@ static float    ghostRenderLvl[6];
 static float    ghostAge[6];
 static bool     ghostRenderOn[6];
 
+// Overwritten (or tapped-away) recording dissolves instead of vanishing:
+// its last rendered pose freezes and fades out while the new take records.
+#define GHOST_OUT_S 3.0f
+static float   ghostOutPos[6][GHOST_BTN_LANES];
+static float   ghostOutSplit[6][GHOST_BTN_LANES];
+static uint8_t ghostOutPot[6][GHOST_BTN_LANES];
+static uint8_t ghostOutLanes[6];
+static float   ghostOutLvl[6];
+static float   ghostOutT[6];
+static float   ghostOutHueRot[6];
+
+static float ghostRenderHueRot[6];
+static bool  ghostRenderTrail[6];
+static float ghostLaneMovedAgo[6][GHOST_BTN_LANES];
+
 // Shard field lives in normalized space: pos in [0,1], vel in units/sec.
 #define CLICKY_NUM_SHARDS  48
 struct ClickyShard {
@@ -606,6 +652,14 @@ static ClickyShard clickyShards[CLICKY_NUM_SHARDS];
 // so baked RGB would leave old strokes stranded outside the current arc.
 static float clickyTrailLvl[NUM_STRIPS][MAX_LEDS];
 static float clickyTrailHue[NUM_STRIPS][MAX_LEDS];
+
+static inline void ghostPaint(uint8_t s, int idx, float add, float hue) {
+    float lvl = clickyTrailLvl[s][idx];
+    float dh = fmodf(hue - clickyTrailHue[s][idx] + 540.0f, 360.0f) - 180.0f;
+    clickyTrailHue[s][idx] = hueWrap360(clickyTrailHue[s][idx]
+                                        + dh * (add / (add + lvl + 1e-6f)));
+    clickyTrailLvl[s][idx] = fminf(CLICKY_PAINT_CAP, lvl + add);
+}
 static float clickyFade = 1.0f;
 static float clickyCrackleT = 0.0f;
 static float clickyPump[CLICKY_NUM_POTS];
@@ -637,14 +691,82 @@ static void resetClickyParticles() {
     clickyShardNext = 0;
 }
 
+static inline bool ghostSampleNear(int b, int i, int j, int epsQ, int epsQ8) {
+    for (int L = 0; L < ghostLanes[b]; L++) {
+        int dp = (int)ghostTrack[b][L][i] - (int)ghostTrack[b][L][j];
+        int ds = (int)ghostSplitTrack[b][L][i] - (int)ghostSplitTrack[b][L][j];
+        if (dp > epsQ || -dp > epsQ || ds > epsQ8 || -ds > epsQ8) return false;
+    }
+    return true;
+}
+
+static void ghostTrimStill(int b) {
+    int n = ghostCount[b];
+    int cap = (int)(GHOST_CAP_HZ * GHOST_TRIM_MAX_S);
+    int epsQ = (int)(GHOST_TRIM_EPS * 65535.0f + 0.5f);
+    int head = 0;
+    while (head < cap && head + 1 < n
+           && ghostSampleNear(b, head + 1, 0, epsQ, 2))
+        head++;
+    int tail = 0;
+    while (tail < cap && head + tail + 2 < n
+           && ghostSampleNear(b, n - 2 - tail, n - 1, epsQ, 2))
+        tail++;
+    int m = n - head - tail;
+    if (head > 0) {
+        for (int L = 0; L < ghostLanes[b]; L++) {
+            memmove(ghostTrack[b][L], ghostTrack[b][L] + head,
+                    m * sizeof(uint16_t));
+            memmove(ghostSplitTrack[b][L], ghostSplitTrack[b][L] + head,
+                    m * sizeof(uint8_t));
+        }
+        memmove(ghostHueTrack[b], ghostHueTrack[b] + head,
+                m * sizeof(uint16_t));
+        memmove(ghostFlagTrack[b], ghostFlagTrack[b] + head,
+                m * sizeof(uint8_t));
+    }
+    ghostCount[b] = (uint16_t)m;
+}
+
 static void ghostUpdate(uint8_t btnBits, float dt) {
+    if (!ghostTrack) {
+        ghostTrack = (GhostPosTrack*)malloc(sizeof(GhostPosTrack) * 6);
+        ghostSplitTrack = (GhostSplitTrack*)malloc(sizeof(GhostSplitTrack) * 6);
+        ghostHueTrack = (GhostHueTrack*)malloc(sizeof(GhostHueTrack) * 6);
+        ghostFlagTrack = (GhostFlagTrack*)malloc(sizeof(GhostFlagTrack) * 6);
+        Serial.printf("[ghost] track heap %u B (%s)\n",
+                      (unsigned)(sizeof(GhostPosTrack) * 6
+                                 + sizeof(GhostSplitTrack) * 6
+                                 + sizeof(GhostHueTrack) * 6
+                                 + sizeof(GhostFlagTrack) * 6),
+                      (ghostTrack && ghostSplitTrack && ghostHueTrack
+                       && ghostFlagTrack) ? "ok" : "FAILED");
+    }
+    if (!ghostTrack || !ghostSplitTrack || !ghostHueTrack || !ghostFlagTrack)
+        return;
+    uint8_t trailBit = (btnBits >> SANDBOX_BTN_TRAIL) & 1;
     uint8_t edgeDown = btnBits & ~ghostPrevBtn;
     uint8_t edgeUp   = ~btnBits & ghostPrevBtn;
     ghostPrevBtn = btnBits;
     for (int b = 0; b < 6; b++) {
         ghostRenderOn[b] = false;
         if (GHOST_BTN_POTS[b] == 0) continue;
+        if (ghostOutLvl[b] > 0.0f) {
+            ghostOutT[b] += dt;
+            if (ghostOutT[b] >= GHOST_OUT_S) ghostOutLvl[b] = 0.0f;
+        }
         if (edgeDown & (1 << b)) {
+            if (ghostCount[b] > 0 && !ghostRec[b]) {
+                ghostOutLanes[b] = ghostLanes[b];
+                for (int L = 0; L < ghostLanes[b]; L++) {
+                    ghostOutPot[b][L] = ghostLanePot[b][L];
+                    ghostOutPos[b][L] = ghostRenderPos[b][L];
+                    ghostOutSplit[b][L] = ghostRenderSplit[b][L];
+                }
+                ghostOutLvl[b] = ghostRenderLvl[b];
+                ghostOutHueRot[b] = ghostRenderHueRot[b];
+                ghostOutT[b] = 0.0f;
+            }
             ghostLanes[b] = 0;
             for (int k = 0; k < CLICKY_NUM_POTS && ghostLanes[b] < GHOST_BTN_LANES; k++)
                 if ((GHOST_BTN_POTS[b] & (1 << k)) && k != CLICKY_BRIGHT_POT)
@@ -663,19 +785,26 @@ static void ghostUpdate(uint8_t btnBits, float dt) {
                     for (int L = 0; L < ghostLanes[b]; L++) {
                         int k = ghostLanePot[b][L];
                         ghostTrack[b][L][ghostCount[b]] = ghostQ(clickyPos[k]);
-                        ghostSplitTrack[b][L][ghostCount[b]] = ghostQ(clickySplitEase[k]);
+                        ghostSplitTrack[b][L][ghostCount[b]] = ghostQ8(clickySplitEase[k]);
                     }
+                    ghostHueTrack[b][ghostCount[b]] = (uint16_t)
+                        (hueWrap360(gHueRotDeg) * (65535.0f / 360.0f));
+                    ghostFlagTrack[b][ghostCount[b]] = trailBit;
                     ghostCount[b]++;
                 }
             }
             if (edgeUp & (1 << b)) {
                 ghostRec[b] = false;
+                uint16_t raw = ghostCount[b];
                 if (ghostCount[b] < GHOST_MIN_SAMPLES) ghostCount[b] = 0;
-                ghostPlayPos[b] = 0.0f;
-                ghostPlayDir[b] = 1.0f;
+                if (ghostCount[b] > 0) ghostTrimStill(b);
+                // replay starts at the release pose and runs backward, so the
+                // ghost takes over exactly where the live particle let go
+                ghostPlayPos[b] = (float)(ghostCount[b] > 0 ? ghostCount[b] - 1 : 0);
+                ghostPlayDir[b] = -1.0f;
                 ghostAge[b] = 0.0f;
-                Serial.printf("[ghost] rec end btn %d samples %u%s\n", b,
-                              ghostCount[b],
+                Serial.printf("[ghost] rec end btn %d samples %u (raw %u)%s\n",
+                              b, ghostCount[b], raw,
                               ghostCount[b] ? "" : " (tap -> cleared)");
             }
             continue;
@@ -705,11 +834,22 @@ static void ghostUpdate(uint8_t btnBits, float dt) {
         uint16_t i1 = (uint16_t)((i0 + 1 < ghostCount[b]) ? i0 + 1 : i0);
         float fr = ghostPlayPos[b] - (float)i0;
         for (int L = 0; L < ghostLanes[b]; L++) {
-            ghostRenderPos[b][L] = GHOST_DQ *
+            float npos = GHOST_DQ *
                 lerpf(ghostTrack[b][L][i0], ghostTrack[b][L][i1], fr);
-            ghostRenderSplit[b][L] = GHOST_DQ *
+            if (fabsf(npos - ghostRenderPos[b][L]) > CLICKY_MOVE_EPS)
+                ghostLaneMovedAgo[b][L] = 0.0f;
+            else
+                ghostLaneMovedAgo[b][L] += dt;
+            ghostRenderPos[b][L] = npos;
+            ghostRenderSplit[b][L] = GHOST_DQ8 *
                 lerpf(ghostSplitTrack[b][L][i0], ghostSplitTrack[b][L][i1], fr);
         }
+        float h0 = ghostHueTrack[b][i0] * (360.0f / 65535.0f);
+        float h1 = ghostHueTrack[b][i1] * (360.0f / 65535.0f);
+        float dh = h1 - h0;
+        dh -= 360.0f * roundf(dh / 360.0f);
+        ghostRenderHueRot[b] = hueWrap360(h0 + dh * fr);
+        ghostRenderTrail[b] = ghostFlagTrack[b][i0] & 1;
         ghostRenderOn[b] = true;
     }
 }
@@ -726,6 +866,11 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
     memset(cov, 0, sizeof(float) * len);
     memset(bufW, 0, sizeof(float) * len);
     memset(bufPot, 0xFF, sizeof(int8_t) * len);
+    static float gpW[MAX_LEDS];
+    static float gpBest[MAX_LEDS];
+    static float gpHue[MAX_LEDS];
+    memset(gpW, 0, sizeof(float) * len);
+    memset(gpBest, 0, sizeof(float) * len);
 
 #if RASTER_PROPORTIONAL
     float sigScale = (float)len / REF_LEN;   // LED-space per REF-LED
@@ -738,6 +883,9 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
         float ownN = clickyPos[k];
         float centerN = lerpf(ownN, meanPos, gatherT);
         float center = centerN * (float)(len - 1);
+        // the END position renders: peak may sit on the last LED, only
+        // tails/teeth clip
+        center = fminf(fmaxf(center, 0.0f), (float)(len - 1));
         float sigma = fmaxf(0.5f, CLICKY_SIGMA_NORM * REF_LEN * sigScale * clickyPump[k]);
         // Negative splay (dialed back past home) squeezes the blob toward a
         // single pixel; positive splay only spreads the comb.
@@ -748,7 +896,7 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
             for (int n = 0; n < 4; n++) {
                 if (randFloat() > env) continue;
                 int i = (int)lroundf(center + (randFloat() - 0.5f) * 4.0f * sigma);
-                i = ((i % (int)len) + (int)len) % (int)len;
+                if (i < 0 || i >= (int)len) continue;
                 float v = (8.0f + randFloat() * 30.0f) * env;
                 buf[i][0] = buf[i][1] = buf[i][2] = v;
                 cov[i] = 1.0f;
@@ -776,11 +924,12 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
             float tcs = (kSplay <= 0.001f
                          && (easeK <= 0.001f || easeK >= 0.999f))
                 ? (float)lroundf(tc) : tc;
-            tcs -= floorf(tcs / (float)len) * (float)len;
+            // Clip at the strip ends — the field is a LINE, not a ring; only
+            // kettle displacement (dup layer, carousel stage) bridges the seam.
+            if (tcs < 0.0f || tcs > (float)(len - 1)) continue;
             int i0 = (int)tcs;
             float fr = tcs - (float)i0;
-            i0 %= (int)len;
-            int i1 = (i0 + 1) % (int)len;
+            int i1 = (i0 + 1 < (int)len) ? i0 + 1 : i0;
             float w0 = w * (1.0f - fr);
             if (w0 > bufW[i0]) { bufW[i0] = w0; bufHue[i0] = CLICKY_HUES[k]; bufPot[i0] = (int8_t)k; }
             buf[i0][0] += r * w0;
@@ -841,25 +990,83 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
         if (!ghostRenderOn[gb]) continue;
         for (int L = 0; L < ghostLanes[gb]; L++) {
         int k = ghostLanePot[gb][L];
-        float center = ghostRenderPos[gb][L] * (float)(len - 1);
+        float center = fminf(ghostRenderPos[gb][L], 1.0f) * (float)(len - 1);
         float sigma = fmaxf(0.5f, CLICKY_SIGMA_NORM * REF_LEN * sigScale);
         float r, g, b;
-        hsvToRgb(hueWrap360(CLICKY_HUES[k] + gHueRotDeg), 1.0f, 1.0f, r, g, b);
+        hsvToRgb(hueWrap360(CLICKY_HUES[k] + ghostRenderHueRot[gb]),
+                 1.0f, 1.0f, r, g, b);
         float ease = ghostRenderSplit[gb][L];
         float fullSpacing = fmaxf(1.0f, CLICKY_PULL_NORM * REF_LEN * sigScale);
         float spacingF = lerpf(1.0f, fullSpacing, ease);
         int reach = (int)(4.0f * sigma);
+        bool gpaint = ghostRenderTrail[gb];
+        float prate = 0.0f, ghue = 0.0f;
+        if (gpaint) {
+            float gate = 1.0f - ghostLaneMovedAgo[gb][L] / CLICKY_PAINT_STOP_S;
+            if (gate <= 0.0f) {
+                gpaint = false;
+            } else {
+                prate = dt * (CLICKY_PAINT_CAP / 255.0f) / CLICKY_PAINT_S * gate;
+                // stored hue is LOGICAL: compose adds the live rotation, so
+                // subtract it out to land exactly on the ghost's color now
+                ghue = hueWrap360(CLICKY_HUES[k] + ghostRenderHueRot[gb]
+                                  - gHueRotDeg);
+            }
+        }
         for (int j = -reach; j <= reach; j++) {
             float tc = center + (float)j * spacingF;
             float d = (float)j / sigma;
             float w = expf(-d * d) * ghostRenderLvl[gb];
             float tcs = (ease <= 0.001f || ease >= 0.999f)
                 ? (float)lroundf(tc) : tc;
-            tcs -= floorf(tcs / (float)len) * (float)len;
+            if (tcs < 0.0f || tcs > (float)(len - 1)) continue;
             int i0 = (int)tcs;
             float fr = tcs - (float)i0;
-            i0 %= (int)len;
-            int i1 = (i0 + 1) % (int)len;
+            int i1 = (i0 + 1 < (int)len) ? i0 + 1 : i0;
+            float w0 = w * (1.0f - fr);
+            buf[i0][0] += r * w0; buf[i0][1] += g * w0; buf[i0][2] += b * w0;
+            cov[i0] += w0;
+            float w1 = w * fr;
+            buf[i1][0] += r * w1; buf[i1][1] += g * w1; buf[i1][2] += b * w1;
+            cov[i1] += w1;
+            if (gpaint) {
+                float bmax = fmaxf(r, fmaxf(g, b));
+                float a0 = bmax * w0 * prate;
+                gpW[i0] += a0;
+                if (a0 > gpBest[i0]) { gpBest[i0] = a0; gpHue[i0] = ghue; }
+                float a1 = bmax * w1 * prate;
+                gpW[i1] += a1;
+                if (a1 > gpBest[i1]) { gpBest[i1] = a1; gpHue[i1] = ghue; }
+            }
+        }
+        }
+    }
+
+    for (int gb = 0; gb < 6; gb++) {
+        if (ghostOutLvl[gb] <= 0.001f) continue;
+        float lvl = ghostOutLvl[gb]
+            * fmaxf(0.0f, 1.0f - ghostOutT[gb] / GHOST_OUT_S);
+        for (int L = 0; L < ghostOutLanes[gb]; L++) {
+        int k = ghostOutPot[gb][L];
+        float center = fminf(ghostOutPos[gb][L], 1.0f) * (float)(len - 1);
+        float sigma = fmaxf(0.5f, CLICKY_SIGMA_NORM * REF_LEN * sigScale);
+        float r, g, b;
+        hsvToRgb(hueWrap360(CLICKY_HUES[k] + ghostOutHueRot[gb]),
+                 1.0f, 1.0f, r, g, b);
+        float ease = ghostOutSplit[gb][L];
+        float fullSpacing = fmaxf(1.0f, CLICKY_PULL_NORM * REF_LEN * sigScale);
+        float spacingF = lerpf(1.0f, fullSpacing, ease);
+        int reach = (int)(4.0f * sigma);
+        for (int j = -reach; j <= reach; j++) {
+            float tc = center + (float)j * spacingF;
+            float d = (float)j / sigma;
+            float w = expf(-d * d) * lvl;
+            float tcs = (ease <= 0.001f || ease >= 0.999f)
+                ? (float)lroundf(tc) : tc;
+            if (tcs < 0.0f || tcs > (float)(len - 1)) continue;
+            int i0 = (int)tcs;
+            float fr = tcs - (float)i0;
+            int i1 = (i0 + 1 < (int)len) ? i0 + 1 : i0;
             float w0 = w * (1.0f - fr);
             buf[i0][0] += r * w0; buf[i0][1] += g * w0; buf[i0][2] += b * w0;
             cov[i0] += w0;
@@ -870,6 +1077,9 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
         }
     }
 
+    for (int i = 0; i < (int)len; i++)
+        if (gpW[i] > 0.0f) ghostPaint(s, i, gpW[i], gpHue[i]);
+
     // Shards: free-flying, max-blended. Normalized pos → this strip's LEDs.
     for (int n = 0; n < CLICKY_NUM_SHARDS; n++) {
         ClickyShard &sh = clickyShards[n];
@@ -879,7 +1089,8 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
         hsvToRgb(hueWrap360(sh.hue + gHueRotDeg), 1.0f, 1.0f, r, g, b);
         int i = (int)lroundf(sh.pos * (float)(len - 1));
         for (int o = -1; o <= 1; o++) {
-            int ii = ((i + o) % (int)len + (int)len) % (int)len;
+            int ii = i + o;
+            if (ii < 0 || ii >= (int)len) continue;
             float w = fadeF * (o == 0 ? 0.4f : 0.125f);
             // Brightest-wins on the whole pixel, not per channel: a per-channel
             // max of two colors yields a hue that is neither of them, which
@@ -895,8 +1106,7 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
     }
 
     // Paintbrush trail (per strip, since strips differ in length).
-    bool trailHeld = false;
-    (void)pkt;
+    bool trailHeld = pkt.btnBits & (1 << SANDBOX_BTN_TRAIL);
     if (trailHeld) {
         float rate = dt * (CLICKY_PAINT_CAP / 255.0f) / CLICKY_PAINT_S;
         for (uint16_t i = 0; i < len; i++) {
@@ -991,7 +1201,7 @@ static void renderClickyParticles(float dt) {
     bool gatherHeld = false;
     bool desatHeld  = false;
     bool pumpHeld   = false;
-    bool hueRotHeld = false;
+    bool hueRotHeld = pkt.btnBits & (1 << SANDBOX_BTN_HUEROT);
 
     float prevFade = clickyFade;
     if (fadeHeld) clickyFade = fmaxf(0.0f, clickyFade - dt / CLICKY_FADE_S);
@@ -1058,7 +1268,6 @@ static void renderClickyParticles(float dt) {
         if (sh.life <= 0.0f) continue;
         sh.life -= dt;
         sh.pos += sh.vel * dt;
-        sh.pos -= floorf(sh.pos);
     }
 
     ghostUpdate(pkt.btnBits, dt);

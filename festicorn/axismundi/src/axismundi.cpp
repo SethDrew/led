@@ -66,9 +66,40 @@
 #include <hue_arc.h>
 
 // ── Strip layout ─────────────────────────────────────────────────
-static const uint8_t  NUM_STRIPS = 4;
-static const uint16_t STRIP_LEN[NUM_STRIPS] = {150, 150, 150, 150};
-#define MAX_LEDS   150
+// Rendering is per SEGMENT: each segment rasterizes the shared normalized
+// field over its own length (the viz twin's per-strip raster, mirrored here)
+// and rotates by its parent wire's carousel ring. fold>0 marks a canopy chain
+// of `fold` daisy-chained out-and-back radials — logical len is one radius,
+// mirrored onto every leg. AM_MOCKUP = backyard mockup, one board; default
+// (no flag) = led-eth-1 full rig, unchanged.
+// wfRev flips the duck waterfall's flow within the segment. Mockup uses it
+// for the rising-sap story: roots flow tip->trunk and helix base->top (both
+// wired head-first at trunk/top), canopy radiates hub->tip.
+struct AmSeg { uint8_t strip; uint16_t off, len; uint8_t fold, wfRev; };
+#define AM_NUM_RINGS 4
+#if defined(AM_MOCKUP)
+  static const AmSeg SEG[] = {
+    {0, 0, 25, 2, 0}, {1, 0, 25, 2, 0},
+    {2, 0, 85, 0, 1}, {2, 85, 65, 0, 1}, {2, 150, 75, 0, 1}, {2, 225, 75, 0, 1},
+    {3, 0, 85, 0, 1}, {3, 85, 75, 0, 1}, {3, 160, 75, 0, 1}, {3, 235, 75, 0, 1},
+  };
+  #define AM_NS 10
+  static const uint16_t PHYS_LEN[AM_NUM_RINGS] = {100, 100, 300, 310};
+#else
+  static const AmSeg SEG[] = {
+    {0, 0, 150, 0, 0}, {1, 0, 150, 0, 0}, {2, 0, 150, 0, 0}, {3, 0, 150, 0, 0},
+  };
+  #define AM_NS 4
+  static const uint16_t PHYS_LEN[AM_NUM_RINGS] = {150, 150, 150, 150};
+#endif
+static const uint8_t NUM_STRIPS = AM_NS;
+static uint16_t STRIP_LEN[AM_NS];
+// Longest logical SEGMENT, not longest wire — logical buffers are per-segment.
+#if defined(AM_MOCKUP)
+  #define MAX_LEDS 85
+#else
+  #define MAX_LEDS 150
+#endif
 #define REF_LEN    100.0f   // LED-space tunings were authored at this length
 #define RASTER_PROPORTIONAL 1
 
@@ -192,18 +223,29 @@ static void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
 // I2S1 parallel DMA: whole frame streams from one buffer, no mid-frame refill
 // ISR, so ESP-NOW/WiFi interrupts can't bit-slip it (RMT did; A/B 2026-07-29).
 #define OUT_DRV "I2S1X8"
-static NeoPixelBus<NeoGrbFeature, NeoEsp32I2s1X8Ws2812xMethod> strip0(STRIP_LEN[0], 13);
-static NeoPixelBus<NeoGrbFeature, NeoEsp32I2s1X8Ws2812xMethod> strip1(STRIP_LEN[1], 27);
-static NeoPixelBus<NeoGrbFeature, NeoEsp32I2s1X8Ws2812xMethod> strip2(STRIP_LEN[2], 32);
-static NeoPixelBus<NeoGrbFeature, NeoEsp32I2s1X8Ws2812xMethod> strip3(STRIP_LEN[3], 33);
+static NeoPixelBus<NeoGrbFeature, NeoEsp32I2s1X8Ws2812xMethod> strip0(PHYS_LEN[0], 13);
+static NeoPixelBus<NeoGrbFeature, NeoEsp32I2s1X8Ws2812xMethod> strip1(PHYS_LEN[1], 27);
+static NeoPixelBus<NeoGrbFeature, NeoEsp32I2s1X8Ws2812xMethod> strip2(PHYS_LEN[2], 32);
+static NeoPixelBus<NeoGrbFeature, NeoEsp32I2s1X8Ws2812xMethod> strip3(PHYS_LEN[3], 33);
 
-static inline void setPixel(uint8_t s, uint16_t i, uint8_t r, uint8_t g, uint8_t b) {
-    RgbColor c(r, g, b);
+static inline void setPixelRaw(uint8_t s, uint16_t i, const RgbColor &c) {
     switch (s) {
         case 0: strip0.SetPixelColor(i, c); break;
         case 1: strip1.SetPixelColor(i, c); break;
         case 2: strip2.SetPixelColor(i, c); break;
         case 3: strip3.SetPixelColor(i, c); break;
+    }
+}
+
+static inline void setPixel(uint8_t s, uint16_t i, uint8_t r, uint8_t g, uint8_t b) {
+    RgbColor c(r, g, b);
+    const AmSeg &sg = SEG[s];
+    if (sg.fold == 0) { setPixelRaw(sg.strip, sg.off + i, c); return; }
+    uint16_t radial = 2 * sg.len;
+    for (uint8_t k = 0; k < sg.fold; k++) {
+        uint16_t base = sg.off + k * radial;
+        setPixelRaw(sg.strip, base + i, c);
+        setPixelRaw(sg.strip, base + radial - 1 - i, c);
     }
 }
 
@@ -241,10 +283,21 @@ static inline void setPixelScaled(uint8_t s, uint16_t i, float fr, float fg, flo
 // viz twin.
 static KettleState kettle;
 
+#define LOOP_RECORD 1
+#if LOOP_RECORD
+#include "loop_record.h"
+#endif
+
 static void kettleUpdate(float dt) {
     KettlePacketV1 pkt;
     memcpy(&pkt, (const void*)&kettlePkt, sizeof(pkt));
-    if (kettleLastMs != 0) kettleInput(kettle, pkt.enc, pkt.btnBits, pkt.upMs);
+    if (kettleLastMs != 0) {
+        kettleInput(kettle, pkt.enc, pkt.btnBits, pkt.upMs);
+#if LOOP_RECORD
+        lrEncFeed(kettle, pkt.enc, pkt.upMs);
+        lrButton(pkt.btnBits, millis());
+#endif
+    }
     kettleRotStep(kettle, dt);
 }
 
@@ -265,7 +318,7 @@ static void outputRotated() {
     static float crk[MAX_LEDS];
     for (uint8_t s = 0; s < NUM_STRIPS; s++) {
         uint16_t len = STRIP_LEN[s];
-        float off = kettleRot(kettle, s) * (float)len;
+        float off = kettleRot(kettle, SEG[s].strip) * (float)len;
         for (uint16_t i = 0; i < len; i++) {
             float srcF = fmodf((float)i - off, (float)len);
             if (srcF < 0.0f) srcF += (float)len;
@@ -278,7 +331,7 @@ static void outputRotated() {
             phys[i][2] = lerpf(frameBuf[s][i0][2], frameBuf[s][i1][2], fr);
         }
         memset(crk, 0, sizeof(float) * len);
-        kettleCrackleSplat(kettle, s, len, crk);
+        kettleCrackleSplat(kettle, SEG[s].strip, len, crk);
         for (uint16_t i = 0; i < len; i++) {
             // Neutral, not warm white: the crackle is additive over every
             // other layer, and an off-arc tint near-cancels the arc's cyan
@@ -287,10 +340,13 @@ static void outputRotated() {
             float c = crk[i] * KETTLE_CRK_LEVEL;
             // gBrightness (pot 5) is a clicky-layer fader: it scales the
             // rotated particle field only, never the duck or the crackle.
-            setPixelScaled(s, i,
-                           phys[i][0] * gBrightness + duckBuf[s][i][0] + c,
-                           phys[i][1] * gBrightness + duckBuf[s][i][1] + c,
-                           phys[i][2] * gBrightness + duckBuf[s][i][2] + c);
+            float cr = phys[i][0] * gBrightness + duckBuf[s][i][0] + c;
+            float cg = phys[i][1] * gBrightness + duckBuf[s][i][1] + c;
+            float cb = phys[i][2] * gBrightness + duckBuf[s][i][2] + c;
+#if LOOP_RECORD
+            lrTap(s, i, cr, cg, cb);
+#endif
+            setPixelScaled(s, i, cr, cg, cb);
         }
     }
 }
@@ -671,7 +727,6 @@ static void renderClickyParticles(float dt) {
 // Feature extraction and the waterfall itself live in lib/duck_energy, shared
 // with the viz twin. This file owns only the per-strip state
 // and the wiring into the composed frame.
-#define WF_REVERSE 0    // 1 if the strips hang head-at-the-far-end
 
 static DuckFeatures duck;
 
@@ -706,13 +761,16 @@ static void renderWaterfall(float dt, bool live) {
     memset(duckBuf, 0, sizeof(duckBuf));
     for (uint8_t s = 0; s < NUM_STRIPS; s++)
         duckWaterfallStep(wfLevel[s], wfHue[s], wfTilt[s], STRIP_LEN[s],
-                          duck, inject, dt, randFloat, duckBuf[s], WF_REVERSE);
+                          duck, inject, dt, randFloat, duckBuf[s], SEG[s].wfRev);
 }
 
 // ── Setup ────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
     delay(200);
+
+    for (uint8_t s = 0; s < NUM_STRIPS; s++)
+        STRIP_LEN[s] = SEG[s].len;
 
     prngState = esp_random();
     if (prngState == 0) prngState = 1;
@@ -729,7 +787,7 @@ void setup() {
     resetWaterfall();
     duckFeaturesReset(duck);
     kettleReset(kettle);
-    kettleSetRings(kettle, NUM_STRIPS);
+    kettleSetRings(kettle, AM_NUM_RINGS);
 
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
@@ -756,9 +814,17 @@ void setup() {
     peer.encrypt = false;
     esp_now_add_peer(&peer);
 
+#if defined(AM_MOCKUP)
+    Serial.printf("Axismundi MOCKUP (%u segs: 2 canopy chains + 2x helix+3roots) ready — ch=%u\n",
+                  NUM_STRIPS, FIXED_CHANNEL);
+    for (uint8_t s = 0; s < NUM_STRIPS; s++)
+        Serial.printf("  seg %u: wire %u off %u len %u fold %u\n",
+                      s, SEG[s].strip, SEG[s].off, SEG[s].len, SEG[s].fold);
+#else
     Serial.printf("Axismundi (clicky, 4-strip) ready — ch=%u\n", FIXED_CHANNEL);
     Serial.printf("  strips: 13=%u 27=%u 32=%u 33=%u\n",
                   STRIP_LEN[0], STRIP_LEN[1], STRIP_LEN[2], STRIP_LEN[3]);
+#endif
 }
 
 // ── Main loop ────────────────────────────────────────────────────
@@ -799,6 +865,9 @@ void loop() {
 
     uint32_t renderT0 = micros();
     kettleUpdate(dt);
+#if LOOP_RECORD
+    lrTick(now, dt);
+#endif
     duckUpdate(dt);
     if (clickyLastMs != 0) {
         renderClickyParticles(dt);
@@ -808,6 +877,9 @@ void loop() {
     }
     renderWaterfall(dt, duckLive());
     outputRotated();
+#if LOOP_RECORD
+    lrApply(now);
+#endif
     uint32_t renderUs = micros() - renderT0;
     showAll();
 

@@ -1,16 +1,22 @@
 {
   "params": {
-    "strap_run_m": 2.4383999999999997,
-    "strap_led_pitch_m": 0.05,
     "hept_sides": 7,
     "hept_side_len_m": 3.048,
     "canopy_height_m": 3.048,
-    "canopy_edge_pull_m": 0.45720000000000005,
-    "canopy_spoke_count": 14,
-    "canopy_pixel_pitch_m": 0.1,
-    "canopy_strand_nodes": 50,
+    "coupling_radius_m": 0.07619999999999999,
+    "butterfly_offset_m": 0.1397,
     "canopy_rotation_deg": 0.0,
-    "canopy_center_hole_m": 0.35,
+    "bulb_strand_nodes": 50,
+    "canopy_start_spoke": 0,
+    "pair_run_nodes": 100,
+    "pair_spoke_sep_m": 0.05,
+    "guy_strip_leds": 150,
+    "guy_strip_pitch_m": 0.03333333333333333,
+    "helix_strips": 2,
+    "helix_strip_leds": 150,
+    "helix_strip_pitch_m": 0.03333333333333333,
+    "helix_pole_radius_m": 0.0254,
+    "helix_height_m": 3.048,
     "roots_count": 4,
     "root_len_m": 1.8288000000000002,
     "root_radius_m": 0.08889999999999999,
@@ -22,9 +28,11 @@
     "roots_jitter_deg": 4.0,
     "roots_seed": 7
   },
-  "n_total": 1846,
+  "n_total": 3050,
   "canopy_z_m": 3.048,
-  "strap_leds_each": 78,
+  "attach_radius_m": 3.65216,
+  "guy_anchor_past_attach_m": 3.9214,
+  "helix_wrap_turns": 24.57,
   "heptagon_vertices_xy": [
     [
       0.0,
@@ -57,179 +65,256 @@
   ],
   "strips": [
     {
-      "name": "canopy_0",
+      "name": "ccw0",
       "kind": "canopy",
       "start": 0,
-      "count": 50,
-      "axn": 32
+      "count": 100,
+      "axn": 174,
+      "axsplit": 51,
+      "axoff": 0
     },
     {
-      "name": "canopy_1",
-      "kind": "canopy",
-      "start": 50,
-      "count": 50,
-      "axn": 24
-    },
-    {
-      "name": "canopy_2",
+      "name": "cw0",
       "kind": "canopy",
       "start": 100,
-      "count": 50,
-      "axn": 32
+      "count": 100,
+      "axn": 174,
+      "axsplit": 51,
+      "axoff": 0
     },
     {
-      "name": "canopy_3",
-      "kind": "canopy",
-      "start": 150,
-      "count": 50,
-      "axn": 24
-    },
-    {
-      "name": "canopy_4",
+      "name": "ccw1",
       "kind": "canopy",
       "start": 200,
-      "count": 50,
-      "axn": 32
+      "count": 100,
+      "axn": 174,
+      "axsplit": 50,
+      "axoff": 49
     },
     {
-      "name": "canopy_5",
-      "kind": "canopy",
-      "start": 250,
-      "count": 50,
-      "axn": 24
-    },
-    {
-      "name": "canopy_6",
+      "name": "cw1",
       "kind": "canopy",
       "start": 300,
-      "count": 50,
-      "axn": 32
+      "count": 100,
+      "axn": 174,
+      "axsplit": 50,
+      "axoff": 49
     },
     {
-      "name": "canopy_7",
-      "kind": "canopy",
-      "start": 350,
-      "count": 50,
-      "axn": 24
-    },
-    {
-      "name": "canopy_8",
+      "name": "ccw2",
       "kind": "canopy",
       "start": 400,
-      "count": 50,
-      "axn": 32
+      "count": 100,
+      "axn": 174,
+      "axsplit": 50,
+      "axoff": 99
     },
     {
-      "name": "canopy_9",
-      "kind": "canopy",
-      "start": 450,
-      "count": 50,
-      "axn": 24
-    },
-    {
-      "name": "canopy_10",
+      "name": "cw2",
       "kind": "canopy",
       "start": 500,
-      "count": 50,
-      "axn": 32
+      "count": 100,
+      "axn": 174,
+      "axsplit": 50,
+      "axoff": 99
     },
     {
-      "name": "canopy_11",
-      "kind": "canopy",
-      "start": 550,
-      "count": 50,
-      "axn": 24
-    },
-    {
-      "name": "canopy_12",
+      "name": "ccw3",
       "kind": "canopy",
       "start": 600,
-      "count": 50,
-      "axn": 32
+      "count": 75,
+      "axn": 174,
+      "axsplit": 50,
+      "axoff": 149
     },
     {
-      "name": "canopy_13",
+      "name": "cw3",
       "kind": "canopy",
-      "start": 650,
+      "start": 675,
+      "count": 75,
+      "axn": 174,
+      "axsplit": 50,
+      "axoff": 149
+    },
+    {
+      "name": "spoke_0",
+      "kind": "canopy",
+      "start": 750,
       "count": 50,
-      "axn": 24
+      "axn": 50,
+      "axsplit": 0,
+      "axoff": 0
     },
     {
-      "name": "strap_0",
+      "name": "guy_0",
       "kind": "strap",
-      "start": 700,
-      "count": 78,
-      "axn": 0
+      "start": 800,
+      "count": 150,
+      "axn": 0,
+      "axsplit": 0,
+      "axoff": 0
     },
     {
-      "name": "strap_1",
-      "kind": "strap",
-      "start": 778,
-      "count": 78,
-      "axn": 0
+      "name": "spoke_1",
+      "kind": "canopy",
+      "start": 950,
+      "count": 50,
+      "axn": 50,
+      "axsplit": 0,
+      "axoff": 0
     },
     {
-      "name": "strap_2",
+      "name": "guy_1",
       "kind": "strap",
-      "start": 856,
-      "count": 78,
-      "axn": 0
+      "start": 1000,
+      "count": 150,
+      "axn": 0,
+      "axsplit": 0,
+      "axoff": 0
     },
     {
-      "name": "strap_3",
-      "kind": "strap",
-      "start": 934,
-      "count": 78,
-      "axn": 0
+      "name": "spoke_2",
+      "kind": "canopy",
+      "start": 1150,
+      "count": 50,
+      "axn": 50,
+      "axsplit": 0,
+      "axoff": 0
     },
     {
-      "name": "strap_4",
+      "name": "guy_2",
       "kind": "strap",
-      "start": 1012,
-      "count": 78,
-      "axn": 0
+      "start": 1200,
+      "count": 150,
+      "axn": 0,
+      "axsplit": 0,
+      "axoff": 0
     },
     {
-      "name": "strap_5",
-      "kind": "strap",
-      "start": 1090,
-      "count": 78,
-      "axn": 0
+      "name": "spoke_3",
+      "kind": "canopy",
+      "start": 1350,
+      "count": 50,
+      "axn": 50,
+      "axsplit": 0,
+      "axoff": 0
     },
     {
-      "name": "strap_6",
+      "name": "guy_3",
       "kind": "strap",
-      "start": 1168,
-      "count": 78,
-      "axn": 0
+      "start": 1400,
+      "count": 150,
+      "axn": 0,
+      "axsplit": 0,
+      "axoff": 0
+    },
+    {
+      "name": "spoke_4",
+      "kind": "canopy",
+      "start": 1550,
+      "count": 50,
+      "axn": 50,
+      "axsplit": 0,
+      "axoff": 0
+    },
+    {
+      "name": "guy_4",
+      "kind": "strap",
+      "start": 1600,
+      "count": 150,
+      "axn": 0,
+      "axsplit": 0,
+      "axoff": 0
+    },
+    {
+      "name": "spoke_5",
+      "kind": "canopy",
+      "start": 1750,
+      "count": 50,
+      "axn": 50,
+      "axsplit": 0,
+      "axoff": 0
+    },
+    {
+      "name": "guy_5",
+      "kind": "strap",
+      "start": 1800,
+      "count": 150,
+      "axn": 0,
+      "axsplit": 0,
+      "axoff": 0
+    },
+    {
+      "name": "spoke_6",
+      "kind": "canopy",
+      "start": 1950,
+      "count": 50,
+      "axn": 50,
+      "axsplit": 0,
+      "axoff": 0
+    },
+    {
+      "name": "guy_6",
+      "kind": "strap",
+      "start": 2000,
+      "count": 150,
+      "axn": 0,
+      "axsplit": 0,
+      "axoff": 0
+    },
+    {
+      "name": "helix_0",
+      "kind": "helix",
+      "start": 2150,
+      "count": 150,
+      "axn": 50,
+      "axsplit": 0,
+      "axoff": 0
+    },
+    {
+      "name": "helix_1",
+      "kind": "helix",
+      "start": 2300,
+      "count": 150,
+      "axn": 50,
+      "axsplit": 0,
+      "axoff": 0
     },
     {
       "name": "root_0",
       "kind": "root",
-      "start": 1246,
+      "start": 2450,
       "count": 150,
-      "axn": 56
+      "axn": 56,
+      "axsplit": 0,
+      "axoff": 0
     },
     {
       "name": "root_1",
       "kind": "root",
-      "start": 1396,
+      "start": 2600,
       "count": 150,
-      "axn": 56
+      "axn": 56,
+      "axsplit": 0,
+      "axoff": 0
     },
     {
       "name": "root_2",
       "kind": "root",
-      "start": 1546,
+      "start": 2750,
       "count": 150,
-      "axn": 56
+      "axn": 56,
+      "axsplit": 0,
+      "axoff": 0
     },
     {
       "name": "root_3",
       "kind": "root",
-      "start": 1696,
+      "start": 2900,
       "count": 150,
-      "axn": 56
+      "axn": 56,
+      "axsplit": 0,
+      "axoff": 0
     }
   ]
 }

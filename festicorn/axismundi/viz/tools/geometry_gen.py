@@ -2,13 +2,24 @@
 """
 geometry_gen.py — parametric geometry for the strap-canopy sculpture.
 
-Canopy-on-straps form (2026-08-17 reshape — the middle helix is gone):
-  - a FILLED HEPTAGON canopy held up at each tip,
-  - one RATCHET STRAP per tip (decorated), running from the tip radially
-    down-and-out to a ground anchor — the bm26 n7-radial single-guy layout,
-  - a ROOT SYSTEM of paper-mache poles radiating on the floor, each decorated
-    with an IP67 strip in a different shape (spiral / serpentine cage /
-    out-and-back / meander).
+Final playa form (2026-08-20, canopy-plan-nopull-butterfly + wiring session;
+physical narrative in ../../WIRING.md):
+  - REGULAR HEPTAGON canopy, side fixed 10 ft, NO edge pull. Alpine-butterfly
+    knots push each spoke-attach point 5.5 in outboard of the corner.
+  - CANOPY CHAINS of WS2811 bulbs (8 runs of 2 x 50-node strands, draped):
+    from ONE double-run short spoke, two chains of four runs wrap the rim in
+    opposite directions; the two final runs are cut ~25 bulbs short so both
+    chains terminate on the vertex diametrically opposite the start. Y-split
+    pins pair mirror-twin runs: the whole canopy reflects about the
+    start-spoke/terminal-vertex axis.
+  - 7 LONG-SPOKE RUNS: one 50-node bulb strand each, coupling edge -> attach
+    point (taut), then the GUY continues from the attach point down-and-out
+    to a ground anchor, dressed with one full 5 m / 150-LED (30/m) WS2812B
+    strip — the anchor sits where the strip runs out.
+  - CENTER HELIX: WS2812B strips (same product as guys) wound around a
+    2 in-diameter, 10 ft pole under the canopy center.
+  - ROOT SYSTEM of paper-mache poles on the floor, one 150-LED strip each,
+    laid as a double meander.
 
 Anti-drift principle (the ledsim doctrine, applied to geometry):
   The position math lives in exactly ONE place — here. We compute every LED's
@@ -20,9 +31,10 @@ Anti-drift principle (the ledsim doctrine, applied to geometry):
 Units: meters internally. Z is up. The center axis is the z axis through (0, 0).
 
 Wire/strip model (festicorn multi-strip setPixel(s, i) convention):
-  strip 0..13  — canopy spokes (center hole -> rim, then along the rim)
-  strip 14..20 — ratchet straps (canopy tip -> ground anchor)
-  strip 21..27 — roots (one strip each)
+  strip 0..6    — sector runs (short spoke -> rim wrap)
+  strip 7..20   — long-spoke / guy pairs, interleaved in chain order
+  strip 21..22  — helix strips on the center pole
+  strip 23..26  — roots (one strip each)
 """
 
 import json
@@ -37,29 +49,39 @@ IN = 0.0254   # meters per inch
 # TUNABLE PARAMETERS — physical dimensions in ft/in for legibility.
 # ─────────────────────────────────────────────────────────────────────────
 P = {
-    # ── Ratchet straps (canopy support, decorated) ───────────────────────
-    # One strap per canopy tip, on the tip's radial azimuth (bm26 n7-radial,
-    # single guy per pole): tip at canopy height -> ground anchor strap_run
-    # horizontally past the tip's floor projection.
-    "strap_run_m":        96.0 * IN,    # bm26 GUY_RUN default (8 ft past the tip)
-    "strap_led_pitch_m":  0.05,         # decorated with 20/m strip along the strap
-
-    # ── Heptagon canopy ──────────────────────────────────────────────────
-    "hept_sides":         7,
-    "hept_side_len_m":    10.0 * FT,    # each edge 10 ft -> circumradius ~11.5 ft
-    "canopy_height_m":    10.0 * FT,    # the canopy is ONE flat plane
-    # The net pulls each side inward: the rim bows toward the center between
-    # tips, deepest at each side's midpoint (concave scalloped outline).
-    "canopy_edge_pull_m": 1.5 * FT,
-    # Real hardware: 12mm WS2811 bullet strands, 50 nodes @ 100mm pitch (10/m, 5m).
-    # The canopy is radial spokes — one strand per spoke, center hole -> rim.
-    "canopy_spoke_count":  14,          # spokes (14 = vertices + edge midpoints; rim arcs meet)
-    "canopy_pixel_pitch_m": 0.10,       # 100mm node pitch (the real default)
-    "canopy_strand_nodes": 50,          # nodes per real strand (caps a spoke's length)
+    # ── Heptagon canopy (nopull-butterfly plan) ──────────────────────────
+    "hept_sides":          7,
+    "hept_side_len_m":     10.0 * FT,   # FIXED side -> circumradius 138.3 in
+    "canopy_height_m":     10.0 * FT,   # the canopy is ONE flat plane
+    "coupling_radius_m":   3.0 * IN,    # hub coupling plate, diameter 6 in
+    "butterfly_offset_m":  5.5 * IN,    # attach point outboard of each corner
     "canopy_rotation_deg": 0.0,
-    "canopy_center_hole_m": 0.35,       # center hole where the spokes start
 
-    # ── Root system: one standard IP67 strip per paper-mache pole ──────────
+    # ── WS2811 bulb strands (12mm bullets, 50 nodes, 140 in lit) ─────────
+    "bulb_strand_nodes":   50,
+    # Canopy chains: from ONE double-run short spoke, two chains of four
+    # 100-bulb runs wrap the rim in opposite directions (each run: out its own
+    # short spoke, then one side-length of rim to the next short spoke). The
+    # two final runs are CUT ~25 bulbs short so both terminate on the vertex
+    # diametrically opposite the start spoke. Y-splitters pair each run with
+    # its mirror twin on one pin: 4 pins x 2 strips, whole-canopy reflection
+    # about the start-spoke/terminal-vertex axis.
+    "canopy_start_spoke":  0,
+    "pair_run_nodes":      100,
+    "pair_spoke_sep_m":    0.05,        # the double-run strands hang ~5cm apart
+
+    # ── Guys: one full WS2812B 5 m / 150-LED (30/m) strip per long spoke ─
+    "guy_strip_leds":      150,
+    "guy_strip_pitch_m":   1.0 / 30.0,
+
+    # ── Center helix: same strip product, wound on the center pole ───────
+    "helix_strips":        2,
+    "helix_strip_leds":    150,
+    "helix_strip_pitch_m": 1.0 / 30.0,
+    "helix_pole_radius_m": 1.0 * IN,    # 2 in-diameter pole
+    "helix_height_m":      10.0 * FT,
+
+    # ── Root system: one standard IP67 strip per paper-mache pole ────────
     "roots_count":        4,
     "root_len_m":         6.0 * FT,     # straight pole length
     "root_radius_m":      3.5 * IN,     # ~7 in diameter paper-mache root
@@ -82,165 +104,157 @@ def _lerp(a, b, f):
     return (a[0]+f*(b[0]-a[0]), a[1]+f*(b[1]-a[1]), a[2]+f*(b[2]-a[2]))
 
 
-def resample_polyline(pts, pitch):
-    """Return points equidistant (~pitch apart) along the polyline `pts`."""
-    if len(pts) < 2:
-        return list(pts)
+def _place_n(waypoints, n):
+    """Place exactly n nodes evenly (by arc length) along a 3D polyline.
+
+    Physical strands are longer than the structural path and get DRAPED to
+    fit, so even spacing along the path is the honest pixel model.
+    """
     cum = [0.0]
-    for i in range(1, len(pts)):
-        cum.append(cum[-1] + _d3(pts[i], pts[i-1]))
+    for a, b in zip(waypoints, waypoints[1:]):
+        cum.append(cum[-1] + _d3(a, b))
     total = cum[-1]
-    n = max(2, int(round(total / pitch)))
-    out, j = [], 0
+    pts, j = [], 0
     for i in range(n):
         d = total * i / (n - 1)
-        while j < len(cum) - 2 and cum[j+1] < d:
+        while j < len(cum) - 2 and cum[j + 1] < d:
             j += 1
-        seg = cum[j+1] - cum[j]
+        seg = cum[j + 1] - cum[j]
         f = 0.0 if seg < 1e-9 else (d - cum[j]) / seg
-        out.append(_lerp(pts[j], pts[j+1], f))
-    return out, total
+        pts.append(_lerp(waypoints[j], waypoints[j + 1], f))
+    return pts, total
 
 
 # ─────────────────────────────────────────────────────────────────────────
 # Geometry builders
 # ─────────────────────────────────────────────────────────────────────────
-def build_straps(p, verts, canopy_z):
-    """One TAUT ratchet strap per canopy tip: straight line from the tip
-    radially down-and-out to a ground anchor. LED index 0 is at the TIP
-    (top), matching the canopy spokes' center-out convention: normalized
-    position 0 reads as "inner/high" on both kinds.
-    """
-    run = p["strap_run_m"]
-    pitch = p["strap_led_pitch_m"]
-    straps = []
-    for (vx, vy), z in ((v, canopy_z) for v in verts):
-        r = math.hypot(vx, vy)
-        ux, uy = vx / r, vy / r
-        tip = (vx, vy, z)
-        anchor = (vx + ux * run, vy + uy * run, 0.0)
-        pts, _ = resample_polyline([tip, anchor], pitch)
-        straps.append(pts)
-    return straps
-
-
-def _heptagon_vertices(p):
+def _frame(p):
     n = p["hept_sides"]
-    R = p["hept_side_len_m"] / (2.0 * math.sin(math.pi / n))   # circumradius from side
-    rot = math.radians(p["canopy_rotation_deg"]) + math.pi / 2.0
-    verts = [(R * math.cos(rot + 2*math.pi*k/n), R * math.sin(rot + 2*math.pi*k/n))
-             for k in range(n)]
-    return verts, R
-
-
-def _ray_poly_hit(theta, verts):
-    """Where a ray from the origin at angle theta exits the (convex) polygon.
-
-    Returns (t, hitpoint, edge_index, u) for the nearest forward boundary
-    crossing; edge_index is the edge verts[k]->verts[k+1] that was hit.
-    """
-    dx, dy = math.cos(theta), math.sin(theta)
-    n = len(verts)
-    best = None
-    for k in range(n):
-        ax, ay = verts[k]; bx, by = verts[(k + 1) % n]
-        ex, ey = bx - ax, by - ay
-        denom = dx * ey - dy * ex
-        if abs(denom) < 1e-12:
-            continue
-        t = (ax * ey - ay * ex) / denom          # origin at (0,0)
-        u = (ax * dy - ay * dx) / denom
-        if t > 1e-9 and -1e-9 <= u <= 1 + 1e-9:
-            if best is None or t < best[0]:
-                best = (t, (dx * t, dy * t), k, u)
-    return best
-
-
-def _march_polyline(waypoints, pitch, cap):
-    """Place up to `cap` nodes at `pitch` arc-length spacing along a 3D polyline."""
-    segs = []
-    for a, b in zip(waypoints, waypoints[1:]):
-        L = _d3(a, b)
-        if L < 1e-9:
-            continue
-        segs.append((a, ((b[0]-a[0])/L, (b[1]-a[1])/L, (b[2]-a[2])/L), L))
-    pts = []
-    for k in range(cap):
-        s = k * pitch
-        acc = 0.0
-        for (a, u, L) in segs:
-            if s <= acc + L:
-                t = s - acc
-                pts.append((a[0] + u[0]*t, a[1] + u[1]*t, a[2] + u[2]*t))
-                break
-            acc += L
-        else:
-            break                                 # ran off the end of the polyline
-    return pts
-
-
-def build_canopy(p):
-    """Radial spokes that bend along the rim — one real bullet strand per spoke.
-
-    Each strand is a single continuous run at the real 100mm node pitch: it goes
-    radially from the center-hole edge out to the heptagon rim, then BENDS and
-    continues horizontally along the perimeter (CCW) until the strand's node cap
-    is used up. So a 50-node strand spends ~32 nodes on the spoke and its ~18
-    spare nodes wrapping around the edge, instead of draping down. Spokes are
-    evenly spaced (spoke_count == hept_sides -> one per vertex).
-    """
-    verts, R = _heptagon_vertices(p)
-    canopy_z = p["canopy_height_m"]
-    hole = p["canopy_center_hole_m"]
-    pitch = p["canopy_pixel_pitch_m"]
-    count = p["canopy_spoke_count"]
-    cap = p["canopy_strand_nodes"]
+    R = p["hept_side_len_m"] / (2.0 * math.sin(math.pi / n))
     base = math.radians(p["canopy_rotation_deg"]) + math.pi / 2.0
+    verts = [(R * math.cos(base + 2*math.pi*k/n), R * math.sin(base + 2*math.pi*k/n))
+             for k in range(n)]
+    mid_az = [base + 2.0 * math.pi * (k + 0.5) / n for k in range(n)]
+    return verts, mid_az, R, base
 
-    # Concave rim: each heptagon side sampled densely and pulled toward the
-    # center with a sin(pi t) profile — 0 at the tips, canopy_edge_pull deep
-    # at the side midpoints. Star-shaped wrt center, so a spoke ray still
-    # crosses it exactly once and _ray_poly_hit works unchanged.
-    pull = p["canopy_edge_pull_m"]
+
+def build_pairs(p, verts, mid_az):
+    """Canopy chains. From the start short spoke, two chains of four 100-bulb
+    runs wrap the rim in opposite directions; each run goes out its own short
+    spoke (coupling edge -> mid-edge) then one side-length of rim to the next
+    short-spoke junction. Every short spoke carries one run; the start spoke
+    carries two (~5cm apart). The two final runs are CUT where they reach the
+    corner diametrically opposite the start spoke (~node 74 of 100), so both
+    chains terminate on that vertex. The cut bulbs don't exist; each pin
+    still clocks a full field.
+
+    Y-splitters pair run j of one chain with run j of the other on one pin —
+    identical data at mirror wire positions = whole-canopy reflection about
+    the start-spoke/terminal-vertex axis.
+
+    Returns a list of (name, points, split), chains interleaved in pin order
+    ccw0, cw0, ccw1, cw1, ... — split = bulb count of the spoke segment
+    (bulbs [0,split) hub->mid-edge, the rest is rim).
+    """
     n = len(verts)
-    SAMP = 48
-    rim = []
-    for k in range(n):
-        ax_, ay_ = verts[k]
-        bx_, by_ = verts[(k + 1) % n]
-        for i in range(SAMP):
-            t = i / SAMP
-            x = ax_ + (bx_ - ax_) * t
-            y = ay_ + (by_ - ay_) * t
-            d = math.hypot(x, y)
-            f = pull * math.sin(math.pi * t) / d
-            rim.append((x * (1.0 - f), y * (1.0 - f)))
+    z = p["canopy_height_m"]
+    cr = p["coupling_radius_m"]
+    nodes = p["pair_run_nodes"]
+    sep = p["pair_spoke_sep_m"] / 2.0
+    f = p["canopy_start_spoke"]
+    depth = (n + 1) // 2                     # 4 runs per chain on a heptagon
 
-    spokes, radial_counts = [], []
-    for s in range(count):
-        theta = base + 2.0 * math.pi * s / count
-        start = (hole * math.cos(theta), hole * math.sin(theta), canopy_z)
-        hit = _ray_poly_hit(theta, rim)
-        if hit is None:                            # degenerate; fall back to straight spoke
-            pts = _march_polyline(
-                [start, (R * math.cos(theta), R * math.sin(theta), canopy_z)],
-                pitch, cap)
-            spokes.append(pts)
-            radial_counts.append(len(pts))
-            continue
-        _, hitpt, edge_idx, u = hit
-        # waypoints: hole -> rim hit -> CCW along the scalloped rim (enough
-        # points to cover the strand's full length)
-        hit3 = (hitpt[0], hitpt[1], canopy_z)
-        waypoints = [start, hit3]
-        waypoints += [(rim[(edge_idx + 1 + j) % len(rim)][0],
-                       rim[(edge_idx + 1 + j) % len(rim)][1],
-                       canopy_z) for j in range(len(rim) // 2)]
-        spokes.append(_march_polyline(waypoints, pitch, cap))
-        # LEDs on the RADIAL section (before the rim bend) — the renderer's
-        # spoke/rim boundary
-        radial_counts.append(min(cap, int(_d3(start, hit3) / pitch) + 1))
-    return spokes, radial_counts, verts, canopy_z
+    def mid(k):
+        ax_, ay_ = verts[k % n]
+        bx_, by_ = verts[(k + 1) % n]
+        return ((ax_ + bx_) / 2.0, (ay_ + by_) / 2.0)
+
+    runs = []
+    for j in range(depth):
+        for dirn in (+1, -1):
+            k = (f + j * dirn) % n           # this run's feed spoke
+            th = mid_az[k]
+            ox = oy = 0.0
+            if j == 0:                       # only the start spoke is doubled
+                ox, oy = -math.sin(th) * sep * dirn, math.cos(th) * sep * dirn
+            start = (cr * math.cos(th) + ox, cr * math.sin(th) + oy, z)
+            m0x, m0y = mid(k)
+            m0 = (m0x + ox, m0y + oy, z)
+            corner = verts[(k + 1) % n] if dirn > 0 else verts[k]
+            far = mid(k + 1) if dirn > 0 else mid(k - 1)
+            pts, total = _place_n([start, m0, corner + (z,), far + (z,)], nodes)
+            pitch_eff = total / (nodes - 1)
+            split = int(_d3(start, m0) / pitch_eff) + 1
+            if j == depth - 1:               # final runs terminate on the far vertex
+                s_corner = _d3(start, m0) + _d3(m0, corner + (z,))
+                pts = pts[:int(s_corner / pitch_eff) + 1]
+            runs.append((f"{'ccw' if dirn > 0 else 'cw'}{j}", pts, split))
+    return runs
+
+
+def build_long_spokes(p, base):
+    """Long spoke k: one taut 50-node bulb strand, coupling edge -> attach
+    point (corner azimuth, butterfly_offset outboard of the corner radius).
+    """
+    n = p["hept_sides"]
+    z = p["canopy_height_m"]
+    cr = p["coupling_radius_m"]
+    R = p["hept_side_len_m"] / (2.0 * math.sin(math.pi / n))
+    ar = R + p["butterfly_offset_m"]
+    spokes, attach = [], []
+    for k in range(n):
+        th = base + 2.0 * math.pi * k / n
+        a = (cr * math.cos(th), cr * math.sin(th), z)
+        b = (ar * math.cos(th), ar * math.sin(th), z)
+        pts, _ = _place_n([a, b], p["bulb_strand_nodes"])
+        spokes.append(pts)
+        attach.append(b)
+    return spokes, attach
+
+
+def build_guys(p, attach):
+    """Guy k continues the long-spoke chain: from the attach point (top)
+    straight down-and-out on the spoke's azimuth to a ground anchor placed
+    where the full 5 m strip runs out. LED 0 at the TOP, so normalized
+    position 0 reads as "inner/high" like every other kind.
+    """
+    lit = (p["guy_strip_leds"] - 1) * p["guy_strip_pitch_m"]
+    h = p["canopy_height_m"]
+    horiz = math.sqrt(max(0.0, lit * lit - h * h))
+    guys = []
+    for (tx, ty, tz) in attach:
+        r = math.hypot(tx, ty)
+        ux, uy = tx / r, ty / r
+        anchor = (tx + ux * horiz, ty + uy * horiz, 0.0)
+        pts, _ = _place_n([(tx, ty, tz), anchor], p["guy_strip_leds"])
+        guys.append(pts)
+    return guys, horiz
+
+
+def build_helix(p):
+    """Center pole helix: helix_strips strips (same product as the guys)
+    wound around the pole, phase-staggered, chained serpentine — strip 0
+    descends from the hub, strip 1 climbs back, and so on. The winding
+    pitch falls out of the strip length vs pole height.
+    """
+    ns = p["helix_strips"]
+    nled = p["helix_strip_leds"]
+    r = p["helix_pole_radius_m"]
+    h = p["helix_height_m"]
+    lit = (nled - 1) * p["helix_strip_pitch_m"]
+    wrap = math.sqrt(max(0.0, lit * lit - h * h)) / r   # total wind angle (rad)
+    strips = []
+    for j in range(ns):
+        phase = 2.0 * math.pi * j / ns
+        down = (j % 2 == 0)
+        pts = []
+        for i in range(nled):
+            f = i / (nled - 1)
+            z = h * (1.0 - f) if down else h * f
+            th = phase + wrap * f
+            pts.append((r * math.cos(th), r * math.sin(th), z))
+        strips.append(pts)
+    return strips, wrap
 
 
 def build_roots(p):
@@ -328,23 +342,43 @@ def main():
     out_dir = os.path.normpath(os.path.join(here, "..", "geometry"))
     os.makedirs(out_dir, exist_ok=True)
 
-    canopy_spokes, canopy_radial, hept_verts, canopy_z = build_canopy(P)
-    straps = build_straps(P, hept_verts, canopy_z)
+    verts, mid_az, R, base = _frame(P)
+    canopy_z = P["canopy_height_m"]
+    pairs = build_pairs(P, verts, mid_az)
+    spokes, attach = build_long_spokes(P, base)
+    guys, guy_horiz = build_guys(P, attach)
+    helices, helix_wrap = build_helix(P)
     roots, meander_amp = build_roots(P)
 
     flat, strips = [], []
 
-    def add_strip(name, kind, pts, axn=0):
+    def add_strip(name, kind, pts, axn=0, axsplit=0, axoff=0):
         start = len(flat)
         flat.extend(pts)
         strips.append({"name": name, "kind": kind, "start": start,
-                       "count": len(pts), "axn": axn})
+                       "count": len(pts), "axn": axn,
+                       "axsplit": axsplit, "axoff": axoff})
 
-    for k, spoke in enumerate(canopy_spokes):       # one real strand per spoke
-        # canopy axn = radial-section LED count: the spoke/rim boundary
-        add_strip(f"canopy_{k}", "canopy", spoke, canopy_radial[k])
-    for k, strap in enumerate(straps):
-        add_strip(f"strap_{k}", "strap", strap)
+    # each chain's rim segments concatenate into ONE perimeter particle
+    # array (mid-S0 -> terminal vertex); the other chain is its mirror
+    rim_off, off = {}, {"ccw": 0, "cw": 0}
+    for name, run, split in pairs:
+        rim_off[name] = off[name[:-1]]
+        off[name[:-1]] += len(run) - split
+    assert off["ccw"] == off["cw"], "chain rim arrays must mirror"
+    rim_total = off["ccw"]
+
+    for name, run, split in pairs:
+        add_strip(name, "canopy", run, rim_total,
+                  axsplit=split, axoff=rim_off[name])
+    for k in range(len(spokes)):
+        # spoke_k and guy_k are ONE physical chain (bulbs, then strip)
+        add_strip(f"spoke_{k}", "canopy", spokes[k], len(spokes[k]))
+        add_strip(f"guy_{k}", "strap", guys[k])
+    # helix axn = height raster resolution, matched to the spokes' node pitch
+    helix_axn = P["bulb_strand_nodes"]
+    for j, hx in enumerate(helices):
+        add_strip(f"helix_{j}", "helix", hx, helix_axn)
     root_axn = int(round(P["root_len_m"] / P["root_strip_pitch_m"])) + 1
     for k, root in enumerate(roots):
         add_strip(f"root_{k}", "root", root, root_axn)
@@ -359,8 +393,10 @@ def main():
         "params": P,
         "n_total": n_total,
         "canopy_z_m": round(canopy_z, 4),
-        "strap_leds_each": len(straps[0]) if straps else 0,
-        "heptagon_vertices_xy": [[round(x, 5), round(y, 5)] for (x, y) in hept_verts],
+        "attach_radius_m": round(R + P["butterfly_offset_m"], 5),
+        "guy_anchor_past_attach_m": round(guy_horiz, 4),
+        "helix_wrap_turns": round(helix_wrap / (2.0 * math.pi), 2),
+        "heptagon_vertices_xy": [[round(x, 5), round(y, 5)] for (x, y) in verts],
         "strips": strips,
     }
     with open(os.path.join(out_dir, "meta.json"), "w") as f:
@@ -376,12 +412,18 @@ def main():
         by_kind[s["kind"]] = by_kind.get(s["kind"], 0) + s["count"]
     for kind, c in by_kind.items():
         print(f"    {kind:>7}: {c:>5} LEDs")
-    print(f"  straps: {len(straps)} x {len(straps[0])} LEDs "
-          f"(tip z {canopy_z/FT:.0f} ft -> anchor {P['strap_run_m']/FT:.1f} ft past tip)")
-    wire = (P["root_strip_leds"] - 1) * P["root_strip_pitch_m"]
+    cuts = [(nm, len(r)) for nm, r, _ in pairs if len(r) < P["pair_run_nodes"]]
+    print(f"  canopy chains: {len(pairs)} runs, double-run spoke "
+          f"S{P['canopy_start_spoke']}; cut runs: {cuts}")
+    print(f"  canopy field: spoke split at bulb {pairs[0][2]}, "
+          f"rim array {rim_total} bulbs per chain")
+    print(f"  long spokes: {len(spokes)} x {len(spokes[0])} bulbs, "
+          f"guys {len(guys)} x {P['guy_strip_leds']} LEDs "
+          f"(anchor {guy_horiz/FT:.1f} ft past attach)")
+    print(f"  helix: {len(helices)} x {P['helix_strip_leds']} LEDs, "
+          f"{helix_wrap/(2*math.pi):.1f} turns each")
     print(f"  roots: {len(roots)} x double-meander, {P['root_strip_leds']} LEDs "
-          f"({wire:.2f} m strip) each; fitted sway amplitude "
-          f"{math.degrees(meander_amp):.0f} deg")
+          f"each; fitted sway amplitude {math.degrees(meander_amp):.0f} deg")
     est_w = n_total * 0.06
     print(f"  rough power @ ~60mW/LED avg: ~{est_w:.0f} W  "
           f"(peak full-white ~{n_total*0.3:.0f} W) — sanity-check controllers/PSU")
@@ -407,15 +449,17 @@ def write_topology_h(path, flat, strips, p, canopy_z):
         L.append(f"  {{ {x:.5f}f, {y:.5f}f, {z:.5f}f }},")
     L.append("};")
     L.append("")
-    L.append("// Strip ranges into LED_POS[]. kind: 0=helix(retired), 1=canopy, 2=root, 3=strap.")
+    L.append("// Strip ranges into LED_POS[]. kind: 0=helix, 1=canopy, 2=root, 3=strap/guy.")
     L.append("// axn: axial raster resolution for wrapped/folded strips (0 = index space).")
-    L.append("// A renderer rasterizing a root at axn pixels and sampling by each LED's")
-    L.append("// axial position makes effects travel DOWN the pole, whatever the wire path.")
-    L.append("struct HcStrip { uint16_t start, count; uint8_t kind; uint16_t axn; };")
+    L.append("// Canopy chain runs split at the mid-edge junction: bulbs [0,axsplit)")
+    L.append("// run the spoke, bulbs [axsplit,count) are rim — axoff is their offset")
+    L.append("// into the chain's rim particle array and axn its total bulb count.")
+    L.append("struct HcStrip { uint16_t start, count; uint8_t kind; uint16_t axn, axsplit, axoff; };")
     kind_map = {"helix": 0, "canopy": 1, "root": 2, "strap": 3}
     L.append("static const HcStrip HC_STRIPS[HC_NUM_STRIPS] = {")
     for s in strips:
-        L.append(f"  {{ {s['start']}, {s['count']}, {kind_map[s['kind']]}, {s['axn']} }}, // {s['name']}")
+        L.append(f"  {{ {s['start']}, {s['count']}, {kind_map[s['kind']]}, "
+                 f"{s['axn']}, {s['axsplit']}, {s['axoff']} }}, // {s['name']}")
     L.append("};")
     L.append("")
     xs = [v[0] for v in flat]; ys = [v[1] for v in flat]; zs = [v[2] for v in flat]

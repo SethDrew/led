@@ -53,10 +53,9 @@ static float AX_KETTLE_AGE = 1e9f;
 #define AXFX_LEN(s) HC_STRIPS[s].count
 #include <axfx_ambient.h>
 
-// Ambient effect triggers (axfx). Three freed kettle buttons each summon one
+// Ambient effect triggers (axfx). Two freed kettle buttons each summon one
 // overlay while held; the knob spin is diverted from the carousel into that
 // effect's drive. Mirrors axismundi_sandbox.cpp.
-#define AXFX_BTN_BLOOM     KETTLE_BTN_FLYWHEEL
 #define AXFX_BTN_FIRE      KETTLE_BTN_COUNTER
 #define AXFX_BTN_LEAFWIND  KETTLE_BTN_CRACKLE
 #define AXFX_CEIL_POT      0
@@ -65,6 +64,15 @@ static int       ax_axfxEffect = AXFX_NONE;
 static int32_t   ax_axfxPrevEnc = 0;
 static bool      ax_axfxEncInit = false;
 static float     ax_axfxCeiling = 1.0f;
+
+// Size (SPLAY). Its own kettle button steals the spin off the carousel and
+// integrates it into the comb spread. Mirrors axismundi_sandbox.cpp.
+#define KETTLE_BTN_SIZE       KETTLE_BTN_FLYWHEEL
+#define KETTLE_SPLAY_PER_ADV  1.0f
+#define KETTLE_SPLAY_HOME_S   1.5f
+static float ax_kSplay     = 0.0f;
+static float ax_kSplayFrom = 0.0f;
+static float ax_kSplayT    = -1.0f;
 
 #define AX_BRIGHT_POT  5
 #define AX_BRIGHT_FLOOR 0.0f
@@ -88,7 +96,6 @@ static float     ax_axfxCeiling = 1.0f;
 #define AX_PAINT_STOP_S 0.3f
 #define AX_PAINT_CAP   160.0f
 #define AX_FADE_S      1.5f
-#define AX_RECOVER_S   0.7f
 #define AX_CRACKLE_S   0.5f
 #define AX_PUMP_MAX    3.0f
 #define AX_PUMP_TAU    0.6f
@@ -105,11 +112,11 @@ static float     ax_axfxCeiling = 1.0f;
 #define AX_NUM_SHARDS  48
 
 // ── Ghost recorder (sandbox experiment, mirrors axismundi_sandbox.cpp) ──────
-// AX_GHOST 1 replaces the six button holds: hold button k to record particle
-// k's motion, release to leave a dim ghost looping the gesture ping-pong,
-// starting from the release pose (backward first) after press/release-lag
-// stillness is trimmed. Tap (< GHOST_MIN samples) clears. 0 restores
-// production button behavior.
+// AX_GHOST 1: buttons 0-3 keep production holds (gather/fade/hue-rot/trail
+// left to right; desat and pump dropped), buttons 4/5 are ghost slots — hold
+// to record the field, release to leave a dim ghost looping the gesture from
+// the release pose (backward first) after press/release-lag stillness is
+// trimmed. Tap (< GHOST_MIN samples) clears. 0 restores production behavior.
 #define AX_GHOST 1
 #define AXG_CAP_HZ       10.0f
 #define AXG_MAX_S        90
@@ -125,11 +132,14 @@ static float     ax_axfxCeiling = 1.0f;
 // two buttons can hold two gestures of the same particles. Default: every
 // recording button captures the WHOLE FIELD. Mirrors GHOST_BTN_POTS in
 // axismundi_sandbox.cpp — keep the two tables identical.
-static const uint8_t AXG_BTN_POTS[6] = { 0x1F, 0x1F, 0x1F, 0x1F, 0, 0 };
+static const uint8_t AXG_BTN_POTS[6] = { 0, 0, 0, 0, 0x1F, 0x1F };
 
-// Buttons 4 (GPIO 16) and 5 (GPIO 13) keep their production functions.
-#define AXG_BTN_TRAIL  4
-#define AXG_BTN_HUEROT 5
+// Buttons 0-3 hold production effects — physical left-to-right reads
+// gather, fade, hue-rot, trail. Buttons 4/5 are the two ghost slots.
+#define AXG_BTN_TRAIL  0
+#define AXG_BTN_HUEROT 1
+#define AXG_BTN_FADE   2
+#define AXG_BTN_GATHER 3
 
 // Heap-allocated and quantized like the firmware (its DRAM constraint,
 // kept identical here): pos u16, split u8.
@@ -226,6 +236,7 @@ static inline void axg_paint(int idx, float add, float hue) {
 }
 static float ax_fade = 1.0f;
 static float ax_crackleT = 0.0f;
+static bool  ax_crackleRev = false;
 static float ax_pump[AX_NUM_POTS];
 static int   ax_shardNext = 0;
 static float ax_gather = 0.0f;
@@ -246,7 +257,7 @@ static void ax_reset() {
     memset(ax_split, 0, sizeof(ax_split));
     memset(ax_splitEase, 0, sizeof(ax_splitEase));
     for (int k = 0; k < AX_NUM_POTS; k++) { ax_movedAgo[k] = 1e9f; ax_pump[k] = 1.0f; }
-    ax_fade = 1.0f; ax_crackleT = 0.0f; ax_gather = 0.0f;
+    ax_fade = 1.0f; ax_crackleT = 0.0f; ax_crackleRev = false; ax_gather = 0.0f;
     ax_desat = 1.0f; ax_prevPull = 0; ax_shardNext = 0;
     ax_ready = true;
 }
@@ -313,9 +324,9 @@ static void ax_kettle_update(float dt) {
                     AX_KETTLE.upMs);
 
         int held = AXFX_NONE;
-        if ((AX_KETTLE.btnBits >> AXFX_BTN_BLOOM) & 1)         held = AXFX_BLOOM;
-        else if ((AX_KETTLE.btnBits >> AXFX_BTN_FIRE) & 1)     held = AXFX_FIRE;
+        if ((AX_KETTLE.btnBits >> AXFX_BTN_FIRE) & 1)          held = AXFX_FIRE;
         else if ((AX_KETTLE.btnBits >> AXFX_BTN_LEAFWIND) & 1) held = AXFX_LEAFWIND;
+        bool sizeHeld = (AX_KETTLE.btnBits >> KETTLE_BTN_SIZE) & 1;
 
         if (!ax_axfxEncInit) { ax_axfxPrevEnc = AX_KETTLE.enc; ax_axfxEncInit = true; }
         int32_t encDelta = AX_KETTLE.enc - ax_axfxPrevEnc;
@@ -336,6 +347,20 @@ static void ax_kettle_update(float dt) {
         }
         ax_axfxDrive.ceiling = ax_axfxCeiling;
         axfxDriveStep(ax_axfxDrive, driveSpin, dt);
+
+        // Size (SPLAY): steal the same spin off the carousel and integrate it.
+        if (sizeHeld) {
+            ax_kettle.rotPending -= encRev * KETTLE_SPIN_GAIN;
+            ax_kSplay += encRev * KETTLE_SPIN_GAIN * KETTLE_SPLAY_PER_ADV;
+            if (ax_kSplay < -1.0f) ax_kSplay = -1.0f;
+            ax_kSplayT = -1.0f;
+        } else if (ax_kSplay != 0.0f) {
+            if (ax_kSplayT < 0.0f) { ax_kSplayFrom = ax_kSplay; ax_kSplayT = 0.0f; }
+            ax_kSplayT += dt;
+            float u = ax_kSplayT / KETTLE_SPLAY_HOME_S;
+            if (u >= 1.0f) { ax_kSplay = 0.0f; ax_kSplayT = -1.0f; }
+            else ax_kSplay = ax_kSplayFrom * (1.0f - u * u * (3.0f - 2.0f * u));
+        }
     }
     float rotBefore = ax_kettle.rot;
     kettleRotStep(ax_kettle, dt);
@@ -581,26 +606,26 @@ static void axg_update(uint8_t btnBits, float dt) {
 }
 
 static float ax_axfrac[HC_NUM_LEDS];
-// Canopy azimuth per LED: the rim samples the field by wheel angle.
-static float ax_azim[HC_NUM_LEDS];
 static bool  ax_axfrac_ready = false;
 
-// Canopy sampling: the field is rasterized at the spoke's RADIAL length
-// (lenR = axn). Spoke LEDs (i < axn) read it by index — knobs own this axis,
-// and travel ENDS at the spoke tip. Rim LEDs read it by wheel azimuth,
-// triangle-folded so the whole particle list appears TWICE, mirror-reflected
-// around the wheel — and the kettle rotation spins that layer only.
-static inline float ax_coordF(bool canopy, int base, int i, int lenR) {
-    if (!canopy)
-        return ax_axfrac[base + i] * (float)(lenR - 1);
-    if (i < lenR)
-        return (float)i;
-    float u = ax_azim[base + i] * (0.5f / (float)M_PI) - ax_kettle.rot;
-    u -= floorf(u);
-    // the particle list spans half the wheel and repeats point-reflected
-    // through the center: every particle's twin sits 180 deg across
-    if (u >= 0.5f) u -= 0.5f;
-    return 2.0f * u * (float)(lenR - 1);
+// Every strip samples the field by ax_axfrac. Canopy chain runs split at
+// their mid-edge junction: the spoke segment compresses the WHOLE field onto
+// itself (its particle ends at the spoke tip), while the rim segments of each
+// chain concatenate into ONE perimeter particle array (axn bulbs, start
+// mid-edge -> terminal vertex). Pin twins still receive identical index data
+// — the mirrored wire paths are what turn that into the canopy reflection,
+// so the two rim images join at both field extremes.
+//
+// pour: the canopy's carousel. The mirror hardware can't rotate a pattern
+// around the rim, but it CAN transport the field along the S0->C4 coordinate
+// — both images move in lockstep, flowing around both sides of the rim at
+// once, draining at one pole and re-emerging at the other. Positive spin
+// pours toward the terminal vertex; one knob revolution = one full trip.
+static inline float ax_coordF(float pour, int base, int i, int lenR) {
+    float f = ax_axfrac[base + i] * (float)(lenR - 1) - pour;
+    f = fmodf(f, (float)lenR);
+    if (f < 0.0f) f += (float)lenR;
+    return f;
 }
 
 // Per-LED raster coordinate in [0,1]. Index-space for normal strips; for
@@ -611,11 +636,28 @@ static inline float ax_coordF(bool canopy, int base, int i, int lenR) {
 static void ax_build_axfrac() {
     for (int s = 0; s < HC_NUM_STRIPS; s++) {
         int b = HC_STRIPS[s].start, n = HC_STRIPS[s].count;
-        if (HC_STRIPS[s].kind == 1) {
+        if (HC_STRIPS[s].kind == 0) {
+            // center-pole helix: sample by HEIGHT, 0 at the top (hub) so it
+            // matches the spokes' inner=0 convention, whatever the wire path
+            float zmin = 1e9f, zmax = -1e9f;
             for (int i = 0; i < n; i++) {
-                ax_azim[b + i] = atan2f(LED_POS[b + i].y, LED_POS[b + i].x);
-                ax_axfrac[b + i] = (n > 1) ? (float)i / (float)(n - 1) : 0.0f;
+                float z = LED_POS[b + i].z;
+                if (z < zmin) zmin = z;
+                if (z > zmax) zmax = z;
             }
+            float span = fmaxf(1e-6f, zmax - zmin);
+            for (int i = 0; i < n; i++)
+                ax_axfrac[b + i] = (zmax - LED_POS[b + i].z) / span;
+            continue;
+        }
+        if (HC_STRIPS[s].kind == 1) {
+            // axsplit=0 (long spokes) degenerates to plain index space
+            int   sp = HC_STRIPS[s].axsplit;
+            float d  = (float)(HC_STRIPS[s].axn > 1 ? HC_STRIPS[s].axn - 1 : 1);
+            for (int i = 0; i < n; i++)
+                ax_axfrac[b + i] = (sp > 0 && i < sp)
+                    ? (float)i / (float)(sp > 1 ? sp - 1 : 1)
+                    : (float)(HC_STRIPS[s].axoff + i - sp) / d;
             continue;
         }
         if (HC_STRIPS[s].axn == 0) {
@@ -630,9 +672,12 @@ static void ax_build_axfrac() {
             if (r > rmax) rmax = r;
         }
         float span = fmaxf(1e-6f, rmax - rmin);
+        // roots sample OUTER tip -> inner end, so a particle reaching the end
+        // of its travel lands at the pole foot just as the helix particle
+        // arrives at the pole bottom — the sculpture converges at its base
         for (int i = 0; i < n; i++)
             ax_axfrac[b + i] =
-                (hypotf(LED_POS[b + i].x, LED_POS[b + i].y) - rmin) / span;
+                (rmax - hypotf(LED_POS[b + i].x, LED_POS[b + i].y)) / span;
     }
     ax_axfrac_ready = true;
 }
@@ -645,6 +690,7 @@ static void ax_build_axfrac() {
 static void ax_raster_strip(RGBf* out, int sIdx, int base, int len, int lenR, int ring,
                             int kind, float gatherT, float meanPos, float dt) {
     const bool canopy = (kind == 1);
+    const float pour = canopy ? kettleRot(ax_kettle, ring) * (float)lenR : 0.0f;
     static float buf[AX_MAX_STRIP][3];
     static float cov[AX_MAX_STRIP];
     static float bufHue[AX_MAX_STRIP];
@@ -670,9 +716,13 @@ static void ax_raster_strip(RGBf* out, int sIdx, int base, int len, int lenR, in
         // tails/teeth clip
         center = fminf(fmaxf(center, 0.0f), (float)(lenR - 1));
         float sigma = fmaxf(0.5f, AX_SIGMA_NORM * AX_REF_LEN * sigScale * ax_pump[k]);
+        // Negative splay (dialed back past home) squeezes the blob toward a
+        // single pixel; positive splay only spreads the comb.
+        sigma = fmaxf(0.35f, sigma * (1.0f + fminf(0.0f, ax_kSplay)));
 
         if (ax_crackleT > 0.0f) {
             float env = ax_crackleT / AX_CRACKLE_S;
+            if (ax_crackleRev) env = 1.0f - env;
             for (int n = 0; n < 4; n++) {
                 if (ax_rand() > env) continue;
                 int i = (int)lroundf(center + (ax_rand() - 0.5f) * 4.0f * sigma);
@@ -691,13 +741,15 @@ static void ax_raster_strip(RGBf* out, int sIdx, int base, int len, int lenR, in
 
         float easeK = ax_splitEase[k];
         float fullSpacing = fmaxf(1.0f, AX_PULL_NORM * AX_REF_LEN * sigScale);
-        float spacingF = ax_lerp(1.0f, fullSpacing, easeK);
+        float spacingF = ax_lerp(1.0f, fullSpacing, easeK)
+            + fmaxf(0.0f, ax_kSplay) * (fullSpacing - 1.0f);
         int reach = (int)(4.0f * sigma);
         for (int j = -reach; j <= reach; j++) {
             float tc = center + (float)j * spacingF;
             float d = (float)j / sigma;
             float w = expf(-d * d) * ax_fade;
-            float tcs = (easeK <= 0.001f || easeK >= 0.999f)
+            float tcs = (ax_kSplay <= 0.001f
+                         && (easeK <= 0.001f || easeK >= 0.999f))
                 ? (float)lroundf(tc) : tc;
             // Clip at the strip ends — the field is a LINE, not a ring; only
             // kettle displacement (dup layer, carousel stage) bridges the seam.
@@ -808,7 +860,7 @@ static void ax_raster_strip(RGBf* out, int sIdx, int base, int len, int lenR, in
 #endif
 
     for (int i = 0; i < len; i++) {
-        int ai = (int)(ax_coordF(canopy, base, i, lenR) + 0.5f);
+        int ai = (int)(ax_coordF(pour, base, i, lenR) + 0.5f);
         if (ai >= lenR) ai = lenR - 1;
         if (gpW[ai] > 0.0f) axg_paint(base + i, gpW[ai], gpHue[ai]);
     }
@@ -842,7 +894,7 @@ static void ax_raster_strip(RGBf* out, int sIdx, int base, int len, int lenR, in
     if (trailHeld) {
         float rate = dt * (AX_PAINT_CAP / 255.0f) / AX_PAINT_S;
         for (int i = 0; i < len; i++) {
-            int ai = (int)(ax_coordF(canopy, base, i, lenR) + 0.5f);
+            int ai = (int)(ax_coordF(pour, base, i, lenR) + 0.5f);
             if (ai >= lenR) ai = lenR - 1;
             float add = fmaxf(fmaxf(buf[ai][0], buf[ai][1]), buf[ai][2]) * rate;
             if (add <= 0.0f) continue;
@@ -874,7 +926,7 @@ static void ax_raster_strip(RGBf* out, int sIdx, int base, int len, int lenR, in
         float tr = 0.0f, tg = 0.0f, tb = 0.0f;
         if (bg > 0.0f)
             ax_hsv(hueWrap360(ax_trailHue[base+i] + ax_hueRotDeg), 1.0f, 1.0f, tr, tg, tb);
-        float srcF = ax_coordF(canopy, base, i, lenR);
+        float srcF = ax_coordF(pour, base, i, lenR);
         int a0 = (int)srcF;
         float afr = srcF - (float)a0;
         a0 %= lenR;
@@ -951,8 +1003,8 @@ static void ax_render_clicky(RGBf* out, float dt) {
     float alpha = fminf(1.0f, dt / AX_POS_TAU);
 
 #if AX_GHOST
-    bool fadeHeld   = false;
-    bool gatherHeld = false;
+    bool fadeHeld   = AX_CLICKY.btnBits & (1 << AXG_BTN_FADE);
+    bool gatherHeld = AX_CLICKY.btnBits & (1 << AXG_BTN_GATHER);
     bool desatHeld  = false;
     bool pumpHeld   = false;
     bool hueRotHeld = AX_CLICKY.btnBits & (1 << AXG_BTN_HUEROT);
@@ -966,8 +1018,15 @@ static void ax_render_clicky(RGBf* out, float dt) {
 
     float prevFade = ax_fade;
     if (fadeHeld) ax_fade = fmaxf(0.0f, ax_fade - dt / AX_FADE_S);
-    else          ax_fade = fminf(1.0f, ax_fade + dt / AX_RECOVER_S);
-    if (prevFade > 0.0f && ax_fade <= 0.0f) ax_crackleT = AX_CRACKLE_S;
+    else          ax_fade = fminf(1.0f, ax_fade + dt / AX_FADE_S);
+    if (prevFade > 0.0f && ax_fade <= 0.0f) {
+        ax_crackleT = AX_CRACKLE_S;
+        ax_crackleRev = false;
+    }
+    if (prevFade <= 0.0f && ax_fade > 0.0f) {
+        ax_crackleT = AX_CRACKLE_S;
+        ax_crackleRev = true;
+    }
 
     if (gatherHeld) ax_gather = fminf(1.0f, ax_gather + dt / AX_GATHER_S);
     else            ax_gather = fmaxf(0.0f, ax_gather - dt / AX_GATHER_S);
@@ -1034,10 +1093,18 @@ static void ax_render_clicky(RGBf* out, float dt) {
 #endif
 
     for (int s = 0; s < HC_NUM_STRIPS; s++) {
+        if (HC_STRIPS[s].kind == 3) continue;
         int count = HC_STRIPS[s].count;
         int lenR = HC_STRIPS[s].axn ? HC_STRIPS[s].axn : count;
         if (lenR < 2) lenR = 2;
-        ax_raster_strip(out, s, HC_STRIPS[s].start, count, lenR, s & 3,
+        // Canopy rings must be pair-safe (Y-split twins share one phase):
+        // chain runs sit adjacent in strip order, so ring = pair index =
+        // chain depth — twist mode fans the pour by depth. Long spokes
+        // (axsplit 0) all share ring 0 so any future pin pairing stays legal.
+        int ring = s & 3;
+        if (HC_STRIPS[s].kind == 1)
+            ring = HC_STRIPS[s].axsplit ? (s >> 1) & 3 : 0;
+        ax_raster_strip(out, s, HC_STRIPS[s].start, count, lenR, ring,
                         HC_STRIPS[s].kind, gatherT, meanPos, dt);
     }
 
@@ -1055,6 +1122,30 @@ static void ax_render_clicky(RGBf* out, float dt) {
 // sculpture awake than at rest.
 static float AXK_armature = 1.0f;
 #define AXK_ARM_LEVEL  0.015f
+
+// Guy-line straps (kind 3) are a safety marker, not a display surface: people
+// must see the wires in the dark, so they hold a dim slow rainbow — one full
+// hue lap per minute — outside every animation layer.
+#define AX_STRAP_LUM     0.055f
+#define AX_STRAP_CYCLE_S 60.0f
+
+static inline void ax_paint_straps(RGBf* out, float t) {
+    float hue = fmodf(t, AX_STRAP_CYCLE_S) * (360.0f / AX_STRAP_CYCLE_S);
+    float r, g, b;
+    ax_hsv(hue, 1.0f, 1.0f, r, g, b);
+    r *= AX_STRAP_LUM / 255.0f;
+    g *= AX_STRAP_LUM / 255.0f;
+    b *= AX_STRAP_LUM / 255.0f;
+    for (int s = 0; s < HC_NUM_STRIPS; s++) {
+        if (HC_STRIPS[s].kind != 3) continue;
+        int st = HC_STRIPS[s].start, n = HC_STRIPS[s].count;
+        for (int i = 0; i < n; i++) {
+            out[st + i].r = r;
+            out[st + i].g = g;
+            out[st + i].b = b;
+        }
+    }
+}
 
 static inline void ax_apply_armature(RGBf* out, float dt) {
     (void)dt;
@@ -1083,6 +1174,7 @@ static inline void fx_axismundi(RGBf* out, float t) {
 
     if (!AX_CLICKY_SEEN && !AX_KETTLE_SEEN && !AX_DUCK_SEEN) {
         for (int i = 0; i < HC_NUM_LEDS; i++) out[i].r = out[i].g = out[i].b = 0.0f;
+        ax_paint_straps(out, t);
         ax_apply_armature(out, dt);
         return;
     }
@@ -1099,12 +1191,15 @@ static inline void fx_axismundi(RGBf* out, float t) {
     } else {
         for (int i = 0; i < HC_NUM_LEDS; i++) out[i].r = out[i].g = out[i].b = 0.0f;
         ax_brightness = 1.0f;
-        for (int s = 0; s < HC_NUM_STRIPS; s++)
+        for (int s = 0; s < HC_NUM_STRIPS; s++) {
+            if (HC_STRIPS[s].kind == 3) continue;
             ax_raster_duck_only(out, s, HC_STRIPS[s].start, HC_STRIPS[s].count,
                                 s & 3, dt);
+        }
     }
 #if AX_LOOP_RECORD
     axlr_apply(out);
 #endif
+    ax_paint_straps(out, t);
     ax_apply_armature(out, dt);
 }

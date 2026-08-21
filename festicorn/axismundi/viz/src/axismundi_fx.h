@@ -433,10 +433,14 @@ static void ax_duck_update(float dt) {
 // rotated by this ring's phase and scaled by the pot-5 fader; duck is the
 // waterfall in PHYSICAL space and the crackle is splatted at fixed physical
 // positions, so neither moves when the carousel spins.
+// rotate=false keeps the crackle ring alive but skips the wire-space carousel
+// — for strips whose wire folds back on itself (root double meander), wire
+// rotation counter-flows the parallel lanes; those strips pour in FIELD space
+// upstream (see ax_coordF) instead.
 static void ax_write_ring(RGBf* out, int sIdx, int base, int len, int ring,
-                          const float (*comp)[3], const float (*duck)[3]) {
+                          bool rotate, const float (*comp)[3], const float (*duck)[3]) {
     static float crk[AX_MAX_STRIP];
-    const float off = (ring < 0) ? 0.0f
+    const float off = (ring < 0 || !rotate) ? 0.0f
         : kettleRot(ax_kettle, ring) * (float)len;
     memset(crk, 0, sizeof(float) * len);
     kettleCrackleSplat(ax_kettle, ring, len, crk);
@@ -690,7 +694,11 @@ static void ax_build_axfrac() {
 static void ax_raster_strip(RGBf* out, int sIdx, int base, int len, int lenR, int ring,
                             int kind, float gatherT, float meanPos, float dt) {
     const bool canopy = (kind == 1);
-    const float pour = canopy ? kettleRot(ax_kettle, ring) * (float)lenR : 0.0f;
+    // canopy pours toward the terminal vertex; roots share the pour but their
+    // inverted mapping runs it the OPPOSITE way — spokes flood outward while
+    // the roots drain into the pole, meeting the helix at the base
+    const bool fieldPour = canopy || (kind == 2);
+    const float pour = fieldPour ? kettleRot(ax_kettle, ring) * (float)lenR : 0.0f;
     static float buf[AX_MAX_STRIP][3];
     static float cov[AX_MAX_STRIP];
     static float bufHue[AX_MAX_STRIP];
@@ -950,7 +958,7 @@ static void ax_raster_strip(RGBf* out, int sIdx, int base, int len, int lenR, in
     duckWaterfallStep(ax_wf_lvl + base, ax_wf_hue + base, ax_wf_tlt + base, len,
                       ax_duck, ax_duck_inject, dt, ax_rand, dbuf, false);
 
-    ax_write_ring(out, sIdx, base, len, canopy ? -1 : ring, comp, dbuf);
+    ax_write_ring(out, sIdx, base, len, canopy ? -1 : ring, !fieldPour, comp, dbuf);
 }
 
 static void ax_spawn_burst(float centerN, bool outward) {
@@ -994,7 +1002,7 @@ static void ax_raster_duck_only(RGBf* out, int sIdx, int base, int len, int ring
     memset(dbuf, 0, sizeof(float) * len * 3);
     duckWaterfallStep(ax_wf_lvl + base, ax_wf_hue + base, ax_wf_tlt + base, len,
                       ax_duck, ax_duck_inject, dt, ax_rand, dbuf, false);
-    ax_write_ring(out, sIdx, base, len, ring, comp, dbuf);
+    ax_write_ring(out, sIdx, base, len, ring, true, comp, dbuf);
 }
 
 static void ax_render_clicky(RGBf* out, float dt) {

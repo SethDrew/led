@@ -4,6 +4,8 @@ A world-tree LED sculpture: **roots** at the floor, a **canopy** overhead,
 and (probably) a **center** — vertical trunk/post connecting them. This
 directory holds everything: the installation firmware (`src/`), the Blender
 wiring mockups (`wiring/`, with POWER.md as the running power design doc),
+the physical canopy rigging geometry (`rigging/canopy-plan.html` — plan-view
+of the heptagon frame, spoke cut lengths, coupling hub),
 and `viz/` — the 3D model geometry, the visualizer twin of this firmware
 (`viz/src/axismundi_fx.h`), and the WASM engine the console dashboard's
 sculpture panel builds from. (These grew up in the retired helix-canopy
@@ -19,7 +21,8 @@ project and were folded in when its viewer was superseded by the dashboard.)
   normalized [0,1] space and rasterizes at each strip's own length.
 
 Board facts live in the catalog (`festicorn/catalog/boards.yaml`) — that file
-is the source of truth for MACs, pins, and roles.
+is the source of truth for MACs, pins, and roles. The physical playa LED
+build (products, run routing, chains) is specified in WIRING.md.
 
 ## Inputs
 

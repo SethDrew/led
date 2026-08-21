@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Canopy Plan — Side Fixed 10ft, Butterfly Offset</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0c141d; --bg2:#0f1926; --surface:#131f2d; --surface2:#17263a;
+  --border:rgba(148,180,220,.14); --border2:rgba(148,180,220,.26);
+  --text:#dce7f2; --dim:#8ba0b8; --faint:#5b7086;
+  --amber:#d4a73a; --amber-dim:rgba(212,167,58,.14);
+  --teal:#4fb0a5; --teal-dim:rgba(79,176,165,.13);
+  --steel:#7fa3c8; --alert:#c96f4a; --alert-dim:rgba(201,111,74,.14);
+  --grid:rgba(127,163,200,.055);
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#f2f0ea; --bg2:#ecebe4; --surface:#faf9f5; --surface2:#f1efe8;
+    --border:rgba(30,58,95,.14); --border2:rgba(30,58,95,.28);
+    --text:#1d2b3a; --dim:#4d6076; --faint:#7d8da0;
+    --amber:#a87d14; --amber-dim:rgba(168,125,20,.11);
+    --teal:#177d72; --teal-dim:rgba(23,125,114,.10);
+    --steel:#3a608c; --alert:#b3502a; --alert-dim:rgba(179,80,42,.10);
+    --grid:rgba(58,96,140,.07);
+  }
+}
+*{box-sizing:border-box;margin:0;padding:0;min-width:0}
+body{
+  background:
+    radial-gradient(1100px 600px at 50% -100px, var(--bg2), transparent),
+    repeating-linear-gradient(0deg, var(--grid) 0 1px, transparent 1px 34px),
+    repeating-linear-gradient(90deg, var(--grid) 0 1px, transparent 1px 34px),
+    var(--bg);
+  color:var(--text);
+  font-family:"IBM Plex Sans",system-ui,sans-serif;
+  line-height:1.55; padding:40px 22px 70px;
+}
+.wrap{max-width:1060px;margin:0 auto}
+.kicker{font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--teal);display:flex;align-items:center;gap:9px}
+.kicker::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--teal)}
+h1{font-size:clamp(26px,4vw,38px);font-weight:600;letter-spacing:-.015em;margin:10px 0 6px}
+.sub{color:var(--dim);max-width:66ch;font-size:15px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:26px 0 30px}
+.kpi{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:13px 15px}
+.kpi .v{font-family:"IBM Plex Mono",monospace;font-size:21px;font-weight:600}
+.kpi .l{font-size:11.5px;color:var(--dim);margin-top:2px;letter-spacing:.03em}
+.kpi--hero{background:linear-gradient(160deg,var(--amber-dim),var(--surface));border-color:var(--border2)}
+.kpi--hero .v{color:var(--amber);font-size:24px}
+.kpi--good{background:linear-gradient(160deg,var(--teal-dim),var(--surface))}
+.kpi--good .v{color:var(--teal)}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;
+  padding:20px 18px 12px;margin-bottom:30px}
+.panel-head{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;
+  padding:0 6px 12px}
+.panel-title{font-family:"IBM Plex Mono",monospace;font-size:13px;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--steel)}
+.legend{display:flex;gap:18px;flex-wrap:wrap;font-size:12.5px;color:var(--dim)}
+.legend span{display:inline-flex;align-items:center;gap:7px}
+.sw{width:24px;height:0;border-top:3px solid}
+.sw--amber{border-color:var(--amber)}
+.sw--steel{border-color:var(--steel)}
+.sw--teal{border-color:var(--teal)}
+.sw--ref{border-color:var(--faint);border-top-style:dotted}
+.dot{width:11px;height:11px;border-radius:50%;background:var(--amber)}
+svg{width:100%;height:auto;display:block}
+.mono{font-family:"IBM Plex Mono",monospace}
+h2{font-size:17px;font-weight:600;margin:0 0 4px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-bottom:30px}
+@media (max-width:860px){.grid2{grid-template-columns:1fr}}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--dim);text-align:left;padding:8px 10px;border-bottom:1px solid var(--border2)}
+td{padding:7.5px 10px;border-bottom:1px solid var(--border)}
+td.num{font-family:"IBM Plex Mono",monospace;text-align:right;font-variant-numeric:tabular-nums}
+tr:last-child td{border-bottom:none}
+tr.hl td{background:var(--amber-dim)}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px 20px}
+.note{border-left:3px solid var(--teal);background:var(--teal-dim);border-radius:0 8px 8px 0;
+  padding:12px 16px;font-size:13.5px;color:var(--dim);margin-top:18px}
+.note b{color:var(--text)}
+.note.amber{border-left-color:var(--amber);background:var(--amber-dim)}
+footer{margin-top:34px;color:var(--faint);font-size:12px;font-family:"IBM Plex Mono",monospace}
+@media (prefers-reduced-motion:no-preference){
+  .fade{animation:up .5s cubic-bezier(.2,.7,.3,1) both}
+  @keyframes up{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  .d1{animation-delay:.05s}.d2{animation-delay:.12s}.d3{animation-delay:.2s}.d4{animation-delay:.28s}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="fade">
+  <div class="kicker">strap-canopy &middot; plan view &middot; no-pull &middot; side fixed &middot; 2026-08-21</div>
+  <h1>Heptagon Canopy — Overall Size</h1>
+  <p class="sub">Clean regular heptagon, <b>no edge pull</b>. The <b>webbing side stays fixed at 10&prime;0&Prime;</b> corner-to-corner &mdash; that&rsquo;s what sets the polygon, so R = 11&prime;6.3&Prime;. Each corner&rsquo;s <b>alpine butterfly (5&frac12;&Prime;)</b> does <b>not</b> grow the heptagon; it only <b>pushes the spoke-attach point ~5&frac12;&Prime; outboard</b> of the corner. Seven long spokes run from a <span class="mono">&oslash;&nbsp;6&Prime;</span> coupling plate to those attach points.</p>
+</header>
+
+<div class="kpis fade d1">
+  <div class="kpi kpi--hero"><div class="v">23&prime;0.6&Prime;</div><div class="l">structure &oslash; — webbing footprint (2R = 276.6&Prime;)</div></div>
+  <div class="kpi"><div class="v">11&prime;6.3&Prime;</div><div class="l">circumradius — hub center &rarr; corner (138.3&Prime;)</div></div>
+  <div class="kpi"><div class="v">10&prime;4.6&Prime;</div><div class="l">apothem — hub center &rarr; mid-edge (124.6&Prime;)</div></div>
+  <div class="kpi kpi--good"><div class="v">11&prime;8.8&Prime;</div><div class="l">long spoke — coupling edge &rarr; attach (140.8&Prime;)</div></div>
+</div>
+
+<section class="panel fade d2">
+  <div class="panel-head">
+    <div class="panel-title">Plan view &mdash; side 10&prime;0&Prime; fixed &middot; no pull &middot; coupling &oslash; 6&Prime;</div>
+    <div class="legend">
+      <span><span class="sw sw--steel"></span>heptagon rim (webbing)</span>
+      <span><span class="sw sw--amber"></span>long spokes (7&times;)</span>
+      <span><span class="sw sw--teal"></span>butterfly offset</span>
+      <span><span class="dot"></span>attach point</span>
+      <span><span class="sw sw--ref"></span>spoke-tip circle</span>
+    </div>
+  </div>
+
+<svg viewBox="20 30 900 880" role="img" aria-label="Plan view of heptagon canopy, side fixed 10 feet, butterfly offsets the attach point outward">
+  <circle cx="470.0" cy="470.0" r="384.7" fill="none" stroke="var(--faint)" stroke-width="1" stroke-dasharray="2 6" opacity=".35"/>
+  <polygon points="470.0,100.0 180.7,239.3 109.3,552.3 309.5,803.4 630.5,803.4 830.7,552.3 759.3,239.3" fill="var(--surface)" fill-opacity=".45" stroke="var(--steel)" stroke-width="2.6" stroke-linejoin="round"/>
+  <g stroke="var(--amber)" stroke-width="2.2" opacity=".85">
+    <line x1="470.0" y1="462.0" x2="470.0" y2="85.3"/>
+    <line x1="463.7" y1="465.0" x2="169.2" y2="230.1"/>
+    <line x1="462.2" y1="471.8" x2="94.9" y2="555.6"/>
+    <line x1="466.5" y1="477.2" x2="303.1" y2="816.6"/>
+    <line x1="473.5" y1="477.2" x2="636.9" y2="816.6"/>
+    <line x1="477.8" y1="471.8" x2="845.1" y2="555.6"/>
+    <line x1="476.3" y1="465.0" x2="770.8" y2="230.1"/>
+  </g>
+  <g stroke="var(--teal)" stroke-width="3.6" opacity=".95">
+    <line x1="470.0" y1="100.0" x2="470.0" y2="85.3"/>
+    <line x1="180.7" y1="239.3" x2="169.2" y2="230.1"/>
+    <line x1="109.3" y1="552.3" x2="94.9" y2="555.6"/>
+    <line x1="309.5" y1="803.4" x2="303.1" y2="816.6"/>
+    <line x1="630.5" y1="803.4" x2="636.9" y2="816.6"/>
+    <line x1="830.7" y1="552.3" x2="845.1" y2="555.6"/>
+    <line x1="759.3" y1="239.3" x2="770.8" y2="230.1"/>
+  </g>
+  <line x1="470.0" y1="470.0" x2="795.0" y2="395.8" stroke="var(--faint)" stroke-width="1" stroke-dasharray="2 5" opacity=".7"/>
+  <circle cx="470.0" cy="470.0" r="8.0" fill="var(--surface2)" stroke="var(--text)" stroke-width="2"/>
+  <circle cx="470.0" cy="470.0" r="2.4" fill="var(--text)"/>
+  <g fill="var(--steel)">
+    <circle cx="470.0" cy="100.0" r="3"/>
+    <circle cx="180.7" cy="239.3" r="3"/>
+    <circle cx="109.3" cy="552.3" r="3"/>
+    <circle cx="309.5" cy="803.4" r="3"/>
+    <circle cx="630.5" cy="803.4" r="3"/>
+    <circle cx="830.7" cy="552.3" r="3"/>
+    <circle cx="759.3" cy="239.3" r="3"/>
+  </g>
+  <g fill="var(--amber)">
+    <circle cx="470.0" cy="85.3" r="4.5"/>
+    <circle cx="169.2" cy="230.1" r="4.5"/>
+    <circle cx="94.9" cy="555.6" r="4.5"/>
+    <circle cx="303.1" cy="816.6" r="4.5"/>
+    <circle cx="636.9" cy="816.6" r="4.5"/>
+    <circle cx="845.1" cy="555.6" r="4.5"/>
+    <circle cx="770.8" cy="230.1" r="4.5"/>
+  </g>
+  <circle cx="470.0" cy="85.3" r="8" fill="var(--bg)" stroke="var(--amber)" stroke-width="2.5"/>
+  <g font-family="'IBM Plex Mono',monospace" font-size="14.5">
+    <text x="612" y="150" fill="var(--steel)" transform="rotate(25.7 612 150)" text-anchor="middle">side 10&prime;0&Prime; (fixed)</text>
+    <text x="612" y="166" fill="var(--dim)" font-size="11.5" transform="rotate(25.7 612 166)" text-anchor="middle">sets R &mdash; butterflies don&rsquo;t grow it</text>
+    <text x="489" y="300" fill="var(--amber)" transform="rotate(-90 489 300)" text-anchor="middle">long spoke 11&prime;8.8&Prime;</text>
+    <text x="322" y="338" fill="var(--steel)" font-size="12.5" transform="rotate(38.6 322 338)" text-anchor="middle">R 11&prime;6.3&Prime;</text>
+    <text x="645" y="432" fill="var(--faint)" font-size="12.5" transform="rotate(-12.9 645 432)" text-anchor="middle">apothem 10&prime;4.6&Prime;</text>
+    <text x="486" y="505" fill="var(--dim)" font-size="12.5">coupling &oslash; 6&Prime;</text>
+    <text x="470" y="70" fill="var(--amber)" text-anchor="middle" font-size="13">butterfly +5&frac12;&Prime; &rarr; attach</text>
+    <text x="470" y="874" fill="var(--faint)" text-anchor="middle" font-size="13">structure &oslash; 23&prime;0.6&Prime; &middot; spoke-tips &oslash; 23&prime;11.6&Prime;</text>
+  </g>
+</svg>
+</section>
+
+<div class="grid2 fade d3">
+  <div class="card">
+    <h2>Measurements</h2>
+    <table>
+      <thead><tr><th>segment</th><th style="text-align:right">inches</th><th style="text-align:right">ft &amp; in</th></tr></thead>
+      <tbody>
+        <tr class="hl"><td><b>webbing side (corner&#8596;corner) &mdash; FIXED</b></td><td class="num"><b>120.0</b></td><td class="num"><b>10&prime;0.0&Prime;</b></td></tr>
+        <tr><td>circumradius R (hub &rarr; corner)</td><td class="num">138.3</td><td class="num">11&prime;6.3&Prime;</td></tr>
+        <tr><td>apothem (hub &rarr; mid-edge)</td><td class="num">124.6</td><td class="num">10&prime;4.6&Prime;</td></tr>
+        <tr><td>structure diameter (2R, corners)</td><td class="num">276.6</td><td class="num">23&prime;0.6&Prime;</td></tr>
+        <tr><td>width across flats (2 &times; apothem)</td><td class="num">249.2</td><td class="num">20&prime;9.2&Prime;</td></tr>
+        <tr><td>butterfly offset (corner &rarr; attach)</td><td class="num">5.5</td><td class="num">&mdash;</td></tr>
+        <tr><td>attach radius (hub &rarr; attach)</td><td class="num">143.8</td><td class="num">11&prime;11.8&Prime;</td></tr>
+        <tr><td>spoke-tip diameter (2 &times; attach)</td><td class="num">287.6</td><td class="num">23&prime;11.6&Prime;</td></tr>
+        <tr><td>coupling plate radius (&oslash; 6&Prime;)</td><td class="num">3.0</td><td class="num">&mdash;</td></tr>
+        <tr><td>long spoke span (coupling edge &rarr; attach)</td><td class="num">140.8</td><td class="num">11&prime;8.8&Prime;</td></tr>
+        <tr><td>long spoke cut (span &minus; 6&Prime; hardware)</td><td class="num">134.8</td><td class="num">11&prime;2.8&Prime;</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Why the spoke reads ~140&Prime;</h2>
+    <p style="font-size:13.5px;color:var(--dim);margin-bottom:10px">You caught the earlier error: the butterfly was growing the polygon. It shouldn&rsquo;t. With the side fixed:</p>
+    <table>
+      <thead><tr><th>step</th><th style="text-align:right">radius</th></tr></thead>
+      <tbody>
+        <tr><td>corner set by side (10&prime; &rarr; R)</td><td class="num">138.3&Prime;</td></tr>
+        <tr><td>+ butterfly offset outboard</td><td class="num">143.8&Prime;</td></tr>
+        <tr><td>&minus; coupling radius (3&Prime;)</td><td class="num">140.8&Prime;</td></tr>
+      </tbody>
+    </table>
+    <div class="note amber"><b>So the ~140&Prime; is real</b> &mdash; but it comes from the <b>butterfly offset</b>, not a bigger heptagon. Bare corner-to-coupling is 135.3&Prime;; the butterfly adds the last ~5&frac12;&Prime;. Close to one 50-LED bulb (140&Prime;), but that&rsquo;s still coincidence.</div>
+    <div class="note"><b>Structure vs. reach.</b> The webbing footprint is <b>23&prime;0.6&Prime;</b> across (corners). The spoke <i>tips</i> reach <b>23&prime;11.6&Prime;</b> because the butterflies stick out past the rim. The 24&prime; you saw before was really this tip circle &mdash; the earlier plan just mislabeled it as the polygon.</div>
+  </div>
+</div>
+
+<section class="card fade d4">
+  <div class="note" style="margin-top:0"><b>Before cutting, confirm two things:</b>
+  (1) which way the butterfly loop points &mdash; the number above assumes it projects <b>outboard</b> (+5&frac12;&Prime; past the corner). If instead it sits <b>inboard</b> toward the hub, the spoke shortens to ~129&Prime; and the tape gets ~11&Prime; shorter, so this is worth pinning down on a test corner;
+  (2) that the coupling ends up ~3&Prime; radius &mdash; a floppy Dyneema loop purses smaller under load, adding an inch or two back onto each spoke. Both live inside the long-spoke adjuster range, so cut those long and tension to the mark.</div>
+</section>
+
+<footer>geometry: regular heptagon &middot; webbing side 120&Prime; FIXED &middot; R = s / (2&middot;sin&pi;/7) = 138.3&Prime; &middot; apothem 124.6&Prime; &middot; butterfly offsets attach to 143.8&Prime; &middot; no pull &middot; coupling &oslash;6&Prime; &middot; 7 long spokes</footer>
+
+</div>
+</body>
+</html>

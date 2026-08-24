@@ -10,11 +10,126 @@
 // Faroudja LD100 front panel → LED instrument. 6 push-pull pots + 6 buttons.
 // Wiring: see festicorn/catalog/boards.yaml (role: clicky-pots).
 
+// RF A/B probe: 0 = production; 1 = 20Hz broadcast + indicators forced
+// all-on (max LED activity); 2 = 20Hz broadcast + indicators disabled;
+// 3 = synthetic pot2 sweep, production cadence; 4 = synthetic sweep + 20Hz
+#define RF_AB_TEST 0
+#define IND_I2C_HZ 400000
+// per-frame pilot-pixel trace for the first N ms after boot (0 = off);
+// normal debug JSON is muted during the window
+#define IND_TRACE_MS 0
+
 const int NUM_POTS = 6;
 const int WHITE_PINS[NUM_POTS] = {36, 39, 34, 35, 32, 33};
 const int ADS_CH[NUM_POTS] = {3, 2, 1, 1, 2, 3};
 const int NUM_BTNS = 7;
 const int BUTTON_PINS[NUM_BTNS] = {25, 26, 14, 27, 16, 13, 17};
+
+// Panel indicator pixels: WS2812B off the 5V bus (VIN), data 3.3V direct.
+// Last pixel in the chain sits above the toggle; the first 12 spread over
+// the other controls (not 1-1).
+const int IND_PIN = 18;
+const int IND_N = 13;
+const int IND_TOGGLE = 12;
+const int TOGGLE_BTN = 6;
+const float IND_WARM_STEP = 0.12f;
+const float IND_COOL_STEP = 0.06f;
+const float IND_HOT[3] = {255, 110, 15};
+const float IND_REST[3] = {255, 170, 90};
+
+const float IND_MASTER = 45.0f / 255.0f;
+uint8_t indFrame[IND_N * 3];
+bool indOn = false;
+unsigned long indFlipMs = 0;
+float indHeat[IND_N] = {0};
+float indSettle[IND_N] = {0};
+float indFlick = 0.0f;
+
+// Adafruit's ESP32 show() streams via RMT with a 1-block buffer; ESP-NOW/WiFi
+// interrupt latency starves the refill ISR mid-frame, truncating frames
+// (visible strobe). Bit-bang is no good either at this board's 80MHz CPU.
+// Fix: own RMT channel with 6 mem blocks — the whole 13-pixel frame (312 bit
+// symbols) preloads into RMT RAM, hardware clocks it out, no refills.
+#include "driver/rmt.h"
+
+void indRmtInit() {
+    rmt_config_t cfg = RMT_DEFAULT_CONFIG_TX((gpio_num_t)IND_PIN, RMT_CHANNEL_0);
+    cfg.clk_div = 2;
+    cfg.mem_block_num = 6;
+    rmt_config(&cfg);
+    rmt_driver_install(RMT_CHANNEL_0, 0, 0);
+}
+
+void indShow() {
+    static uint8_t prev[IND_N * 3];
+    static bool first = true;
+    static rmt_item32_t items[IND_N * 24];
+    const uint8_t *px = indFrame;
+    const int nb = IND_N * 3;
+    if (!first && memcmp(prev, px, nb) == 0) return;
+    rmt_wait_tx_done(RMT_CHANNEL_0, pdMS_TO_TICKS(10));
+    memcpy(prev, px, nb);
+    first = false;
+    int k = 0;
+    for (int i = 0; i < nb; i++) {
+        for (int b = 7; b >= 0; b--) {
+            bool one = (px[i] >> b) & 1;
+            items[k].level0 = 1;
+            items[k].duration0 = one ? 32 : 16;
+            items[k].level1 = 0;
+            items[k].duration1 = one ? 18 : 34;
+            k++;
+        }
+    }
+    rmt_write_items(RMT_CHANNEL_0, items, k, false);
+}
+
+void renderIndicators(unsigned long now, float dt) {
+    float p = (now - indFlipMs) * 0.001f;
+    float t = now * 0.001f;
+    indFlick += (random(1000) * 0.001f - 0.5f) * dt * 10.0f;
+    indFlick *= expf(-3.0f * dt);
+    for (int i = 0; i < IND_N; i++) {
+        bool lit = indOn ? (IND_TOGGLE - i) * IND_WARM_STEP <= p
+                         : i * IND_COOL_STEP > p;
+        float target = lit ? 1.0f : 0.0f;
+        if (!indOn && !lit && i >= IND_N - 2) {
+            // trough floor keeps red >=4 codes / green >=1.7 — below that the
+            // 0-snap and the LED's coarse low-end quanta step visibly
+            target = 0.42f + 0.12f * sinf(t * 6.2832f / 4.5f) + indFlick * 0.08f;
+            if (target < 0.30f) target = 0.30f;
+        }
+        float tauH = (target > indHeat[i]) ? 0.05f : 0.12f;
+        indHeat[i] += (target - indHeat[i]) * fminf(1.0f, dt / tauH);
+        float sTgt = (indOn && lit) ? 1.0f : 0.0f;
+        float tauS = (sTgt > indSettle[i]) ? 1.2f : 0.15f;
+        indSettle[i] += (sTgt - indSettle[i]) * fminf(1.0f, dt / tauS);
+        float s = indSettle[i];
+        float lvl = indHeat[i] * (1.0f - 0.2f * s);
+        float l2 = lvl * lvl;
+        // float -> GRB wire order with delta-sigma dither; snap the 0<->1
+        // code boundary to 0 (dithering across it flashes visibly)
+        static const int ord[3] = {1, 0, 2};
+        for (int c = 0; c < 3; c++) {
+            int j = i * 3 + c;
+            int oc = ord[c];
+            float tgt = (IND_HOT[oc] + (IND_REST[oc] - IND_HOT[oc]) * s)
+                        * l2 * IND_MASTER;
+            if (tgt < 1.0f) {
+                indFrame[j] = 0;
+                continue;
+            }
+            // no dithering: plain rounded codes, 0.6-code hysteresis so
+            // noise can't chatter a boundary
+            if (fabsf(tgt - (float)indFrame[j]) > 0.6f) {
+                int o = (int)(tgt + 0.5f);
+                if (o > 255) o = 255;
+                indFrame[j] = (uint8_t)o;
+            }
+        }
+    }
+    indShow();
+}
 
 const float RREF = 330.0f;
 const float VCC = 3.3f;
@@ -52,6 +167,9 @@ bool pendingValid[NUM_POTS] = {false};
 Adafruit_ADS1115 adsA;
 Adafruit_ADS1115 adsB;
 bool adsAOk = false, adsBOk = false;
+uint32_t adsFailCnt = 0, adsReinit = 0;
+uint32_t potStatDiscard = 0, potStatMismatch = 0, potStatPend = 0,
+         potStatCommit = 0;
 
 float potPos[NUM_POTS] = {0};
 // Transmitted position: hysteresis latch over potPos. ADC quantization dither
@@ -60,6 +178,10 @@ float potPos[NUM_POTS] = {0};
 float potPosTx[NUM_POTS] = {0};
 const float TX_HYST = 0.002f;
 bool potPulled[NUM_POTS] = {false};
+// The pull switch bounces for tens of ms; at 66Hz/pot sampling the bounce is
+// visible (the old 28Hz loop was an accidental debounce). Commit a pull-state
+// change only after 8 consecutive agreeing samples (~20ms).
+uint8_t pullRun[NUM_POTS] = {0};
 int16_t potRaw[NUM_POTS] = {0};
 int whiteRaw[NUM_POTS] = {0};
 
@@ -70,13 +192,22 @@ const unsigned long DEBOUNCE_MS = 20;
 
 uint32_t espnowSeq = 0;
 uint8_t broadcastAddr[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+volatile uint32_t txQueued = 0, txQueueFail = 0, txCbOk = 0, txCbFail = 0;
+volatile uint32_t txCbMaxLat = 0, txLastSendMs = 0;
+
+void onEspnowSendCb(const uint8_t *mac, esp_now_send_status_t st) {
+    uint32_t lat = millis() - txLastSendMs;
+    if (lat > txCbMaxLat) txCbMaxLat = lat;
+    if (st == ESP_NOW_SEND_SUCCESS) txCbOk++; else txCbFail++;
+}
 unsigned long lastBroadcast = 0;
-const unsigned long HEARTBEAT_MS = 1000;
+const unsigned long HEARTBEAT_MS =
+    (RF_AB_TEST == 0 || RF_AB_TEST == 3) ? 1000 : 50;
 
 float prevPos[NUM_POTS] = {-1};
 bool prevPulled[NUM_POTS] = {false};
 bool prevBtn[NUM_BTNS] = {false};
-const float POS_EPSILON = 0.01f;
+const float POS_EPSILON = 0.004f;
 
 float potRawToR(int16_t raw) {
     float v = raw * 0.000125f;
@@ -89,18 +220,22 @@ static const uint16_t ADS_MUX[4] = {
     ADS1X15_REG_CONFIG_MUX_SINGLE_0, ADS1X15_REG_CONFIG_MUX_SINGLE_1,
     ADS1X15_REG_CONFIG_MUX_SINGLE_2, ADS1X15_REG_CONFIG_MUX_SINGLE_3};
 
-// Adafruit's readADC_SingleEnded() polls conversionComplete() with no timeout;
-// a dead I2C bus hangs it forever, and because that poll yields to the idle
-// task the idle-watching WDT never fires (the 12h silent-hang bug). Bound it:
-// 860SPS converts in ~1.2ms, so 5ms of no completion means the bus is gone.
-bool readAdsBounded(Adafruit_ADS1115 &ads, uint8_t ch, int16_t &out) {
-    ads.startADCReading(ADS_MUX[ch], false);
-    uint32_t t0 = millis();
-    while (!ads.conversionComplete())
-        if (millis() - t0 > 5) return false;
-    out = ads.getLastConversionResults();
-    return true;
-}
+// Non-blocking ADS scan: each chip has one conversion in flight; the loop
+// starts it, keeps rendering, and harvests when the chip signals done. Both
+// chips convert in parallel — ~60Hz per pot without ever blocking the loop.
+// 860SPS converts in ~1.2ms; 5ms of no completion means the bus is gone
+// (the 12h silent-hang bug lived in the old unbounded poll).
+struct AdsScan {
+    Adafruit_ADS1115 *ads;
+    bool *ok;
+    int base;
+    int ch;
+    bool inFlight;
+    int s1;
+    unsigned long startMs;
+};
+AdsScan adsScan[2] = {{&adsA, &adsAOk, 0, 0, false, 0, 0},
+                      {&adsB, &adsBOk, 3, 0, false, 0, 0}};
 
 // 9 SCL pulses release a slave that's mid-transaction holding SDA low.
 void i2cBusRecover() {
@@ -112,13 +247,7 @@ void i2cBusRecover() {
     }
 }
 
-float readPotPosition(int i, bool pulled) {
-    Adafruit_ADS1115 &ads = (i < 3) ? adsA : adsB;
-    bool &ok = (i < 3) ? adsAOk : adsBOk;
-    int16_t raw = 0;
-    if (ok && !readAdsBounded(ads, ADS_CH[i], raw)) ok = false;
-    if (!ok) return potPos[i];
-    potRaw[i] = raw;
+float potRawToPos(int i, int16_t raw, bool pulled) {
     int s = pulled ? 1 : 0;
     float r = potRawToR(raw);
     float p = (r - potCalMin[s][i]) / (potCalMax[s][i] - potCalMin[s][i]);
@@ -140,6 +269,87 @@ int classifyWhite(int i) {
     return -1;
 }
 
+void potScanStep() {
+    for (int c = 0; c < 2; c++) {
+        AdsScan &sc = adsScan[c];
+        if (!*sc.ok) {
+            sc.inFlight = false;
+            continue;
+        }
+        int i = sc.base + sc.ch;
+        if (!sc.inFlight) {
+            sc.s1 = classifyWhite(i);
+            if (sc.s1 < 0) {
+                potStatDiscard++;
+                sc.ch = (sc.ch + 1) % 3;
+                continue;
+            }
+            sc.ads->startADCReading(ADS_MUX[ADS_CH[i]], false);
+            sc.startMs = millis();
+            sc.inFlight = true;
+        } else if (sc.ads->conversionComplete()) {
+            sc.inFlight = false;
+            int16_t raw = sc.ads->getLastConversionResults();
+            int s2 = classifyWhite(i);
+            sc.ch = (sc.ch + 1) % 3;
+            if (s2 != sc.s1) {
+                potStatMismatch++;
+                continue;
+            }
+            potRaw[i] = raw;
+            bool pulledNow = (sc.s1 == 1);
+            if (pulledNow != potPulled[i]) {
+                if (++pullRun[i] >= 8) {
+                    potPulled[i] = pulledNow;
+                    pullRun[i] = 0;
+                }
+            } else {
+                pullRun[i] = 0;
+            }
+            float p = potRawToPos(i, raw, pulledNow);
+            if (fabsf(p - potPos[i]) > JUMP_THRESH) {
+                if (pendingValid[i] && fabsf(p - pendingP[i]) < CONFIRM_TOL) {
+                    potPos[i] = p;
+                    pendingValid[i] = false;
+                    potStatCommit++;
+                } else {
+                    pendingP[i] = p;
+                    pendingValid[i] = true;
+                    potStatPend++;
+                }
+            } else {
+                potPos[i] = p;
+                pendingValid[i] = false;
+                potStatCommit++;
+            }
+        } else if (millis() - sc.startMs > 5) {
+            *sc.ok = false;
+            sc.inFlight = false;
+            adsFailCnt++;
+        }
+    }
+}
+
+// All I2C (scan + bus recovery + re-init) lives on this core-0 task; the
+// core-1 loop only reads the shared word-atomic pot state.
+void potScanTask(void *) {
+    unsigned long lastRetry = 0;
+    for (;;) {
+        if ((!adsAOk || !adsBOk) && millis() - lastRetry >= 1000) {
+            lastRetry = millis();
+            adsReinit++;
+            i2cBusRecover();
+            Wire.begin(21, 22);
+            Wire.setClock(IND_I2C_HZ);
+            if (!adsAOk) adsAOk = adsA.begin(0x48, &Wire);
+            if (!adsBOk) adsBOk = adsB.begin(0x49, &Wire);
+        }
+        potScanStep();
+        potScanStep();
+        vTaskDelay(1);
+    }
+}
+
 void broadcastState() {
     ClickyPacketV1 pkt = {};
     pkt.magic = CLICKY_MAGIC;
@@ -151,7 +361,11 @@ void broadcastState() {
     }
     for (int i = 0; i < NUM_BTNS; i++)
         if (btnState[i]) pkt.btnBits |= (1 << i);
-    esp_now_send(broadcastAddr, (uint8_t *)&pkt, sizeof(pkt));
+    txLastSendMs = millis();
+    if (esp_now_send(broadcastAddr, (uint8_t *)&pkt, sizeof(pkt)) == ESP_OK)
+        txQueued++;
+    else
+        txQueueFail++;
 }
 
 void setup() {
@@ -161,8 +375,12 @@ void setup() {
     for (int i = 0; i < NUM_BTNS; i++) pinMode(BUTTON_PINS[i], INPUT_PULLUP);
     analogSetAttenuation(ADC_11db);
 
+    indRmtInit();
+    indShow();
+
     i2cBusRecover();
     Wire.begin(21, 22);
+    Wire.setClock(IND_I2C_HZ);
     Wire.setTimeOut(20);
     adsA.setGain(GAIN_ONE);
     adsB.setGain(GAIN_ONE);
@@ -172,6 +390,7 @@ void setup() {
     adsBOk = adsB.begin(0x49, &Wire);
     Serial.printf("ADS1115 A(0x48): %s  B(0x49): %s\n",
                   adsAOk ? "OK" : "FAIL", adsBOk ? "OK" : "FAIL");
+    xTaskCreatePinnedToCore(potScanTask, "potscan", 4096, NULL, 1, NULL, 0);
 
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
@@ -180,6 +399,7 @@ void setup() {
     esp_wifi_set_promiscuous(false);
     if (esp_now_init() == ESP_OK) {
         Serial.println("ESP-NOW OK ch1");
+        esp_now_register_send_cb(onEspnowSendCb);
         // wake_window 0 = radio sleeps except during TX; this board can never receive
         esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
         esp_now_set_wake_window(0);
@@ -198,51 +418,67 @@ void setup() {
 }
 
 void loop() {
+    unsigned long lp0 = millis();
+    static unsigned long prevLp0 = 0, maxLoopGap = 0;
+    if (prevLp0 && lp0 - prevLp0 > maxLoopGap) maxLoopGap = lp0 - prevLp0;
+    prevLp0 = lp0;
     esp_task_wdt_reset();
 
-    static unsigned long lastAdsRetry = 0;
-    if ((!adsAOk || !adsBOk) && millis() - lastAdsRetry >= 1000) {
-        lastAdsRetry = millis();
-        i2cBusRecover();
-        Wire.begin(21, 22);
-        if (!adsAOk) adsAOk = adsA.begin(0x48, &Wire);
-        if (!adsBOk) adsBOk = adsB.begin(0x49, &Wire);
-    }
-
-    for (int i = 0; i < NUM_POTS; i++) {
-        int s1 = classifyWhite(i);
-        if (s1 >= 0) {
-            float p = readPotPosition(i, s1 == 1);
-            int s2 = classifyWhite(i);
-            if (s2 == s1) {
-                potPulled[i] = (s1 == 1);
-                if (fabsf(p - potPos[i]) > JUMP_THRESH) {
-                    if (pendingValid[i] && fabsf(p - pendingP[i]) < CONFIRM_TOL) {
-                        potPos[i] = p;
-                        pendingValid[i] = false;
-                    } else {
-                        pendingP[i] = p;
-                        pendingValid[i] = true;
-                    }
-                } else {
-                    potPos[i] = p;
-                    pendingValid[i] = false;
-                }
-            }
-        }
-
-    }
+    unsigned long lpPot = millis();
 
     for (int i = 0; i < NUM_BTNS; i++) {
         // Momentaries (0-5) are normally-closed: rest = 0Ω to GND = LOW.
-        // Pressed = open = HIGH. Toggle (6) is plain: closed = LOW = on.
-        bool raw = digitalRead(BUTTON_PINS[i]) == (i < 6 ? HIGH : LOW);
+        // Pressed = open = HIGH. Toggle (6): open = HIGH = on (flipped
+        // 2026-08-23 to match the panel's preferred throw direction).
+        bool raw = digitalRead(BUTTON_PINS[i]) == HIGH;
         if (raw != btnLast[i]) { btnLast[i] = raw; btnDebounceTime[i] = millis(); }
         if (millis() - btnDebounceTime[i] > DEBOUNCE_MS) btnState[i] = btnLast[i];
     }
 
+    static unsigned long indLastMs = 0;
+    unsigned long indNow = millis();
+    float indDt = (indNow - indLastMs) * 0.001f;
+    if (indDt > 0.05f) indDt = 0.05f;
+    indLastMs = indNow;
+#if RF_AB_TEST == 1
+    bool indWant = true;
+#elif RF_AB_TEST == 2
+    bool indWant = false;
+#elif RF_AB_TEST >= 3
+    bool indWant = true;
+#else
+    bool indWant = btnState[TOGGLE_BTN];
+#endif
+    if (indWant != indOn) {
+        indOn = indWant;
+        indFlipMs = indNow;
+    }
+#if RF_AB_TEST != 2
+    renderIndicators(indNow, indDt);
+#endif
+#if IND_TRACE_MS > 0
+    if (millis() < IND_TRACE_MS) {
+        static uint32_t lastUs = 0;
+        uint32_t nowUs = micros();
+        Serial.printf("T,%lu,%u,%u,%u,%.4f\n",
+                      (unsigned long)(nowUs - lastUs),
+                      indFrame[IND_TOGGLE * 3 + 1], indFrame[IND_TOGGLE * 3],
+                      indFrame[IND_TOGGLE * 3 + 2],
+                      (double)indHeat[IND_TOGGLE]);
+        lastUs = nowUs;
+    }
+#endif
+    unsigned long lpInd = millis();
+
     for (int i = 0; i < NUM_POTS; i++)
         if (fabsf(potPos[i] - potPosTx[i]) > TX_HYST) potPosTx[i] = potPos[i];
+
+#if RF_AB_TEST >= 3
+    {
+        float ph = fmodf(millis() * 0.000125f, 1.0f);
+        potPosTx[2] = ph < 0.5f ? ph * 2.0f : 2.0f - ph * 2.0f;
+    }
+#endif
 
     bool changed = false;
     for (int i = 0; i < NUM_POTS; i++) {
@@ -264,13 +500,17 @@ void loop() {
         }
         for (int i = 0; i < NUM_BTNS; i++) prevBtn[i] = btnState[i];
     }
+    unsigned long lpTx = millis();
 
     static unsigned long lastDebug = 0;
-    if (millis() - lastDebug >= 10) {
+    if (millis() - lastDebug >= 50 && millis() >= IND_TRACE_MS) {
         lastDebug = millis();
         Serial.printf("{\"ms\":%lu,\"p\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
                       "\"pull\":[%d,%d,%d,%d,%d,%d],\"btn\":[%d,%d,%d,%d,%d,%d,%d],"
-                      "\"raw\":[%d,%d,%d,%d,%d,%d],\"wraw\":[%d,%d,%d,%d,%d,%d]}\n",
+                      "\"raw\":[%d,%d,%d,%d,%d,%d],\"wraw\":[%d,%d,%d,%d,%d,%d],"
+                      "\"txq\":[%u,%u,%u,%u,%u],\"gap\":%lu,"
+                      "\"adsf\":%u,\"adsr\":%u,\"adsok\":%d,"
+                      "\"pf\":[%u,%u,%u,%u]}\n",
                       millis(),
                       potPos[0], potPos[1], potPos[2], potPos[3], potPos[4], potPos[5],
                       potPulled[0], potPulled[1], potPulled[2],
@@ -279,8 +519,23 @@ void loop() {
                       btnState[3], btnState[4], btnState[5], btnState[6],
                       potRaw[0], potRaw[1], potRaw[2], potRaw[3], potRaw[4], potRaw[5],
                       whiteRaw[0], whiteRaw[1], whiteRaw[2],
-                      whiteRaw[3], whiteRaw[4], whiteRaw[5]);
+                      whiteRaw[3], whiteRaw[4], whiteRaw[5],
+                      (unsigned)txQueued, (unsigned)txQueueFail,
+                      (unsigned)txCbOk, (unsigned)txCbFail,
+                      (unsigned)txCbMaxLat, maxLoopGap,
+                      (unsigned)adsFailCnt, (unsigned)adsReinit,
+                      (adsAOk ? 1 : 0) + (adsBOk ? 2 : 0),
+                      (unsigned)potStatDiscard, (unsigned)potStatMismatch,
+                      (unsigned)potStatPend, (unsigned)potStatCommit);
+        txCbMaxLat = 0;
+        maxLoopGap = 0;
     }
 
-    delay(2);
+    unsigned long lpEnd = millis();
+    if (lpEnd - lp0 > 60)
+        Serial.printf("{\"stall\":%lu,\"pot\":%lu,\"ind\":%lu,\"tx\":%lu,\"dbg\":%lu}\n",
+                      lpEnd - lp0, lpPot - lp0, lpInd - lpPot,
+                      lpTx - lpInd, lpEnd - lpTx);
+
+    delay(1);
 }

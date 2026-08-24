@@ -360,4 +360,92 @@ static inline void duckWaterfallStep(float *lvl, float *hue, float *tlt, int len
     memcpy(tlt, ntl, sizeof(float) * len);
 }
 
+// ── Sparkle: alternative duck renderer (original-duck's sparkle_burst look
+// on THIS lib's tuned features — the waterfall above stays available).
+// Each onset pulse ignites a random fraction of every strip's cells; a spark
+// captures the duck's hue/tilt at ignition and decays at its own randomized
+// rate, and a dim envelope glow rides underneath so sustained level reads
+// between onsets. Same white-at-rest / rotate-to-colour palette as the
+// waterfall. lvl/hue/tlt/dec are the caller's persistent per-cell state.
+#define DUCK_SP_ENV_ATTACK_TAU 0.030f
+#define DUCK_SP_ENV_DECAY_TAU  0.400f
+#define DUCK_SP_FRAC_BASE      0.30f   // fraction of cells ignited per onset
+#define DUCK_SP_FRAC_ONSET     0.20f
+#define DUCK_SP_VAL_BASE       0.70f
+#define DUCK_SP_VAL_ONSET      0.30f
+#define DUCK_SP_DECAY_KMIN     0.91f   // = original 0.97/frame @30fps ref
+#define DUCK_SP_DECAY_KMAX     2.50f   // = original 0.92/frame @30fps ref
+#define DUCK_SP_BASE_CAP       0.20f
+#define DUCK_SP_DEADBAND       0.08f
+#define DUCK_SP_SHIMMER        0.60f   // downward level jitter per second
+
+struct DuckSparkleCtl { float env; };
+
+// Once per frame: smooth the envelope and decide this frame's ignition
+// fraction (0 = no burst). The lib's onset detector already carries the
+// gate and refractory, so it is the trigger verbatim.
+static inline float duckSparkleFrame(DuckSparkleCtl &c, const DuckFeatures &f,
+                                     bool live, float dt) {
+    float e = live ? f.energy : 0.0f;
+    float tau = (e > c.env) ? DUCK_SP_ENV_ATTACK_TAU : DUCK_SP_ENV_DECAY_TAU;
+    c.env += fminf(1.0f, dt / tau) * (e - c.env);
+    if (!live || f.onset <= 0.0f) return 0.0f;
+    return DUCK_SP_FRAC_BASE + DUCK_SP_FRAC_ONSET * f.onset;
+}
+
+static inline void duckSparkleStep(float *lvl, float *hue, float *tlt, float *dec,
+                                   int len, const DuckFeatures &f,
+                                   const DuckSparkleCtl &c, float ignite, float dt,
+                                   float (*rnd)(), float (*out)[3]) {
+    if (ignite > 0.0f) {
+        float val = DUCK_SP_VAL_BASE + DUCK_SP_VAL_ONSET * f.onset;
+        for (int i = 0; i < len; i++) {
+            if (rnd() >= ignite) continue;
+            lvl[i] = val;
+            hue[i] = f.hueIdx;
+            tlt[i] = f.tilt;
+            dec[i] = DUCK_SP_DECAY_KMIN
+                   + rnd() * (DUCK_SP_DECAY_KMAX - DUCK_SP_DECAY_KMIN);
+        }
+    }
+
+    float base = fminf(c.env, DUCK_SP_BASE_CAP);
+    float bR = 255.0f, bG = 255.0f, bB = 255.0f;
+    if (base > DUCK_WF_DEADBAND && f.tilt > 0.0f) {
+        uint8_t hi = duckOklchIdx(hueWrap360(f.hueIdx * (360.0f / 255.0f)));
+        bR = duckLerpf(bR, (float)oklchConstL[hi][0], f.tilt);
+        bG = duckLerpf(bG, (float)oklchConstL[hi][1], f.tilt);
+        bB = duckLerpf(bB, (float)oklchConstL[hi][2], f.tilt);
+    }
+
+    float cacheHue = -1.0f, cacheR = 0.0f, cacheG = 0.0f, cacheB = 0.0f;
+    for (int i = 0; i < len; i++) {
+        lvl[i] = fmaxf(0.0f, lvl[i] * expf(-dec[i] * dt)
+                             - rnd() * DUCK_SP_SHIMMER * dt);
+        if (base > DUCK_WF_DEADBAND) {
+            out[i][0] = fmaxf(out[i][0], bR * base);
+            out[i][1] = fmaxf(out[i][1], bG * base);
+            out[i][2] = fmaxf(out[i][2], bB * base);
+        }
+        float s = fminf(lvl[i], 1.0f);
+        if (s < DUCK_SP_DEADBAND) continue;
+        float colR = 255.0f, colG = 255.0f, colB = 255.0f;
+        if (tlt[i] > 0.0f) {
+            if (hue[i] != cacheHue) {
+                cacheHue = hue[i];
+                uint8_t hi = duckOklchIdx(hueWrap360(cacheHue * (360.0f / 255.0f)));
+                cacheR = (float)oklchConstL[hi][0];
+                cacheG = (float)oklchConstL[hi][1];
+                cacheB = (float)oklchConstL[hi][2];
+            }
+            colR = duckLerpf(colR, cacheR, tlt[i]);
+            colG = duckLerpf(colG, cacheG, tlt[i]);
+            colB = duckLerpf(colB, cacheB, tlt[i]);
+        }
+        out[i][0] = fmaxf(out[i][0], colR * s);
+        out[i][1] = fmaxf(out[i][1], colG * s);
+        out[i][2] = fmaxf(out[i][2], colB * s);
+    }
+}
+
 #endif

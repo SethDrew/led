@@ -401,16 +401,22 @@ static void ax_kettle_update(float dt) {
     }
 }
 
-// ── Duck energy waterfall ───────────────────────────────────────
-// Features and waterfall math come from lib/duck_energy, shared with the
+// ── Duck energy renderer ────────────────────────────────────────
+// Features and renderer math come from lib/duck_energy, shared with the
 // installation. Cell state is flat over all LEDs, indexed by strip base like
 // ax_trail. The viewer's clock is the effect time, so it supplies its own
 // milliseconds for the rest-vector calibration window.
+// AX_DUCK_SPARKLE picks the renderer on the SAME tuned features: 1 = onset
+// sparkle bursts (original-duck look), 0 = the energy waterfall.
+#define AX_DUCK_SPARKLE 1
 static DuckFeatures ax_duck;
 static float ax_wf_lvl[HC_NUM_LEDS];
 static float ax_wf_hue[HC_NUM_LEDS];
 static float ax_wf_tlt[HC_NUM_LEDS];
+static float ax_wf_dec[HC_NUM_LEDS];
+static DuckSparkleCtl ax_duck_sp;
 static float ax_duck_inject = 0.0f;
+static float ax_duck_ignite = 0.0f;
 static float ax_now_ms = 0.0f;
 
 static void ax_duck_reset() {
@@ -418,7 +424,10 @@ static void ax_duck_reset() {
     memset(ax_wf_lvl, 0, sizeof(ax_wf_lvl));
     memset(ax_wf_hue, 0, sizeof(ax_wf_hue));
     memset(ax_wf_tlt, 0, sizeof(ax_wf_tlt));
+    memset(ax_wf_dec, 0, sizeof(ax_wf_dec));
+    ax_duck_sp.env = 0.0f;
     ax_duck_inject = 0.0f;
+    ax_duck_ignite = 0.0f;
 }
 
 static void ax_duck_update(float dt) {
@@ -427,6 +436,7 @@ static void ax_duck_update(float dt) {
     bool live = AX_DUCK_SEEN && AX_DUCK_AGE < AXK_STALE_S;
     duckFeaturesUpdate(ax_duck, AX_DUCK, dt, (uint32_t)ax_now_ms, live);
     ax_duck_inject = duckWaterfallInject(ax_duck, live);
+    ax_duck_ignite = duckSparkleFrame(ax_duck_sp, ax_duck, live, dt);
 }
 
 // Carousel output. comp is the clicky field in LOGICAL ring space and gets
@@ -955,8 +965,14 @@ static void ax_raster_strip(RGBf* out, int sIdx, int base, int len, int lenR, in
 
     static float dbuf[AX_MAX_STRIP][3];
     memset(dbuf, 0, sizeof(float) * len * 3);
+#if AX_DUCK_SPARKLE
+    duckSparkleStep(ax_wf_lvl + base, ax_wf_hue + base, ax_wf_tlt + base,
+                    ax_wf_dec + base, len, ax_duck, ax_duck_sp,
+                    ax_duck_ignite, dt, ax_rand, dbuf);
+#else
     duckWaterfallStep(ax_wf_lvl + base, ax_wf_hue + base, ax_wf_tlt + base, len,
                       ax_duck, ax_duck_inject, dt, ax_rand, dbuf, false);
+#endif
 
     ax_write_ring(out, sIdx, base, len, canopy ? -1 : ring, !fieldPour, comp, dbuf);
 }
@@ -1000,8 +1016,14 @@ static void ax_raster_duck_only(RGBf* out, int sIdx, int base, int len, int ring
     static float dbuf[AX_MAX_STRIP][3];
     memset(comp, 0, sizeof(float) * len * 3);
     memset(dbuf, 0, sizeof(float) * len * 3);
+#if AX_DUCK_SPARKLE
+    duckSparkleStep(ax_wf_lvl + base, ax_wf_hue + base, ax_wf_tlt + base,
+                    ax_wf_dec + base, len, ax_duck, ax_duck_sp,
+                    ax_duck_ignite, dt, ax_rand, dbuf);
+#else
     duckWaterfallStep(ax_wf_lvl + base, ax_wf_hue + base, ax_wf_tlt + base, len,
                       ax_duck, ax_duck_inject, dt, ax_rand, dbuf, false);
+#endif
     ax_write_ring(out, sIdx, base, len, ring, true, comp, dbuf);
 }
 

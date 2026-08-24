@@ -288,6 +288,11 @@ static KettleState kettle;
 #include "loop_record.h"
 #endif
 
+#define KETTLE_LEAK_TAU      6.0f
+#define KETTLE_LEAK_DELAY_S  1.0f
+#define KETTLE_LEAK_RAMP_S   2.0f
+#define KETTLE_LEAK_EPS_REVS 0.02f
+
 static void kettleUpdate(float dt) {
     KettlePacketV1 pkt;
     memcpy(&pkt, (const void*)&kettlePkt, sizeof(pkt));
@@ -298,7 +303,29 @@ static void kettleUpdate(float dt) {
         lrButton(pkt.btnBits, millis());
 #endif
     }
+    float rotBefore = kettle.rot;
     kettleRotStep(kettle, dt);
+    float adv = kettle.rot - rotBefore;
+    adv -= roundf(adv);
+    float speed = (dt > 0.0f) ? adv / dt : 0.0f;
+
+    // Drift-home (mirrors the viz twin): waits out a deadband after the
+    // spin stops, then ramps in and drains the carousel back to zero.
+    static float idleT = 0.0f;
+    if (fabsf(speed) >= KETTLE_LEAK_EPS_REVS) idleT = 0.0f;
+    else idleT += dt;
+    if (idleT > KETTLE_LEAK_DELAY_S) {
+        float u = fminf(1.0f, (idleT - KETTLE_LEAK_DELAY_S) / KETTLE_LEAK_RAMP_S);
+        float f = expf(-dt * u / KETTLE_LEAK_TAU);
+        for (int r = 0; r < kettle.numRings; r++) {
+            float d = kettle.ringRot[r];
+            d -= roundf(d);
+            kettle.ringRot[r] = kettleWrap01(d * f);
+        }
+        float d = kettle.rot;
+        d -= roundf(d);
+        kettle.rot = kettleWrap01(d * f);
+    }
 }
 
 // ── Composed frame + carousel output ────────────────────────────
@@ -724,20 +751,27 @@ static void renderClickyParticles(float dt) {
 }
 
 // ── Duck: audio features + rotate-to-change-color ───────────────
-// Feature extraction and the waterfall itself live in lib/duck_energy, shared
+// Feature extraction and the renderers live in lib/duck_energy, shared
 // with the viz twin. This file owns only the per-strip state
 // and the wiring into the composed frame.
+// AX_DUCK_SPARKLE picks the renderer on the SAME tuned features: 1 = onset
+// sparkle bursts (original-duck look), 0 = the energy waterfall.
+#define AX_DUCK_SPARKLE 1
 
 static DuckFeatures duck;
+static DuckSparkleCtl duckSp;
 
 static float wfLevel[NUM_STRIPS][MAX_LEDS];
 static float wfHue[NUM_STRIPS][MAX_LEDS];
 static float wfTilt[NUM_STRIPS][MAX_LEDS];
+static float wfDec[NUM_STRIPS][MAX_LEDS];
 
 static void resetWaterfall() {
     memset(wfLevel, 0, sizeof(wfLevel));
     memset(wfHue, 0, sizeof(wfHue));
     memset(wfTilt, 0, sizeof(wfTilt));
+    memset(wfDec, 0, sizeof(wfDec));
+    duckSp.env = 0.0f;
 }
 
 static bool duckLive() {
@@ -757,11 +791,18 @@ static void duckUpdate(float dt) {
 }
 
 static void renderWaterfall(float dt, bool live) {
-    float inject = duckWaterfallInject(duck, live);
     memset(duckBuf, 0, sizeof(duckBuf));
+#if AX_DUCK_SPARKLE
+    float ignite = duckSparkleFrame(duckSp, duck, live, dt);
+    for (uint8_t s = 0; s < NUM_STRIPS; s++)
+        duckSparkleStep(wfLevel[s], wfHue[s], wfTilt[s], wfDec[s], STRIP_LEN[s],
+                        duck, duckSp, ignite, dt, randFloat, duckBuf[s]);
+#else
+    float inject = duckWaterfallInject(duck, live);
     for (uint8_t s = 0; s < NUM_STRIPS; s++)
         duckWaterfallStep(wfLevel[s], wfHue[s], wfTilt[s], STRIP_LEN[s],
                           duck, inject, dt, randFloat, duckBuf[s], SEG[s].wfRev);
+#endif
 }
 
 // ── Setup ────────────────────────────────────────────────────────

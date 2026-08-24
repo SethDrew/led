@@ -3153,8 +3153,8 @@ entries:
 
   - id: delta-sigma-eliminates-low-brightness-flicker
     date: 2026-03-17
-    touched: 2026-03-17
-    title: "First-order delta-sigma modulation with gamma 2.4 eliminates visible flicker on SK6812 — complete solution"
+    touched: 2026-08-23
+    title: "First-order delta-sigma modulation with gamma 2.4 eliminates visible flicker on SK6812 — amended: not preferred on WS2812B"
     summary: >
       Replacing 16-phase ordered temporal dithering with first-order delta-sigma
       modulation (Fadecandy-style) completely eliminates visible low-brightness
@@ -3218,6 +3218,23 @@ entries:
       approach and the 16-phase ordered dithering. The gamma curve,
       delta-sigma modulation, and 0↔1 floor are independent of the
       animation/effect logic upstream.
+
+      ## 2026-08-23 amendment: dithering is usually NOT preferred on WS2812B
+
+      On the clicky-pots WS2812B panel indicators (13 px, slow breathing
+      envelope spanning ~4-14 output codes, 253-346 fps), delta-sigma
+      produced visible flutter: whenever the target dwells near an integer
+      code the toggle pattern goes sparse — measured 2.3 blip events/s
+      (constant-code holds up to 360 ms ending in a single-frame flip,
+      7-25% luminance each), well below the 40 Hz visibility boundary
+      (see subharmonic-dither-flicker-bench). A +/-0.16-code dead-band
+      variant measured 0 blips/s yet STILL read as flutter/stepping to the
+      eye. Plain rounded codes with a 0.6-code hysteresis were judged
+      clearly better. Standing default: on WS2812B, do not reach for
+      temporal dithering — prefer plain codes plus a brightness floor that
+      keeps the envelope above the coarse bottom of the 8-bit range. The
+      original SK6812 validation stands in its context (W channel, denser
+      code range, faster traversal), but it does not generalize.
 
   - id: per-channel-noise-gate-kills-die-strobe
     date: 2026-04-05

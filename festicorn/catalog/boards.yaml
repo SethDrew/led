@@ -152,6 +152,21 @@ firmware_by_role:
     notes: |
       Bring-up + experimentation breadboard. Not pinned to one firmware —
       reflash freely. Per-board `last_flashed` may record current state.
+  mobile-c3:
+    deployment: dynamic
+    source: null
+    hardware:
+      chip: esp32-c3
+      strips: 2× WS2812-class (color order unverified — assumed GRB)
+      pins: GPIO 3 (strip A) / GPIO 4 (strip B) data; GPIO 2 momentary
+        button (other terminal to GND); I2C SDA=6 SCL=5 (MPU-6500 @ 0x68)
+      hazards: |
+        GPIO 2 is a C3 strapping pin (must read HIGH at boot) — don't hold
+        the button through reset/flash, and add an external pull-up if
+        boot ever proves flaky.
+    notes: |
+      Mobile C3 installation, user-wired 2026-08-23. Bring-up firmware in
+      festicorn/mobile-c3.
   axismundi-mockup:
     deployment: static
     source: festicorn/axismundi/src/axismundi.cpp
@@ -711,3 +726,19 @@ boards:
     distrust that cable.
     GPIO2 straps: boot/reflash spews CAN error frames (see led-eth-0/3).
     Identify by MAC; port re-enumerates on replug.
+
+# ── mobile-c3 (mobile C3 installation) ───────────────────────────────
+- mac: 14:63:93:70:42:AC
+  id: 'mobile-c3'
+  chip: esp32-c3
+  role: mobile-c3
+  first_seen: '2026-08-23T00:00:00Z'
+  last_validated:
+    utc: '2026-08-23T00:00:00Z'
+    port: /dev/cu.usbmodem21201
+    method: esptool read-mac; rainbow_blue flashed and re-enumerated clean
+  notes: |
+    See firmware_by_role.mobile-c3 for wiring. Early USB enumeration
+    flapped 4x in 30 s, then held solid through MAC read + full flash —
+    marginal cable/jack seating, not a boot loop. Radio (TX defect
+    screen) not yet tested.

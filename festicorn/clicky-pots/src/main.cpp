@@ -30,12 +30,27 @@ const int BUTTON_PINS[NUM_BTNS] = {25, 26, 14, 27, 16, 13, 17};
 // the other controls (not 1-1).
 const int IND_PIN = 18;
 const int IND_N = 13;
+// LED 0 sits above the toggle (photo-confirmed strip direction 2026-08-23);
+// if the pilot shows at the wrong end, this is the constant to flip back to 12
 const int IND_TOGGLE = 12;
 const int TOGGLE_BTN = 6;
 const float IND_WARM_STEP = 0.12f;
 const float IND_COOL_STEP = 0.06f;
-const float IND_HOT[3] = {255, 110, 15};
-const float IND_REST[3] = {255, 170, 90};
+// ignition flash: rust family borrowed from wormhole_eth (RUST 190,58,16)
+const float IND_HOT[3] = {255, 95, 12};
+// resting color: uniform burnt orange across the whole bar
+const float IND_PAL[IND_N][3] = {
+    {245, 100, 25}, {245, 100, 25}, {245, 100, 25}, {245, 100, 25},
+    {245, 100, 25}, {245, 100, 25}, {245, 100, 25}, {245, 100, 25},
+    {245, 100, 25}, {245, 100, 25}, {245, 100, 25}, {245, 100, 25},
+    {245, 100, 25},
+};
+
+// preview mode: whole bar breathes between two colors, 10s each way
+// (cosine, 20s period). set to 0 to return to the per-pixel IND_PAL.
+#define IND_PREVIEW 0
+const float IND_FADE_A[3] = {245, 100, 25};  // burnt orange
+const float IND_FADE_B[3] = {190, 58, 16};   // wormhole rust (original)
 
 const float IND_MASTER = 45.0f / 255.0f;
 uint8_t indFrame[IND_N * 3];
@@ -93,7 +108,7 @@ void renderIndicators(unsigned long now, float dt) {
         bool lit = indOn ? (IND_TOGGLE - i) * IND_WARM_STEP <= p
                          : i * IND_COOL_STEP > p;
         float target = lit ? 1.0f : 0.0f;
-        if (!indOn && !lit && i >= IND_N - 2) {
+        if (!indOn && !lit && i >= IND_TOGGLE - 1) {
             // trough floor keeps red >=4 codes / green >=1.7 — below that the
             // 0-snap and the LED's coarse low-end quanta step visibly
             target = 0.42f + 0.12f * sinf(t * 6.2832f / 4.5f) + indFlick * 0.08f;
@@ -110,10 +125,19 @@ void renderIndicators(unsigned long now, float dt) {
         // float -> GRB wire order with delta-sigma dither; snap the 0<->1
         // code boundary to 0 (dithering across it flashes visibly)
         static const int ord[3] = {1, 0, 2};
+#if IND_PREVIEW
+        float mix = 0.5f - 0.5f * cosf(t * 6.2832f / 20.0f);
+        float fade[3] = {IND_FADE_A[0] + (IND_FADE_B[0] - IND_FADE_A[0]) * mix,
+                         IND_FADE_A[1] + (IND_FADE_B[1] - IND_FADE_A[1]) * mix,
+                         IND_FADE_A[2] + (IND_FADE_B[2] - IND_FADE_A[2]) * mix};
+        const float *pal = fade;
+#else
+        const float *pal = IND_PAL[i];
+#endif
         for (int c = 0; c < 3; c++) {
             int j = i * 3 + c;
             int oc = ord[c];
-            float tgt = (IND_HOT[oc] + (IND_REST[oc] - IND_HOT[oc]) * s)
+            float tgt = (IND_HOT[oc] + (pal[oc] - IND_HOT[oc]) * s)
                         * l2 * IND_MASTER;
             if (tgt < 1.0f) {
                 indFrame[j] = 0;

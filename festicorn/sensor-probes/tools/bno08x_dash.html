@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BNO085 — live capability dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --edge: #30363d; --fg: #e6edf3;
+    --dim: #8b949e; --acc: #58a6ff; --good: #3fb950; --hot: #f85149;
+    --warn: #d29922;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.45 ui-monospace, "SF Mono", Menlo, monospace;
+    padding: 16px; max-width: 1280px; margin: 0 auto;
+  }
+  header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
+  h1 { font-size: 18px; font-weight: 600; }
+  button {
+    background: var(--acc); color: #0d1117; border: 0; border-radius: 6px;
+    padding: 8px 18px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { background: var(--edge); color: var(--dim); cursor: default; }
+  #stat { color: var(--dim); }
+  #stat.on { color: var(--good); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--edge); border-radius: 8px;
+    padding: 12px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .panel h2 { font-size: 13px; font-weight: 600; color: var(--acc); }
+  .try { color: var(--warn); font-size: 12px; }
+  .proves { color: var(--dim); font-size: 11.5px; }
+  .big { font-size: 30px; font-weight: 700; text-align: center; }
+  .val { font-variant-numeric: tabular-nums; }
+  canvas { width: 100%; border-radius: 4px; background: #0a0d12; }
+  .bars div { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+  .bars span:first-child { width: 14px; color: var(--dim); }
+  .bar { flex: 1; height: 14px; background: #0a0d12; border-radius: 3px; position: relative; overflow: hidden; }
+  .bar i {
+    position: absolute; top: 0; bottom: 0; left: 50%;
+    background: var(--acc); border-radius: 2px; min-width: 1px;
+  }
+  .bars span.num { width: 62px; text-align: right; }
+  .chipline { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip {
+    border: 1px solid var(--edge); border-radius: 12px; padding: 2px 10px;
+    color: var(--dim); font-size: 12px; transition: all .15s;
+  }
+  .chip.on { background: var(--good); color: #0d1117; border-color: var(--good); font-weight: 600; }
+  .flash { animation: fl .4s; }
+  @keyframes fl { 0% { background: var(--hot); } 100% { background: var(--panel); } }
+  #log {
+    background: #0a0d12; border-radius: 4px; padding: 8px; height: 110px;
+    overflow-y: auto; font-size: 11px; color: var(--dim); white-space: pre-wrap;
+  }
+  .kv { display: flex; justify-content: space-between; font-size: 12.5px; }
+  .kv b { color: var(--fg); font-weight: 600; }
+  .wide { grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>BNO085 — every capability, live</h1>
+  <button id="btn">connect</button>
+  <span id="stat">not connected — Chrome/Edge, port must be free (close monitor/flasher first)</span>
+  <span id="rate" class="val"></span>
+</header>
+
+<div class="grid">
+
+  <div class="panel">
+    <h2>orientation — sensor fusion</h2>
+    <canvas id="cube" height="190"></canvas>
+    <div class="kv"><span>roll / pitch / yaw</span><b id="rpy" class="val">—</b></div>
+    <div class="try">↻ rotate the board in your hand</div>
+    <div class="proves">An on-die ARM core fuses accel + gyro into a drift-corrected
+    quaternion at 400 Hz. Your ESP32 does zero math for this.</div>
+  </div>
+
+  <div class="panel">
+    <h2>compass heading — 9-DOF absolute</h2>
+    <canvas id="compass" height="190"></canvas>
+    <div class="kv"><span>heading ± accuracy</span><b id="head" class="val">—</b></div>
+    <div class="try">↻ point the board's X axis north, then east</div>
+    <div class="proves">The rotation-vector report adds the on-chip magnetometer:
+    yaw is referenced to magnetic north and survives reboots. The chip even
+    reports its own confidence.</div>
+  </div>
+
+  <div class="panel">
+    <h2>linear acceleration — gravity removed</h2>
+    <div class="bars" id="linbars"></div>
+    <canvas id="linspark" height="60"></canvas>
+    <div class="try">→ slide the board flat across the desk</div>
+    <div class="proves">Compare with the accelerometer panel: gravity is subtracted
+    on-chip. Motion shows; tilting mostly doesn't. This is the severity signal
+    for gesture work.</div>
+  </div>
+
+  <div class="panel">
+    <h2>accelerometer + gravity estimate</h2>
+    <div class="bars" id="accbars"></div>
+    <div class="kv"><span>|gravity|</span><b id="gmag" class="val">—</b></div>
+    <div class="try">⟂ tilt the board — watch gravity rotate through the axes</div>
+    <div class="proves">Raw specific force (top) vs the fused gravity direction
+    (norm should sit at 9.81 m/s² however you hold it).</div>
+  </div>
+
+  <div class="panel">
+    <h2>gyroscope — calibrated rad/s</h2>
+    <canvas id="gyrspark" height="90"></canvas>
+    <div class="kv"><span>x / y / z</span><b id="gyr" class="val">—</b></div>
+    <div class="try">↻ twist sharply, then hold still</div>
+    <div class="proves">Bias calibration runs continuously on-chip: at rest all
+    three traces sit on zero, no zero-offset routine in your code.</div>
+  </div>
+
+  <div class="panel">
+    <h2>magnetometer — µT</h2>
+    <div class="bars" id="magbars"></div>
+    <div class="kv"><span>|B| (earth ≈ 25–65 µT)</span><b id="bmag" class="val">—</b></div>
+    <div class="try">🧲 bring a magnet or speaker near, then away</div>
+    <div class="proves">Hard/soft-iron calibrated field vector. Field magnitude far
+    outside the earth band means magnetic interference — the chip's fusion
+    already discounts it.</div>
+  </div>
+
+  <div class="panel" id="tappanel">
+    <h2>tap detector — on-chip event</h2>
+    <div class="big val" id="tapn">0</div>
+    <div class="kv"><span>last tap</span><b id="tapf" class="val">—</b></div>
+    <div class="try">👆 tap the board — rigid mounting matters (press it to the desk)</div>
+    <div class="proves">Runs in the sensor's DSP, tuned for wearables: it wants a
+    crisp impulse into a rigid mount. Dangling on jumpers damps exactly what it
+    listens for — compare with the movement gate panel, which doesn't care.</div>
+  </div>
+
+  <div class="panel" id="gatepanel">
+    <h2>movement gate — host-side, 0.5 g</h2>
+    <div class="big val" id="gaten">0</div>
+    <div class="bars" id="gatebars"></div>
+    <div class="try">👆👋 tap OR shake — this fires on both, however the board is mounted</div>
+    <div class="proves">The project's validated gesture gate: peak |linear accel|
+    ≥ 0.5 g per 40 ms window, computed from the stream the chip already sends.
+    Fires on taps, drums, shakes, pick-ups; silent on ambient. This is what the
+    duck installations actually use instead of the on-chip detectors.</div>
+  </div>
+
+  <div class="panel" id="shakepanel">
+    <h2>shake detector — on-chip event</h2>
+    <div class="big val" id="shkn">0</div>
+    <div class="kv"><span>last shake axes</span><b id="shka" class="val">—</b></div>
+    <div class="try">👋 shake the board briskly</div>
+    <div class="proves">Same story as tap: gesture recognized inside the sensor,
+    delivered as an event, with the axes that shook.</div>
+  </div>
+
+  <div class="panel">
+    <h2>step counter — pedometer</h2>
+    <div class="big val" id="steps">0</div>
+    <div class="try">🚶 hold it in your hand and walk a hallway</div>
+    <div class="proves">A full pedometer in the IMU package. Ignores taps and
+    desk vibration; counts gait.</div>
+  </div>
+
+  <div class="panel">
+    <h2>stability classifier</h2>
+    <div class="chipline" id="stabchips"></div>
+    <div class="try">🖐 leave it on the desk, then pick it up and hold it "still"</div>
+    <div class="proves">The chip distinguishes on-table from held-stationary — your
+    hand tremor is its evidence. A free context signal for interactive pieces.</div>
+  </div>
+
+  <div class="panel">
+    <h2>activity classifier</h2>
+    <div class="chipline" id="actchips"></div>
+    <div class="kv"><span>confidence</span><b id="actc" class="val">—</b></div>
+    <div class="try">🏃 carry it while walking; try running on the spot</div>
+    <div class="proves">Human-activity recognition (still / walking / running /
+    stairs…) running inside the IMU. Updates every 0.5 s.</div>
+  </div>
+
+  <div class="panel">
+    <h2>microphone — INMP441 over I2S</h2>
+    <div class="big val" id="micdb">—</div>
+    <div class="proves" style="text-align:center" id="miczone">—</div>
+    <canvas id="michist" height="110"></canvas>
+    <div class="kv"><span>learned floor / samples</span><b class="val"><span id="micfloor">—</span> · <span id="micn">—</span></b></div>
+    <div class="try">🗣 stay quiet a while, then talk — watch the grey floor line learn the room</div>
+    <div class="proves">Separate sensor, separate bus: 24-bit MEMS mic at 16 kHz
+    on I2S while the IMU shares I2C. Chart: ~50 s of level (amber) over the
+    self-learned ambient floor (grey, fast-down slow-up EMA — what effects
+    trigger against). Headline is absolute dBFS, smoothed. Dead at −120 dB =
+    check L/R is tied to GND.</div>
+  </div>
+
+  <div class="panel">
+    <h2>the bus itself</h2>
+    <div class="kv"><span>I2C clock</span><b id="hz" class="val">—</b></div>
+    <div class="kv"><span>reports received</span><b id="ev" class="val">—</b></div>
+    <div class="kv"><span>report rate</span><b id="evrate" class="val">—</b></div>
+    <div class="kv"><span>INT pulses</span><b id="irq" class="val">—</b></div>
+    <div class="proves">Twelve report streams share one 400 kHz I2C bus via the
+    SHTP protocol — each panel above is a separate on-chip virtual sensor
+    multiplexed onto two wires. The INT line pulsing at the report rate is the
+    chip saying "data ready" — the wire that lets a host sleep between reads.</div>
+  </div>
+
+  <div class="panel wide">
+    <h2>raw feed</h2>
+    <div id="log"></div>
+  </div>
+
+</div>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const STAB = ['unknown', 'on-table', 'stationary', 'stable', 'in-motion'];
+const ACT = ['unknown', 'in-vehicle', 'on-bicycle', 'on-foot', 'still',
+             'tilting', 'walking', 'running', 'on-stairs'];
+
+function mkBars(el, labels) {
+  el.innerHTML = labels.map(l =>
+    `<div><span>${l}</span><div class="bar"><i></i></div><span class="num val">—</span></div>`
+  ).join('');
+  return [...el.querySelectorAll('div.bar i')].map((bar, i) => ({
+    bar, num: el.querySelectorAll('span.num')[i]
+  }));
+}
+function setBar(b, v, full, unit, dp) {
+  const f = Math.max(-1, Math.min(1, v / full));
+  b.bar.style.left = f < 0 ? (50 + f * 50) + '%' : '50%';
+  b.bar.style.width = Math.abs(f) * 50 + '%';
+  b.num.textContent = v.toFixed(dp) + unit;
+}
+function mkChips(el, names) {
+  el.innerHTML = names.map(n => `<span class="chip">${n}</span>`).join('');
+  return [...el.children];
+}
+
+const linB = mkBars($('linbars'), ['x', 'y', 'z']);
+const accB = mkBars($('accbars'), ['x', 'y', 'z']);
+const magB = mkBars($('magbars'), ['x', 'y', 'z']);
+const stabC = mkChips($('stabchips'), STAB);
+const actC = mkChips($('actchips'), ACT);
+
+class Spark {
+  constructor(canvas, n, scale, colors) {
+    this.c = canvas; this.n = n; this.scale = scale; this.colors = colors;
+    this.data = colors.map(() => new Array(200).fill(0));
+  }
+  push(vals) {
+    vals.forEach((v, i) => { this.data[i].push(v); this.data[i].shift(); });
+    const ctx = this.c.getContext('2d');
+    const w = this.c.width = this.c.clientWidth, h = this.c.height;
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = '#21262d';
+    ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
+    this.data.forEach((d, i) => {
+      ctx.strokeStyle = this.colors[i]; ctx.beginPath();
+      d.forEach((v, x) => {
+        const y = h / 2 - Math.max(-1, Math.min(1, v / this.scale)) * (h / 2 - 2);
+        x ? ctx.lineTo(x / d.length * w, y) : ctx.moveTo(0, y);
+      });
+      ctx.stroke();
+    });
+  }
+}
+const linSpark = new Spark($('linspark'), 200, 8, ['#f85149', '#3fb950', '#58a6ff']);
+const gyrSpark = new Spark($('gyrspark'), 200, 6, ['#f85149', '#3fb950', '#58a6ff']);
+const micS = { disp: null, floor: null, hist: [], fhist: [], frame: 0 };
+const gateB = mkBars($('gatebars'), ['pk']);
+const gateS = { n: 0, last: 0 };
+
+function drawMicHist() {
+  const c = $('michist'), ctx = c.getContext('2d');
+  const w = c.width = c.clientWidth, h = c.height;
+  const LO = -85, HI = -15;
+  const Y = db => h - (Math.max(LO, Math.min(HI, db)) - LO) / (HI - LO) * h;
+  ctx.clearRect(0, 0, w, h);
+  ctx.font = '10px ui-monospace';
+  for (let db = -80; db <= -20; db += 20) {
+    ctx.strokeStyle = '#21262d';
+    ctx.beginPath(); ctx.moveTo(0, Y(db)); ctx.lineTo(w, Y(db)); ctx.stroke();
+    ctx.fillStyle = '#484f58';
+    ctx.fillText(db + '', 2, Y(db) - 2);
+  }
+  const trace = (data, col, lw) => {
+    ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.beginPath();
+    data.forEach((v, i) => {
+      const x = i / 200 * w;
+      i ? ctx.lineTo(x, Y(v)) : ctx.moveTo(x, Y(v));
+    });
+    ctx.stroke(); ctx.lineWidth = 1;
+  };
+  trace(micS.fhist, '#6e7681', 1.5);
+  trace(micS.hist, '#d29922', 1.5);
+}
+function setDb(b, db) {
+  const f = Math.max(0, Math.min(1, (db + 90) / 90));
+  b.bar.style.left = '0%';
+  b.bar.style.width = f * 100 + '%';
+  b.bar.style.background = db > -20 ? 'var(--hot)' : db > -50 ? 'var(--warn)' : 'var(--acc)';
+  b.num.textContent = db.toFixed(1) + ' dB';
+}
+
+function quatMat(i, j, k, r) {
+  return [
+    [1 - 2 * (j * j + k * k), 2 * (i * j - k * r), 2 * (i * k + j * r)],
+    [2 * (i * j + k * r), 1 - 2 * (i * i + k * k), 2 * (j * k - i * r)],
+    [2 * (i * k - j * r), 2 * (j * k + i * r), 1 - 2 * (i * i + j * j)],
+  ];
+}
+function drawCube(q) {
+  const c = $('cube'), ctx = c.getContext('2d');
+  const w = c.width = c.clientWidth, h = c.height, s = Math.min(w, h) * 0.32;
+  ctx.clearRect(0, 0, w, h);
+  const m = quatMat(q[0], q[1], q[2], q[3]);
+  const P = p => {
+    const x = m[0][0] * p[0] + m[0][1] * p[1] + m[0][2] * p[2];
+    const y = m[1][0] * p[0] + m[1][1] * p[1] + m[1][2] * p[2];
+    const z = m[2][0] * p[0] + m[2][1] * p[1] + m[2][2] * p[2];
+    return [w / 2 + x * s, h / 2 - y * s, z];
+  };
+  const board = [[-1, -0.65, 0.06], [1, -0.65, 0.06], [1, 0.65, 0.06], [-1, 0.65, 0.06],
+                 [-1, -0.65, -0.06], [1, -0.65, -0.06], [1, 0.65, -0.06], [-1, 0.65, -0.06]]
+                .map(P);
+  const faces = [[0,1,2,3],[4,5,6,7],[0,1,5,4],[2,3,7,6],[0,3,7,4],[1,2,6,5]]
+    .map(f => ({ f, z: f.reduce((a, i) => a + board[i][2], 0) / 4 }))
+    .sort((a, b) => a.z - b.z);
+  faces.forEach(({ f, z }) => {
+    ctx.beginPath();
+    f.forEach((i, n) => n ? ctx.lineTo(board[i][0], board[i][1])
+                          : ctx.moveTo(board[i][0], board[i][1]));
+    ctx.closePath();
+    ctx.fillStyle = z > 0 ? '#1c2a3a' : '#131a24';
+    ctx.strokeStyle = '#30363d';
+    ctx.fill(); ctx.stroke();
+  });
+  [[1.4, 0, 0, '#f85149', 'x'], [0, 1.1, 0, '#3fb950', 'y'], [0, 0, 1.1, '#58a6ff', 'z']]
+    .forEach(([x, y, z, col, name]) => {
+      const o = P([0, 0, 0]), e = P([x, y, z]);
+      ctx.strokeStyle = col; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(e[0], e[1]); ctx.stroke();
+      ctx.lineWidth = 1; ctx.fillStyle = col;
+      ctx.fillText(name, e[0] + 4, e[1]);
+    });
+}
+function drawCompass(deg, acc) {
+  const c = $('compass'), ctx = c.getContext('2d');
+  const w = c.width = c.clientWidth, h = c.height, r = Math.min(w, h) / 2 - 14;
+  ctx.clearRect(0, 0, w, h);
+  ctx.strokeStyle = '#30363d';
+  ctx.beginPath(); ctx.arc(w / 2, h / 2, r, 0, 7); ctx.stroke();
+  ctx.fillStyle = '#8b949e'; ctx.textAlign = 'center';
+  ['N', 'E', 'S', 'W'].forEach((n, i) => {
+    const a = i * Math.PI / 2 - Math.PI / 2;
+    ctx.fillText(n, w / 2 + Math.cos(a) * (r + 9), h / 2 + Math.sin(a) * (r + 9) + 4);
+  });
+  const a = deg * Math.PI / 180 - Math.PI / 2;
+  if (acc >= 0) {
+    ctx.fillStyle = 'rgba(88,166,255,0.15)';
+    ctx.beginPath(); ctx.moveTo(w / 2, h / 2);
+    ctx.arc(w / 2, h / 2, r, a - acc, a + acc); ctx.fill();
+  }
+  ctx.strokeStyle = '#58a6ff'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(w / 2, h / 2);
+  ctx.lineTo(w / 2 + Math.cos(a) * r, h / 2 + Math.sin(a) * r); ctx.stroke();
+  ctx.lineWidth = 1;
+}
+
+let evPrev = 0, tPrev = 0, irqPrev = 0;
+function frame(d) {
+  drawCube(d.q);
+  const yaw = Math.atan2(2 * (d.rq[3] * d.rq[2] + d.rq[0] * d.rq[1]),
+                         1 - 2 * (d.rq[1] * d.rq[1] + d.rq[2] * d.rq[2]));
+  const heading = ((-yaw * 180 / Math.PI) + 360) % 360;
+  drawCompass(heading, d.ra);
+  $('head').textContent = heading.toFixed(0) + '° ± ' + (d.ra * 180 / Math.PI).toFixed(0) + '°';
+
+  const q = d.q;
+  const roll = Math.atan2(2 * (q[3] * q[0] + q[1] * q[2]), 1 - 2 * (q[0] * q[0] + q[1] * q[1]));
+  const pitch = Math.asin(Math.max(-1, Math.min(1, 2 * (q[3] * q[1] - q[2] * q[0]))));
+  const yg = Math.atan2(2 * (q[3] * q[2] + q[0] * q[1]), 1 - 2 * (q[1] * q[1] + q[2] * q[2]));
+  $('rpy').textContent = [roll, pitch, yg].map(v => (v * 180 / Math.PI).toFixed(0) + '°').join(' / ');
+
+  d.lin.forEach((v, i) => setBar(linB[i], v, 8, '', 2));
+  linSpark.push(d.lin);
+  d.acc.forEach((v, i) => setBar(accB[i], v, 12, '', 2));
+  $('gmag').textContent = Math.hypot(...d.grv).toFixed(2) + ' m/s²';
+  gyrSpark.push(d.gyr);
+  $('gyr').textContent = d.gyr.map(v => v.toFixed(2)).join(' / ');
+  d.mag.forEach((v, i) => setBar(magB[i], v, 80, '', 1));
+  $('bmag').textContent = Math.hypot(...d.mag).toFixed(1) + ' µT';
+
+  $('steps').textContent = d.stp;
+  $('tapn').textContent = d.tap;
+  $('shkn').textContent = d.shk;
+  stabC.forEach((c, i) => c.classList.toggle('on', i === d.stb));
+  actC.forEach((c, i) => c.classList.toggle('on', i === d.act));
+  $('actc').textContent = d.ac + ' %';
+
+  if (d.mic) {
+    const rms = d.mic[0];
+    if (micS.disp === null) { micS.disp = rms; micS.floor = rms; }
+    micS.disp += (rms > micS.disp ? 0.6 : 0.08) * (rms - micS.disp);
+    micS.floor += (rms < micS.floor ? 0.05 : 0.002) * (rms - micS.floor);
+    micS.frame++;
+    if (micS.frame % 6 === 0) {
+      const el = $('micdb');
+      el.textContent = micS.disp.toFixed(0) + ' dB';
+      el.style.color = micS.disp > -30 ? 'var(--hot)' : micS.disp > -45 ? 'var(--warn)' : 'var(--fg)';
+      $('miczone').textContent =
+        micS.disp > -30 ? 'loud' : micS.disp > -45 ? 'speech-level' :
+        micS.disp > -55 ? 'room ambient' : 'quiet';
+      micS.hist.push(micS.disp); micS.fhist.push(micS.floor);
+      if (micS.hist.length > 200) { micS.hist.shift(); micS.fhist.shift(); }
+      drawMicHist();
+      $('micfloor').textContent = micS.floor.toFixed(0) + ' dB';
+      $('micn').textContent = d.mn.toLocaleString();
+    }
+  }
+
+  if (d.lpk !== undefined) {
+    const G = 9.81, thresh = 0.5 * G;
+    setBar(gateB[0], d.lpk, 2 * G, '', 1);
+    gateB[0].bar.style.background = d.lpk >= thresh ? 'var(--hot)' : 'var(--acc)';
+    const t2 = performance.now();
+    if (d.lpk >= thresh && t2 - gateS.last > 300) {
+      gateS.n++; gateS.last = t2;
+      $('gaten').textContent = gateS.n;
+      $('gatepanel').classList.remove('flash'); void $('gatepanel').offsetWidth;
+      $('gatepanel').classList.add('flash');
+    }
+  }
+
+  $('hz').textContent = (d.hz / 1000) + ' kHz';
+  $('ev').textContent = d.ev;
+  const t = performance.now();
+  if (tPrev) {
+    const dt = (t - tPrev) / 1000;
+    $('evrate').textContent = ((d.ev - evPrev) / dt).toFixed(0) + ' /s';
+    if (d.irq !== undefined)
+      $('irq').textContent = d.irq + ' (' + ((d.irq - irqPrev) / dt).toFixed(0) + ' /s)';
+  }
+  evPrev = d.ev; tPrev = t; irqPrev = d.irq ?? 0;
+}
+
+const TAPF = f => (f & 0x40 ? 'double' : 'single') +
+  (f & 0x03 ? ' x' : f & 0x0C ? ' y' : f & 0x30 ? ' z' : '');
+function event(d) {
+  if (d.e === 'tap') {
+    $('tapf').textContent = TAPF(d.f) + ' (flags 0x' + d.f.toString(16) + ')';
+    $('tappanel').classList.remove('flash'); void $('tappanel').offsetWidth;
+    $('tappanel').classList.add('flash');
+  } else if (d.e === 'shake') {
+    $('shka').textContent = ['x', 'y', 'z'].filter((_, i) => d.a & (1 << i)).join('+') || '?';
+    $('shakepanel').classList.remove('flash'); void $('shakepanel').offsetWidth;
+    $('shakepanel').classList.add('flash');
+  }
+}
+
+function logLine(s) {
+  const el = $('log');
+  el.textContent = (el.textContent + s + '\n').split('\n').slice(-60).join('\n');
+  el.scrollTop = el.scrollHeight;
+}
+
+function handleLine(t) {
+  if (!t) return;
+  if (t[0] === '{') {
+    try {
+      const d = JSON.parse(t);
+      d.e ? event(d) : frame(d);
+    } catch (e) { logLine(t); }
+  } else logLine(t);
+}
+function connected(how) {
+  $('btn').disabled = true;
+  $('stat').textContent = 'connected via ' + how;
+  $('stat').classList.add('on');
+}
+function disconnected() {
+  $('btn').disabled = false;
+  $('stat').textContent = 'disconnected';
+  $('stat').classList.remove('on');
+}
+
+$('btn').onclick = async () => {
+  const port = await navigator.serial.requestPort();
+  await port.open({ baudRate: 460800 });
+  connected('Web Serial (exclusive — close tab before flashing)');
+  const dec = new TextDecoderStream();
+  port.readable.pipeTo(dec.writable);
+  const reader = dec.readable.getReader();
+  let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += value;
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) handleLine(line.trim());
+  }
+  disconnected();
+};
+if (!('serial' in navigator))
+  $('btn').disabled = true;
+</script>
+</body>
+</html>

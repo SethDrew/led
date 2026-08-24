@@ -416,21 +416,25 @@ boards:
     clicky-pots, clean 1 Hz ClickyPacketV1 heartbeat reception. Candidate
     for the water-heater rotary-encoder control node.
 - mac: 14:63:93:6F:FF:78
-  id: 'espnow-usb-bridge'
+  id: 'bno08x-bench'
   chip: esp32-c3
-  role: espnow-bridge
+  role: sensor-probe
   first_seen: '2026-07-27T00:00:00Z'
   last_validated:
-    utc: '2026-07-31T00:00:00Z'
-    port: /dev/cu.usbmodem2101
-    method: bridge frames verified (clicky 18B + kettle 13B over the air, XOR framing clean)
+    utc: '2026-08-23T00:00:00Z'
+    port: /dev/cu.usbmodem112101
+    method: bno08x_probe full init; BNO085 at 0x4B streaming all reports
   notes: |
     No TX defect: clean unicast ACK and reception all the way to the 20.00 dBm
     driver ceiling. Preferred over 10:00:3B:B1:3E:80 for anything TX-heavy.
-    Flashed 2026-07-31 as the console-dashboard ESP-NOW bridge
-    (festicorn/console-bridge env:bridge, src/bridge.cpp): forwards every
-    ch-1 ESP-NOW packet over USB CDC as A5 5A | len | payload | XOR at
-    460800. Dashboard runs with --no-discover --port bridge=<port>.
+    Reflashed 2026-08-22 from espnow-bridge to festicorn/sensor-probes
+    env:bno08x_probe for GY-BNO08X bring-up (SDA=2 SCL=3 CS=0 ADD=1, INT
+    unwired). 2026-08-23: sensor enumerated at 0x4B, streams all reports at
+    400 kHz I2C full rate (3x50 Hz + status, zero loss). A first-boot scan
+    that ACKed only at 10 kHz did not reproduce -- BNO08x boot-time clock
+    stretching, not a wiring or speed limitation.
+    The console-dashboard bridge role was retired from this board; restore
+    with festicorn/console-bridge env:bridge if it is ever needed again.
 - mac: 10:00:3B:B1:5D:10
   id: ''
   chip: esp32-c3

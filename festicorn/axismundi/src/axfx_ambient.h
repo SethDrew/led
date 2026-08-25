@@ -17,13 +17,17 @@
 
 #include <math.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <fast_math.h>
 
 enum AxfxEffect : int8_t { AXFX_NONE = -1, AXFX_BLOOM = 0, AXFX_FIRE = 1,
                            AXFX_LEAFWIND = 2 };
 
-static float axfxBuf[AXFX_NS][AXFX_MAXLEN][3];
+// Heap-allocated lazily, like the ghost tracks: the static DRAM segment
+// overflows on the 10-segment mockup long before the runtime heap does.
+typedef float AxfxStripBuf[AXFX_MAXLEN][3];
+static AxfxStripBuf* axfxBuf = nullptr;
 
 static inline float axfxClamp(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
@@ -55,22 +59,28 @@ static inline float axfxRandF() {
 #define AXFX_ONSET_TAU      0.25f
 #define AXFX_LEVEL_RISE     2.5f    // envelope climb rate toward target
 #define AXFX_LEVEL_FALL_TAU 1.5f    // envelope leak back to floor
+#define AXFX_SPEED_TAU      0.12f   // fast, near-instantaneous spin magnitude
 
 struct AxfxDrive {
     float floor, ceiling;
-    float energy, onset, level, prevSpeed;
+    float energy, onset, level, prevSpeed, speed;
 };
 
 static inline void axfxDriveInit(AxfxDrive &d) {
     d.floor = AXFX_FLOOR;
     d.ceiling = 1.0f;
-    d.energy = d.onset = d.prevSpeed = 0.0f;
+    d.energy = d.onset = d.prevSpeed = d.speed = 0.0f;
     d.level = AXFX_FLOOR;
 }
 
 static inline void axfxDriveStep(AxfxDrive &d, float spinRevS, float dt) {
     if (dt <= 0.0f) return;
     float sp = fabsf(spinRevS);
+    // Lightly-smoothed current spin magnitude (rev/s): collapses within a few
+    // hundred ms of stopping, so effects that read it break on a pause instead
+    // of coasting on the buffered energy EMA.
+    float sa = fminf(1.0f, dt / AXFX_SPEED_TAU);
+    d.speed += sa * (sp - d.speed);
     float e = fminf(1.0f, sp / AXFX_ENERGY_REF);
     float ea = fminf(1.0f, dt / AXFX_ENERGY_TAU);
     d.energy += ea * (e - d.energy);
@@ -188,20 +198,18 @@ static void axfxRenderBloom(const AxfxDrive &d, float dt) {
 #define AXFX_FIRE_FLICKER_SCALE 3.0f
 #define AXFX_FIRE_EMBER_FLOOR   0.78f
 #define AXFX_FIRE_DEADBAND      0.08f
-#define AXFX_FIRE_DROPOUT_DEPTH 0.85f
+// Resting fire never dims below this brightness envelope (idle output lands at
+// ~EMBER_FLOOR*this ^2.4 ≈ 10%), so a held-but-still fire keeps a live glow.
+#define AXFX_FIRE_LEVEL_FLOOR   0.50f
 
 static float axfxFireTime[AXFX_NS];
 static float axfxFireBase = 0.0f;
 static float axfxFireFlicker = 0.0f;
 static float axfxFireColor = 0.0f;
-static float axfxFirePrevE = 0.0f;
-static float axfxFireDerivS = 0.0f;
-static float axfxFireDropout = 0.0f;
 
 static void axfxResetFire() {
     for (int s = 0; s < AXFX_NS; s++) axfxFireTime[s] = (float)s * 1.37f;
     axfxFireBase = axfxFireFlicker = axfxFireColor = 0.0f;
-    axfxFirePrevE = axfxFireDerivS = axfxFireDropout = 0.0f;
 }
 
 static void axfxRenderFire(const AxfxDrive &d, float dt) {
@@ -220,15 +228,6 @@ static void axfxRenderFire(const AxfxDrive &d, float dt) {
     float flickerAlpha = fminf(1.0f, dt / 0.200f);
     float deltaTarget = isSilent ? 0.0f : onset;
     axfxFireFlicker += flickerAlpha * (deltaTarget - axfxFireFlicker);
-
-    float energyDeriv = (energy - axfxFirePrevE) / fmaxf(dt, 0.001f);
-    axfxFirePrevE = energy;
-    float derivAlpha = fminf(1.0f, dt / 0.200f);
-    axfxFireDerivS += derivAlpha * (energyDeriv - axfxFireDerivS);
-    bool isSustaining = (!isSilent && energy > 0.05f && fabsf(axfxFireDerivS) <= 0.5f);
-    if (isSustaining) axfxFireDropout = fminf(1.0f, axfxFireDropout + dt * 0.35f);
-    else              axfxFireDropout = fmaxf(0.0f, axfxFireDropout - dt * 1.0f);
-    float dropoutAmount = axfxFireDropout;
 
     float colorAttack = fminf(1.0f, dt / 0.080f);
     float colorDecay  = fminf(1.0f, dt / 2.0f);
@@ -270,18 +269,11 @@ static void axfxRenderFire(const AxfxDrive &d, float dt) {
             float bright = base * (1.0f + noiseAmp * (noise - 0.5f))
                          + axfxFireFlicker * (noise - 0.5f) * 0.25f * sScl;
 
-            float perLedDim = 0.0f, colorRedShift = 0.0f;
-            if (dropoutAmount > 0.0f) {
-                float resilience = fastSin(fi * 13.7f + t * 0.3f) * fastSin(fi * 9.1f + t * 0.2f) * 0.5f + 0.5f;
-                perLedDim = axfxClamp((dropoutAmount - resilience * 0.7f) / 0.3f, 0.0f, 1.0f) * AXFX_FIRE_DROPOUT_DEPTH;
-                colorRedShift = axfxClamp(perLedDim / 0.3f, 0.0f, 1.0f);
-            }
-            bright *= (1.0f - perLedDim);
-            bright = axfxClamp(bright, 0.0f, 1.0f) * d.level;
+            bright = axfxClamp(bright, 0.0f, 1.0f) * fmaxf(d.level, AXFX_FIRE_LEVEL_FLOOR);
 
-            float colR = baseColR * (1.0f - colorRedShift) + redR * colorRedShift;
-            float colG = baseColG * (1.0f - colorRedShift) + redG * colorRedShift;
-            float colB = baseColB * (1.0f - colorRedShift) + redB * colorRedShift;
+            float colR = baseColR;
+            float colG = baseColG;
+            float colB = baseColB;
 
             float linBright = fastGamma24(bright);
             float oR = axfxClamp(colR * linBright, 0.0f, 255.0f);
@@ -309,6 +301,11 @@ static void axfxRenderFire(const AxfxDrive &d, float dt) {
 #define AXFX_LW_TURBULENCE   0.3f
 #define AXFX_LW_BOOST_SPEED  0.157f
 #define AXFX_LW_BOOST_TC     20.0f
+// Wind now tracks the CURRENT knob spin (d.speed), not the buffered energy EMA:
+// spinning emits leaves, faster spin emits denser/brighter/faster, and pausing
+// past EMIT_MIN for a few hundred ms stops new spawns so the stream breaks.
+#define AXFX_LW_SPEED_REF    1.2f    // rev/s mapping to full wind
+#define AXFX_LW_EMIT_MIN     0.06f   // rev/s below which the stream stops spawning
 
 static const uint8_t AXFX_LW_PALETTE[][3] = {
     {255, 140, 20}, {240, 100, 10}, {220, 60, 5}, {200, 40, 10},
@@ -316,7 +313,7 @@ static const uint8_t AXFX_LW_PALETTE[][3] = {
 };
 #define AXFX_LW_PALETTE_SIZE (sizeof(AXFX_LW_PALETTE) / sizeof(AXFX_LW_PALETTE[0]))
 
-struct AxfxLeaf { float pos, vel, boost, age, brightness; uint8_t r, g, b; bool active; };
+struct AxfxLeaf { float pos, vel, boost, age, brightness, bmax; uint8_t r, g, b; bool active; };
 static AxfxLeaf axfxLeaves[AXFX_NS][AXFX_LW_MAX_LEAVES];
 static float axfxLwTime = 0.0f;
 static float axfxLwSpawnTimer[AXFX_NS];
@@ -335,7 +332,7 @@ static void axfxResetLeafWind() {
     }
 }
 
-static void axfxLwSpawnLeaf(int s, float boostGain) {
+static void axfxLwSpawnLeaf(int s, float boostGain, float wind) {
     for (int i = 0; i < AXFX_LW_MAX_LEAVES; i++) {
         if (axfxLeaves[s][i].active) continue;
         AxfxLeaf &lf = axfxLeaves[s][i];
@@ -345,6 +342,7 @@ static void axfxLwSpawnLeaf(int s, float boostGain) {
         lf.vel = 0.0f;
         lf.age = 0.0f;
         lf.brightness = 0.0f;
+        lf.bmax = 0.4f + 0.6f * wind;
         int ci = (int)(axfxRand32() % AXFX_LW_PALETTE_SIZE);
         lf.r = AXFX_LW_PALETTE[ci][0];
         lf.g = AXFX_LW_PALETTE[ci][1];
@@ -357,17 +355,26 @@ static void axfxRenderLeafWind(const AxfxDrive &d, float dt) {
     axfxLwTime += dt;
     float boostDecay = expf(-dt / AXFX_LW_BOOST_TC);
     float lwAlpha = fminf(1.0f, dt / AXFX_LW_VEL_TAU);
-    float windMult = 1.0f + d.energy * 1.5f;
-    float turb = AXFX_LW_TURBULENCE * (1.0f + d.energy);
-    float spawnInt = AXFX_LW_SPAWN_INT / (1.0f + d.energy * 2.0f);
-    float boostGain = 1.0f + d.onset * 2.0f;
+    float wind = fminf(1.0f, d.speed / AXFX_LW_SPEED_REF);
+    float windMult = 1.0f + wind * 1.5f;
+    float turb = AXFX_LW_TURBULENCE * (1.0f + wind);
+    bool emitting = d.speed > AXFX_LW_EMIT_MIN;
+    float spawnInt = AXFX_LW_SPAWN_INT / (0.3f + wind * 3.0f);
+    float boostGain = 1.0f + wind * 2.0f;
 
     for (int s = 0; s < AXFX_NS; s++) {
         int len = AXFX_LEN(s);
-        axfxLwSpawnTimer[s] += dt;
-        while (axfxLwSpawnTimer[s] >= spawnInt) {
-            axfxLwSpawnTimer[s] -= spawnInt;
-            axfxLwSpawnLeaf(s, boostGain);
+        if (emitting) {
+            axfxLwSpawnTimer[s] += dt;
+            // A primed idle timer (set huge below) overshoots one interval:
+            // clamp so the first spin emits exactly one leaf, not a burst.
+            if (axfxLwSpawnTimer[s] > spawnInt + dt) axfxLwSpawnTimer[s] = spawnInt;
+            while (axfxLwSpawnTimer[s] >= spawnInt) {
+                axfxLwSpawnTimer[s] -= spawnInt;
+                axfxLwSpawnLeaf(s, boostGain, wind);
+            }
+        } else {
+            axfxLwSpawnTimer[s] = 1.0e9f;
         }
         for (int i = 0; i < AXFX_LW_MAX_LEAVES; i++) {
             if (!axfxLeaves[s][i].active) continue;
@@ -389,7 +396,7 @@ static void axfxRenderLeafWind(const AxfxDrive &d, float dt) {
                 if (!axfxLeaves[s][li].active) continue;
                 AxfxLeaf &lf = axfxLeaves[s][li];
                 float dd = lpos - lf.pos;
-                float intensity = expf(-(dd * dd) / AXFX_LW_GLOW_SQ2) * lf.brightness;
+                float intensity = expf(-(dd * dd) / AXFX_LW_GLOW_SQ2) * lf.brightness * lf.bmax;
                 if (intensity < 0.005f) continue;
                 totalGlow += intensity;
                 cr += intensity * lf.r;
@@ -399,7 +406,7 @@ static void axfxRenderLeafWind(const AxfxDrive &d, float dt) {
             float oR = 0.0f, oG = 0.0f, oB = 0.0f;
             if (totalGlow > 0.01f) {
                 cr /= totalGlow; cg /= totalGlow; cb /= totalGlow;
-                float bright = fminf(totalGlow * AXFX_LW_LEAF_VALUE, 1.0f) * d.level;
+                float bright = fminf(totalGlow * AXFX_LW_LEAF_VALUE, 1.0f);
                 float linBright = fastGamma24(bright);
                 oR = cr * linBright; oG = cg * linBright; oB = cb * linBright;
                 if (oR < AXFX_CH_SNAP) oR = 0.0f;
@@ -422,10 +429,14 @@ static void axfxReset(int effect) {
 
 // Fills axfxBuf for the active effect; zeros it when none is active.
 static void axfxRender(int effect, const AxfxDrive &d, float dt) {
+    if (!axfxBuf) {
+        axfxBuf = (AxfxStripBuf*)calloc(AXFX_NS, sizeof(AxfxStripBuf));
+        if (!axfxBuf) return;
+    }
     if (effect == AXFX_BLOOM)         axfxRenderBloom(d, dt);
     else if (effect == AXFX_FIRE)     axfxRenderFire(d, dt);
     else if (effect == AXFX_LEAFWIND) axfxRenderLeafWind(d, dt);
-    else memset(axfxBuf, 0, sizeof(axfxBuf));
+    else memset(axfxBuf, 0, sizeof(AxfxStripBuf) * AXFX_NS);
 }
 
 #endif

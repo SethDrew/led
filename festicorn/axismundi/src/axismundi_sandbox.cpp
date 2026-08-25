@@ -1,9 +1,12 @@
 /*
  * AXISMUNDI SANDBOX — ghost-recorder experiment (2026-08-16).
- * Copy of axismundi.cpp; production file is untouched. The six clicky
- * button holds (desat/pump/hue-rot/gather/fade/trail) are replaced:
- * hold button k to record particle k's motion, release to leave a dim
- * ghost looping the gesture (ping-pong). Tap (<~0.25 s) clears it.
+ * Copy of axismundi.cpp; production file is untouched. Clicky buttons
+ * 0-3 keep production holds (left to right: gather, fade, hue-rot,
+ * trail; desat and pump dropped). Buttons 4/5 are ghost slots: hold to
+ * record the field's motion, release to leave a dim ghost looping the
+ * gesture from the release pose (ping-pong). Tap (<~0.25 s) clears it.
+ * Fade recovery retraces at the fade's own rate — no snap back — and
+ * leaving black replays the crackle time-reversed.
  * Pot 5 stays the brightness fader. Everything else unchanged.
  *
  * Original header follows.
@@ -322,10 +325,9 @@ static float kResetT = -1.0f;
 #define KETTLE_LEAK_EPS_REVS  0.02f
 
 // ── Ambient effect triggers (axfx) ──────────────────────────────
-// Three freed kettle buttons each summon one overlay effect while held; the
+// Two freed kettle buttons each summon one overlay effect while held; the
 // knob spin is diverted from the carousel into that effect's drive (energy +
 // brightness up to the clicky ceiling pot). Release fades the effect out.
-#define AXFX_BTN_BLOOM     KETTLE_BTN_FLYWHEEL   // bit 1
 #define AXFX_BTN_FIRE      KETTLE_BTN_COUNTER    // bit 3
 #define AXFX_BTN_LEAFWIND  KETTLE_BTN_CRACKLE    // bit 4
 #define AXFX_CEIL_POT      0                     // clicky pot: max effect brightness
@@ -334,6 +336,17 @@ static int       axfxEffect = AXFX_NONE;
 static int32_t   axfxPrevEnc = 0;
 static bool      axfxEncInit = false;
 static float     axfxCeiling = 1.0f;   // clicky ceiling pot, set by the clicky render
+
+// ── Size (SPLAY) ────────────────────────────────────────────────
+// Its own kettle button steals the spin off the carousel and integrates it:
+// spin forward spreads the comb teeth apart, spin back past home squeezes the
+// blob toward a single pixel. Release drifts kSplay smoothly home.
+#define KETTLE_BTN_SIZE       KETTLE_BTN_FLYWHEEL   // bit 1
+#define KETTLE_SPLAY_PER_ADV  1.0f
+#define KETTLE_SPLAY_HOME_S   1.5f
+static float kSplay     = 0.0f;
+static float kSplayFrom = 0.0f;
+static float kSplayT    = -1.0f;
 
 static void kettleUpdate(float dt) {
     KettlePacketV1 pkt;
@@ -360,9 +373,9 @@ static void kettleUpdate(float dt) {
                     pkt.upMs);
 
         int held = AXFX_NONE;
-        if ((pkt.btnBits >> AXFX_BTN_BLOOM) & 1)         held = AXFX_BLOOM;
-        else if ((pkt.btnBits >> AXFX_BTN_FIRE) & 1)     held = AXFX_FIRE;
+        if ((pkt.btnBits >> AXFX_BTN_FIRE) & 1)          held = AXFX_FIRE;
         else if ((pkt.btnBits >> AXFX_BTN_LEAFWIND) & 1) held = AXFX_LEAFWIND;
+        bool sizeHeld = (pkt.btnBits >> KETTLE_BTN_SIZE) & 1;
 
         if (!axfxEncInit || pkt.upMs < kettleLastMs) { axfxPrevEnc = pkt.enc; axfxEncInit = true; }
         int32_t encDelta = pkt.enc - axfxPrevEnc;
@@ -383,6 +396,20 @@ static void kettleUpdate(float dt) {
         }
         axfxDrive.ceiling = axfxCeiling;
         axfxDriveStep(axfxDrive, driveSpin, dt);
+
+        // Size (SPLAY): steal the same spin off the carousel and integrate it.
+        if (sizeHeld) {
+            kettle.rotPending -= encRev * KETTLE_SPIN_GAIN;
+            kSplay += encRev * KETTLE_SPIN_GAIN * KETTLE_SPLAY_PER_ADV;
+            if (kSplay < -1.0f) kSplay = -1.0f;
+            kSplayT = -1.0f;
+        } else if (kSplay != 0.0f) {
+            if (kSplayT < 0.0f) { kSplayFrom = kSplay; kSplayT = 0.0f; }
+            kSplayT += dt;
+            float u = kSplayT / KETTLE_SPLAY_HOME_S;
+            if (u >= 1.0f) { kSplay = 0.0f; kSplayT = -1.0f; }
+            else kSplay = kSplayFrom * (1.0f - u * u * (3.0f - 2.0f * u));
+        }
     }
     float rotBefore = kettle.rot;
     kettleRotStep(kettle, dt);
@@ -515,7 +542,6 @@ static float clickyRufflePhase = 0.0f;
 #define CLICKY_PAINT_STOP_S 0.3f   // paint gate fade-out after the knob stops
 #define CLICKY_PAINT_CAP   160.0f  // max paint level (vs 255-scale particle)
 #define CLICKY_FADE_S      1.5f
-#define CLICKY_RECOVER_S   0.7f
 #define CLICKY_CRACKLE_S   0.5f
 #define CLICKY_PUMP_MAX    3.0f
 #define CLICKY_PUMP_TAU    0.6f
@@ -558,12 +584,15 @@ static float clickyRufflePhase = 0.0f;
 // Button -> pots it records (bitmask per button). Default: every recording
 // button captures the WHOLE FIELD (all five particles), so a slot replays
 // the full gesture. Narrow a row's mask to record a subset instead; 0 = the
-// button does not record (buttons 4/5 are trail/huerot).
-static const uint8_t GHOST_BTN_POTS[6] = { 0x1F, 0x1F, 0x1F, 0x1F, 0, 0 };
+// button does not record (buttons 0-3 are the effect holds).
+static const uint8_t GHOST_BTN_POTS[6] = { 0, 0, 0, 0, 0x1F, 0x1F };
 
-// Buttons 4 (GPIO 16) and 5 (GPIO 13) keep their production functions.
-#define SANDBOX_BTN_TRAIL  4
-#define SANDBOX_BTN_HUEROT 5
+// Buttons 0-3 hold production effects — physical left-to-right reads
+// gather, fade, hue-rot, trail. Buttons 4/5 are the two ghost slots.
+#define SANDBOX_BTN_TRAIL  0
+#define SANDBOX_BTN_HUEROT 1
+#define SANDBOX_BTN_FADE   2
+#define SANDBOX_BTN_GATHER 3
 
 // Tracks are HEAP-allocated (lazily, first ghostUpdate): the static DRAM
 // segment overflows long before the runtime heap does. Quantized [0,1] —
@@ -638,6 +667,7 @@ static inline void ghostPaint(uint8_t s, int idx, float add, float hue) {
 }
 static float clickyFade = 1.0f;
 static float clickyCrackleT = 0.0f;
+static bool  clickyCrackleRev = false;
 static float clickyPump[CLICKY_NUM_POTS];
 static int   clickyShardNext = 0;
 static float clickyGather = 0.0f;
@@ -661,6 +691,7 @@ static void resetClickyParticles() {
     }
     clickyFade = 1.0f;
     clickyCrackleT = 0.0f;
+    clickyCrackleRev = false;
     clickyGather = 0.0f;
     clickyDesat = 1.0f;
     clickyPrevPull = 0;
@@ -774,6 +805,36 @@ static void ghostUpdate(uint8_t btnBits, float dt) {
                 uint16_t raw = ghostCount[b];
                 if (ghostCount[b] < GHOST_MIN_SAMPLES) ghostCount[b] = 0;
                 if (ghostCount[b] > 0) ghostTrimStill(b);
+                // the gesture is only the particles that moved: drop lanes
+                // whose pos AND split stayed still for the whole take
+                if (ghostCount[b] > 0) {
+                    int kept = 0;
+                    for (int L = 0; L < ghostLanes[b]; L++) {
+                        uint16_t lo = 65535, hi = 0;
+                        uint8_t loS = 255, hiS = 0;
+                        for (uint16_t i = 0; i < ghostCount[b]; i++) {
+                            uint16_t v = ghostTrack[b][L][i];
+                            uint8_t w = ghostSplitTrack[b][L][i];
+                            if (v < lo) lo = v;
+                            if (v > hi) hi = v;
+                            if (w < loS) loS = w;
+                            if (w > hiS) hiS = w;
+                        }
+                        if ((hi - lo) * GHOST_DQ <= GHOST_TRIM_EPS
+                            && (uint8_t)(hiS - loS) <= 1)
+                            continue;
+                        if (kept != L) {
+                            memcpy(ghostTrack[b][kept], ghostTrack[b][L],
+                                   ghostCount[b] * sizeof(uint16_t));
+                            memcpy(ghostSplitTrack[b][kept], ghostSplitTrack[b][L],
+                                   ghostCount[b]);
+                            ghostLanePot[b][kept] = ghostLanePot[b][L];
+                        }
+                        kept++;
+                    }
+                    ghostLanes[b] = (uint8_t)kept;
+                    if (kept == 0) ghostCount[b] = 0;
+                }
                 // replay starts at the release pose and runs backward, so the
                 // ghost takes over exactly where the live particle let go
                 ghostPlayPos[b] = (float)(ghostCount[b] > 0 ? ghostCount[b] - 1 : 0);
@@ -863,9 +924,13 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
         // tails/teeth clip
         center = fminf(fmaxf(center, 0.0f), (float)(len - 1));
         float sigma = fmaxf(0.5f, CLICKY_SIGMA_NORM * REF_LEN * sigScale * clickyPump[k]);
+        // Negative splay (dialed back past home) squeezes the blob toward a
+        // single pixel; positive splay only spreads the comb.
+        sigma = fmaxf(0.35f, sigma * (1.0f + fminf(0.0f, kSplay)));
 
         if (clickyCrackleT > 0.0f) {
             float env = clickyCrackleT / CLICKY_CRACKLE_S;
+            if (clickyCrackleRev) env = 1.0f - env;
             for (int n = 0; n < 4; n++) {
                 if (randFloat() > env) continue;
                 int i = (int)lroundf(center + (randFloat() - 0.5f) * 4.0f * sigma);
@@ -884,7 +949,8 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
 
         float easeK = clickySplitEase[k];
         float fullSpacing = fmaxf(1.0f, CLICKY_PULL_NORM * REF_LEN * sigScale);
-        float spacingF = lerpf(1.0f, fullSpacing, easeK);
+        float spacingF = lerpf(1.0f, fullSpacing, easeK)
+            + fmaxf(0.0f, kSplay) * (fullSpacing - 1.0f);
         int reach = (int)(4.0f * sigma);
         for (int j = -reach; j <= reach; j++) {
             float tc = center + (float)j * spacingF;
@@ -893,7 +959,8 @@ static void rasterStrip(uint8_t s, uint16_t len, const ClickyPacketV1 &pkt,
             // Sub-pixel splat only while the split animates; settled comb
             // snaps to single crisp pixels (and settled blob keeps the old
             // integer-center look).
-            float tcs = (easeK <= 0.001f || easeK >= 0.999f)
+            float tcs = (kSplay <= 0.001f
+                         && (easeK <= 0.001f || easeK >= 0.999f))
                 ? (float)lroundf(tc) : tc;
             // Clip at the strip ends — the field is a LINE, not a ring; only
             // kettle displacement (dup layer, carousel stage) bridges the seam.
@@ -1127,16 +1194,25 @@ static void renderClickyParticles(float dt) {
     float alpha = fminf(1.0f, dt / CLICKY_POS_TAU);
 
     // Sandbox: all button holds route to the ghost recorder instead.
-    bool fadeHeld   = false;
-    bool gatherHeld = false;
+    bool fadeHeld   = pkt.btnBits & (1 << SANDBOX_BTN_FADE);
+    bool gatherHeld = pkt.btnBits & (1 << SANDBOX_BTN_GATHER);
     bool desatHeld  = false;
     bool pumpHeld   = false;
     bool hueRotHeld = pkt.btnBits & (1 << SANDBOX_BTN_HUEROT);
 
     float prevFade = clickyFade;
     if (fadeHeld) clickyFade = fmaxf(0.0f, clickyFade - dt / CLICKY_FADE_S);
-    else          clickyFade = fminf(1.0f, clickyFade + dt / CLICKY_RECOVER_S);
-    if (prevFade > 0.0f && clickyFade <= 0.0f) clickyCrackleT = CLICKY_CRACKLE_S;
+    else          clickyFade = fminf(1.0f, clickyFade + dt / CLICKY_FADE_S);
+    if (prevFade > 0.0f && clickyFade <= 0.0f) {
+        clickyCrackleT = CLICKY_CRACKLE_S;
+        clickyCrackleRev = false;
+    }
+    // Leaving black replays the crackle time-reversed: sparks condense from
+    // nothing to a pop, then hand off to the returning color.
+    if (prevFade <= 0.0f && clickyFade > 0.0f) {
+        clickyCrackleT = CLICKY_CRACKLE_S;
+        clickyCrackleRev = true;
+    }
 
     if (gatherHeld) clickyGather = fminf(1.0f, clickyGather + dt / CLICKY_GATHER_S);
     else            clickyGather = fmaxf(0.0f, clickyGather - dt / CLICKY_GATHER_S);
@@ -1217,14 +1293,23 @@ static void renderClickyParticles(float dt) {
 
 static DuckFeatures duck;
 
+// AX_DUCK_SPARKLE picks the renderer on the SAME tuned features: 1 = onset
+// sparkle bursts (original-duck look), 0 = the energy waterfall.
+#define AX_DUCK_SPARKLE 1
+
+static DuckSparkleCtl duckSp;
+
 static float wfLevel[NUM_STRIPS][MAX_LEDS];
 static float wfHue[NUM_STRIPS][MAX_LEDS];
 static float wfTilt[NUM_STRIPS][MAX_LEDS];
+static float wfDec[NUM_STRIPS][MAX_LEDS];
 
 static void resetWaterfall() {
     memset(wfLevel, 0, sizeof(wfLevel));
     memset(wfHue, 0, sizeof(wfHue));
     memset(wfTilt, 0, sizeof(wfTilt));
+    memset(wfDec, 0, sizeof(wfDec));
+    duckSp.env = 0.0f;
 }
 
 static bool duckLive() {
@@ -1244,11 +1329,18 @@ static void duckUpdate(float dt) {
 }
 
 static void renderWaterfall(float dt, bool live) {
-    float inject = duckWaterfallInject(duck, live);
     memset(duckBuf, 0, sizeof(duckBuf));
+#if AX_DUCK_SPARKLE
+    float ignite = duckSparkleFrame(duckSp, duck, live, dt);
+    for (uint8_t s = 0; s < NUM_STRIPS; s++)
+        duckSparkleStep(wfLevel[s], wfHue[s], wfTilt[s], wfDec[s], STRIP_LEN[s],
+                        duck, duckSp, ignite, dt, randFloat, duckBuf[s]);
+#else
+    float inject = duckWaterfallInject(duck, live);
     for (uint8_t s = 0; s < NUM_STRIPS; s++)
         duckWaterfallStep(wfLevel[s], wfHue[s], wfTilt[s], STRIP_LEN[s],
                           duck, inject, dt, randFloat, duckBuf[s], SEG[s].wfRev);
+#endif
 }
 
 // ── Setup ────────────────────────────────────────────────────────

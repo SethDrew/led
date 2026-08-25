@@ -98,6 +98,13 @@ festicorn/rf-bench/data/
 # Dashboard QA screenshots (generated)
 festicorn/tools/console-dashboard/shots/
 
+# Axismundi ambient audio bed — downloaded albums/sets, re-fetchable with yt-dlp
+# (tiers.yaml is the inventory/source of truth; the media itself never goes in git)
+festicorn/axismundi/audio/*.opus
+festicorn/axismundi/audio/*.m4a
+festicorn/axismundi/audio/*.mp3
+festicorn/axismundi/audio/*.webm
+
 # ESP-IDF generated per-env sdkconfig (sdkconfig.defaults is the source)
 festicorn/*/sdkconfig.*
 !festicorn/*/sdkconfig.defaults

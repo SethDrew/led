@@ -71,6 +71,9 @@ KETTLE_BTNS = [
      "region": "right"},
     {"label": "crackle", "sub": "bottom · GPIO 5 · hold · sparks pinned in place",
      "region": "bottom"},
+    {"label": "aux-mom", "sub": "new · GPIO 3 · momentary · unassigned", "region": None},
+    {"label": "keep-temp", "sub": "new · GPIO 4 · toggle (latched) · unassigned",
+     "region": None},
 ]
 REGIONS = ["top", "left", "right", "bottom"]
 
@@ -82,7 +85,7 @@ ROSTER = [
     {"role": "clicky", "title": "CLICKY-POTS", "baud": 230400,
      "detail": "6 push-pull pots + 6 buttons"},
     {"role": "kettle", "title": "KETTLE-KNOB", "baud": 115200,
-     "detail": "30-detent encoder + 5 buttons"},
+     "detail": "30-detent encoder + 7 buttons"},
     {"role": "duck", "title": "DUCK-SENDER", "baud": 115200,
      "detail": "mic energy waterfall · tilt recolors the water"},
 ]

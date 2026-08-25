@@ -12,7 +12,9 @@
 //   magic     0xEC11 (the encoder part family)
 //   ver       1
 //   seq       send counter (wraps)
-//   btnBits   bit 0 = knob push (GPIO 21), then GPIO 9, 7, 6, 5 on bits 1-4
+//   btnBits   bit 0 = knob push (GPIO 21), then GPIO 9, 7, 6, 5 on bits 1-4,
+//             GPIO 3 on bit 5 (momentary) and GPIO 4 on bit 6 (latched toggle —
+//             the bit tracks switch position, not a press edge)
 //   enc       cumulative quadrature count, signed; 2 counts per detent,
 //             30 detents per revolution. Receivers consume deltas.
 //   upMs      sender uptime; a regression means the sender rebooted and enc
@@ -28,7 +30,7 @@
 
 #define KETTLE_MAGIC 0xEC11
 #define KETTLE_VER   1
-#define KETTLE_NUM_BTNS 5
+#define KETTLE_NUM_BTNS 7
 #define KETTLE_COUNTS_PER_DETENT 2
 #define KETTLE_DETENTS_PER_REV   30
 
@@ -37,6 +39,8 @@
 #define KETTLE_BTN_UPMID  2   // GPIO 7: wave, upper middle
 #define KETTLE_BTN_LOMID  3   // GPIO 6: wave, lower middle
 #define KETTLE_BTN_BOTTOM 4   // GPIO 5: wave, bottom 20 LEDs
+#define KETTLE_BTN_AUXMOM   5 // GPIO 3: momentary, unassigned
+#define KETTLE_BTN_KEEPTEMP 6 // GPIO 4: latched toggle, unassigned
 
 struct __attribute__((packed)) KettlePacketV1 {
     uint16_t magic;

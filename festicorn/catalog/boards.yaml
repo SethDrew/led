@@ -410,11 +410,12 @@ boards:
     counts_per_detent: 2
     detents_per_rev: 30
   buttons:
-    pins: [21, 9, 7, 6, 5]
-    notes: 21 = knob push; 9 shares the BOOT strap (held at power-on = download mode)
+    pins: [21, 9, 7, 6, 5, 3, 4]
+    notes: 21 = knob push; 9 shares the BOOT strap (held at power-on = download mode);
+      4 is a latched toggle, the rest momentary
   notes: |
     Axis Mundi input console: salvaged infinite-spin water-heater encoder +
-    5 buttons. Broadcasts KettlePacketV1 (13 B) on ESP-NOW ch 1; firmware
+    7 buttons. Broadcasts KettlePacketV1 (13 B) on ESP-NOW ch 1; firmware
     pins TX power below this unit's brownout cliff (current value: see
     esp_wifi_set_max_tx_power in kettle-knob src/main.cpp).
     Receiver: led-eth-1 (axismundi).

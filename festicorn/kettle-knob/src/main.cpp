@@ -7,7 +7,7 @@
 #define ENC_A 20
 #define ENC_B 10
 
-static const uint8_t BTN_PINS[] = {21, 9, 7, 6, 5};
+static const uint8_t BTN_PINS[] = {21, 9, 7, 6, 5, 3, 4};
 static const int NUM_BTNS = sizeof(BTN_PINS);
 
 #define FIXED_CHANNEL 1
@@ -124,12 +124,14 @@ void loop() {
         esp_now_send(BROADCAST_ADDR, (const uint8_t*)&pkt, sizeof(pkt));
 
         uint8_t s = prevState;
-        Serial.printf("{\"c\":%ld,\"a\":%d,\"b\":%d,\"btn\":[%d,%d,%d,%d,%d],"
-                      "\"n\":[%lu,%lu,%lu,%lu,%lu],\"up\":%lu,\"seq\":%u}\n",
+        Serial.printf("{\"c\":%ld,\"a\":%d,\"b\":%d,\"btn\":[%d,%d,%d,%d,%d,%d,%d],"
+                      "\"n\":[%lu,%lu,%lu,%lu,%lu,%lu,%lu],\"up\":%lu,\"seq\":%u}\n",
                       (long)c, (s >> 1) & 1, s & 1,
                       (btnMask >> 0) & 1, (btnMask >> 1) & 1, (btnMask >> 2) & 1,
                       (btnMask >> 3) & 1, (btnMask >> 4) & 1,
+                      (btnMask >> 5) & 1, (btnMask >> 6) & 1,
                       presses[0], presses[1], presses[2], presses[3], presses[4],
+                      presses[5], presses[6],
                       now, pkt.seq);
     }
     delay(2);

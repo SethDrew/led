@@ -157,7 +157,7 @@ firmware_by_role:
     source: null
     hardware:
       chip: esp32-c3
-      strips: 2× WS2812-class (color order unverified — assumed GRB)
+      strips: 2× WS2811 bulb strings (RGB order — see LED_LIBRARY.md)
       pins: GPIO 3 (strip A) / GPIO 4 (strip B) data; GPIO 2 momentary
         button (other terminal to GND); I2C SDA=6 SCL=5 (MPU-6500 @ 0x68)
       hazards: |

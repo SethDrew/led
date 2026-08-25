@@ -118,12 +118,50 @@
     #rail { flex-direction:row; overflow-x:auto; }
     .mini { min-width:210px; }
   }
+
+  .portnote { margin:8px 12px 0; font-size:9px; color:#666; }
+  .portnote summary { cursor:pointer; color:#a44; list-style:none; user-select:none; }
+  .portnote summary::-webkit-details-marker { display:none; }
+  .portnote summary:hover { color:#c66; }
+  .portnote .body { margin-top:6px; padding:8px 10px; background:#181818;
+                    border:1px solid #262626; border-radius:6px; line-height:1.7;
+                    color:#8a8a8a; max-width:660px; }
+  .portnote .body b { color:#bbb; font-weight:normal; }
+  .portnote .body code { color:#9a9; }
+  .portnote pre { margin:7px 0 0; padding:7px 9px; background:#111; border:1px solid #2a2a2a;
+                  border-radius:4px; color:#9a9; white-space:pre-wrap; font-size:9px; line-height:1.6; }
+  .portnote button { font:inherit; font-size:9px; color:#9a9; background:#1e1e1e;
+                     border:1px solid #333; border-radius:4px; padding:2px 8px; cursor:pointer; margin-top:7px; }
+  .portnote button:hover { border-color:#4a8; color:#ddd; }
 </style>
 </head><body>
 <header>
   <h1>AXIS MUNDI</h1>
   <div class="roll" id="roll"></div>
 </header>
+<details class="portnote">
+  <summary>◦ board offline but plugged in via USB? — why &amp; how to fix</summary>
+  <div class="body">
+    The dashboard resolves serial ports <b>once at startup and never rescans</b>.
+    macOS renumbers <code>/dev/cu.usbserial-*</code> whenever a board is unplugged/replugged
+    (or the hub re-enumerates), so a reader gets stuck on a dead path — the board is live on
+    USB but reads <b>offline · 0rb · 0gap</b> and its panel just shows stale values. The fix is
+    to restart the dashboard against the current ports. Paste this to Claude:
+    <pre id="portnote-msg">Axis Mundi dashboard shows a board offline (0rb / 0gap) but it's plugged in via USB. The ports went stale: dashboard.py resolves /dev/cu.usb* once at startup and never rescans, and macOS renumbers the usbserial paths on replug. Please fix: run `ls /dev/cu.usb*`, kill the running dashboard.py, then relaunch it with .venv/bin/python against the current ports — exclude the sculpture receiver /dev/cu.usbserial-10, --include clicky's usbserial port, and let the kettle usbmodem be discovered (or pin it with --port kettle=/dev/cu.usbmodemXXX if it misses the 1.5s probe window). Then confirm via /api/state that the boards read online.</pre>
+    <button id="portnote-copy">copy for Claude</button>
+  </div>
+</details>
+<script>
+(function(){
+  var b=document.getElementById('portnote-copy');
+  b.addEventListener('click',function(){
+    navigator.clipboard.writeText(document.getElementById('portnote-msg').textContent).then(function(){
+      b.textContent='copied ✓';
+      setTimeout(function(){b.textContent='copy for Claude';},1500);
+    });
+  });
+})();
+</script>
 <div class="stage">
   <div id="rail"></div>
   <div id="stagepanel"></div>

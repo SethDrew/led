@@ -55,10 +55,28 @@ before trusting the label.
 Total ≈ 3000 px. Guys are a SAFETY layer: they hold a dim slow rainbow and
 never participate in effects (see `ax_paint_straps` in the fx twin).
 
+## Pin grouping — four 4-output boards, 16 pins, decided 2026-08-26
+
+16 data lines land 1:1 on four 4-output eth boards (pins 13/27/32/33 each;
+board identities assigned in the board catalog at deploy time). The only
+splitters in the system are the canopy's mirror Y-pairs above. No data line
+travels the trunk — every board drives locally.
+
+| Board (site) | pin 13 | pin 27 | pin 32 | pin 33 |
+|---|---|---|---|---|
+| CANOPY (hub) | rim pair 1 | rim pair 2 | rim pair 3 | rim pair 4 |
+| RAYS (hub) | spoke 0 | spoke 2 | spoke 4 | spoke 6 |
+| TRUNK (hub) | helix serpentine | spoke 1 | spoke 3 | spoke 5 |
+| ROOTS (base) | root A | root B | root C | root D |
+
+Spokes are numbered from the vertex diametrically opposite S0 (the rim
+seam) and alternate between RAYS and TRUNK, so a single board failure
+darkens every other ray instead of a contiguous arc. All hub-board data
+legs originate at the ⌀6 in coupling; the ROOTS board sits at the base PSU.
+Per-pin wire lengths: canopy 100 px, spokes 200 px, helix 300 px,
+roots 150 px.
+
 ## Open items
 
-- **Pin grouping**: the canopy rim takes 4 of the controller's 8 outputs
-  (Y-split pairs above). How the 7 long-spoke/guy chains + helix share the
-  remaining pins is NOT yet decided.
 - Bullet-strand color order and strip color order unverified until the
   physical batches are tested.

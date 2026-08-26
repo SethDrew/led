@@ -43,6 +43,15 @@ static float AX_DUCK_AGE = 1e9f;
 // pushing entirely once a desk goes stale, so this is what stops a console
 // unplugged mid-press from acting forever.
 static float AX_KETTLE_AGE = 1e9f;
+static float AX_CLICKY_AGE = 1e9f;
+
+// Resting show (twin of the firmware's clickyRest): no live clicky console →
+// particles keep playing at half brightness, a fifth speed, eased.
+#define AX_CLICKY_LIVE_S 3.0f
+#define AX_REST_DIM      0.5f
+#define AX_REST_SPEED    0.2f
+#define AX_REST_TAU_S    0.75f
+static float ax_clickyRest = 0.0f;
 
 
 #define AX_REF_LEN    100.0f
@@ -259,6 +268,7 @@ static void ax_reset() {
     for (int k = 0; k < AX_NUM_POTS; k++) { ax_movedAgo[k] = 1e9f; ax_pump[k] = 1.0f; }
     ax_fade = 1.0f; ax_crackleT = 0.0f; ax_crackleRev = false; ax_gather = 0.0f;
     ax_desat = 1.0f; ax_prevPull = 0; ax_shardNext = 0;
+    axfxSapReset();
     ax_ready = true;
 }
 
@@ -408,7 +418,7 @@ static void ax_kettle_update(float dt) {
 // milliseconds for the rest-vector calibration window.
 // AX_DUCK_SPARKLE picks the renderer on the SAME tuned features: 1 = onset
 // sparkle bursts (original-duck look), 0 = the energy waterfall.
-#define AX_DUCK_SPARKLE 1
+#define AX_DUCK_SPARKLE 0
 static DuckFeatures ax_duck;
 static float ax_wf_lvl[HC_NUM_LEDS];
 static float ax_wf_hue[HC_NUM_LEDS];
@@ -455,6 +465,8 @@ static void ax_write_ring(RGBf* out, int sIdx, int base, int len, int ring,
     memset(crk, 0, sizeof(float) * len);
     kettleCrackleSplat(ax_kettle, ring, len, crk);
     const float s = ax_brightness / 255.0f;
+    const float (*fx)[3] = axfxRow(sIdx);
+    const float (*sap)[3] = axfxSapRow(sIdx);
     for (int i = 0; i < len; i++) {
         float srcF = fmodf((float)i - off, (float)len);
         if (srcF < 0.0f) srcF += (float)len;
@@ -463,9 +475,13 @@ static void ax_write_ring(RGBf* out, int sIdx, int base, int len, int ring,
         int i1 = (i0 + 1) % len;
         float fr = srcF - (float)i0;
         const float c = crk[i] * AXK_CRK_LEVEL;
-        float pr = ax_lerp(comp[i0][0], comp[i1][0], fr) * s + duck[i][0] / 255.0f + axfxBuf[sIdx][i][0] / 255.0f + c;
-        float pg = ax_lerp(comp[i0][1], comp[i1][1], fr) * s + duck[i][1] / 255.0f + axfxBuf[sIdx][i][1] / 255.0f + c;
-        float pb = ax_lerp(comp[i0][2], comp[i1][2], fr) * s + duck[i][2] / 255.0f + axfxBuf[sIdx][i][2] / 255.0f + c;
+        // The sap wipe crossfades the clicky particle layer ALONE: duck,
+        // crackle and the kettle ambients play through it untouched.
+        const float cf = s * (AX_REST_DIM + (1.0f - AX_REST_DIM) * ax_clickyRest)
+                       * (1.0f - axfxWipeAt(sIdx, i));
+        float pr = ax_lerp(comp[i0][0], comp[i1][0], fr) * cf + duck[i][0] / 255.0f + fx[i][0] / 255.0f + sap[i][0] / 255.0f + c;
+        float pg = ax_lerp(comp[i0][1], comp[i1][1], fr) * cf + duck[i][1] / 255.0f + fx[i][1] / 255.0f + sap[i][1] / 255.0f + c;
+        float pb = ax_lerp(comp[i0][2], comp[i1][2], fr) * cf + duck[i][2] / 255.0f + fx[i][2] / 255.0f + sap[i][2] / 255.0f + c;
         hueArcRolloff(pr, pg, pb, 1.0f);
         out[base+i].r = pr;
         out[base+i].g = pg;
@@ -694,6 +710,24 @@ static void ax_build_axfrac() {
                 (rmax - hypotf(LED_POS[b + i].x, LED_POS[b + i].y)) / span;
     }
     ax_axfrac_ready = true;
+}
+
+// Sap journey: ax_axfrac already runs each section the way the sap flows —
+// roots outer tip -> pole foot, helix top -> bottom, canopy hub -> rim tip —
+// so each kind is one span mapping, with the helix reversed because its axfrac
+// starts at the top. Guy straps (kind 3) are not a display surface.
+static void ax_build_sapj() {
+    static float j[AX_MAX_STRIP];
+    for (int s = 0; s < HC_NUM_STRIPS; s++) {
+        const int b = HC_STRIPS[s].start, n = HC_STRIPS[s].count;
+        if (HC_STRIPS[s].kind == 3) { axfxSapSetSegJ(s, 0, nullptr); continue; }
+        float j0, j1;
+        if (HC_STRIPS[s].kind == 0)      { j0 = AXFX_SAP_J_HELIX; j1 = AXFX_SAP_J_ROOTS; }
+        else if (HC_STRIPS[s].kind == 1) { j0 = AXFX_SAP_J_HELIX; j1 = 1.0f; }
+        else                             { j0 = 0.0f; j1 = AXFX_SAP_J_ROOTS; }
+        for (int i = 0; i < n; i++) j[i] = j0 + (j1 - j0) * ax_axfrac[b + i];
+        axfxSapSetSegJ(s, n, j);
+    }
 }
 
 // The particle field is splatted at lenR (RASTER resolution) and mapped onto
@@ -1009,24 +1043,6 @@ static inline float ax_dt(float t) {
     return dt;
 }
 
-// Duck alone: the firmware's clicky-absent branch (zeroed frame, waterfall,
-// carousel) with no particle layer to compose against.
-static void ax_raster_duck_only(RGBf* out, int sIdx, int base, int len, int ring, float dt) {
-    static float comp[AX_MAX_STRIP][3];
-    static float dbuf[AX_MAX_STRIP][3];
-    memset(comp, 0, sizeof(float) * len * 3);
-    memset(dbuf, 0, sizeof(float) * len * 3);
-#if AX_DUCK_SPARKLE
-    duckSparkleStep(ax_wf_lvl + base, ax_wf_hue + base, ax_wf_tlt + base,
-                    ax_wf_dec + base, len, ax_duck, ax_duck_sp,
-                    ax_duck_ignite, dt, ax_rand, dbuf);
-#else
-    duckWaterfallStep(ax_wf_lvl + base, ax_wf_hue + base, ax_wf_tlt + base, len,
-                      ax_duck, ax_duck_inject, dt, ax_rand, dbuf, false);
-#endif
-    ax_write_ring(out, sIdx, base, len, ring, true, comp, dbuf);
-}
-
 static void ax_render_clicky(RGBf* out, float dt) {
     ax_rufflePhase += dt * AX_RUFFLE_SPEED;
     if (ax_rufflePhase >= 2.0f * (float)M_PI) ax_rufflePhase -= 2.0f * (float)M_PI;
@@ -1199,15 +1215,8 @@ static inline void ax_apply_armature(RGBf* out, float dt) {
 // Either console may be absent; with neither the sculpture holds dark.
 static inline void fx_axismundi(RGBf* out, float t) {
     if (!ax_ready) { ax_reset(); ax_kettle_reset(); ax_duck_reset(); }
-    if (!ax_axfrac_ready) ax_build_axfrac();
+    if (!ax_axfrac_ready) { ax_build_axfrac(); ax_build_sapj(); }
     const float dt = ax_dt(t);
-
-    if (!AX_CLICKY_SEEN && !AX_KETTLE_SEEN && !AX_DUCK_SEEN) {
-        for (int i = 0; i < HC_NUM_LEDS; i++) out[i].r = out[i].g = out[i].b = 0.0f;
-        ax_paint_straps(out, t);
-        ax_apply_armature(out, dt);
-        return;
-    }
 
     ax_kettle_update(dt);
 #if AX_LOOP_RECORD
@@ -1215,18 +1224,15 @@ static inline void fx_axismundi(RGBf* out, float t) {
 #endif
     ax_duck_update(dt);
     axfxRender(ax_axfxEffect, ax_axfxDrive, dt);
+    axfxSapFrame(AX_KETTLE_SEEN
+                 && ((AX_KETTLE.btnBits >> AXFX_SAP_BTN) & 1), dt);
 
-    if (AX_CLICKY_SEEN) {
-        ax_render_clicky(out, dt);
-    } else {
-        for (int i = 0; i < HC_NUM_LEDS; i++) out[i].r = out[i].g = out[i].b = 0.0f;
-        ax_brightness = 1.0f;
-        for (int s = 0; s < HC_NUM_STRIPS; s++) {
-            if (HC_STRIPS[s].kind == 3) continue;
-            ax_raster_duck_only(out, s, HC_STRIPS[s].start, HC_STRIPS[s].count,
-                                s & 3, dt);
-        }
-    }
+    AX_CLICKY_AGE += dt;
+    bool clickyOn = AX_CLICKY_SEEN && AX_CLICKY_AGE < AX_CLICKY_LIVE_S;
+    ax_clickyRest += fminf(1.0f, dt / AX_REST_TAU_S)
+        * ((clickyOn ? 1.0f : 0.0f) - ax_clickyRest);
+    ax_render_clicky(out, dt * (AX_REST_SPEED
+        + (1.0f - AX_REST_SPEED) * ax_clickyRest));
 #if AX_LOOP_RECORD
     axlr_apply(out);
 #endif

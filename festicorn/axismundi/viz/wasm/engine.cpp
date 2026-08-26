@@ -59,6 +59,7 @@ void set_clicky(int pullBits, int btnBits,
     const int p[6] = { p0, p1, p2, p3, p4, p5 };
     for (int i = 0; i < 6; i++) AX_CLICKY.pos[i] = (uint16_t)p[i];
     AX_CLICKY_SEEN = true;
+    AX_CLICKY_AGE  = 0.0f;
 }
 void set_kettle(int btnBits, int enc, int upMs) {
     AX_KETTLE.btnBits = (uint8_t)btnBits;

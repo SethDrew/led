@@ -7,7 +7,9 @@
  * gesture from the release pose (ping-pong). Tap (<~0.25 s) clears it.
  * Fade recovery retraces at the fade's own rate — no snap back — and
  * leaving black replays the crackle time-reversed.
- * Pot 5 stays the brightness fader. Everything else unchanged.
+ * Pot 5 stays the brightness fader. The panel toggle switch (btnBits bit 6) is
+ * a LEVEL: on wipes the sculpture bottom-up from the particle show into the
+ * sap flow, off drains it back top-down. Everything else unchanged.
  *
  * Original header follows.
  *
@@ -120,6 +122,25 @@ static uint16_t STRIP_LEN[AM_NS];
 #define AXFX_MAXLEN MAX_LEDS
 #define AXFX_LEN(s) STRIP_LEN[s]
 #include "axfx_ambient.h"
+
+// Each segment's slice of the sap journey (0 = root tips, 1 = canopy tips),
+// mapped through the segment's own u after the wfRev flip — so the mockup's
+// roots read tip->trunk, its helices base->top and its canopy chains hub->tip.
+// The bench layout carries no roots/helix semantics: all four rise in parallel
+// over the whole span.
+#if defined(AM_MOCKUP)
+static const float SEG_J[AM_NS][2] = {
+    {AXFX_SAP_J_HELIX, 1.0f},             {AXFX_SAP_J_HELIX, 1.0f},
+    {AXFX_SAP_J_ROOTS, AXFX_SAP_J_HELIX}, {0.0f, AXFX_SAP_J_ROOTS},
+    {0.0f, AXFX_SAP_J_ROOTS},             {0.0f, AXFX_SAP_J_ROOTS},
+    {AXFX_SAP_J_ROOTS, AXFX_SAP_J_HELIX}, {0.0f, AXFX_SAP_J_ROOTS},
+    {0.0f, AXFX_SAP_J_ROOTS},             {0.0f, AXFX_SAP_J_ROOTS},
+};
+#else
+static const float SEG_J[AM_NS][2] = {
+    {0.0f, 1.0f}, {0.0f, 1.0f}, {0.0f, 1.0f}, {0.0f, 1.0f},
+};
+#endif
 
 #define FIXED_CHANNEL 1
 
@@ -467,6 +488,8 @@ static void outputRotated() {
     static float crk[MAX_LEDS];
     for (uint8_t s = 0; s < NUM_STRIPS; s++) {
         uint16_t len = STRIP_LEN[s];
+        const float (*fx)[3] = axfxRow(s);
+        const float (*sap)[3] = axfxSapRow(s);
         float off = kettleRot(kettle, SEG[s].strip) * (float)len;
         for (uint16_t i = 0; i < len; i++) {
             float srcF = fmodf((float)i - off, (float)len);
@@ -487,11 +510,14 @@ static void outputRotated() {
             // chroma and leaves the residual hue pointing anywhere -- the
             // one way past the red/blue arc guarantee.
             float c = crk[i] * KETTLE_CRK_LEVEL;
+            // The sap wipe crossfades the clicky particle layer ALONE: duck,
+            // crackle and the kettle ambients play through it untouched.
+            float cf = gBrightness * (1.0f - axfxWipeAt(s, i));
             // gBrightness (pot 5) is a clicky-layer fader: it scales the
             // rotated particle field only, never the duck or the crackle.
-            float cr = phys[i][0] * gBrightness + duckBuf[s][i][0] + axfxBuf[s][i][0] + c;
-            float cg = phys[i][1] * gBrightness + duckBuf[s][i][1] + axfxBuf[s][i][1] + c;
-            float cb = phys[i][2] * gBrightness + duckBuf[s][i][2] + axfxBuf[s][i][2] + c;
+            float cr = phys[i][0] * cf + duckBuf[s][i][0] + fx[i][0] + sap[i][0] + c;
+            float cg = phys[i][1] * cf + duckBuf[s][i][1] + fx[i][1] + sap[i][1] + c;
+            float cb = phys[i][2] * cf + duckBuf[s][i][2] + fx[i][2] + sap[i][2] + c;
 #if LOOP_RECORD
             lrTap(s, i, cr, cg, cb);
 #endif
@@ -1368,6 +1394,9 @@ void setup() {
     kettleReset(kettle);
     kettleSetRings(kettle, AM_NUM_RINGS);
     axfxDriveInit(axfxDrive);
+    axfxSapReset();
+    for (uint8_t s = 0; s < NUM_STRIPS; s++)
+        axfxSapSetSeg(s, SEG[s].len, SEG_J[s][0], SEG_J[s][1], SEG[s].wfRev != 0);
 
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
@@ -1457,6 +1486,8 @@ void loop() {
     }
     renderWaterfall(dt, duckLive());
     axfxRender(axfxEffect, axfxDrive, dt);
+    axfxSapFrame(kettleLastMs != 0
+                 && ((kettlePkt.btnBits >> AXFX_SAP_BTN) & 1), dt);
     outputRotated();
 #if LOOP_RECORD
     lrApply(now);

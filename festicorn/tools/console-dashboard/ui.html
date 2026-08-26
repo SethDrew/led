@@ -489,11 +489,11 @@ fetchRetry('/api/config').then(r => r.json()).then(c => {
 // console is online, which it isn't when this panel is in use.
 function wireSimConsole() {
   const st = { p: [0.5, 0.5, 0.5, 0.5, 0.5, 1.0],
-               btn: [0, 0, 0, 0, 0, 0], pull: [0, 0, 0, 0, 0, 0] };
-  const kt = { enc: 0, hold: 0, twist: 0, fly: 0, counter: 0, crackle: 0 };
+               btn: [0, 0, 0, 0, 0, 0, 0], pull: [0, 0, 0, 0, 0, 0] };
+  const kt = { enc: 0, hold: 0, twist: 0, fly: 0, counter: 0, crackle: 0, keep: 0 };
   window.__sim = {
     set(k, v) { st.p[k] = v; },
-    btn(mask) { for (let k = 0; k < 6; k++) st.btn[k] = (mask >> k) & 1; },
+    btn(mask) { for (let k = 0; k < 7; k++) st.btn[k] = (mask >> k) & 1; },
     pull(mask) { for (let k = 0; k < 6; k++) st.pull[k] = (mask >> k) & 1; },
     spin(counts) { kt.enc += counts; },
     kpress(v) { kt.hold = v ? 1 : 0; },
@@ -516,7 +516,8 @@ function wireSimConsole() {
   const hues = [0, 60, 120, 180, 272, 300];
   const div = document.createElement('div');
   div.id = 'simpanel';
-  div.innerHTML = '<b>virtual clicky</b> <span style="color:#678">(hold B0-B5 / keys 1-6)</span>' +
+  div.innerHTML = '<b>virtual clicky</b> <button id="simcoff">OFF</button>' +
+    ' <span style="color:#678">(hold B0-B5 / keys 1-6; OFF/O = console dark, resting show)</span>' +
     st.p.map((v, k) =>
       '<div class="srowx"><span class="hue" style="background:hsl(' + hues[k] + ',90%,55%)"></span>' +
       '<input type="range" min="0" max="1" step="0.001" value="' + v + '" id="simp' + k + '">' +
@@ -532,7 +533,9 @@ function wireSimConsole() {
     '<div class="srowx"><span style="color:#678">hold:</span>' +
     '<button id="simkd">DUP</button>' +
     '<button id="simks">SPLAY</button>' +
-    '<span style="color:#678">latch here, hold on the real panel (D / S)</span></div>';
+    '<span style="color:#678">latch here, hold on the real panel (D / S)</span></div>' +
+    '<div class="srowx"><button id="simkw">SAP</button>' +
+    '<span style="color:#678">keep-warm latch, bit 6 (or W)</span></div>';
   document.body.appendChild(div);
   for (let k = 0; k < 6; k++) {
     document.getElementById('simp' + k).addEventListener('input',
@@ -607,12 +610,20 @@ function wireSimConsole() {
   };
   latch('simkd', 'counter', 'd');
   latch('simks', 'crackle', 's');
+  latch('simkw', 'keep', 'w');
+  let cOff = 0;
+  const cob = document.getElementById('simcoff');
+  const coFlip = () => { cOff ^= 1; cob.classList.toggle('on', !!cOff); };
+  cob.addEventListener('click', coFlip);
+  document.addEventListener('keydown', e => {
+    if (e.key.toLowerCase() === 'o' && !e.repeat) coFlip();
+  });
   setInterval(() => {
     if (!window.LED3D) return;
     window.LED3D.applyState({ roles: {
-      clicky: { online: true, state: st },
+      clicky: cOff ? { online: false } : { online: true, state: st },
       kettle: { online: true, state: {
-        c: kt.enc, btn: [kt.hold, kt.fly, kt.twist, kt.counter, kt.crackle],
+        c: kt.enc, btn: [kt.hold, kt.fly, kt.twist, kt.counter, kt.crackle, 0, kt.keep],
         up: Math.round(performance.now()) } },
     } });
   }, 33);

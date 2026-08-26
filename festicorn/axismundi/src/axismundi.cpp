@@ -75,7 +75,10 @@
 // wfRev flips the duck waterfall's flow within the segment. Mockup uses it
 // for the rising-sap story: roots flow tip->trunk and helix base->top (both
 // wired head-first at trunk/top), canopy radiates hub->tip.
-struct AmSeg { uint8_t strip; uint16_t off, len; uint8_t fold, wfRev; };
+// rgb: product sends R,G,B on the wire (WS2811 bullets) vs the strips' G,R,B —
+// verify each physical batch at bring-up, flip the flag if the label lied.
+// guy: safety layer — dim slow rainbow, bypasses every effect and the carousel.
+struct AmSeg { uint8_t strip; uint16_t off, len; uint8_t fold, wfRev, rgb, guy; };
 #define AM_NUM_RINGS 4
 #if defined(AM_MOCKUP)
   static const AmSeg SEG[] = {
@@ -85,23 +88,128 @@ struct AmSeg { uint8_t strip; uint16_t off, len; uint8_t fold, wfRev; };
   };
   #define AM_NS 10
   static const uint16_t PHYS_LEN[AM_NUM_RINGS] = {100, 100, 300, 310};
+  #define MAX_LEDS 85
+#elif defined(AM_PLAYA_CANOPY)
+  static const AmSeg SEG[] = {
+    {0, 0, 100, 0, 0, 1, 0}, {1, 0, 100, 0, 0, 1, 0},
+    {2, 0, 100, 0, 0, 1, 0}, {3, 0,  75, 0, 0, 1, 0},
+  };
+  #define AM_NS 4
+  static const uint16_t PHYS_LEN[AM_NUM_RINGS] = {100, 100, 100, 100};
+  #define MAX_LEDS 100
+#elif defined(AM_PLAYA_RAYS)
+  static const AmSeg SEG[] = {
+    {0, 0, 50, 0, 0, 1, 0}, {0, 50, 150, 0, 0, 0, 1},
+    {1, 0, 50, 0, 0, 1, 0}, {1, 50, 150, 0, 0, 0, 1},
+    {2, 0, 50, 0, 0, 1, 0}, {2, 50, 150, 0, 0, 0, 1},
+    {3, 0, 50, 0, 0, 1, 0}, {3, 50, 150, 0, 0, 0, 1},
+  };
+  #define AM_NS 8
+  static const uint16_t PHYS_LEN[AM_NUM_RINGS] = {200, 200, 200, 200};
+  #define MAX_LEDS 150
+#elif defined(AM_PLAYA_TRUNK)
+  static const AmSeg SEG[] = {
+    {0, 0, 150, 0, 1, 0, 0}, {0, 150, 150, 0, 0, 0, 0},
+    {1, 0, 50, 0, 0, 1, 0}, {1, 50, 150, 0, 0, 0, 1},
+    {2, 0, 50, 0, 0, 1, 0}, {2, 50, 150, 0, 0, 0, 1},
+    {3, 0, 50, 0, 0, 1, 0}, {3, 50, 150, 0, 0, 0, 1},
+  };
+  #define AM_NS 8
+  static const uint16_t PHYS_LEN[AM_NUM_RINGS] = {300, 200, 200, 200};
+  #define MAX_LEDS 150
+#elif defined(AM_PLAYA_ROOTS)
+  static const AmSeg SEG[] = {
+    {0, 0, 75, 0, 1, 0, 0}, {0, 75, 75, 0, 0, 0, 0},
+    {1, 0, 75, 0, 1, 0, 0}, {1, 75, 75, 0, 0, 0, 0},
+    {2, 0, 75, 0, 1, 0, 0}, {2, 75, 75, 0, 0, 0, 0},
+    {3, 0, 75, 0, 1, 0, 0}, {3, 75, 75, 0, 0, 0, 0},
+  };
+  #define AM_NS 8
+  static const uint16_t PHYS_LEN[AM_NUM_RINGS] = {150, 150, 150, 150};
+  #define MAX_LEDS 75
 #else
   static const AmSeg SEG[] = {
     {0, 0, 150, 0, 0}, {1, 0, 150, 0, 0}, {2, 0, 150, 0, 0}, {3, 0, 150, 0, 0},
   };
   #define AM_NS 4
   static const uint16_t PHYS_LEN[AM_NUM_RINGS] = {150, 150, 150, 150};
+  #define MAX_LEDS 150
 #endif
 static const uint8_t NUM_STRIPS = AM_NS;
 static uint16_t STRIP_LEN[AM_NS];
-// Longest logical SEGMENT, not longest wire — logical buffers are per-segment.
-#if defined(AM_MOCKUP)
-  #define MAX_LEDS 85
-#else
-  #define MAX_LEDS 150
-#endif
 #define REF_LEN    100.0f   // LED-space tunings were authored at this length
 #define RASTER_PROPORTIONAL 1
+
+#define AXFX_NS     NUM_STRIPS
+#define AXFX_MAXLEN MAX_LEDS
+#define AXFX_LEN(s) STRIP_LEN[s]
+#include "axfx_ambient.h"
+
+// Each segment's [j0,j1] slice of the sap journey (0 = root tips, 1 = canopy
+// tips), read through the segment's own u after the wfRev flip. Bench layout
+// carries no roots/helix semantics: all four rise in parallel over the span.
+// Canopy has no table: its runs bend at the rim (spoke out, rim up to the
+// corner, rim back down), so sapRegisterSegs builds a per-LED j array instead.
+#define AM_J_MIDEDGE (AXFX_SAP_J_HELIX + 0.25f * (124.6f / 138.3f))
+#if defined(AM_MOCKUP)
+static const float SEG_J[AM_NS][2] = {
+    {AXFX_SAP_J_HELIX, 1.0f},             {AXFX_SAP_J_HELIX, 1.0f},
+    {AXFX_SAP_J_ROOTS, AXFX_SAP_J_HELIX}, {0.0f, AXFX_SAP_J_ROOTS},
+    {0.0f, AXFX_SAP_J_ROOTS},             {0.0f, AXFX_SAP_J_ROOTS},
+    {AXFX_SAP_J_ROOTS, AXFX_SAP_J_HELIX}, {0.0f, AXFX_SAP_J_ROOTS},
+    {0.0f, AXFX_SAP_J_ROOTS},             {0.0f, AXFX_SAP_J_ROOTS},
+};
+#elif defined(AM_PLAYA_CANOPY)
+#elif defined(AM_PLAYA_RAYS)
+static const float SEG_J[AM_NS][2] = {
+    {AXFX_SAP_J_HELIX, 1.0f}, {0.0f, 0.0f},
+    {AXFX_SAP_J_HELIX, 1.0f}, {0.0f, 0.0f},
+    {AXFX_SAP_J_HELIX, 1.0f}, {0.0f, 0.0f},
+    {AXFX_SAP_J_HELIX, 1.0f}, {0.0f, 0.0f},
+};
+#elif defined(AM_PLAYA_TRUNK)
+static const float SEG_J[AM_NS][2] = {
+    {AXFX_SAP_J_ROOTS, AXFX_SAP_J_HELIX}, {AXFX_SAP_J_ROOTS, AXFX_SAP_J_HELIX},
+    {AXFX_SAP_J_HELIX, 1.0f}, {0.0f, 0.0f},
+    {AXFX_SAP_J_HELIX, 1.0f}, {0.0f, 0.0f},
+    {AXFX_SAP_J_HELIX, 1.0f}, {0.0f, 0.0f},
+};
+#elif defined(AM_PLAYA_ROOTS)
+static const float SEG_J[AM_NS][2] = {
+    {0.0f, AXFX_SAP_J_ROOTS}, {0.0f, AXFX_SAP_J_ROOTS},
+    {0.0f, AXFX_SAP_J_ROOTS}, {0.0f, AXFX_SAP_J_ROOTS},
+    {0.0f, AXFX_SAP_J_ROOTS}, {0.0f, AXFX_SAP_J_ROOTS},
+    {0.0f, AXFX_SAP_J_ROOTS}, {0.0f, AXFX_SAP_J_ROOTS},
+};
+#else
+static const float SEG_J[AM_NS][2] = {
+    {0.0f, 1.0f}, {0.0f, 1.0f}, {0.0f, 1.0f}, {0.0f, 1.0f},
+};
+#endif
+
+static void sapRegisterSegs() {
+#if defined(AM_PLAYA_CANOPY)
+    static float j[MAX_LEDS];
+    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        int len = SEG[s].len;
+        for (int i = 0; i < len; i++) {
+            if (i < 50)
+                j[i] = AXFX_SAP_J_HELIX
+                     + (AM_J_MIDEDGE - AXFX_SAP_J_HELIX) * ((float)i / 49.0f);
+            else if (i < 75)
+                j[i] = AM_J_MIDEDGE
+                     + (1.0f - AM_J_MIDEDGE) * ((float)(i - 50) / 24.0f);
+            else
+                j[i] = 1.0f - (1.0f - AM_J_MIDEDGE) * ((float)(i - 75) / 24.0f);
+        }
+        axfxSapSetSegJ(s, len, j);
+    }
+#else
+    for (uint8_t s = 0; s < NUM_STRIPS; s++)
+        axfxSapSetSeg(s, SEG[s].guy ? 0 : SEG[s].len,
+                      SEG_J[s][0], SEG_J[s][1], SEG[s].wfRev != 0);
+#endif
+}
 
 #define FIXED_CHANNEL 1
 
@@ -110,6 +218,15 @@ static uint16_t STRIP_LEN[AM_NS];
 #define BRIGHT_FLOOR       0.0f   // brightness at pot 5 fully in (full black)
 
 static float gBrightness = MASTER_BRIGHTNESS;
+
+// Resting show: with no live clicky console the particle field keeps playing,
+// half bright at a fifth speed, easing between states so heartbeat dropouts
+// don't pop.
+#define CLICKY_LIVE_MS    3000
+#define CLICKY_REST_DIM   0.5f
+#define CLICKY_REST_SPEED 0.2f
+#define CLICKY_REST_TAU_S 0.75f
+static float clickyRest = 0.0f;
 
 // ── clicky-pots panel state (over ESP-NOW) ──────────────────────
 static volatile ClickyPacketV1 clickyPkt = {};
@@ -238,14 +355,35 @@ static inline void setPixelRaw(uint8_t s, uint16_t i, const RgbColor &c) {
 }
 
 static inline void setPixel(uint8_t s, uint16_t i, uint8_t r, uint8_t g, uint8_t b) {
-    RgbColor c(r, g, b);
     const AmSeg &sg = SEG[s];
+    // GRB host feature: swapping the args makes the wire bytes land R,G,B for
+    // bullet segments.
+    RgbColor c = sg.rgb ? RgbColor(g, r, b) : RgbColor(r, g, b);
     if (sg.fold == 0) { setPixelRaw(sg.strip, sg.off + i, c); return; }
     uint16_t radial = 2 * sg.len;
     for (uint8_t k = 0; k < sg.fold; k++) {
         uint16_t base = sg.off + k * radial;
         setPixelRaw(sg.strip, base + i, c);
         setPixelRaw(sg.strip, base + radial - 1 - i, c);
+    }
+}
+
+// Twin: ax_paint_straps. Bypasses setPixelScaled's hueArcRolloff on purpose —
+// a safety layer must not be gradeable to black by the kettle arc.
+#define STRAP_LUM     0.055f
+#define STRAP_CYCLE_S 60.0f
+static void paintGuys(uint32_t now) {
+    float hue = (float)(now % (uint32_t)(STRAP_CYCLE_S * 1000.0f))
+                * (360.0f / (STRAP_CYCLE_S * 1000.0f));
+    float r, g, b;
+    hsvToRgb(hue, 1.0f, 1.0f, r, g, b);
+    uint8_t R = (uint8_t)(r * STRAP_LUM);
+    uint8_t G = (uint8_t)(g * STRAP_LUM);
+    uint8_t B = (uint8_t)(b * STRAP_LUM);
+    for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        if (!SEG[s].guy) continue;
+        for (uint16_t i = 0; i < STRIP_LEN[s]; i++)
+            setPixel(s, i, R, G, B);
     }
 }
 
@@ -343,8 +481,12 @@ static float duckBuf[NUM_STRIPS][MAX_LEDS][3];
 static void outputRotated() {
     static float phys[MAX_LEDS][3];
     static float crk[MAX_LEDS];
+    float restB = CLICKY_REST_DIM + (1.0f - CLICKY_REST_DIM) * clickyRest;
+    paintGuys(millis());
     for (uint8_t s = 0; s < NUM_STRIPS; s++) {
+        if (SEG[s].guy) continue;
         uint16_t len = STRIP_LEN[s];
+        const float (*sap)[3] = axfxSapRow(s);
         float off = kettleRot(kettle, SEG[s].strip) * (float)len;
         for (uint16_t i = 0; i < len; i++) {
             float srcF = fmodf((float)i - off, (float)len);
@@ -365,11 +507,13 @@ static void outputRotated() {
             // chroma and leaves the residual hue pointing anywhere -- the
             // one way past the red/blue arc guarantee.
             float c = crk[i] * KETTLE_CRK_LEVEL;
-            // gBrightness (pot 5) is a clicky-layer fader: it scales the
-            // rotated particle field only, never the duck or the crackle.
-            float cr = phys[i][0] * gBrightness + duckBuf[s][i][0] + c;
-            float cg = phys[i][1] * gBrightness + duckBuf[s][i][1] + c;
-            float cb = phys[i][2] * gBrightness + duckBuf[s][i][2] + c;
+            // The sap wipe crossfades the clicky particle layer ALONE: duck and
+            // crackle play through it untouched. gBrightness (pot 5) is that
+            // same clicky-layer fader — never the duck or the crackle.
+            float cf = gBrightness * restB * (1.0f - axfxWipeAt(s, i));
+            float cr = phys[i][0] * cf + duckBuf[s][i][0] + sap[i][0] + c;
+            float cg = phys[i][1] * cf + duckBuf[s][i][1] + sap[i][1] + c;
+            float cb = phys[i][2] * cf + duckBuf[s][i][2] + sap[i][2] + c;
 #if LOOP_RECORD
             lrTap(s, i, cr, cg, cb);
 #endif
@@ -756,7 +900,7 @@ static void renderClickyParticles(float dt) {
 // and the wiring into the composed frame.
 // AX_DUCK_SPARKLE picks the renderer on the SAME tuned features: 1 = onset
 // sparkle bursts (original-duck look), 0 = the energy waterfall.
-#define AX_DUCK_SPARKLE 1
+#define AX_DUCK_SPARKLE 0
 
 static DuckFeatures duck;
 static DuckSparkleCtl duckSp;
@@ -824,11 +968,15 @@ void setup() {
     Serial.printf("boot drv=%s built=%s %s heap=%u\n",
                   OUT_DRV, __DATE__, __TIME__, ESP.getFreeHeap());
 
+    for (int k = 0; k < CLICKY_NUM_POTS; k++)
+        clickyPkt.pos[k] = (k == CLICKY_BRIGHT_POT) ? 10000 : 5000;
     resetClickyParticles();
     resetWaterfall();
     duckFeaturesReset(duck);
     kettleReset(kettle);
     kettleSetRings(kettle, AM_NUM_RINGS);
+    axfxSapReset();
+    sapRegisterSegs();
 
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
@@ -858,11 +1006,26 @@ void setup() {
 #if defined(AM_MOCKUP)
     Serial.printf("Axismundi MOCKUP (%u segs: 2 canopy chains + 2x helix+3roots) ready — ch=%u\n",
                   NUM_STRIPS, FIXED_CHANNEL);
+#elif defined(AM_PLAYA_CANOPY)
+    Serial.printf("Axismundi PLAYA CANOPY (4x rim Y-pair, bullets) ready — ch=%u\n", FIXED_CHANNEL);
+#elif defined(AM_PLAYA_RAYS)
+    Serial.printf("Axismundi PLAYA RAYS (spokes 0/2/4/6 + guys) ready — ch=%u\n", FIXED_CHANNEL);
+#elif defined(AM_PLAYA_TRUNK)
+    Serial.printf("Axismundi PLAYA TRUNK (helix + spokes 1/3/5 + guys) ready — ch=%u\n", FIXED_CHANNEL);
+#elif defined(AM_PLAYA_ROOTS)
+    Serial.printf("Axismundi PLAYA ROOTS (4x double-meander pole) ready — ch=%u\n", FIXED_CHANNEL);
+#else
+    Serial.printf("Axismundi (clicky, 4-strip) ready — ch=%u\n", FIXED_CHANNEL);
+#endif
+#if !defined(AM_MOCKUP) && (defined(AM_PLAYA_CANOPY) || defined(AM_PLAYA_RAYS) || defined(AM_PLAYA_TRUNK) || defined(AM_PLAYA_ROOTS))
+    for (uint8_t s = 0; s < NUM_STRIPS; s++)
+        Serial.printf("  seg %u: wire %u off %u len %u rgb %u guy %u\n",
+                      s, SEG[s].strip, SEG[s].off, SEG[s].len, SEG[s].rgb, SEG[s].guy);
+#elif defined(AM_MOCKUP)
     for (uint8_t s = 0; s < NUM_STRIPS; s++)
         Serial.printf("  seg %u: wire %u off %u len %u fold %u\n",
                       s, SEG[s].strip, SEG[s].off, SEG[s].len, SEG[s].fold);
 #else
-    Serial.printf("Axismundi (clicky, 4-strip) ready — ch=%u\n", FIXED_CHANNEL);
     Serial.printf("  strips: 13=%u 27=%u 32=%u 33=%u\n",
                   STRIP_LEN[0], STRIP_LEN[1], STRIP_LEN[2], STRIP_LEN[3]);
 #endif
@@ -876,14 +1039,6 @@ void loop() {
     if (dt > 0.1f) dt = 0.1f;
     lastRenderMs = now;
 
-    // No console seen yet → hold dark.
-    if (clickyLastMs == 0 && kettleLastMs == 0 && duckLastMs == 0) {
-        for (uint8_t s = 0; s < NUM_STRIPS; s++)
-            for (uint16_t i = 0; i < STRIP_LEN[s]; i++)
-                setPixel(s, i, 0, 0, 0);
-        showAll();
-        return;
-    }
 
 #if DIAG_KETTLE_LOG
     while (kettleArrTail != (uint8_t)kettleArrHead) {
@@ -910,13 +1065,15 @@ void loop() {
     lrTick(now, dt);
 #endif
     duckUpdate(dt);
-    if (clickyLastMs != 0) {
-        renderClickyParticles(dt);
-    } else {
-        gBrightness = MASTER_BRIGHTNESS;
-        memset(frameBuf, 0, sizeof(frameBuf));
-    }
+    bool clickyOn = clickyLastMs != 0
+        && (int32_t)(now - clickyLastMs) < CLICKY_LIVE_MS;
+    clickyRest += fminf(1.0f, dt / CLICKY_REST_TAU_S)
+        * ((clickyOn ? 1.0f : 0.0f) - clickyRest);
+    renderClickyParticles(dt * (CLICKY_REST_SPEED
+        + (1.0f - CLICKY_REST_SPEED) * clickyRest));
     renderWaterfall(dt, duckLive());
+    axfxSapFrame(kettleLastMs != 0
+                 && ((kettlePkt.btnBits >> AXFX_SAP_BTN) & 1), dt);
     outputRotated();
 #if LOOP_RECORD
     lrApply(now);

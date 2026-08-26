@@ -8,9 +8,11 @@
 //   AXFX_NS         number of strips
 //   AXFX_MAXLEN     max LEDs on any strip (sizes the state arrays)
 //   AXFX_LEN(s)     LED count of strip s
-// The host memsets nothing here — it reads axfxBuf[s][i][3] (linear, 0..255,
+// The host memsets nothing here — it reads axfxRow(s)[i][3] (linear, 0..255,
 // PHYSICAL space) and adds it alongside the duck waterfall AFTER the carousel
 // rotation, so the overlay stays pinned to the sculpture while the field spins.
+// The sap layer (axfxSapRow) composites the same way and additionally needs
+// each segment's journey span declared once via axfxSapSetSeg/SetSegJ.
 
 #ifndef AXFX_AMBIENT_H
 #define AXFX_AMBIENT_H
@@ -416,6 +418,206 @@ static void axfxRenderLeafWind(const AxfxDrive &d, float dt) {
             axfxBuf[s][i][0] = oR;
             axfxBuf[s][i][1] = oG;
             axfxBuf[s][i][2] = oB;
+        }
+    }
+}
+
+// ── Sap flow ──────────────────────────────────────────────────────────────
+// Ported from bench-tree/src/foregrounds/SapFlowForeground.h (the original
+// LED-tree sap flow), re-aimed from that tree's integer depth onto a GLOBAL
+// journey coordinate j in [0,1] spanning the whole sculpture: root tip 0 ->
+// trunk -> helix -> canopy tip 1. The field is one scalar function of j, so a
+// particle sitting on a span boundary lights both adjoining segments.
+// Depth constants divide by the original's MAX_DEPTH of 70.
+#define AXFX_SAP_MAX_PARTICLES 12
+#define AXFX_SAP_VEL_J       (7.25f / 70.0f)
+#define AXFX_SAP_RADIUS_J    (3.0f / 70.0f)
+#define AXFX_SAP_END_J       (75.0f / 70.0f)
+#define AXFX_SAP_MIN_INT_S   1.91f
+#define AXFX_SAP_MAX_INT_S   12.73f
+#define AXFX_SAP_RATE_HZ     1.68f
+#define AXFX_SAP_BRIGHT_MIN  80.0f
+#define AXFX_SAP_BRIGHT_SPAN 70.0f
+#define AXFX_SAP_R            34.0f
+#define AXFX_SAP_G           139.0f
+#define AXFX_SAP_B            34.0f
+#define AXFX_SAP_BED_R  1.0f
+#define AXFX_SAP_BED_G  6.0f
+#define AXFX_SAP_BED_B  1.0f
+// A segment spanning little journey over many LEDs would render the blob
+// thinner than a pixel: floor the radius at this many LEDs, the CLICKY_SIGMA
+// pattern expressed in journey units.
+#define AXFX_SAP_MIN_LEDS 1.5f
+
+// Journey boundaries, shared so the firmware's per-segment table and the
+// twin's per-kind mapping cannot drift apart.
+#define AXFX_SAP_J_ROOTS 0.35f
+#define AXFX_SAP_J_HELIX 0.75f
+
+// KettlePacketV1 btnBits bit (== KETTLE_BTN_KEEPTEMP): the keep-warm latched
+// toggle — the wire bit is switch position, so every receiver board converges
+// on it via the heartbeat regardless of loss.
+#define AXFX_SAP_BTN 6
+
+// Takeover boundary sweeping the journey. The console's indicator bar wipes on
+// in ~1.6 s; the sculpture is deliberately ~2x statelier, and releases at 2:1.
+#define AXFX_WIPE_ON_S   3.0f
+#define AXFX_WIPE_OFF_S  1.5f
+#define AXFX_WIPE_BAND   0.08f
+
+struct AxfxSapParticle { float j, vel, bright; bool active; };
+static AxfxSapParticle axfxSapP[AXFX_SAP_MAX_PARTICLES];
+static float axfxSapSince = 0.0f;
+static float axfxWipeP = 0.0f;
+
+typedef float AxfxSapJBuf[AXFX_MAXLEN];
+static AxfxSapJBuf*  axfxSapJ = nullptr;
+static AxfxStripBuf* axfxSapBuf = nullptr;
+static uint16_t axfxSapLen[AXFX_NS];
+static float axfxSapRad[AXFX_NS];
+static bool axfxSapLit = false;
+
+// Stand-in row for a layer whose lazy calloc failed: the host composites it
+// unconditionally, so degrade to black rather than dereference null.
+static float axfxZeroRow[AXFX_MAXLEN][3];
+static inline const float (*axfxRow(int s))[3] {
+    return axfxBuf ? axfxBuf[s] : axfxZeroRow;
+}
+static inline const float (*axfxSapRow(int s))[3] {
+    return axfxSapBuf ? axfxSapBuf[s] : axfxZeroRow;
+}
+
+static bool axfxSapAlloc() {
+    if (!axfxSapJ)   axfxSapJ = (AxfxSapJBuf*)calloc(AXFX_NS, sizeof(AxfxSapJBuf));
+    if (!axfxSapBuf) axfxSapBuf = (AxfxStripBuf*)calloc(AXFX_NS, sizeof(AxfxStripBuf));
+    return axfxSapJ && axfxSapBuf;
+}
+
+// Host declares each segment's journey coordinate per LED. j may run either
+// way along the wire and need not be monotonic (folded canopy chains).
+static void axfxSapSetSegJ(int s, int len, const float *j) {
+    if (s < 0 || s >= AXFX_NS) return;
+    if (len <= 0 || !j || !axfxSapAlloc()) { axfxSapLen[s] = 0; return; }
+    if (len > AXFX_MAXLEN) len = AXFX_MAXLEN;
+    axfxSapLen[s] = (uint16_t)len;
+    float lo = j[0], hi = j[0];
+    for (int i = 0; i < len; i++) {
+        axfxSapJ[s][i] = j[i];
+        if (j[i] < lo) lo = j[i];
+        if (j[i] > hi) hi = j[i];
+    }
+    float perLed = (len > 1) ? (hi - lo) / (float)(len - 1) : 0.0f;
+    axfxSapRad[s] = fmaxf(AXFX_SAP_RADIUS_J, AXFX_SAP_MIN_LEDS * perLed);
+}
+
+// Index-space form: u runs 0->1 along the wire, or 1->0 when the wire head
+// sits at the far end of the flow (the wfRev segments).
+static void axfxSapSetSeg(int s, int len, float j0, float j1, bool rev) {
+    static float tmp[AXFX_MAXLEN];
+    if (len <= 0) { axfxSapSetSegJ(s, 0, nullptr); return; }
+    if (len > AXFX_MAXLEN) len = AXFX_MAXLEN;
+    float d = (len > 1) ? 1.0f / (float)(len - 1) : 0.0f;
+    for (int i = 0; i < len; i++) {
+        float u = (float)i * d;
+        if (rev) u = 1.0f - u;
+        tmp[i] = j0 + (j1 - j0) * u;
+    }
+    axfxSapSetSegJ(s, len, tmp);
+}
+
+static void axfxSapReset() {
+    for (int i = 0; i < AXFX_SAP_MAX_PARTICLES; i++) axfxSapP[i].active = false;
+    axfxSapSince = 0.0f;
+    axfxWipeP = 0.0f;
+    axfxSapLit = false;
+}
+
+// Two-stage gate: guaranteed arrival at MAX_INT, probabilistic at RATE_HZ once
+// past MIN_INT — irregular but never dead.
+static void axfxSapStep(float dt) {
+    axfxSapSince += dt;
+    bool spawn = false;
+    if (axfxSapSince >= AXFX_SAP_MAX_INT_S) spawn = true;
+    else if (axfxSapSince >= AXFX_SAP_MIN_INT_S)
+        spawn = axfxRandF() < AXFX_SAP_RATE_HZ * dt;
+    if (spawn) {
+        for (int i = 0; i < AXFX_SAP_MAX_PARTICLES; i++) {
+            if (axfxSapP[i].active) continue;
+            axfxSapP[i].active = true;
+            axfxSapP[i].j = 0.0f;
+            axfxSapP[i].vel = AXFX_SAP_VEL_J;
+            axfxSapP[i].bright = AXFX_SAP_BRIGHT_MIN
+                + axfxRandF() * AXFX_SAP_BRIGHT_SPAN;
+            axfxSapSince = 0.0f;
+            break;
+        }
+    }
+    for (int i = 0; i < AXFX_SAP_MAX_PARTICLES; i++) {
+        if (!axfxSapP[i].active) continue;
+        axfxSapP[i].j += axfxSapP[i].vel * dt;
+        if (axfxSapP[i].j > AXFX_SAP_END_J) axfxSapP[i].active = false;
+    }
+}
+
+static void axfxWipeStep(bool on, float dt) {
+    float rate = on ? (dt / AXFX_WIPE_ON_S) : -(dt / AXFX_WIPE_OFF_S);
+    axfxWipeP = axfxClamp(axfxWipeP + rate, 0.0f, 1.0f);
+}
+
+// Sap's share of a point in journey space. The band is swept a half-width past
+// each end of the journey so the wipe parks fully off at p=0 and fully on at
+// p=1 instead of straddling the tips.
+static inline float axfxWipeAtJ(float j) {
+    float lo = axfxWipeP * (1.0f + AXFX_WIPE_BAND) - AXFX_WIPE_BAND;
+    float t = axfxClamp((j - lo) / AXFX_WIPE_BAND, 0.0f, 1.0f);
+    return 1.0f - t * t * (3.0f - 2.0f * t);
+}
+
+static inline float axfxWipeAt(int s, int i) {
+    return axfxSapJ ? axfxWipeAtJ(axfxSapJ[s][i]) : 0.0f;
+}
+
+// Fills axfxSapBuf with the wipe already applied; the host scales its clicky
+// particle layer by (1 - axfxWipeAt) and adds this on top.
+static void axfxSapFrame(bool on, float dt) {
+    axfxWipeStep(on, dt);
+    if (!axfxSapAlloc()) return;
+    axfxSapStep(dt);
+    if (axfxWipeP <= 0.0f) {
+        if (axfxSapLit) {
+            memset(axfxSapBuf, 0, sizeof(AxfxStripBuf) * AXFX_NS);
+            axfxSapLit = false;
+        }
+        return;
+    }
+    axfxSapLit = true;
+    for (int s = 0; s < AXFX_NS; s++) {
+        int len = axfxSapLen[s];
+        float rad = axfxSapRad[s];
+        float inv = (rad > 0.0f) ? 1.0f / rad : 0.0f;
+        for (int i = 0; i < len; i++) {
+            float j = axfxSapJ[s][i];
+            float w = axfxWipeAtJ(j);
+            float oR = AXFX_SAP_BED_R, oG = AXFX_SAP_BED_G, oB = AXFX_SAP_BED_B;
+            for (int p = 0; p < AXFX_SAP_MAX_PARTICLES; p++) {
+                if (!axfxSapP[p].active) continue;
+                float d = fabsf(j - axfxSapP[p].j);
+                if (d >= rad) continue;
+                float f = 1.0f - d * inv;
+                f *= f * axfxSapP[p].bright * (1.0f / 255.0f);
+                oR += AXFX_SAP_R * f;
+                oG += AXFX_SAP_G * f;
+                oB += AXFX_SAP_B * f;
+            }
+            oR = fminf(255.0f, oR) * w;
+            oG = fminf(255.0f, oG) * w;
+            oB = fminf(255.0f, oB) * w;
+            if (oR < AXFX_CH_SNAP) oR = 0.0f;
+            if (oG < AXFX_CH_SNAP) oG = 0.0f;
+            if (oB < AXFX_CH_SNAP) oB = 0.0f;
+            axfxSapBuf[s][i][0] = oR;
+            axfxSapBuf[s][i][1] = oG;
+            axfxSapBuf[s][i][2] = oB;
         }
     }
 }
